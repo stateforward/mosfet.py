@@ -1,0 +1,78 @@
+"""Cognitive system: host ability plus autonomy, intuition, reasoning, and reflection.
+
+Same-named module ``cognition.cognition`` is re-exported at package level.
+Leaf deliberative processing lives in ``bot.abilities.processing``.
+"""
+
+from __future__ import annotations
+
+import importlib
+import typing
+
+from . import cognition
+from . import autonomy, dispatch, episodes, input, intuition, reasoning, reflection, types
+
+if typing.TYPE_CHECKING:
+    from .autonomy import Autonomy
+    from .cognition import InputEvent, OutputEvent, Cognition, InputData, OutputData
+    from .episodes import CognitiveEpisode
+    from .input import is_input
+    from .intuition import Intuition
+    from .reasoning import Reasoning
+    from .reflection import Reflection
+    from .types import EventData, is_output
+
+_LAZY_EXPORT_MODULES = {
+    "InputEvent": ".cognition",
+    "OutputEvent": ".cognition",
+    "Cognition": ".cognition",
+    "InputData": ".cognition",
+    "OutputData": ".cognition",
+    "is_input": ".input",
+    "Autonomy": ".autonomy",
+    "Intuition": ".intuition",
+    "Reasoning": ".reasoning",
+    "Reflection": ".reflection",
+    "CognitiveEpisode": ".episodes",
+    "EventData": ".types",
+    "is_output": ".types",
+}
+
+__all__ = [
+    "InputEvent",
+    "OutputEvent",
+    "Cognition",
+    "InputData",
+    "OutputData",
+    "is_input",
+    "Autonomy",
+    "Intuition",
+    "Reasoning",
+    "Reflection",
+    "CognitiveEpisode",
+    "EventData",
+    "is_output",
+    "autonomy",
+    "cognition",
+    "dispatch",
+    "episodes",
+    "input",
+    "intuition",
+    "reasoning",
+    "reflection",
+    "types",
+]
+
+
+def __getattr__(name: str) -> object:
+    module_name = _LAZY_EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(module_name, __name__)
+    value = typing.cast(object, getattr(module, name))
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

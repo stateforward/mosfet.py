@@ -1,0 +1,1 @@
+"""Bot abilities package tests."""

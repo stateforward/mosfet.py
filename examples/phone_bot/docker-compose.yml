@@ -1,0 +1,15 @@
+# Local LiveKit SFU for the phone_bot example (matches LiveKit "running locally" docs).
+# Dev credentials: API key `devkey`, API secret `secret`.
+#
+#   docker compose up -d
+#   uv run phone-bot
+#
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--dev", "--bind", "0.0.0.0"]
+    ports:
+      - "7880:7880" # signaling (ws)
+      - "7881:7881" # ICE/TCP
+      - "7882:7882/udp" # ICE/UDP
+    restart: unless-stopped

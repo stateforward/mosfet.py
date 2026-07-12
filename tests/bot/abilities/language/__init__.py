@@ -1,0 +1,1 @@
+"""Bot language ability tests."""

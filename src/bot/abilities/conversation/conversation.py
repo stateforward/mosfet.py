@@ -1,0 +1,1125 @@
+"""Thin conversation coordinator: decode → participate → contribution terminal.
+
+Decide, memory, and response encoding are host-owned. Conversation tracks
+participant/room state and normalizes a turn into a participated contribution.
+"""
+
+from __future__ import annotations
+
+from .. import ability
+from .. import decoding
+from .. import participating
+
+import abc
+import dataclasses
+import typing as typ
+
+import hsm
+import pydantic
+from pydantic.config import JsonDict, JsonValue
+
+from bot.telemetry import observer
+
+Stage: typ.TypeAlias = typ.Literal["decoding", "participating"]
+ConversationChildKind: typ.TypeAlias = typ.Literal["decoding", "participating"]
+TContent = typ.TypeVar("TContent", covariant=True)
+# Durable domain memory of the last contribution terminal (not in-flight bridge state).
+_LAST_PARTICIPATED_ATTRIBUTE = "conversation_last_participated"
+# Event-chain keys for async child stages (HSM-COMPLETION-001). Never instance.set.
+_CONVERSATION_MESSAGE_METADATA_KEY = "bot.conversation.message"
+_CONVERSATION_DECODED_METADATA_KEY = "bot.conversation.decoded"
+_CONVERSATION_CHILD_ID_MARKER = ":conversation:"
+_CONVERSATION_TEXT_INPUT_EXAMPLE: JsonDict = {
+    "conversation_ref": "support-call",
+    "self_participant_ref": "bot",
+    "participants": [
+        {
+            "ref": "bot",
+            "kind": "bot",
+            "state": {"presence": "present", "attention": "available", "turn": "listening"},
+        },
+        {
+            "ref": "caller",
+            "kind": "human",
+            "state": {"presence": "present", "attention": "available", "turn": "holding"},
+        },
+    ],
+    "content": {"kind": "text", "source_participant_ref": "caller", "content": "hello"},
+}
+
+_CONVERSATION_VOICE_INPUT_EXAMPLE: JsonDict = {
+    "conversation_ref": "support-call",
+    "self_participant_ref": "bot",
+    "participants": [
+        {
+            "ref": "bot",
+            "kind": "bot",
+            "state": {"presence": "present", "attention": "available", "turn": "listening"},
+        },
+        {
+            "ref": "caller",
+            "kind": "human",
+            "state": {"presence": "present", "attention": "available", "turn": "holding"},
+        },
+    ],
+    "content": {"kind": "audio", "source_participant_ref": "caller", "content": "aGVsbG8="},
+}
+
+
+def _conversation_schema_extra(description: str, example: JsonDict) -> JsonDict:
+    examples: list[JsonValue] = [example]
+    return {"description": description, "examples": examples}
+
+
+class Message(pydantic.BaseModel, typ.Generic[TContent]):
+    """Message entering or leaving a conversation."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra=_conversation_schema_extra(
+            (
+                "Conversation message. It carries the full participant state known by the conversation owner plus "
+                "the message content to coordinate."
+            ),
+            _CONVERSATION_TEXT_INPUT_EXAMPLE,
+        ),
+    )
+
+    conversation_ref: str = pydantic.Field(
+        min_length=1,
+        description="Stable reference for the conversation being coordinated.",
+        examples=["support-call"],
+    )
+    self_participant_ref: str = pydantic.Field(
+        min_length=1,
+        description="Participant reference this conversation ability acts from inside the shared conversation.",
+        examples=["bot"],
+    )
+    participants: tuple[participating.ParticipantSnapshot, ...] = pydantic.Field(
+        min_length=1,
+        description=(
+            "All participant states currently known to the conversation owner. This is shared conversation state, "
+            "not just the local bot participant."
+        ),
+    )
+    content: TContent = pydantic.Field(
+        description="Message content to coordinate.",
+    )
+
+    @pydantic.model_validator(mode="after")
+    def validate_participant_refs(self) -> typ.Self:
+        """Require the conversation to know every participant by stable unique reference."""
+
+        refs = [participant.ref for participant in self.participants]
+        if len(set(refs)) != len(refs):
+            raise ValueError("participant refs must be unique.")
+        if self.self_participant_ref not in refs:
+            raise ValueError("self_participant_ref must match one participant snapshot.")
+        return self
+
+
+class TextMessage(Message[participating.TextStimulus]):
+    """Conversation input for a text stimulus turn."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra=_conversation_schema_extra(
+            "Conversation input for a text stimulus turn.",
+            _CONVERSATION_TEXT_INPUT_EXAMPLE,
+        ),
+    )
+
+
+class VoiceMessage(Message[participating.AudioStimulus]):
+    """Conversation input for an audio stimulus turn."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra=_conversation_schema_extra(
+            "Conversation input for an audio stimulus turn.",
+            _CONVERSATION_VOICE_INPUT_EXAMPLE,
+        ),
+    )
+
+
+AnyMessage: typ.TypeAlias = Message[participating.ParticipationStimulus]
+TAnyMessage = typ.TypeVar("TAnyMessage", bound=AnyMessage)
+
+
+class Response(Message[str | bytes | None]):
+    """Message produced after a conversation contribution or host-completed response turn."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+        json_schema_extra={
+            "description": (
+                "Response message for one completed turn. Contribution-only turns leave content unset; hosts that "
+                "encode a reply set content to the channel payload."
+            ),
+            "examples": [
+                {
+                    "conversation_ref": "support-call",
+                    "self_participant_ref": "bot",
+                    "participants": [
+                        {
+                            "ref": "bot",
+                            "kind": "bot",
+                            "state": {"presence": "present", "attention": "available", "turn": "listening"},
+                        }
+                    ],
+                    "content": "SSBjYW4gaGVscCB3aXRoIHRoYXQu",
+                }
+            ],
+        },
+    )
+
+    content: str | bytes | None = pydantic.Field(
+        default=None,
+        description="Encoded channel response when a host completed encoding; null for contribution-only turns.",
+        examples=["SSBjYW4gaGVscCB3aXRoIHRoYXQu"],
+    )
+
+
+TResponse = typ.TypeVar("TResponse", bound=Response)
+
+
+class FailureData(pydantic.BaseModel):
+    """FailureData signal produced when a conversation phase cannot complete."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": "FailureData signal produced when a conversation phase cannot complete.",
+            "examples": [{"stage": "decoding", "message": "Conversation decoding timed out."}],
+        },
+    )
+
+    stage: Stage = pydantic.Field(
+        description="Conversation phase that failed.",
+        examples=["decoding"],
+    )
+    message: str = pydantic.Field(
+        min_length=1,
+        description="Human-readable failure message for the conversation phase.",
+        examples=["Conversation decoding timed out."],
+    )
+
+
+class SnapshotRequest(pydantic.BaseModel):
+    """Request for the conversation coordinator to publish its current tracked room snapshot."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": (
+                "Request for the conversation coordinator to publish the durable room state it currently tracks. "
+                "Use this event instead of reading state-machine attributes directly."
+            ),
+            "examples": [{"request_ref": "operator-panel-refresh"}],
+        },
+    )
+
+    request_ref: str = pydantic.Field(
+        min_length=1,
+        description="Caller-chosen correlation reference echoed in the snapshot output event.",
+        examples=["operator-panel-refresh"],
+    )
+
+
+class Snapshot(pydantic.BaseModel):
+    """Current durable conversation room state published in response to a snapshot request."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": (
+                "Current durable conversation room state published in response to a snapshot request. The snapshot "
+                "can be empty before the conversation coordinator has accepted its first message."
+            ),
+            "examples": [
+                {
+                    "request_ref": "operator-panel-refresh",
+                    "conversation_ref": "support-call",
+                    "participants": [
+                        {
+                            "ref": "bot",
+                            "kind": "bot",
+                            "state": {"presence": "present", "attention": "available", "turn": "listening"},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    request_ref: str = pydantic.Field(
+        min_length=1,
+        description="Caller-chosen correlation reference from the snapshot request event.",
+        examples=["operator-panel-refresh"],
+    )
+    conversation_ref: str | None = pydantic.Field(
+        default=None,
+        description="Stable reference for the currently tracked conversation, or null before one is tracked.",
+        examples=["support-call"],
+    )
+    participants: tuple[participating.ParticipantSnapshot, ...] = pydantic.Field(
+        default=(),
+        description="All participant states currently tracked by the conversation coordinator.",
+    )
+
+
+class DecodedTurn(pydantic.BaseModel):
+    """Private phase payload carrying the decoded conversation stimulus."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    input: pydantic.SkipValidation[AnyMessage] = pydantic.Field(
+        description="Original message accepted by the conversation ability.",
+    )
+    stimulus: participating.ParticipationStimulus = pydantic.Field(
+        description="Stimulus normalized by decoding so participating can emit a contribution.",
+    )
+    decoded_text: str = pydantic.Field(
+        min_length=1,
+        description="DecodedData readable content when the turn produced one.",
+        examples=["hello"],
+    )
+
+
+class ParticipatedTurn(pydantic.BaseModel):
+    """Participated contribution for one conversation turn.
+
+    Exposed to hosts after contribution completes so they can run decide/memory/encode.
+    """
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    input: pydantic.SkipValidation[AnyMessage] = pydantic.Field(
+        description="Original message accepted by the conversation ability.",
+    )
+    stimulus: participating.ParticipationStimulus = pydantic.Field(
+        description="Stimulus normalized by decoding so participating can emit a contribution.",
+    )
+    decoded_text: str = pydantic.Field(
+        min_length=1,
+        description="DecodedData readable content when the turn produced one.",
+    )
+    participation: participating.OutputData = pydantic.Field(
+        description="Contribution emitted by the participating ability.",
+    )
+
+
+InputEvent = ability.ability_input_event(
+    "bot.ability.conversation.input",
+    AnyMessage,
+)
+OutputEvent = ability.ability_output_event(
+    "bot.ability.conversation.output",
+    Response,
+)
+FailedEvent = hsm.Event[FailureData](
+    name="bot.ability.conversation.failed",
+    schema=FailureData,
+)
+SnapshotRequestEvent = hsm.Event[SnapshotRequest](
+    name="bot.ability.conversation.snapshot.request",
+    schema=SnapshotRequest,
+)
+SnapshotOutputEvent = hsm.Event[Snapshot](
+    name="bot.ability.conversation.snapshot.output",
+    schema=Snapshot,
+)
+_ConversationDecodingCompletedEvent = hsm.Event[DecodedTurn](
+    name="bot.ability.conversation.decoding.completed",
+    kind=hsm.CompletionEventKind,
+    schema=DecodedTurn,
+)
+_ConversationDecodingFailedEvent = hsm.Event[FailureData](
+    name="bot.ability.conversation.decoding.failed",
+    kind=hsm.ErrorEventKind,
+    schema=FailureData,
+)
+_ConversationParticipatingCompletedEvent = hsm.Event[ParticipatedTurn](
+    name="bot.ability.conversation.participating.completed",
+    kind=hsm.CompletionEventKind,
+    schema=ParticipatedTurn,
+)
+_ConversationParticipatingFailedEvent = hsm.Event[FailureData](
+    name="bot.ability.conversation.participating.failed",
+    kind=hsm.ErrorEventKind,
+    schema=FailureData,
+)
+_ConversationChildrenAttachedEvent = hsm.Event[object](
+    name="bot.ability.conversation.children.attached",
+    kind=hsm.CompletionEventKind,
+    schema=object,
+)
+DECODING_FAILED_EVENT = _ConversationDecodingFailedEvent
+ParticipatingFailedEvent = _ConversationParticipatingFailedEvent
+
+
+def _conversation_operation_id(event: hsm.Event[typ.Any]) -> str | None:
+    return event.id if event.id else None
+
+
+def _has_conversation_operation_id(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx, instance
+    return _conversation_operation_id(event) is not None
+
+
+def _public_conversation_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    """Metadata safe on private completions and host terminals (no stage payloads)."""
+
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key
+        not in (
+            _CONVERSATION_MESSAGE_METADATA_KEY,
+            _CONVERSATION_DECODED_METADATA_KEY,
+        )
+    }
+
+
+def _conversation_child_operation_id(event: hsm.Event[typ.Any], kind: ConversationChildKind) -> str:
+    operation_id = event.id if event.id else "operation"
+    return f"{operation_id}{_CONVERSATION_CHILD_ID_MARKER}{kind}"
+
+
+conversation_child_operation_id = _conversation_child_operation_id
+
+
+def _operation_id_from_conversation_child_event(
+    event: hsm.Event[typ.Any],
+    kind: ConversationChildKind,
+) -> str | None:
+    child_id = event.id if event.id else None
+    if child_id is None:
+        return None
+    suffix = f"{_CONVERSATION_CHILD_ID_MARKER}{kind}"
+    if child_id.endswith(suffix):
+        parent = child_id[: -len(suffix)]
+        return parent or None
+    return child_id
+
+
+def _conversation_event_with_operation(
+    event: hsm.Event[typ.Any],
+    source: hsm.Event[typ.Any],
+    *,
+    operation_id: str | None = None,
+    public_metadata: bool = True,
+) -> hsm.Event[typ.Any]:
+    resolved_operation_id = operation_id if operation_id is not None else _conversation_operation_id(source)
+    if resolved_operation_id is not None:
+        event = event.with_data_and_id(event.data, resolved_operation_id)
+    metadata = dict(source.metadata)
+    if public_metadata:
+        metadata = _public_conversation_metadata(metadata)
+    return dataclasses.replace(event, metadata=metadata)
+
+
+conversation_event_with_operation = _conversation_event_with_operation
+
+
+def _clear_last_participated_on_input(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> None:
+    """Reset durable last-contribution memory when a new turn starts."""
+
+    del ctx, event
+    _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
+
+
+def _has_conversation_decoded(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    """Single in-flight turn (inputs deferred); completion carries DecodedTurn (HSM-COMPLETION-001)."""
+
+    del ctx, instance
+    return isinstance(event.data, DecodedTurn)
+
+
+def _has_conversation_participated(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx, instance
+    return isinstance(event.data, ParticipatedTurn)
+
+
+def _matches_data_type(
+    data: object,
+    data_type: type[object] | tuple[type[object], ...] | None,
+) -> bool:
+    if data_type is None:
+        return True
+    return isinstance(data, data_type)
+
+
+def _matches_conversation_output_contract(
+    instance: "Conversation[typ.Any, typ.Any]",
+    data: object,
+) -> bool:
+    return isinstance(data, Response) and _matches_data_type(data, instance.output_data_type)
+
+
+matches_conversation_output_contract = _matches_conversation_output_contract
+
+
+def _matches_message_contract(
+    instance: "Conversation[typ.Any, typ.Any]",
+    data: object,
+) -> bool:
+    return isinstance(data, Message) and _matches_data_type(data, instance.input_data_type)
+
+
+def _has_conversation_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx, instance
+    return isinstance(event.data, FailureData)
+
+
+def _has_conversation_snapshot_request(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx, instance
+    return isinstance(event.data, SnapshotRequest)
+
+
+def _dispatch_conversation_phase_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    source: hsm.Event[typ.Any],
+    failure_event: hsm.Event[FailureData],
+    *,
+    kind: ConversationChildKind | None = None,
+) -> None:
+    operation_id = (
+        _operation_id_from_conversation_child_event(source, kind)
+        if kind is not None
+        else _conversation_operation_id(source)
+    )
+    _ = hsm.dispatch(
+        ctx,
+        instance,
+        _conversation_event_with_operation(failure_event, source, operation_id=operation_id),
+    )
+
+
+def _matches_conversation_child_event(
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+    terminal_kind: str,
+    kind: ConversationChildKind,
+) -> bool:
+    child = instance.child_for_kind(kind)
+    if child is None:
+        return False
+    terminal_event = child.output_event if terminal_kind == "output" else child.failed_event
+    child_id = event.id if event.id else None
+    suffix = f"{_CONVERSATION_CHILD_ID_MARKER}{kind}"
+    return (
+        event.name == terminal_event.name
+        and event.source == hsm.id(child)
+        and event.target == hsm.id(instance)
+        and child_id is not None
+        and child_id.endswith(suffix)
+    )
+
+
+def _dispatch_conversation_terminal_output(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+    output: Response,
+) -> None:
+    terminal = _conversation_event_with_operation(instance.output_event.with_data(output), event)
+    terminal = dataclasses.replace(terminal, source=hsm.id(instance))
+    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+
+
+def _dispatch_conversation_terminal_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    source: hsm.Event[typ.Any],
+    failure: FailureData,
+) -> None:
+    terminal = _conversation_event_with_operation(instance.failed_event.with_data(failure), source)
+    terminal = dataclasses.replace(terminal, source=hsm.id(instance))
+    _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+
+
+def _matches_decoding_child_output(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx
+    return _matches_conversation_child_event(instance, event, "output", "decoding")
+
+
+def _matches_decoding_child_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx
+    return _matches_conversation_child_event(instance, event, "failure", "decoding")
+
+
+def _matches_participating_child_output(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx
+    return _matches_conversation_child_event(instance, event, "output", "participating")
+
+
+def _matches_participating_child_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> bool:
+    del ctx
+    return _matches_conversation_child_event(instance, event, "failure", "participating")
+
+
+def _dispatch_conversation_failure(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+) -> None:
+    failure = event.data
+    assert isinstance(failure, FailureData)
+    _dispatch_conversation_terminal_failure(ctx, instance, event, failure)
+
+
+def _fail_conversation_child(
+    ctx: hsm.Context,
+    instance: "Conversation[typ.Any, typ.Any]",
+    event: hsm.Event[typ.Any],
+    kind: ConversationChildKind,
+) -> None:
+    stage = Conversation.stage_for_child_kind(kind)
+    message = getattr(event.data, "message", f"Conversation {stage} child failed.")
+    failure = FailureData(stage=stage, message=str(message))
+    _dispatch_conversation_phase_failure(
+        ctx,
+        instance,
+        event,
+        Conversation.failed_event_for_child_kind(kind).with_data(failure),
+        kind=kind,
+    )
+
+
+class Conversation(
+    ability.Ability[TAnyMessage, TResponse],
+    abc.ABC,
+    typ.Generic[TAnyMessage, TResponse],
+):
+    """Thin conversation coordinator: decode, participate, and publish contribution terminals.
+
+    Decision inputs, cognition, memory, and response encoding are host-owned.
+    """
+
+    input_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = Message
+    output_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = Response
+    input_event: typ.ClassVar[hsm.Event[typ.Any]] = InputEvent
+    output_event: typ.ClassVar[hsm.Event[typ.Any]] = OutputEvent
+    failed_event: typ.ClassVar[hsm.Event[FailureData]] = FailedEvent
+    snapshot_request_event: typ.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
+    snapshot_output_event: typ.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
+    submodel: typ.ClassVar[hsm.Model | None] = hsm.define(
+        "Conversation",
+        hsm.initial(hsm.target("/Conversation/silent")),
+        hsm.state("silent"),
+        hsm.observe(observer),
+    )
+    _decoding: decoding.Decoding[participating.ParticipationStimulus, str]
+    _participating: participating.Participating
+    _conversation_ref: str | None
+    _participants_by_ref: dict[str, participating.ParticipantSnapshot]
+
+    def __init__(
+        self,
+        *,
+        decoding: decoding.Decoding[participating.ParticipationStimulus, str] | None,
+        participating: participating.Participating | None,
+    ) -> None:
+        if decoding is None:
+            raise ValueError("Conversation requires decoding.")
+        if participating is None:
+            raise ValueError("Conversation requires participating.")
+        super().__init__()
+        self._decoding = decoding
+        self._participating = participating
+        self._conversation_ref = None
+        self._participants_by_ref = {}
+
+    @abc.abstractmethod
+    def _conversation_kind(self) -> str:
+        """Return the concrete conversation modality marker."""
+
+    def last_participated_turn(self) -> ParticipatedTurn | None:
+        """Return the participated turn from the most recent contribution terminal, if any."""
+
+        value, ok = typ.cast(tuple[object, bool], self.get(_LAST_PARTICIPATED_ATTRIBUTE))
+        if ok and isinstance(value, ParticipatedTurn):
+            return value
+        return None
+
+    def _dispatch_child_ability(
+        self,
+        ctx: hsm.Context,
+        source_event: hsm.Event[typ.Any],
+        *,
+        kind: ConversationChildKind,
+        child: ability.Ability[typ.Any, typ.Any],
+        input: object,
+        stage_metadata: dict[str, object],
+    ) -> None:
+        """Dispatch a child ability; stage provenance rides child event metadata/id suffix."""
+
+        operation_id = _conversation_child_operation_id(source_event, kind)
+        metadata = dict(source_event.metadata)
+        metadata.update(stage_metadata)
+        child_event = dataclasses.replace(
+            child.input_event.with_data_and_id(input, operation_id),
+            metadata=metadata,
+        )
+        _ = hsm.dispatch(ctx, child, child_event)
+
+    def child_for_kind(self, kind: ConversationChildKind) -> ability.Ability[typ.Any, typ.Any] | None:
+        if kind == "decoding":
+            return typ.cast(ability.Ability[typ.Any, typ.Any], self._decoding)
+        if kind == "participating":
+            return typ.cast(ability.Ability[typ.Any, typ.Any], self._participating)
+        return None
+
+    @staticmethod
+    def stage_for_child_kind(kind: ConversationChildKind) -> Stage:
+        if kind == "participating":
+            return "participating"
+        return "decoding"
+
+    @staticmethod
+    def failed_event_for_child_kind(kind: ConversationChildKind) -> hsm.Event[FailureData]:
+        if kind == "participating":
+            return _ConversationParticipatingFailedEvent
+        return _ConversationDecodingFailedEvent
+
+    def _start_decode_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
+        input = event.data
+        assert isinstance(input, Message)
+        self._dispatch_child_ability(
+            ctx,
+            event,
+            kind="decoding",
+            child=typ.cast(ability.Ability[typ.Any, typ.Any], self._decoding),
+            input=input.content,
+            stage_metadata={_CONVERSATION_MESSAGE_METADATA_KEY: input},
+        )
+
+    def _complete_decode_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
+        message = event.metadata.get(_CONVERSATION_MESSAGE_METADATA_KEY)
+        if not isinstance(message, Message):
+            return
+        input = typ.cast(AnyMessage, message)
+        operation_id = _operation_id_from_conversation_child_event(event, "decoding")
+        if not isinstance(event.data, str):
+            failure = FailureData(stage="decoding", message="Conversation decoding produced a non-text output.")
+            _dispatch_conversation_phase_failure(
+                ctx,
+                self,
+                event,
+                _ConversationDecodingFailedEvent.with_data(failure),
+                kind="decoding",
+            )
+            return
+        decoded = event.data.strip()
+        if not decoded:
+            failure = FailureData(stage="decoding", message="Conversation decoding produced no decoded text.")
+            _dispatch_conversation_phase_failure(
+                ctx,
+                self,
+                event,
+                _ConversationDecodingFailedEvent.with_data(failure),
+                kind="decoding",
+            )
+            return
+        normalized = participating.EventStimulus(
+            source_participant_ref=input.content.source_participant_ref,
+            event="conversation.decoding",
+            payload={
+                "source_kind": input.content.kind,
+                "text": decoded,
+            },
+        )
+        turn = DecodedTurn(input=input, stimulus=normalized, decoded_text=decoded)
+        _ = hsm.dispatch(
+            ctx,
+            self,
+            _conversation_event_with_operation(
+                _ConversationDecodingCompletedEvent.with_data(turn),
+                event,
+                operation_id=operation_id,
+            ),
+        )
+
+    def _start_participate_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
+        decoded = event.data
+        assert isinstance(decoded, DecodedTurn)
+        input = decoded.input
+        participating_input = participating.InputData(
+            conversation_ref=input.conversation_ref,
+            self_participant_ref=input.self_participant_ref,
+            participants=input.participants,
+            stimulus=decoded.stimulus,
+        )
+        self._dispatch_child_ability(
+            ctx,
+            event,
+            kind="participating",
+            child=typ.cast(ability.Ability[typ.Any, typ.Any], self._participating),
+            input=participating_input,
+            stage_metadata={_CONVERSATION_DECODED_METADATA_KEY: decoded},
+        )
+
+    def _complete_participate_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
+        decoded = event.metadata.get(_CONVERSATION_DECODED_METADATA_KEY)
+        if not isinstance(decoded, DecodedTurn):
+            return
+        operation_id = _operation_id_from_conversation_child_event(event, "participating")
+        output = event.data
+        if not isinstance(output, participating.OutputData):
+            failure = FailureData(stage="participating", message="Conversation participation produced invalid output.")
+            _dispatch_conversation_phase_failure(
+                ctx,
+                self,
+                event,
+                _ConversationParticipatingFailedEvent.with_data(failure),
+                kind="participating",
+            )
+            return
+        participated = ParticipatedTurn(
+            input=decoded.input,
+            stimulus=decoded.stimulus,
+            decoded_text=decoded.decoded_text,
+            participation=output,
+        )
+        _ = hsm.dispatch(
+            ctx,
+            self,
+            _conversation_event_with_operation(
+                _ConversationParticipatingCompletedEvent.with_data(participated),
+                event,
+                operation_id=operation_id,
+            ),
+        )
+
+    @staticmethod
+    def _build_contribution_response(
+        instance: "Conversation[typ.Any, typ.Any]",
+        participated: ParticipatedTurn,
+    ) -> object:
+        """Build the contribution-only terminal response (no host-encoded content)."""
+
+        input = participated.input
+        return Response(
+            conversation_ref=input.conversation_ref,
+            self_participant_ref=input.self_participant_ref,
+            participants=tuple(instance._participants_by_ref.values()),
+            content=None,
+        )
+
+    @staticmethod
+    def _dispatch_contribution_output(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        """Complete a turn after participation; hosts may continue with decide/memory/encode."""
+
+        participated = event.data
+        assert isinstance(participated, ParticipatedTurn)
+        # Durable domain memory of the last contribution (kept intentionally).
+        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, participated)
+        output = Conversation._build_contribution_response(instance, participated)
+        if not _matches_conversation_output_contract(instance, output):
+            failure = FailureData(
+                stage="participating",
+                message="Conversation contribution output type does not match its output event.",
+            )
+            _dispatch_conversation_terminal_failure(ctx, instance, event, failure)
+            return
+        assert isinstance(output, Response)
+        _dispatch_conversation_terminal_output(ctx, instance, event, output)
+
+    def _owned_children(self) -> tuple[ability.Ability[typ.Any, typ.Any], ...]:
+        return (
+            typ.cast(ability.Ability[typ.Any, typ.Any], self._decoding),
+            typ.cast(ability.Ability[typ.Any, typ.Any], self._participating),
+        )
+
+    @staticmethod
+    def _record_participant_states(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        del ctx
+        input = event.data
+        assert isinstance(input, Message)
+        instance._conversation_ref = input.conversation_ref
+        instance._participants_by_ref = {participant.ref: participant for participant in input.participants}
+
+    @staticmethod
+    def _dispatch_conversation_snapshot(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        request = event.data
+        assert isinstance(request, SnapshotRequest)
+        snapshot = Snapshot(
+            request_ref=request.request_ref,
+            conversation_ref=instance._conversation_ref,
+            participants=tuple(instance._participants_by_ref.values()),
+        )
+        _ = hsm.dispatch(ctx, instance, instance.snapshot_output_event.with_data(snapshot))
+
+    @staticmethod
+    def _start_decoding(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        instance._start_decode_phase(ctx, event)
+
+    @staticmethod
+    def _complete_decoding(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        instance._complete_decode_phase(ctx, event)
+
+    @staticmethod
+    def _start_participating(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        instance._start_participate_phase(ctx, event)
+
+    @staticmethod
+    def _complete_participating(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        instance._complete_participate_phase(ctx, event)
+
+    @staticmethod
+    def _fail_decoding_child(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        _fail_conversation_child(ctx, instance, event, "decoding")
+
+    @staticmethod
+    def _fail_participating_child(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        _fail_conversation_child(ctx, instance, event, "participating")
+
+    @staticmethod
+    async def _attach_children(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        del event
+        for child in instance._owned_children():
+            owner = ability.Ability.current_owner(child)
+            if owner is not None and owner is not instance:
+                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
+            _ = await child.attach(owner=instance, ctx=ctx)
+        _ = hsm.dispatch(ctx, instance, _ConversationChildrenAttachedEvent.with_data(None))
+
+    @staticmethod
+    def _detach_children_on_detach(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        if event.name != ability.DetachEvent.name:
+            return
+        for child in instance._owned_children():
+            if ability.Ability.current_owner(child) is instance:
+                _ = child.detach(ctx=ctx)
+        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
+
+    @classmethod
+    def define_model(
+        cls,
+        root_name: str,
+        *,
+        input_event: hsm.Event[typ.Any],
+        input_guard: typ.Callable[[hsm.Context, "Conversation[typ.Any, typ.Any]", hsm.Event[typ.Any]], bool],
+    ) -> hsm.Model:
+        root_path = f"/{root_name}"
+
+        def _has_correlated_input(
+            ctx: hsm.Context,
+            instance: Conversation[typ.Any, typ.Any],
+            event: hsm.Event[typ.Any],
+        ) -> bool:
+            return (
+                _matches_message_contract(instance, event.data)
+                and input_guard(ctx, instance, event)
+                and _has_conversation_operation_id(ctx, instance, event)
+            )
+
+        return hsm.define(
+            root_name,
+            hsm.initial(hsm.target(f"{root_path}/initializing")),
+            hsm.attribute(_LAST_PARTICIPATED_ATTRIBUTE),
+            hsm.transition(
+                hsm.on(cls.snapshot_request_event),
+                hsm.guard(_has_conversation_snapshot_request),
+                hsm.effect(cls._dispatch_conversation_snapshot),
+            ),
+            hsm.state(
+                "initializing",
+                hsm.defer(input_event),
+                hsm.activity(cls._attach_children),
+                hsm.exit(cls._detach_children_on_detach),
+                hsm.transition(
+                    hsm.on(_ConversationChildrenAttachedEvent),
+                    hsm.target(f"{root_path}/silent"),
+                ),
+            ),
+            hsm.state(
+                "silent",
+                hsm.exit(cls._detach_children_on_detach),
+                hsm.transition(
+                    hsm.on(input_event),
+                    hsm.guard(_has_correlated_input),
+                    hsm.effect(
+                        _clear_last_participated_on_input,
+                        cls._record_participant_states,
+                    ),
+                    hsm.target(f"{root_path}/active/decoding"),
+                ),
+            ),
+            hsm.state(
+                "active",
+                hsm.defer(input_event),
+                hsm.exit(cls._detach_children_on_detach),
+                hsm.transition(
+                    hsm.on(
+                        _ConversationDecodingFailedEvent,
+                        _ConversationParticipatingFailedEvent,
+                    ),
+                    hsm.guard(_has_conversation_failure),
+                    hsm.effect(_dispatch_conversation_failure),
+                    hsm.target(f"{root_path}/silent"),
+                ),
+                hsm.state(
+                    "decoding",
+                    hsm.entry(cls._start_decoding),
+                    hsm.transition(
+                        hsm.on(_ConversationDecodingCompletedEvent),
+                        hsm.guard(_has_conversation_decoded),
+                        hsm.target(f"{root_path}/active/participating"),
+                    ),
+                    hsm.transition(
+                        hsm.on(hsm.AnyEvent),
+                        hsm.guard(_matches_decoding_child_output),
+                        hsm.effect(cls._complete_decoding),
+                    ),
+                    hsm.transition(
+                        hsm.on(hsm.AnyEvent),
+                        hsm.guard(_matches_decoding_child_failure),
+                        hsm.effect(cls._fail_decoding_child),
+                    ),
+                ),
+                hsm.state(
+                    "participating",
+                    hsm.entry(cls._start_participating),
+                    hsm.transition(
+                        hsm.on(_ConversationParticipatingCompletedEvent),
+                        hsm.guard(_has_conversation_participated),
+                        hsm.effect(Conversation._dispatch_contribution_output),
+                        hsm.target(f"{root_path}/silent"),
+                    ),
+                    hsm.transition(
+                        hsm.on(hsm.AnyEvent),
+                        hsm.guard(_matches_participating_child_output),
+                        hsm.effect(cls._complete_participating),
+                    ),
+                    hsm.transition(
+                        hsm.on(hsm.AnyEvent),
+                        hsm.guard(_matches_participating_child_failure),
+                        hsm.effect(cls._fail_participating_child),
+                    ),
+                ),
+            ),
+            hsm.observe(observer),
+        )
+
+
+def define_conversation_model(
+    root_name: str,
+    *,
+    input_event: hsm.Event[typ.Any],
+    input_guard: typ.Callable[[hsm.Context, Conversation[typ.Any, typ.Any], hsm.Event[typ.Any]], bool],
+) -> hsm.Model:
+    return Conversation.define_model(root_name, input_event=input_event, input_guard=input_guard)
+
+
+__all__ = [
+    "FailedEvent",
+    "InputEvent",
+    "OutputEvent",
+    "SnapshotOutputEvent",
+    "SnapshotRequestEvent",
+    "AnyMessage",
+    "Conversation",
+    "ConversationChildKind",
+    "DecodedTurn",
+    "FailureData",
+    "Message",
+    "ParticipatedTurn",
+    "Response",
+    "Snapshot",
+    "SnapshotRequest",
+    "Stage",
+    "TextMessage",
+    "VoiceMessage",
+    "conversation_event_with_operation",
+    "define_conversation_model",
+    "matches_conversation_output_contract",
+]

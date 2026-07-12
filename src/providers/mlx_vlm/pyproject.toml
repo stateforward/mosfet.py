@@ -1,0 +1,45 @@
+[project]
+name = "bot-provider-mlx-vlm"
+dynamic = ["version"]
+description = "MLX VLM reading provider package for stateforward.bot."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "mlx-vlm>=0.6.3,<0.7.0; sys_platform == 'darwin'",
+  "stateforward.bot",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3,<10.0.0",
+  "ruff~=0.11.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bot"]
+exclude = ["src/bot/__init__.pyi"]
+
+[tool.hatch.version]
+path = "src/bot/providers/mlx_vlm/__init__.py"
+
+[tool.uv.sources]
+stateforward-bot = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.basedpyright]
+include = ["src", "tests"]
+extraPaths = ["src", "../../../src", "../../.."]
+pythonVersion = "3.13"
