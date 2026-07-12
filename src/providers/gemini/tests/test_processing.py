@@ -126,11 +126,19 @@ class _ConfidencePatch(pydantic.BaseModel):
     confidence: int | None = pydantic.Field(default=None, ge=0, le=100)
 
 
-def test_processor_maps_tool_calls_to_events() -> None:
+def test_processor_maps_dispatch_tool_to_events() -> None:
     generator = RecordingGenerator(
         content="",
         tool_calls=(
-            text.TextToolCall(id="tc1", name="phone_answer_call", args={"call_id": "c1"}),
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={
+                    "events": [
+                        {"event": "phone.answer_call", "data": {"call_id": "c1"}},
+                    ]
+                },
+            ),
         ),
     )
     processor = Processor(generator=generator)
@@ -143,27 +151,59 @@ def test_processor_maps_tool_calls_to_events() -> None:
     assert len(output) == 1
     assert output[0].event == "phone.answer_call"
     assert output[0].data == {"call_id": "c1"}
-    assert generator.inputs[0].tool_selection == text.ToolSelectionPolicy.AUTO
+    assert generator.inputs[0].tool_selection == text.ToolSelectionPolicy.REQUIRED
     assert len(generator.inputs[0].tools) == 1
     tool = generator.inputs[0].tools[0]
     assert isinstance(tool, dict)
+    assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
     parameters = tool["function"]["parameters"]
-    assert isinstance(parameters, dict)
-    properties = parameters["properties"]
-    assert isinstance(properties, dict)
-    # No InputData.patch → pure domain tool schema.
-    assert "confidence" not in properties
-    assert "call_id" in properties
+    assert parameters["properties"]["events"]["items"]["properties"]["event"]["enum"] == [
+        "phone.answer_call"
+    ]
 
 
-def test_processor_lifts_confidence_from_patched_tool_args() -> None:
+def test_processor_maps_multi_event_dispatch() -> None:
     generator = RecordingGenerator(
         content="",
         tool_calls=(
             text.TextToolCall(
                 id="tc1",
-                name="phone_answer_call",
-                args={"call_id": "c1", "confidence": 73},
+                name=processing.DISPATCH_TOOL_NAME,
+                args={
+                    "events": [
+                        {"event": "phone.answer_call", "data": {"call_id": "c1"}},
+                        {"event": "phone.answer_call", "data": {"call_id": "c2"}},
+                    ]
+                },
+            ),
+        ),
+    )
+    processor = Processor(generator=generator)
+    input = processing.InputData(
+        input="ring",
+        schemas=(_PHONE_ANSWER_CALL,),
+        instructions="Select events from schemas.",
+    )
+    output = asyncio.run(process_for_test(processor, input))
+    assert [item.event for item in output] == ["phone.answer_call", "phone.answer_call"]
+    assert [item.data for item in output] == [{"call_id": "c1"}, {"call_id": "c2"}]
+
+
+def test_processor_lifts_confidence_from_patched_dispatch_data() -> None:
+    generator = RecordingGenerator(
+        content="",
+        tool_calls=(
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={
+                    "events": [
+                        {
+                            "event": "phone.answer_call",
+                            "data": {"call_id": "c1", "confidence": 73},
+                        }
+                    ]
+                },
             ),
         ),
     )
@@ -179,10 +219,6 @@ def test_processor_lifts_confidence_from_patched_tool_args() -> None:
     assert output[0].event == "phone.answer_call"
     assert output[0].data == {"call_id": "c1"}
     assert output[0].confidence == 73
-    tool = generator.inputs[0].tools[0]
-    assert isinstance(tool, dict)
-    properties = tool["function"]["parameters"]["properties"]
-    assert "confidence" in properties
 
 
 def test_processor_requires_stamped_instructions() -> None:

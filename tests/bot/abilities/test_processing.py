@@ -475,3 +475,36 @@ def test_input_data_serialization_projects_patched_schemas() -> None:
     pure_props = pure["schemas"][0]["schema"]["properties"]
     assert "confidence" not in pure_props
 
+
+def test_dispatch_tool_is_single_function_with_events_array() -> None:
+    tool = processing.dispatch_tool((_SPEAK_EVENT,), patch=_ConfidencePatch)
+    assert tool["type"] == "function"
+    assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
+    parameters = tool["function"]["parameters"]
+    assert parameters["required"] == ["events"]
+    event_schema = parameters["properties"]["events"]["items"]["properties"]["event"]
+    assert event_schema["enum"] == ["bot.ability.speaking.input"]
+    assert "description" in tool["function"]
+    assert "multi-select" in tool["function"]["description"].lower() or "multiple" in tool[
+        "function"
+    ]["description"].lower()
+
+
+def test_events_from_dispatch_args_parses_canonical_names() -> None:
+    selections = processing.events_from_dispatch_args(
+        {
+            "events": [
+                {
+                    "event": "bot.ability.speaking.input",
+                    "data": {"text": "hi", "confidence": 90},
+                }
+            ]
+        },
+        patch=_ConfidencePatch,
+        offered=(_SPEAK_EVENT,),
+    )
+    assert len(selections) == 1
+    assert selections[0].event == "bot.ability.speaking.input"
+    assert selections[0].data == {"text": "hi"}
+    assert selections[0].confidence == 90
+

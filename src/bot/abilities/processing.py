@@ -33,6 +33,9 @@ Event = hsm.Event
 _FOCUS_DEVICE_EVENT = "bot.focus_device"
 _CLEAR_FOCUS_EVENT = "bot.clear_focus"
 
+# Single model-facing tool: multi-select is an events array, not N parallel tools.
+DISPATCH_TOOL_NAME: typing.Final[str] = "dispatch"
+
 # Optional model-facing overlay: a BaseModel type whose fields are create_model-patched onto
 # every offered event for this InputData only. ``None`` → pure domain schemas (no force patch).
 SchemaPatch: typing.TypeAlias = type[pydantic.BaseModel]
@@ -309,6 +312,141 @@ def selection_confidence(selections: Events) -> int | None:
     if not values:
         return None
     return min(values)
+
+
+def dispatch_tool(
+    events: collections.abc.Sequence[Event[typing.Any]],
+    *,
+    patch: SchemaPatch | None = None,
+) -> dict[str, object]:
+    """Build the single model-facing ``dispatch`` function tool.
+
+    Multi-select is one tool call with ``events: [...]`` using canonical HSM event names
+    (no per-event tool name mangling). Offered payload shapes stay in the user message /
+    schema projection; item ``data`` is validated after the call.
+    """
+
+    names = tuple(dict.fromkeys(event.name for event in events if event.name))
+    offered = ", ".join(names) if names else "(none)"
+    patch_note = ""
+    if patch is not None and _is_schema_patch(patch) and patch.model_fields:
+        field_bits: list[str] = []
+        for field_name, field_info in patch.model_fields.items():
+            description = field_info.description
+            if isinstance(description, str) and description.strip():
+                field_bits.append(f"{field_name}: {description.strip()}")
+            else:
+                field_bits.append(field_name)
+        patch_note = (
+            " Each selected event's data must also include these model-facing fields: "
+            + "; ".join(field_bits)
+            + "."
+        )
+    description = (
+        "Dispatch zero or more modeled events for this turn. "
+        "Call this function once. Put every event that should run in the events array "
+        "(multi-select is normal—for example speaking.input together with reasoning.input "
+        "when the user is waiting on speech while deliberation continues). "
+        f"Allowed event names: {offered}. "
+        "Use the exact canonical event string. data must match that event's payload schema "
+        "from the offered schemas in the user message."
+        f"{patch_note} "
+        "Return events: [] when no offered event should run."
+    )
+    event_property: dict[str, object] = {
+        "type": "string",
+        "description": (
+            "Canonical HSM event name to dispatch. Must be one of the offered schema names."
+        ),
+        "examples": list(names[:3]) if names else ["phone.answer_call"],
+    }
+    if names:
+        event_property["enum"] = list(names)
+    parameters: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "events": {
+                "type": "array",
+                "description": (
+                    "Ordered list of events to dispatch this turn. Include multiple items when "
+                    "several actions should run together. Empty array selects none."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "event": event_property,
+                        "data": {
+                            "type": "object",
+                            "description": (
+                                "JSON object payload for the selected event. Match the schema for "
+                                "that event name (and any patched fields such as confidence). "
+                                "Omit or use {} when the event has no payload fields."
+                            ),
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": (
+                                "Optional actor name that should receive the event when more than "
+                                "one actor can accept it."
+                            ),
+                            "examples": ["speaking", "phone", "bot"],
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Optional short reason this event was selected.",
+                            "examples": ["User greeted; reply now while deliberating keypad request."],
+                        },
+                    },
+                    "required": ["event"],
+                    "additionalProperties": False,
+                },
+                "examples": [
+                    [],
+                    [
+                        {
+                            "event": names[0] if names else "bot.ability.speaking.input",
+                            "data": {"text": "One moment.", "confidence": 86}
+                            if patch is not None
+                            else {"text": "One moment."},
+                            "reason": "Acknowledge while handling a hard request.",
+                        }
+                    ],
+                ],
+            }
+        },
+        "required": ["events"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "function",
+        "function": {
+            "name": DISPATCH_TOOL_NAME,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
+
+
+def events_from_dispatch_args(
+    args: collections.abc.Mapping[str, object],
+    *,
+    patch: SchemaPatch | None = None,
+    offered: collections.abc.Sequence[Event[typing.Any]] | None = None,
+) -> Events:
+    """Parse a ``dispatch`` tool's args into validated ``Events``."""
+
+    raw_events = args.get("events")
+    if raw_events is None:
+        raise ValueError("dispatch tool args must include an events array.")
+    selections = coerce_event_selections(raw_events, patch=patch)
+    if selections is None:
+        raise ValueError("dispatch tool events must be an array of event selections.")
+    if offered is not None:
+        allowed = {event.name for event in offered}
+        for item in selections:
+            if item.event not in allowed:
+                raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+    return selections
 
 
 def _confidence_from_meta(meta: dict[str, object] | None) -> int | None:
@@ -989,6 +1127,7 @@ OutputEvent = Processing.output_event
 __all__ = [
     "CONFIDENCE_MAX",
     "CONFIDENCE_MIN",
+    "DISPATCH_TOOL_NAME",
     "Event",
     "Events",
     "InputEvent",
@@ -1001,7 +1140,9 @@ __all__ = [
     "SelectedEvent",
     "coerce_event_selections",
     "dispatch_selected_events",
+    "dispatch_tool",
     "enabled_call_events",
+    "events_from_dispatch_args",
     "model_facing_event_json_schema",
     "normalize_confidence",
     "patch_field_names",

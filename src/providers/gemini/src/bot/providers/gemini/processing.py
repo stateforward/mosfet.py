@@ -69,13 +69,6 @@ _ALLOWED_STRICT_SCHEMA_KEYS = frozenset(
 _STRICT_SCHEMA_SHAPE_KEYS = frozenset({"type", "$ref", "anyOf", "enum", "const", "properties"})
 
 
-@dataclasses.dataclass(frozen=True)
-class _EventToolSpec:
-    name: str
-    event: processing.Event[typing.Any]
-    tool: dict[str, object]
-
-
 def _mapping_dict(value: object) -> dict[str, object]:
     if not isinstance(value, collections.abc.Mapping):
         return {}
@@ -271,17 +264,11 @@ def _schema_name_for(output_type: object) -> str:
     return name or "processing_output"
 
 
-def _event_tool_name(event: processing.Event[typing.Any]) -> str:
-    name = re.sub(r"[^a-zA-Z0-9_-]+", "_", event.name).strip("_")
-    return name or "event"
-
-
-def _event_tool_parameters(
+def _event_payload_schema(
     event: processing.Event[typing.Any],
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> dict[str, object]:
-    # Domain payload + optional InputData.patch fields; unpatched before dispatch.
     schema = _copy_schema(processing.model_facing_event_json_schema(event, patch=patch))
     if not schema:
         return {
@@ -294,87 +281,57 @@ def _event_tool_parameters(
     raise ValueError("Gemini event tools require object event data schemas.")
 
 
-def _event_tool_specs(
-    events: collections.abc.Sequence[processing.Event[typing.Any]],
-    *,
-    patch: processing.SchemaPatch | None = None,
-) -> tuple[_EventToolSpec, ...]:
-    specs: list[_EventToolSpec] = []
-    by_name: dict[str, processing.Event[typing.Any]] = {}
-    for event in events:
-        name = _event_tool_name(event)
-        existing = by_name.get(name)
-        if existing is not None:
-            continue
-        by_name[name] = event
-        schema = processing.model_facing_event_json_schema(event, patch=patch)
-        description = schema.get("description")
-        if not isinstance(description, str) or not description:
-            domain = event_json_schema(event)
-            domain_description = domain.get("description")
-            description = (
-                domain_description
-                if isinstance(domain_description, str) and domain_description
-                else f"Dispatch {event.name}."
-            )
-        specs.append(
-            _EventToolSpec(
-                name=name,
-                event=event,
-                tool={
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": _event_tool_parameters(event, patch=patch),
-                    },
-                },
-            )
-        )
-    return tuple(specs)
-
-
-def _events_by_name(
-    tool_specs: tuple[_EventToolSpec, ...],
-) -> dict[str, processing.Event[typing.Any]]:
-    return {spec.event.name: spec.event for spec in tool_specs}
-
-
-def _validate_event_args(
+def _validate_event_payload(
     event: processing.Event[typing.Any],
-    args: collections.abc.Mapping[str, object],
+    data: collections.abc.Mapping[str, object],
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> None:
-    schema = _event_tool_parameters(event, patch=patch)
-    _validate_structured_json(dict(args), schema, root_schema=schema)
+    schema = _event_payload_schema(event, patch=patch)
+    _validate_structured_json(dict(data), schema, root_schema=schema)
 
 
-def _event_tool_output(
+def _events_from_dispatch_tool_calls(
     tool_calls: tuple[text.generation.TextToolCall, ...],
-    tool_specs: tuple[_EventToolSpec, ...],
+    offered: collections.abc.Sequence[processing.Event[typing.Any]],
     *,
-    reason: str,
     patch: processing.SchemaPatch | None = None,
-) -> object:
-    event_by_tool = {spec.name: spec.event for spec in tool_specs}
-    selected: list[dict[str, object]] = []
-    for tool_call in tool_calls:
-        event = event_by_tool.get(tool_call.name)
-        if event is None:
-            raise _StructuredOutputValidationError("processing response selected an unknown event tool")
-        args = dict(tool_call.args)
-        _validate_event_args(event, args, patch=patch)
-        item: dict[str, object] = {
-            "event": event.name,
-        }
-        if args:
-            item["data"] = args
-        if reason:
-            item["reason"] = reason
-        selected.append(item)
-    return selected
-
+) -> processing.Events:
+    if not tool_calls:
+        return ()
+    # Prefer the dedicated dispatch tool; ignore unexpected names.
+    dispatch_calls = [
+        call for call in tool_calls if call.name == processing.DISPATCH_TOOL_NAME
+    ]
+    if not dispatch_calls:
+        names = ", ".join(sorted({call.name for call in tool_calls}))
+        raise _StructuredOutputValidationError(
+            f"processing expected tool {processing.DISPATCH_TOOL_NAME!r}, got: {names}"
+        )
+    # One dispatch call is the contract; if the model emits several, merge in order.
+    merged: list[processing.SelectedEvent] = []
+    by_name = {event.name: event for event in offered}
+    for call in dispatch_calls:
+        try:
+            selections = processing.events_from_dispatch_args(
+                call.args,
+                patch=patch,
+                offered=offered,
+            )
+        except ValueError as error:
+            raise _StructuredOutputValidationError(str(error)) from error
+        for selection in selections:
+            event = by_name[selection.event]
+            raw = selection.data if selection.data is not None else {}
+            # Validate pre-unpatch shape: re-merge meta into data for schema check when present.
+            payload = dict(raw)
+            if selection.meta:
+                payload.update(selection.meta)
+            elif selection.confidence is not None and "confidence" not in payload:
+                payload["confidence"] = selection.confidence
+            _validate_event_payload(event, payload, patch=patch)
+            merged.append(selection)
+    return tuple(merged)
 
 _MISSING = object()
 
@@ -386,80 +343,36 @@ def _field(value: object, name: str, default: object = _MISSING) -> object:
     return getattr(value, name, default)
 
 
-def _validate_selected_event_output(
-    output: object,
-    events_by_name: collections.abc.Mapping[str, processing.Event[typing.Any]],
-    *,
-    patch: processing.SchemaPatch | None = None,
-) -> None:
-    event_name = _field(output, "event")
-    if not isinstance(event_name, str):
-        raise _StructuredOutputValidationError("processing response selected an invalid event reference")
-    event = events_by_name.get(event_name)
-    if event is None:
-        raise _StructuredOutputValidationError("processing response selected an unavailable event")
-    data = _field(output, "data", None)
-    if data is None:
-        args: collections.abc.Mapping[str, object] = {}
-    elif isinstance(data, collections.abc.Mapping):
-        args = typing.cast(collections.abc.Mapping[str, object], data)
-    else:
-        raise _StructuredOutputValidationError("processing response selected event data that is not an object")
-    _validate_event_args(event, args, patch=patch)
-
-
 def _looks_like_event_selection(output: object) -> bool:
     """Return whether a value looks like one cognition event selection (has string `event`)."""
 
     return isinstance(_field(output, "event", None), str)
 
 
-def _validate_event_outputs(
-    output: object,
-    tool_specs: tuple[_EventToolSpec, ...],
+def _validate_selection_payloads(
+    selections: processing.Events,
+    offered: collections.abc.Sequence[processing.Event[typing.Any]],
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> None:
-    """Validate event selections in model content against offered events.
-
-    Cognition `OutputData` is always a sequence of event selections (possibly empty). Arbitrary
-    typed processor outputs (e.g. list[Decision]) must not be treated as event menus.
-    """
-
-    events_by_name = _events_by_name(tool_specs)
-    if isinstance(output, collections.abc.Sequence) and not isinstance(output, str | bytes | bytearray):
-        if not output:
-            return
-        if all(_looks_like_event_selection(item) for item in output):
-            for item in output:
-                _validate_selected_event_output(item, events_by_name, patch=patch)
-        return
-    # Single object selection (legacy model content) — treat as one-event list.
-    if _looks_like_event_selection(output):
-        _validate_selected_event_output(output, events_by_name, patch=patch)
-        return
-    result = _field(output, "result", None)
-    if result is not None:
-        _validate_event_outputs(result, tool_specs, patch=patch)
-
-
-def _events_from_tool_calls(
-    tool_calls: tuple[text.generation.TextToolCall, ...],
-    tool_specs: tuple[_EventToolSpec, ...],
-    *,
-    reason: str,
-    patch: processing.SchemaPatch | None = None,
-) -> processing.Events:
-    raw = _event_tool_output(tool_calls, tool_specs, reason=reason, patch=patch)
-    selections = processing.coerce_event_selections(raw, patch=patch)
-    if selections is None:
-        raise _StructuredOutputValidationError("processing tool calls did not produce an events array")
-    return selections
+    by_name = {event.name: event for event in offered}
+    for selection in selections:
+        event = by_name.get(selection.event)
+        if event is None:
+            raise _StructuredOutputValidationError(
+                f"processing response selected an unavailable event: {selection.event}"
+            )
+        payload = dict(selection.data or {})
+        if selection.meta:
+            payload.update(selection.meta)
+        elif selection.confidence is not None:
+            payload.setdefault("confidence", selection.confidence)
+        _validate_event_payload(event, payload, patch=patch)
 
 
 def _events_from_content(
     content: str,
-    tool_specs: tuple[_EventToolSpec, ...],
+    offered: collections.abc.Sequence[processing.Event[typing.Any]],
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> processing.Events:
@@ -471,15 +384,31 @@ def _events_from_content(
         raise _StructuredOutputValidationError("processing response was not JSON") from error
     if isinstance(parsed, collections.abc.Mapping):
         mapping = typing.cast(collections.abc.Mapping[str, object], parsed)
-        if "result" in mapping:
+        if "events" in mapping:
+            parsed = mapping["events"]
+        elif "result" in mapping:
             parsed = mapping["result"]
-    selections = processing.coerce_event_selections(parsed, patch=patch)
-    if selections is None:
-        raise _StructuredOutputValidationError("processing response was not an events array")
-    if tool_specs:
-        _validate_event_outputs(selections, tool_specs, patch=patch)
+    try:
+        if isinstance(parsed, collections.abc.Mapping) and "events" in parsed:
+            selections = processing.events_from_dispatch_args(
+                typing.cast(collections.abc.Mapping[str, object], parsed),
+                patch=patch,
+                offered=offered,
+            )
+        else:
+            selections = processing.coerce_event_selections(parsed, patch=patch)
+            if selections is None:
+                raise ValueError("processing response was not an events array")
+            if offered:
+                allowed = {event.name for event in offered}
+                for item in selections:
+                    if item.event not in allowed:
+                        raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+    except ValueError as error:
+        raise _StructuredOutputValidationError(str(error)) from error
+    if offered:
+        _validate_selection_payloads(selections, offered, patch=patch)
     return selections
-
 
 def _schema_type_matches(value: object, schema_type: str) -> bool:
     if schema_type == "null":
@@ -707,8 +636,9 @@ class Processor(processing.Processor):
             raise ProcessingError(
                 "Gemini processing requires non-blank instructions stamped by Processing."
             )
-        tool_specs = _event_tool_specs(input.schemas, patch=input.patch)
-        operation_tools = tuple(spec.tool for spec in tool_specs)
+        operation_tools: tuple[dict[str, object], ...] = ()
+        if input.schemas:
+            operation_tools = (processing.dispatch_tool(input.schemas, patch=input.patch),)
         generation_input = text.generation.InputData(
             messages=(
                 text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
@@ -719,7 +649,8 @@ class Processor(processing.Processor):
             ),
             tools=operation_tools,
             tool_selection=(
-                text.generation.ToolSelectionPolicy.AUTO
+                # Required so multi-select is always a filled events array (possibly empty).
+                text.generation.ToolSelectionPolicy.REQUIRED
                 if operation_tools
                 else text.generation.ToolSelectionPolicy.NONE
             ),
@@ -727,15 +658,14 @@ class Processor(processing.Processor):
         output = await self._generator.generate(generation_input)
         try:
             if output.tool_calls:
-                return _events_from_tool_calls(
+                return _events_from_dispatch_tool_calls(
                     output.tool_calls,
-                    tool_specs,
-                    reason=output.reasoning,
+                    input.schemas,
                     patch=input.patch,
                 )
-            return _events_from_content(output.content, tool_specs, patch=input.patch)
+            return _events_from_content(output.content, input.schemas, patch=input.patch)
         except (pydantic.ValidationError, _StructuredOutputValidationError) as error:
-            message = "Gemini processing response did not produce a valid events array."
+            message = f"Gemini processing response did not produce a valid events array: {error}"
             raise ProcessingError(message) from error
 
 
