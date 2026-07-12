@@ -146,13 +146,17 @@ class FocusDeviceEventData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "description": "Command payload that requests moving bot focus to one configured device.",
+            "description": (
+                "Move body attention (focus) to one configured device. device is required and must "
+                "be a live focus candidate. Prefer this only when a device should become the active "
+                "attention target — not as a substitute for speaking or reasoning."
+            ),
             "examples": [{"device": "phone", "reason": "Incoming call should become the active device."}],
         },
     )
 
     device: DeviceReference = pydantic.Field(
-        description="Stable configured device reference that should become focused.",
+        description="Required stable configured device reference that should become focused.",
         examples=["phone"],
     )
     reason: BotOperationReason | None = pydantic.Field(
@@ -167,7 +171,11 @@ class ClearFocusEventData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "description": "Command payload that requests leaving the bot without a focused device.",
+            "description": (
+                "Clear body focus so no device is the active attention target. Use only when focus "
+                "should end (for example the focused device is gone). Do not use this as a default "
+                "response to user speech — prefer speaking.input and/or reasoning.input."
+            ),
             "examples": [{"reason": "The focused device has no remaining available transition."}],
         },
     )

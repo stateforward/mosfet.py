@@ -88,92 +88,34 @@ def patch_field_names(patch: SchemaPatch | None) -> frozenset[str]:
     return frozenset(patch.model_fields)
 
 
-def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, tuple[object, pydantic.fields.FieldInfo]]:
-    fields: dict[str, tuple[object, pydantic.fields.FieldInfo]] = {}
+def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, tuple[object, object]]:
+    """Build create_model field kwargs from a patch model (fresh Field, not borrowed FieldInfo)."""
+
+    fields: dict[str, tuple[object, object]] = {}
     for name, field_info in patch.model_fields.items():
         annotation: object = field_info.annotation if field_info.annotation is not None else object
-        fields[name] = (annotation, field_info)
+        kwargs: dict[str, object] = {}
+        if field_info.description is not None:
+            kwargs["description"] = field_info.description
+        if field_info.examples is not None:
+            kwargs["examples"] = field_info.examples
+        if field_info.is_required():
+            # Required patch fields stay required on the projected model.
+            pass
+        elif field_info.default is not pydantic.fields.PydanticUndefined:
+            kwargs["default"] = field_info.default
+        elif field_info.default_factory is not None:
+            kwargs["default_factory"] = field_info.default_factory
+        metadata = list(field_info.metadata)
+        for item in metadata:
+            ge = getattr(item, "ge", None)
+            le = getattr(item, "le", None)
+            if ge is not None:
+                kwargs["ge"] = ge
+            if le is not None:
+                kwargs["le"] = le
+        fields[name] = (annotation, pydantic.Field(**kwargs))
     return fields
-
-
-def _example_value_for_patch_field(field_info: pydantic.fields.FieldInfo) -> object:
-    examples = field_info.examples
-    if isinstance(examples, list) and examples:
-        return examples[0]
-    if field_info.default is not None and field_info.default is not pydantic.fields.PydanticUndefined:
-        return field_info.default
-    annotation = field_info.annotation
-    origin = typing.get_origin(annotation)
-    args = typing.get_args(annotation)
-    if origin is typing.Union:
-        non_none = [item for item in args if item is not type(None)]
-        if non_none:
-            annotation = non_none[0]
-    if annotation is int:
-        return 86
-    if annotation is float:
-        return 0.86
-    if annotation is bool:
-        return True
-    if annotation is str:
-        return "example"
-    return None
-
-
-def _enrich_model_facing_schema(
-    schema: dict[str, object],
-    *,
-    patch: SchemaPatch | None,
-) -> dict[str, object]:
-    """Merge patch field descriptions/examples into the projected event schema for the model."""
-
-    if patch is None or not _is_schema_patch(patch) or not patch.model_fields:
-        return schema
-
-    notes: list[str] = []
-    for name, field_info in patch.model_fields.items():
-        description = field_info.description
-        if isinstance(description, str) and description.strip():
-            notes.append(f"Always set {name}: {description.strip()}")
-        else:
-            notes.append(f"Always set model-facing field {name!r} on this payload.")
-    note = " ".join(notes)
-    description = schema.get("description")
-    if isinstance(description, str) and description.strip():
-        lower = description.lower()
-        if not any(name in lower for name in patch.model_fields):
-            schema["description"] = f"{description.rstrip()} {note}"
-    else:
-        schema["description"] = note
-
-    examples = schema.get("examples")
-    if isinstance(examples, list) and examples:
-        enriched: list[object] = []
-        defaults = {
-            name: _example_value_for_patch_field(field_info)
-            for name, field_info in patch.model_fields.items()
-        }
-        for example in examples:
-            if isinstance(example, dict):
-                item = dict(typing.cast(dict[str, object], example))
-                for name, value in defaults.items():
-                    if name not in item and value is not None:
-                        item[name] = value
-                enriched.append(item)
-            else:
-                enriched.append(example)
-        # Second object example using alternate field examples when available.
-        first = enriched[0]
-        if isinstance(first, dict):
-            alt = dict(typing.cast(dict[str, object], first))
-            for name, field_info in patch.model_fields.items():
-                examples_list = field_info.examples
-                if isinstance(examples_list, list) and len(examples_list) > 1:
-                    alt[name] = examples_list[1]
-            if alt not in enriched:
-                enriched.append(alt)
-        schema["examples"] = enriched
-    return schema
 
 
 def patched_event_data_model(
@@ -223,24 +165,24 @@ def model_facing_event_json_schema(
     *,
     patch: SchemaPatch | None = None,
 ) -> dict[str, object]:
-    """JSON schema for one offered event as shown to the model (domain + optional patch)."""
+    """JSON schema for one offered event payload as shown to the model.
+
+    Required fields, descriptions, and examples come only from the event's Pydantic/schema
+    contract (and an optional faculty ``patch`` BaseModel via create_model). Processing does
+    not invent or rewrite domain schema text here.
+    """
 
     if patch is None:
         return event_json_schema(event)
 
     base = _payload_base_model(event)
     if base is not None or getattr(event, "schema", None) is None:
-        return _enrich_model_facing_schema(
-            event_schema_json_schema(patched_event_data_model(event, patch=patch)),
-            patch=patch,
-        )
-    # Typed non-BaseModel payloads: merge patch field JSON into the projected schema.
+        # Domain BaseModel (+ patch fields) projected as-is from Pydantic.
+        return event_schema_json_schema(patched_event_data_model(event, patch=patch))
+    # Typed non-BaseModel payloads: merge patch field JSON into the projected domain schema.
     schema = dict(event_json_schema(event))
     if not schema:
-        return _enrich_model_facing_schema(
-            event_schema_json_schema(patched_event_data_model(event, patch=patch)),
-            patch=patch,
-        )
+        return event_schema_json_schema(patched_event_data_model(event, patch=patch))
     if schema.get("type") not in (None, "object") and "properties" not in schema:
         return schema
     properties_raw = schema.get("properties")
@@ -258,7 +200,7 @@ def model_facing_event_json_schema(
         for key, value in typing.cast(dict[str, object], patch_properties).items():
             if key in names:
                 properties[key] = value
-    return _enrich_model_facing_schema(schema, patch=patch)
+    return schema
 
 
 def normalize_confidence(value: object) -> int | None:
@@ -314,6 +256,82 @@ def selection_confidence(selections: Events) -> int | None:
     return min(values)
 
 
+def _object_schema_required_names(schema: collections.abc.Mapping[str, object]) -> list[str]:
+    required = schema.get("required")
+    if isinstance(required, list):
+        return [item for item in required if isinstance(item, str)]
+    return []
+
+
+def _selection_item_branch(
+    event: Event[typing.Any],
+    *,
+    patch: SchemaPatch | None = None,
+) -> dict[str, object]:
+    """One anyOf branch: const event name + projected event payload schema as ``data``.
+
+    Payload required/description/examples come only from the event (and optional patch) models.
+    """
+
+    data_schema = model_facing_event_json_schema(event, patch=patch)
+    if not data_schema:
+        data_schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    elif data_schema.get("type") not in (None, "object") and "properties" not in data_schema:
+        data_schema = {
+            "type": "object",
+            "properties": {"value": data_schema},
+            "required": ["value"],
+            "additionalProperties": False,
+        }
+    else:
+        data_schema = dict(data_schema)
+        data_schema.setdefault("type", "object")
+        data_schema.setdefault("additionalProperties", False)
+
+    # Branch description is the event schema's own description when present.
+    event_description = data_schema.get("description")
+    if not isinstance(event_description, str) or not event_description.strip():
+        event_description = event.name
+
+    data_required = _object_schema_required_names(data_schema)
+    item_required = ["event", "data"] if data_required else ["event"]
+
+    branch: dict[str, object] = {
+        "type": "object",
+        "description": event_description,
+        "properties": {
+            "event": {
+                "type": "string",
+                "const": event.name,
+            },
+            "data": data_schema,
+            "target": {
+                "type": "string",
+                "description": (
+                    "Optional actor name that should receive the event when more than one actor "
+                    "can accept it."
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": "Optional short reason this event was selected.",
+            },
+        },
+        "required": item_required,
+        "additionalProperties": False,
+    }
+    data_examples = data_schema.get("examples")
+    if isinstance(data_examples, list) and data_examples:
+        first = data_examples[0]
+        if isinstance(first, dict):
+            branch["examples"] = [{"event": event.name, "data": first}]
+    return branch
+
+
 def dispatch_tool(
     events: collections.abc.Sequence[Event[typing.Any]],
     *,
@@ -321,97 +339,58 @@ def dispatch_tool(
 ) -> dict[str, object]:
     """Build the single model-facing ``dispatch`` function tool.
 
-    Multi-select is one tool call with ``events: [...]`` using canonical HSM event names
-    (no per-event tool name mangling). Offered payload shapes stay in the user message /
-    schema projection; item ``data`` is validated after the call.
+    Structural only: one tool, ``events`` array, anyOf item per offered event. Each branch's
+    ``data`` is the projected event payload schema (Pydantic/event contract + optional patch).
     """
 
-    names = tuple(dict.fromkeys(event.name for event in events if event.name))
-    offered = ", ".join(names) if names else "(none)"
-    patch_note = ""
-    if patch is not None and _is_schema_patch(patch) and patch.model_fields:
-        field_bits: list[str] = []
-        for field_name, field_info in patch.model_fields.items():
-            description = field_info.description
-            if isinstance(description, str) and description.strip():
-                field_bits.append(f"{field_name}: {description.strip()}")
-            else:
-                field_bits.append(field_name)
-        patch_note = (
-            " Each selected event's data must also include these model-facing fields: "
-            + "; ".join(field_bits)
-            + "."
-        )
+    unique: list[Event[typing.Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        if not event.name or event.name in seen:
+            continue
+        seen.add(event.name)
+        unique.append(event)
+
     description = (
-        "Dispatch zero or more modeled events for this turn. "
-        "Call this function once. Put every event that should run in the events array "
-        "(multi-select is normal—for example speaking.input together with reasoning.input "
-        "when the user is waiting on speech while deliberation continues). "
-        f"Allowed event names: {offered}. "
-        "Use the exact canonical event string. data must match that event's payload schema "
-        "from the offered schemas in the user message."
-        f"{patch_note} "
-        "Return events: [] when no offered event should run."
+        "Dispatch zero or more modeled events for this turn. Call once. "
+        "Multi-select by listing multiple items (for example speaking and reasoning together). "
+        "Each item must match one offered event branch; payload fields and requirements are "
+        "defined on that event's data schema. Use events: [] when nothing should run."
     )
-    event_property: dict[str, object] = {
-        "type": "string",
-        "description": (
-            "Canonical HSM event name to dispatch. Must be one of the offered schema names."
-        ),
-        "examples": list(names[:3]) if names else ["phone.answer_call"],
-    }
-    if names:
-        event_property["enum"] = list(names)
+
+    if unique:
+        item_schema: dict[str, object] = {
+            "anyOf": [_selection_item_branch(event, patch=patch) for event in unique],
+        }
+    else:
+        item_schema = {
+            "type": "object",
+            "properties": {
+                "event": {"type": "string"},
+                "data": {"type": "object", "additionalProperties": False},
+            },
+            "required": ["event"],
+            "additionalProperties": False,
+        }
+
+    array_examples: list[object] = [[]]
+    if unique:
+        first_branch = _selection_item_branch(unique[0], patch=patch)
+        branch_examples = first_branch.get("examples")
+        if isinstance(branch_examples, list) and branch_examples:
+            array_examples.append(branch_examples)
+
     parameters: dict[str, object] = {
         "type": "object",
         "properties": {
             "events": {
                 "type": "array",
                 "description": (
-                    "Ordered list of events to dispatch this turn. Include multiple items when "
-                    "several actions should run together. Empty array selects none."
+                    "Events to dispatch this turn. Each item is one offered event branch "
+                    "(const name + that event's data schema). Empty array selects none."
                 ),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "event": event_property,
-                        "data": {
-                            "type": "object",
-                            "description": (
-                                "JSON object payload for the selected event. Match the schema for "
-                                "that event name (and any patched fields such as confidence). "
-                                "Omit or use {} when the event has no payload fields."
-                            ),
-                        },
-                        "target": {
-                            "type": "string",
-                            "description": (
-                                "Optional actor name that should receive the event when more than "
-                                "one actor can accept it."
-                            ),
-                            "examples": ["speaking", "phone", "bot"],
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "Optional short reason this event was selected.",
-                            "examples": ["User greeted; reply now while deliberating keypad request."],
-                        },
-                    },
-                    "required": ["event"],
-                    "additionalProperties": False,
-                },
-                "examples": [
-                    [],
-                    [
-                        {
-                            "event": names[0] if names else "bot.ability.speaking.input",
-                            "data": {"text": "One moment.", "confidence": 86}
-                            if patch is not None
-                            else {"text": "One moment."},
-                            "reason": "Acknowledge while handling a hard request.",
-                        }
-                    ],
-                ],
+                "items": item_schema,
+                "examples": array_examples,
             }
         },
         "required": ["events"],

@@ -34,20 +34,24 @@ class InputData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Utterance for the bot to speak. Provide short natural language text; "
-                "the speaking ability owns TTS encoding and speaker playout."
+                "Utterance for the bot to speak aloud now. text is required and must be non-empty. "
+                "Use for greetings, answers, and short bridge lines while other events (for example "
+                "reasoning.input) run in the same turn. The speaking ability owns TTS and playout."
             ),
             "examples": [
                 {"text": "Let me think about that."},
                 {"text": "One moment."},
+                {"text": "Hi Gabe, I'm doing well — how can I help?"},
             ],
         },
     )
 
     text: str = pydantic.Field(
         min_length=1,
-        description="Text to speak aloud.",
-        examples=["Let me think about that.", "Hello."],
+        description=(
+            "Required non-empty text to speak aloud. Never omit this field and never use an empty string."
+        ),
+        examples=["Let me think about that.", "Hello.", "One moment while I work on that."],
     )
 
 

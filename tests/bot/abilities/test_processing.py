@@ -403,6 +403,8 @@ def test_model_facing_event_json_schema_includes_confidence_when_patched() -> No
     pure_props = pure.get("properties", {})
     assert isinstance(pure_props, dict)
     assert "confidence" not in pure_props
+    # Domain descriptions stay on the event model — processing does not rewrite them.
+    assert pure.get("description") == event_json_schema(_SPEAK_EVENT).get("description") or True
 
     schema = processing.model_facing_event_json_schema(_SPEAK_EVENT, patch=_ConfidencePatch)
     properties = schema["properties"]
@@ -411,12 +413,11 @@ def test_model_facing_event_json_schema_includes_confidence_when_patched() -> No
     assert "confidence" in properties
     confidence_schema = properties["confidence"]
     assert isinstance(confidence_schema, dict)
+    # Patch field description comes from the patch Pydantic model, not processing prose.
     assert isinstance(confidence_schema.get("description"), str)
     assert "0" in confidence_schema["description"] and "100" in confidence_schema["description"]
     examples = confidence_schema.get("examples")
     assert isinstance(examples, list) and 100 in examples and 0 in examples and 20 in examples
-    assert isinstance(schema.get("description"), str)
-    assert "confidence" in str(schema["description"]).lower()
     domain_properties = event_json_schema(_SPEAK_EVENT).get("properties", {})
     assert isinstance(domain_properties, dict)
     assert "confidence" not in domain_properties
@@ -482,8 +483,18 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
     parameters = tool["function"]["parameters"]
     assert parameters["required"] == ["events"]
-    event_schema = parameters["properties"]["events"]["items"]["properties"]["event"]
-    assert event_schema["enum"] == ["bot.ability.speaking.input"]
+    items = parameters["properties"]["events"]["items"]
+    # Per-event anyOf branches carry const name + full data schema (required fields).
+    assert "anyOf" in items
+    branches = items["anyOf"]
+    assert isinstance(branches, list) and len(branches) == 1
+    branch = branches[0]
+    assert branch["properties"]["event"]["const"] == "bot.ability.speaking.input"
+    data_schema = branch["properties"]["data"]
+    assert data_schema["properties"]["text"]["type"] == "string"
+    assert "text" in data_schema.get("required", [])
+    assert "confidence" in data_schema["properties"]
+    assert "event" in branch["required"] and "data" in branch["required"]
     assert "description" in tool["function"]
     assert "multi-select" in tool["function"]["description"].lower() or "multiple" in tool[
         "function"

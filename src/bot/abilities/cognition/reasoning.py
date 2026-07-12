@@ -16,6 +16,8 @@ from bot.habit import BreakData, ChangeData, CreateData
 from . import episodes
 from . import types
 _REASONING_INPUT_METADATA_KEY = "bot.reasoning.input"
+# Host frame when CallData is used as the model-facing invoke (multi-select or cascade).
+HOST_INPUT_METADATA_KEY = "bot.reasoning.host_input"
 DEFAULT_INSTRUCTIONS = (
     "Return the best typed result for the input; use prior_episodes when present; "
     "set create/change/break only for clear repeated habit patterns; else omit them."
@@ -25,6 +27,31 @@ _InitializingCompleteEvent = hsm.Event[object](
     kind=hsm.CompletionEventKind,
     schema=pydantic.TypeAdapter(object),
 )
+
+
+class CallData(pydantic.BaseModel):
+    """Model-facing request to run deliberate (System-2) reasoning on the current turn.
+
+    The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
+    stimulus, schemas, or instructions here — leave ``data`` empty / omit fields.
+    Prefer selecting this together with ``bot.ability.speaking.input`` when the user is waiting
+    on speech while deliberation runs.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Invoke deliberate reasoning for the current turn. The host supplies the deliberative "
+                "frame; do not include stimulus text, tools, or schemas in data. Use an empty object "
+                "as data. Often multi-selected with speaking.input for a short spoken bridge."
+            ),
+            "examples": [
+                {},
+            ],
+        },
+    )
 
 
 class InputData(pydantic.BaseModel):
@@ -268,14 +295,20 @@ class Reasoning(processing.Processing):
     The deliberative ``Processor`` is not an HSM child; Reasoning calls ``process`` in-activity.
     """
 
-    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = processing.InputData
+    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = (
+        processing.InputData,
+        CallData,
+    )
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.OutputData
-    # CallEventKind so intuition (and other model-facing processors) can multi-select reasoning
-    # as a normal actor tool — same pattern as speaking.input / device CallEvents.
-    input_event: typing.ClassVar[hsm.Event[processing.InputData]] = hsm.Event[processing.InputData](
+    # CallEventKind so intuition can multi-select reasoning as a normal actor tool.
+    # CallData is the model-facing schema (empty invoke); hosts may also dispatch a full
+    # processing.InputData frame (cascade / internal).
+    input_event: typing.ClassVar[hsm.Event[CallData | processing.InputData]] = hsm.Event[
+        CallData | processing.InputData
+    ](
         name="bot.ability.reasoning.input",
         kind=hsm.CallEventKind,
-        schema=processing.InputData,
+        schema=CallData,
     )
     output_event: typing.ClassVar[hsm.Event[types.OutputData]] = hsm.Event[types.OutputData](
         name="bot.ability.reasoning.output",
@@ -314,9 +347,31 @@ class Reasoning(processing.Processing):
             _ = store.detach(ctx=ctx)
 
     @staticmethod
+    def _host_input_from_event(event: hsm.Event[typing.Any]) -> processing.InputData:
+        """Resolve the deliberative frame from a call payload or host-stamped metadata."""
+
+        data = event.data
+        if isinstance(data, processing.InputData):
+            return data
+        if isinstance(data, CallData):
+            host = event.metadata.get(HOST_INPUT_METADATA_KEY)
+            if isinstance(host, processing.InputData):
+                return host
+            raise TypeError(
+                "Reasoning CallData requires bot.reasoning.host_input metadata with processing.InputData."
+            )
+        raise TypeError(
+            f"Reasoning input must be processing.InputData or CallData, got {type(data)!r}."
+        )
+
+    @staticmethod
     def _has_reasoning_input(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, processing.InputData)
+        if isinstance(event.data, processing.InputData):
+            return True
+        if isinstance(event.data, CallData):
+            return isinstance(event.metadata.get(HOST_INPUT_METADATA_KEY), processing.InputData)
+        return False
 
     @staticmethod
     def _has_recalled(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
@@ -390,9 +445,21 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, processing.InputData)
-        input = typing.cast(processing.InputData, data)
+        try:
+            input = Reasoning._host_input_from_event(event)
+        except TypeError as error:
+            operation_id = event.id or None
+            metadata = dict(event.metadata)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _ReasoningStageFailedEvent.with_data(ability.FailureData(message=str(error))),
+                    id=operation_id,
+                    metadata=metadata,
+                ),
+            )
+            return
         operation_id = event.id or None
         metadata = dict(event.metadata)
         store = instance._memory
@@ -739,6 +806,8 @@ OutputEvent = Reasoning.output_event
 
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
+    "CallData",
+    "HOST_INPUT_METADATA_KEY",
     "InputEvent",
     "OutputEvent",
     "Reasoning",

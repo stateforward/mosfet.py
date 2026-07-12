@@ -870,9 +870,10 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
         == processing.InputData.model_json_schema()
     )
     assert object_dict(cognition.Intuition.output_event.schema)
+    # Reasoning CallEvent is model-facing CallData (empty invoke); host frame rides metadata.
     assert (
         object_dict(cognition.Reasoning.input_event.schema)
-        == processing.InputData.model_json_schema()
+        == cognition.reasoning.CallData.model_json_schema()
     )
     assert (
         object_dict(cognition.Reasoning.output_event.schema)

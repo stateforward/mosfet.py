@@ -614,11 +614,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
+        from . import reasoning as reasoning_ability
+
         child_metadata = dict(event.metadata)
         child_metadata[_COGNITION_INPUT_METADATA_KEY] = cognition_input
+        # CallData is model/runtime invoke; host frame rides metadata for Reasoning.
+        child_metadata[reasoning_ability.HOST_INPUT_METADATA_KEY] = input
         input_event = dataclasses.replace(
             instance._reasoning.input_event.with_data_and_id(
-                input,
+                reasoning_ability.CallData(),
                 Cognition._reasoning_operation_id(operation_id),
             ),
             metadata=child_metadata,

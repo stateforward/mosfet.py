@@ -68,7 +68,6 @@ _ALLOWED_STRICT_SCHEMA_KEYS = frozenset(
 _STRICT_SCHEMA_SHAPE_KEYS = frozenset({"type", "$ref", "anyOf", "enum", "const", "properties"})
 
 
-@dataclasses.dataclass(frozen=True)
 def _mapping_dict(value: object) -> dict[str, object]:
     if not isinstance(value, collections.abc.Mapping):
         return {}

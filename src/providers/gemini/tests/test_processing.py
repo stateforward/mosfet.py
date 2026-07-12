@@ -157,9 +157,11 @@ def test_processor_maps_dispatch_tool_to_events() -> None:
     assert isinstance(tool, dict)
     assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
     parameters = tool["function"]["parameters"]
-    assert parameters["properties"]["events"]["items"]["properties"]["event"]["enum"] == [
-        "phone.answer_call"
-    ]
+    branches = parameters["properties"]["events"]["items"]["anyOf"]
+    assert branches[0]["properties"]["event"]["const"] == "phone.answer_call"
+    data_schema = branches[0]["properties"]["data"]
+    assert "call_id" in data_schema["properties"]
+    assert "call_id" in data_schema.get("required", [])
 
 
 def test_processor_maps_multi_event_dispatch() -> None:

@@ -44,17 +44,15 @@ class EventPatch(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    confidence: int | None = pydantic.Field(
-        default=None,
+    confidence: int = pydantic.Field(
         ge=0,
         le=100,
         description=(
-            "Integer self-assessment of how sure you are that selecting THIS event is correct "
-            "right now, on a whole-number scale from 0 to 100. "
+            "Required integer self-assessment of how sure you are that selecting THIS event is "
+            "correct right now, on a whole-number scale from 0 to 100. "
             "0 = no idea / wrong event / missing capability; "
             "100 = certain this event should run with the given data. "
-            "Always set this field on every selected event. Use whole integers only "
-            "(for example 86), never fractions or decimals (not 0.86, not 0.9). "
+            "Use whole integers only (for example 86), never fractions or decimals (not 0.86). "
             "Calibration guide: "
             "80–100 when the stimulus clearly matches the event and required data is known; "
             "40–70 when an action is plausible but the situation is incomplete or ambiguous; "
@@ -246,12 +244,17 @@ def _is_deliberative_input_event(
     event_name: str,
     schemas: dict[str, hsm.Event[typing.Any]],
 ) -> bool:
-    """True for processing.InputData-shaped tools (e.g. reasoning.input) — host cascade owns these when escalating."""
+    """True for reasoning invoke tools — host cascade / multi-select handoff to System 2."""
 
+    from . import reasoning as reasoning_ability
+
+    if event_name == reasoning_ability.InputEvent.name:
+        return True
     schema_event = schemas.get(event_name)
     if schema_event is None:
         return False
-    return getattr(schema_event, "schema", None) is processing.InputData
+    schema = getattr(schema_event, "schema", None)
+    return schema is processing.InputData or schema is reasoning_ability.CallData
 
 
 def _world_actions(
@@ -274,14 +277,19 @@ def _selections_from_output(
     *,
     current_input: processing.InputData,
 ) -> processing.Events:
-    """Build dispatch selections; reuse the deliberative frame for empty processing.InputData payloads."""
+    """Build dispatch selections; reasoning.input uses CallData (host frame via metadata)."""
+
+    from . import reasoning as reasoning_ability
 
     schemas = {event.name: event for event in current_input.schemas}
     selections: list[processing.SelectedEvent] = []
     for item in output:
         raw: object = item.data if item.data is not None else {}
         schema_event = schemas.get(item.event)
-        if (raw is None or raw == {}) and schema_event is not None:
+        if item.event == reasoning_ability.InputEvent.name:
+            # Model-facing CallData is empty; runtime frame is stamped in dispatch metadata.
+            raw = {}
+        elif (raw is None or raw == {}) and schema_event is not None:
             schema = getattr(schema_event, "schema", None)
             if schema is processing.InputData:
                 raw = current_input
@@ -428,11 +436,18 @@ class Intuition(processing.Processing):
 
         if to_dispatch and input.actors:
             try:
+                from . import reasoning as reasoning_ability
+
+                # Host frame for any multi-selected reasoning.input (CallData invoke).
+                dispatch_metadata = {
+                    **metadata,
+                    reasoning_ability.HOST_INPUT_METADATA_KEY: input,
+                }
                 processing.dispatch_selected_events(
                     ctx,
                     input,
                     _selections_from_output(to_dispatch, current_input=input),
-                    metadata=metadata,
+                    metadata=dispatch_metadata,
                 )
             except Exception as error:
                 _ = hsm.dispatch(

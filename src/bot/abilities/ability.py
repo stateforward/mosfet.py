@@ -65,14 +65,72 @@ class FailureData(pydantic.BaseModel):
     )
 
 
+def _is_base_model_type(data_type: object) -> typing.TypeGuard[type[pydantic.BaseModel]]:
+    if not isinstance(data_type, type):
+        return False
+    try:
+        return issubclass(data_type, pydantic.BaseModel)
+    except TypeError:
+        return False
+
+
+def _model_with_json_schema_extra(
+    data_type: type[pydantic.BaseModel],
+    *,
+    description: str | None,
+    examples: collections.abc.Sequence[object] | None,
+) -> type[pydantic.BaseModel]:
+    """Return a BaseModel subclass with merged root json_schema_extra (still a model, not TypeAdapter)."""
+
+    existing_extra = data_type.model_config.get("json_schema_extra")
+    extra: dict[str, object] = {}
+    if isinstance(existing_extra, dict):
+        extra = dict(typing.cast(dict[str, object], existing_extra))
+    if description is not None:
+        extra["description"] = description
+    if examples is not None:
+        extra["examples"] = list(examples)
+    # Preserve relevant base config; create_model needs an explicit ConfigDict for extra merge.
+    config = pydantic.ConfigDict(
+        frozen=bool(data_type.model_config.get("frozen", False)),
+        extra=data_type.model_config.get("extra", "ignore"),  # type: ignore[arg-type]
+        arbitrary_types_allowed=bool(data_type.model_config.get("arbitrary_types_allowed", False)),
+        json_schema_extra=extra,
+    )
+    return typing.cast(
+        type[pydantic.BaseModel],
+        pydantic.create_model(
+            f"{data_type.__name__}EventSchema",
+            __base__=data_type,
+            __config__=config,
+        ),
+    )
+
+
 def _schema_for_data_type(
     data_type: type[object],
     *,
     description: str | None,
     examples: collections.abc.Sequence[object] | None,
 ) -> object:
+    """Resolve an event payload schema.
+
+    Prefer concrete ``BaseModel`` types (required fields / Field descriptions stay on the model).
+    Do not wrap models in ``TypeAdapter`` — that breaks create_model patching and hides
+    domain required lists. Non-model types may still use TypeAdapter when metadata is needed.
+    """
+
+    if _is_base_model_type(data_type):
+        if description is None and examples is None:
+            return data_type
+        return _model_with_json_schema_extra(
+            data_type,
+            description=description,
+            examples=examples,
+        )
     if description is None and examples is None:
         return data_type
+    # Non-BaseModel payloads (e.g. bytes) still need TypeAdapter to attach description/examples.
     field = _schema_metadata_field(description=description, examples=examples)
     schema_type: object = typing.Annotated[data_type, field]
     return typing.cast(pydantic.TypeAdapter[object], pydantic.TypeAdapter(schema_type))
