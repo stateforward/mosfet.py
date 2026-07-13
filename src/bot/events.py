@@ -210,11 +210,11 @@ class ProcessingCompletedEventData(pydantic.BaseModel):
         examples=[[]],
     )
     focus_candidates: tuple[DeviceReference, ...] = pydantic.Field(
-        min_length=1,
         description=(
-            "Stable device references associated with this processing turn for focus bookkeeping on the body."
+            "Stable device references associated with this processing turn for focus bookkeeping on the body. "
+            "Empty when the turn had no device context (e.g. no configured devices)."
         ),
-        examples=[["phone"], ["phone", "browser"]],
+        examples=[["phone"], ["phone", "browser"], []],
     )
 
 

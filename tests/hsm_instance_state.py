@@ -6,7 +6,6 @@ import typing
 
 import hsm
 
-import bot.bot as bot_module
 from bot import abilities
 from bot import habit
 from bot.abilities import cognition
@@ -82,14 +81,6 @@ def _append_if_list(ability: abilities.Ability[typing.Any, typing.Any], attribut
         values = typing.cast(list[object], values)
         values.append(data)
 
-_bot_focused_device = typing.cast(
-    collections.abc.Callable[[bot_module.Bot], str | None],
-    getattr(bot_module, "_bot_focused_device"),
-)
-_bot_innate_ability_instances = typing.cast(
-    collections.abc.Callable[[bot_module.Bot], tuple[abilities.Ability[typing.Any, typing.Any], ...]],
-    getattr(bot_module, "_bot_innate_ability_instances"),
-)
 TResult = typing.TypeVar("TResult")
 
 async def await_result(awaitable: collections.abc.Awaitable[TResult]) -> TResult:
@@ -101,11 +92,8 @@ async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability
     _ = await hsm.started(context, owner, typing.cast(hsm.Model, owner.model))
     _ = await ability.attach(owner=owner, ctx=context)
 
-def bot_focused_device(bot: object) -> str | None:
-    return _bot_focused_device(typing.cast(bot_module.Bot, bot))
-
-def bot_innate_abilities(bot: object) -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
-    return _bot_innate_ability_instances(typing.cast(bot_module.Bot, bot))
+def bot_has_focus(bot: hsm.Instance) -> bool:
+    return bot.state() == "/Bot/active/focused"
 
 def device_bots(device: Device) -> tuple[hsm.Instance, ...]:
     return tuple(typing.cast(collections.abc.Iterable[hsm.Instance], vars(device)["_bots"]))
