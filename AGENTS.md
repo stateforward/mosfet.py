@@ -105,9 +105,9 @@
 
 ### Bot and cognition
 
-- ALWAYS treat `Bot` as the robot: it receives world/device stimuli, holds focus (looking), owns devices and
-  world-facing ability instances, and forwards unhandled stimuli to its first-class `cognition`. It does not decide,
-  interpret, habit-match, build processing inputs, or apply cognition selections.
+- ALWAYS treat `Bot` as the robot: it receives explicit world/body input events, holds focus (looking), owns devices
+  and world-facing ability instances, and hands explicit `cognition.InputEvent` products to its first-class
+  `cognition`. It does not decide, interpret, habit-match, build processing inputs, or apply cognition selections.
 - ALWAYS treat focus as attention only: the bot looking at something (a live device reference). Focus is not
   understanding and does not by itself move device actuators.
 - ALWAYS inject bot I/O abilities as constructor tuples: `input=(Listening(), …)` and `output=(Speaking(), …)`
@@ -138,10 +138,10 @@
 - ALWAYS handle only bot machinery with explicit Bot transitions (lifecycle, focus/clear-focus, input fan-out,
   processing complete/fail/cancel, and other bot-owned control). Those transitions may move attention without the
   cognition.
-- ALWAYS forward events that have no explicit Bot transition to `Bot.cognition` as live `InputData`: `stimulus` =
-  the event, `abilities` = ability instances on the bot, `focus` = the focused device or `None`. Example:
-  `phone.ringing` has no Bot transition, so it goes to the cognition with that context. NEVER forward
-  `devices.audio.output`, `world.sound`, or `world.visual` as cognition stimuli.
+- NEVER use `hsm.AnyEvent` as Bot ingress. Bot handles only explicit lifecycle, focus, world-input, and cognition-input
+  events; unmatched events are ignored by normal HSM semantics. Only `world.sound` and `world.visual` fan out to input
+  abilities. Input abilities return products through explicit `cognition.InputEvent`; unrelated device, lifecycle,
+  terminal, telemetry, and output events never become cognition stimuli through a fallback transition.
 - ALWAYS keep judgment in `bot.abilities.cognition`. The cognition builds any deliberative `InputData` internally,
   runs thinking abilities (intuition, reasoning, reflection), habits/skills, and dispatches selected events
   directly to devices, the bot, or abilities. Bot never chooses habit vs think vs ignore and never interprets
