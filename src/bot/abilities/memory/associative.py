@@ -11,6 +11,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
@@ -754,9 +756,6 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in instance._subordinate_abilities:
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _AssociativeMemoryChildrenAttachedEvent.with_data(None))
 
@@ -766,11 +765,10 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
         instance: "AssociativeMemory",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         for child in instance._subordinate_abilities:
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
 
     def __init__(
         self,

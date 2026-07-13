@@ -14,6 +14,7 @@ import hsm
 import pytest
 import bot.abilities as abilities_module
 import bot.abilities.ability as ability_module
+from bot.protocols import attachment
 
 from tests.type_helpers import invalid_value, object_dict
 
@@ -98,17 +99,26 @@ class AbilityTerminalOwner(hsm.Instance):
     )
     outputs: list[object]
     failures: list[object]
+    lifecycle: list[hsm.Event[typing.Any]]
 
     def __init__(self) -> None:
         super().__init__()
         self.outputs = []
         self.failures = []
+        self.lifecycle = []
 
     def record(self, event: hsm.Event[typing.Any]) -> None:
         if event.name.endswith(".output"):
             self.outputs.append(event.data)
         if event.name.endswith(".failed"):
             self.failures.append(event.data)
+        if event.name in {
+            attachment.AttachCompleteEvent.name,
+            attachment.AttachFailedEvent.name,
+            attachment.DetachedEvent.name,
+            attachment.DetachFailedEvent.name,
+        }:
+            self.lifecycle.append(event)
 
 class _DirectApplyReferenceVisitor(ast.NodeVisitor):
     relative_path: str
@@ -230,21 +240,73 @@ def test_result_bridge_helper_is_removed() -> None:
     assert "apply" + "_ability" not in ability_module.__all__
 
 def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
-    async def run() -> tuple[bool, hsm.Instance | None]:
+    async def run() -> list[hsm.Event[typing.Any]]:
         ctx = hsm.Context()
         child = abilities.Ability[object, object]()
-        owner = abilities.Ability[object, object]()
+        owner = AbilityTerminalOwner()
 
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
         _ = await child.attach(owner=owner, ctx=ctx)
-        claimed_owner = abilities.Ability.current_owner(child)
         _ = await child.detach(ctx=ctx)
 
-        return claimed_owner is owner, abilities.Ability.current_owner(child)
+        return owner.lifecycle
 
-    claimed_expected_owner, detached_owner = asyncio.run(run())
+    lifecycle = asyncio.run(run())
 
-    assert claimed_expected_owner
-    assert detached_owner is None
+    assert [event.name for event in lifecycle] == [
+        attachment.AttachCompleteEvent.name,
+        attachment.DetachedEvent.name,
+    ]
+    assert lifecycle[0].data.created
+    assert lifecycle[1].data.removed
+
+
+def test_ability_reports_correlated_attachment_success_and_conflict() -> None:
+    async def run() -> tuple[
+        AbilityTerminalOwner,
+        AbilityTerminalOwner,
+        list[hsm.Event[typing.Any]],
+        list[hsm.Event[typing.Any]],
+    ]:
+        ctx = hsm.Context()
+        child = abilities.Ability[object, object]()
+        owner = AbilityTerminalOwner()
+        other_owner = AbilityTerminalOwner()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await hsm.started(ctx, other_owner, require_model(other_owner.model))
+        _ = await hsm.started(ctx, child, require_model(child.model))
+
+        await child.dispatch(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "attach-owner",
+            ),
+        )
+        await child.dispatch(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=other_owner),
+                "attach-conflict",
+            ),
+        )
+
+        return owner, other_owner, owner.lifecycle, other_owner.lifecycle
+
+    owner, other_owner, owner_lifecycle, other_lifecycle = asyncio.run(run())
+
+    assert [event.name for event in owner_lifecycle] == [attachment.AttachCompleteEvent.name]
+    assert owner_lifecycle[0].id == "attach-owner"
+    attached = owner_lifecycle[0].data
+    assert isinstance(attached, attachment.AttachCompleteData)
+    assert attached.actor is owner
+    assert attached.created
+    assert [event.name for event in other_lifecycle] == [attachment.AttachFailedEvent.name]
+    assert other_lifecycle[0].id == "attach-conflict"
+    failure = other_lifecycle[0].data
+    assert isinstance(failure, attachment.FailedData)
+    assert failure.actor is other_owner
+    assert failure.kind is attachment.FailureKind.CONFLICT
 
 def test_ability_owner_public_mutators_are_removed() -> None:
     ability = abilities.Ability[object, object]()

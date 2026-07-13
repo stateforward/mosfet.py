@@ -10,6 +10,8 @@ import dataclasses
 import typing
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
@@ -871,9 +873,6 @@ class Reading(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in instance._subordinate_abilities:
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _ReadingChildrenAttachedEvent.with_data(None))
 
@@ -883,11 +882,10 @@ class Reading(ability.Ability[InputData, OutputData]):
         instance: "Reading",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         for child in instance._subordinate_abilities:
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
         _set_reading_active_operation_id(instance, None)
 
     def __init__(

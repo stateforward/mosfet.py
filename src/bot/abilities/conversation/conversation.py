@@ -15,6 +15,8 @@ import dataclasses
 import typing as typ
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 from pydantic.config import JsonDict, JsonValue
 
@@ -962,9 +964,6 @@ class Conversation(
     ) -> None:
         del event
         for child in instance._owned_children():
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _ConversationChildrenAttachedEvent.with_data(None))
 
@@ -974,11 +973,10 @@ class Conversation(
         instance: "Conversation[typ.Any, typ.Any]",
         event: hsm.Event[typ.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         for child in instance._owned_children():
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
         _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
 
     @classmethod

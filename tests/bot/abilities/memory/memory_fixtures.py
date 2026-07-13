@@ -9,6 +9,8 @@ import typing
 
 import hsm
 
+from tests.hsm_instance_state import remember_ability_terminal_owner
+
 _TResult = typing.TypeVar("_TResult")
 
 
@@ -236,6 +238,7 @@ async def start_ability_tree(*abilities: abilities.Ability[typing.Any, typing.An
         assert owner.model is not None
         _ = await hsm.started(ctx, owner, owner.model)
         _ = await ability.attach(owner=owner, ctx=ctx)
+        remember_ability_terminal_owner(ability, owner)
 
 
 async def stop_ability_tree(*abilities: abilities.Ability[typing.Any, typing.Any]) -> None:

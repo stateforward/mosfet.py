@@ -23,8 +23,9 @@ import pytest
 
 from bot.bot import Bot
 import bot.bot as bot_module
-from bot.device import AttachEvent, DetachEvent, Device
+from bot.device import Device
 from bot.event_schema import event_json_schema
+from bot.protocols import attachment
 
 from bot.world import SoundData, SoundEvent, VisualData, VisualEvent, World
 from tests.hsm_instance_state import (
@@ -513,7 +514,7 @@ class ImmediatelyFailingInitializingDevice(Device):
 class LifecycleDispatchFailingDevice(Device):
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name in {AttachEvent.name, DetachEvent.name}:
+        if event.name in {attachment.AttachEvent.name, attachment.DetachEvent.name}:
             raise RuntimeError("device lifecycle dispatch override failed")
         return super().dispatch(ctx, event)
 
@@ -747,7 +748,7 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
         original_dispatch = hsm.Instance.dispatch
 
         def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-            if instance is failing_device and event.name == AttachEvent.name:
+            if instance is failing_device and event.name == attachment.AttachEvent.name:
                 raise RuntimeError("device attach dispatch failed")
             return original_dispatch(instance, ctx, event)
 
@@ -820,7 +821,7 @@ def test_bot_activation_rollback_times_out_missing_device_event(monkeypatch: pyt
         original_dispatch = hsm.Instance.dispatch
 
         def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-            if instance is silent_device and event.name == AttachEvent.name:
+            if instance is silent_device and event.name == attachment.AttachEvent.name:
                 future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
                 future.set_result(None)
                 return future
@@ -1093,13 +1094,13 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "/Bot/active/focused" in model.members
     assert "/Bot/active/processing" in model.members
     assert "bot.activate" in transitions["/Bot/inactive"]
-    assert "device.attach" in transitions["/Bot/activating"]
-    assert "device.firmware.initializing.failed" in transitions["/Bot/activating"]
+    assert "attachment.attach.complete" in transitions["/Bot/activating"]
+    assert "attachment.attach.failed" in transitions["/Bot/activating"]
     assert "bot.activated" in transitions["/Bot/activating"]
     assert "bot.activating.failed" in transitions["/Bot/activating"]
     assert "bot.activation.rollback.failed" in transitions["/Bot/activating"]
-    assert "device.attach" in transitions["/Bot/activation_rolling_back"]
-    assert "device.firmware.initializing.failed" in transitions["/Bot/activation_rolling_back"]
+    assert "attachment.attach.complete" in transitions["/Bot/activation_rolling_back"]
+    assert "attachment.attach.failed" in transitions["/Bot/activation_rolling_back"]
     assert "bot.activation.rollback.ready" in transitions["/Bot/activation_rolling_back"]
     assert "bot.activating.failed" in transitions["/Bot/activation_detaching"]
     assert "bot.activation.rollback.failed" in transitions["/Bot/activation_detaching"]
@@ -2715,7 +2716,7 @@ def test_bot_deactivation_timeout_reaches_inactive() -> None:
     class HangOnDetachDevice(Device):
         @typing.override
         def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-            if event.name == DetachEvent.name:
+            if event.name == attachment.DetachEvent.name:
 
                 async def hang() -> None:
                     _ = await asyncio.Event().wait()

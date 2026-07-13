@@ -8,6 +8,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot.abilities import cognition
@@ -642,9 +644,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     ) -> None:
         del event
         for child in Listening._listening_children(instance):
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _ListeningChildrenAttachedEvent.with_data(None))
 
@@ -654,11 +653,10 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         instance: "Listening",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         for child in Listening._listening_children(instance):
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Listening",

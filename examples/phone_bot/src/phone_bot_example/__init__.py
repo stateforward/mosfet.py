@@ -4,12 +4,12 @@ from bot import abilities
 import bot
 from bot.abilities import ability
 from bot.abilities import cognition
+from bot.abilities import conversation
 from bot.abilities import listening
 from bot.abilities import memory
 from bot.abilities import speaking
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
-from bot.abilities.conversation import voice
 
 import argparse
 import asyncio
@@ -25,6 +25,7 @@ import hsm
 
 from bot.bot import Bot
 
+from bot.devices import audio
 from bot.devices import phone as phone_device
 from bot.providers.gemini import ChatClient, Processor
 from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
@@ -340,7 +341,7 @@ class ExampleVoiceConversation(abilities.VoiceConversation):
         *,
         participating: abilities.Participating,
         decoder: abilities.VoiceDecoder,
-        encoder: conversation_voice.VoiceEncoder,
+        encoder: conversation.voice.VoiceEncoder,
     ) -> None:
         super().__init__(
             participating=participating,
@@ -383,7 +384,7 @@ class ExampleVoiceConversation(abilities.VoiceConversation):
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class ExampleVoiceEncoder(conversation_voice.VoiceEncoder):
+class ExampleVoiceEncoder(conversation.voice.VoiceEncoder):
     """Host voice encoder that renders turn text through Gemini TTS."""
 
     speech_encoder: GeminiSpeechEncoder
@@ -471,7 +472,7 @@ def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening
 
 def _speaking(
     *,
-    phone: phone_device.Phone,
+    speaker: audio.Speaker,
     speech_config: SpeechConfig | None = None,
 ) -> speaking.Speaking:
     """Bot output ability: Gemini TTS + phone speaker playout (world.sound elevation)."""
@@ -487,7 +488,7 @@ def _speaking(
     )
     return speaking.Speaking(
         encoder=encoder,
-        speaker=phone.speaker,
+        speaker=speaker,
         sample_rate_hz=config.output_sample_rate_hz,
         channels=config.output_channels,
         media_type="audio/pcm",
@@ -623,17 +624,21 @@ class PhoneBot(Bot):
         memory: memory.Memory | None = None,
     ) -> None:
         self._label = label
-        self._phone = phone if phone is not None else phone_device.Phone()
+        if phone is None and speaking is None:
+            speaker = audio.Speaker()
+            self._phone = phone_device.Phone(speaker=speaker)
+            speaking_instance = _speaking(speaker=speaker, speech_config=speech_config)
+        else:
+            self._phone = phone if phone is not None else phone_device.Phone()
+            if speaking is None:
+                raise ValueError("An injected phone requires an injected Speaking ability sharing its speaker.")
+            speaking_instance = speaking
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
             cognition if cognition is not None else _phone_cognition(cognition_config, memory=self._memory)
         )
         self._listening = listening if listening is not None else _listening(speech_config)
-        self._speaking = (
-            speaking
-            if speaking is not None
-            else _speaking(phone=self._phone, speech_config=speech_config)
-        )
+        self._speaking = speaking_instance
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
         super().__init__(
             devices={"phone": self._phone},
@@ -748,6 +753,7 @@ async def start_bot(
     phone_service: PhoneService | None = None,
     cognition: cognition.Cognition | None = None,
     listening: listening.Listening | None = None,
+    speaking: speaking.Speaking | None = None,
     conversation: ExampleVoiceConversation | None = None,
     memory: memory.Memory | None = None,
 ) -> PhoneBot:
@@ -759,6 +765,7 @@ async def start_bot(
         speech_config=app_config.speech,
         cognition=cognition,
         listening=listening,
+        speaking=speaking,
         conversation=conversation,
         memory=memory,
     )
@@ -886,7 +893,9 @@ async def run(
         token=livekit_token,
         track_name=app_config.livekit.track_name,
     )
-    phone = phone_device.Phone(service=phone_service)
+    speaker = audio.Speaker()
+    phone = phone_device.Phone(service=phone_service, speaker=speaker)
+    speaking_ability = _speaking(speaker=speaker, speech_config=app_config.speech)
     body = await start_bot(
         "alice",
         config=app_config,
@@ -894,6 +903,7 @@ async def run(
         phone=phone,
         phone_service=phone_service,
         cognition=cognition_ability,
+        speaking=speaking_ability,
         conversation=conversation,
         memory=store,
     )

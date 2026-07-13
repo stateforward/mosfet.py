@@ -8,6 +8,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
@@ -329,9 +331,6 @@ class Reasoning(processing.Processing):
         del event
         store = instance._memory
         if store is not None:
-            memory_owner = ability.Ability.current_owner(store)
-            if memory_owner is not None and memory_owner is not instance:
-                raise ValueError(f"{type(store).__name__} is already owned by {type(memory_owner).__name__}.")
             _ = await store.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
@@ -341,10 +340,10 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         store = instance._memory
-        if store is not None and ability.Ability.current_owner(store) is instance:
+        if store is not None:
             _ = store.detach(ctx=ctx)
 
     @staticmethod

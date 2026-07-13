@@ -2,15 +2,10 @@
 
 from bot.device.device import Device
 from bot.device.events import (
-    ATTACH_CREATED_METADATA_KEY,
     ActivateEvent,
     ActivateEventData,
-    AttachEvent,
-    AttachEventData,
     DeactivateEvent,
     DeactivateEventData,
-    DetachEvent,
-    DetachEventData,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEvent,
@@ -28,15 +23,10 @@ from bot.device.sandbox import Sandbox
 
 __all__ = [
     "Device",
-    "ATTACH_CREATED_METADATA_KEY",
     "ActivateEvent",
     "ActivateEventData",
-    "AttachEvent",
-    "AttachEventData",
     "DeactivateEvent",
     "DeactivateEventData",
-    "DetachEvent",
-    "DetachEventData",
     "FirmwareInitializingDoneEvent",
     "FirmwareInitializingDoneEventData",
     "FirmwareInitializingFailedEvent",

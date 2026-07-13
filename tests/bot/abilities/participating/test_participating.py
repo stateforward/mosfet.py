@@ -251,7 +251,7 @@ def test_participating_reads_text_stimulus_into_contribution() -> None:
     ]
 
 def test_participating_detach_releases_owned_perception_while_reading() -> None:
-    async def run() -> tuple[hsm.Instance | None, str]:
+    async def run() -> tuple[str, str]:
         ctx = hsm.Context()
         reading = HangingTextReading()
         ability = RecordingParticipating(reading=reading)
@@ -263,15 +263,15 @@ def test_participating_detach_releases_owned_perception_while_reading() -> None:
         assert ability.state() == "/RecordingParticipatingLifecycle/attached/behavior/perceiving/reading_text"
 
         _ = await ability.detach(ctx=ctx)
-        await wait_until(lambda: abilities.Ability.current_owner(reading) is None)
-        owner = abilities.Ability.current_owner(reading)
+        await wait_until(lambda: reading.state().endswith("/detached"))
+        reading_state = reading.state()
         state = ability.state()
         await ability.stop(ctx)
-        return owner, state
+        return reading_state, state
 
-    owner, state = asyncio.run(run())
+    reading_state, state = asyncio.run(run())
 
-    assert owner is None
+    assert reading_state.endswith("/detached")
     assert state == "/RecordingParticipatingLifecycle/detached"
 
 def test_participating_reads_image_stimulus_into_contribution() -> None:

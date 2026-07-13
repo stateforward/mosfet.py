@@ -8,6 +8,8 @@ import weakref
 
 import hsm
 
+from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
+
 _TAbilityOutput = typing.TypeVar("_TAbilityOutput")
 
 def shared_hsm_context(ctx: hsm.Context | None = None) -> hsm.Context:
@@ -33,6 +35,7 @@ async def start_abilities_for_test(
         )
         _ = await hsm.started(ctx, recorder, require_model(recorder.model))
         _ = await ability.attach(owner=recorder, ctx=ctx)
+        remember_ability_terminal_owner(ability, recorder)
 
 class _AbilityTerminalRecorder(hsm.Instance):
     model: typing.ClassVar[hsm.Model | None] = None
@@ -127,8 +130,11 @@ async def dispatch_ability_for_test(
 ) -> _TAbilityOutput:
     shared_ctx = shared_hsm_context(ctx)
     _register_ability_graph(shared_ctx, ability)
-    owner = abilities.Ability.current_owner(ability)
-    if owner is None:
+    owner = ability_terminal_owner(ability)
+    recorder = owner if isinstance(owner, _AbilityTerminalRecorder) else None
+    if owner is not None and recorder is None and callable(getattr(owner, "result_for", None)):
+        recorder = typing.cast(_AbilityTerminalRecorder, owner)
+    if recorder is None:
         recorder = _AbilityTerminalRecorder(
             output_event=ability.output_event,
             failed_event=ability.failed_event,
@@ -136,12 +142,9 @@ async def dispatch_ability_for_test(
         )
         _ = await hsm.started(shared_ctx, recorder, require_model(recorder.model))
         _ = await ability.attach(owner=recorder, ctx=shared_ctx)
-    elif isinstance(owner, _AbilityTerminalRecorder) or callable(getattr(owner, "result_for", None)):
-        recorder = typing.cast(_AbilityTerminalRecorder, owner)
-        if not ability.state():
-            _ = await ability.attach(owner=recorder, ctx=shared_ctx)
-    else:
-        raise ValueError(f"{type(ability).__name__} is already owned by {type(owner).__name__}.")
+        remember_ability_terminal_owner(ability, recorder)
+    elif not ability.state():
+        _ = await ability.attach(owner=recorder, ctx=shared_ctx)
     operation_id = uuid.uuid4().hex
     result = recorder.result_for(operation_id)
     _ = await hsm.dispatch(shared_ctx, ability, ability.input_event.with_data_and_id(input, operation_id))

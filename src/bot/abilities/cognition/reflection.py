@@ -30,6 +30,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 from bot.habit import (
@@ -680,9 +682,6 @@ class Reflection(processing.Processing):
             instance._memory,
         )
         for child in children:
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
@@ -692,7 +691,7 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         children: tuple[ability.Ability[typing.Any, typing.Any], ...] = (
             instance._select_processing,
@@ -700,8 +699,7 @@ class Reflection(processing.Processing):
             instance._memory,
         )
         for child in children:
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
 
     @staticmethod
     def _has_reflection_input(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:

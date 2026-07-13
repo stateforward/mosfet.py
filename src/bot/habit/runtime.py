@@ -206,7 +206,7 @@ class _DispatchHost:
         output_event = _habit_event(
             current.instance.output_event.with_data(data),
             current=current,
-            target=_owner_id(current.instance),
+            target=None,
         )
         habit = typing.cast(hsm.Dispatchable, current.instance)
         _ = hsm.dispatch(current.ctx, habit, output_event)
@@ -220,7 +220,7 @@ class _DispatchHost:
         failed_event = _habit_event(
             current.instance.failed_event.with_data(failure),
             current=current,
-            target=_owner_id(current.instance),
+            target=None,
         )
         habit = typing.cast(hsm.Dispatchable, current.instance)
         _ = hsm.dispatch(current.ctx, habit, failed_event)
@@ -418,14 +418,6 @@ def _optional_target_id(value: object | None) -> str | None:
 
 def _habit_id(instance: _Instance) -> str:
     return hsm.id(typing.cast(hsm.Instance, typing.cast(object, instance)))
-
-
-def _owner_id(instance: _Instance) -> str | None:
-    ability_instance = typing.cast(abilities.Ability[typing.Any, typing.Any], typing.cast(object, instance))
-    owner = abilities.Ability.current_owner(ability_instance)
-    if owner is None:
-        return None
-    return hsm.id(owner)
 
 
 def _target_is_live(ctx: hsm.Context, target: str) -> bool:

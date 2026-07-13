@@ -288,7 +288,7 @@ def test_reading_ignores_stale_terminal_event_for_previous_apply_operation() -> 
     assert not task_done
 
 def test_reading_detach_releases_owned_subabilities_while_focused() -> None:
-    async def run() -> tuple[tuple[hsm.Instance | None, ...], str]:
+    async def run() -> tuple[tuple[str, ...], str]:
         ctx = hsm.Context()
         reading_ability = RecordingReading(
             visual_classifier=StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99)),
@@ -307,15 +307,15 @@ def test_reading_detach_releases_owned_subabilities_while_focused() -> None:
         )
 
         _ = await reading_ability.detach(ctx=ctx)
-        await wait_until(lambda: all(abilities.Ability.current_owner(ability) is None for ability in subabilities))
-        owners = tuple(abilities.Ability.current_owner(ability) for ability in subabilities)
+        await wait_until(lambda: all(ability.state().endswith("/detached") for ability in subabilities))
+        states = tuple(ability.state() for ability in subabilities)
         state = reading_ability.state()
         await reading_ability.stop(ctx)
-        return owners, state
+        return states, state
 
-    owners, state = asyncio.run(run())
+    states, state = asyncio.run(run())
 
-    assert owners == (None, None, None, None)
+    assert all(child_state.endswith("/detached") for child_state in states)
     assert state == "/RecordingReadingLifecycle/detached"
 
 def test_reading_model_tracks_focus_classification_decoding_and_encoding() -> None:

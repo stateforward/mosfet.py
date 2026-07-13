@@ -10,8 +10,8 @@ import weakref
 import hsm
 import pydantic
 
-import bot.device
 from bot import abilities
+from bot.protocols import attachment
 from . import events
 
 from bot.device import Device
@@ -211,19 +211,30 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     async def _start_abilities(ctx: hsm.Context, instance: "Bot") -> None:
+        del ctx
         ability_scope = _ability_attach_context(instance.context())
-        for ability in Bot._lifecycle_abilities(instance):
-            _ = await ability.attach(owner=instance, ctx=ability_scope)
+        lifecycle_abilities = Bot._lifecycle_abilities(instance)
+        for ability in lifecycle_abilities:
+            model = ability.model
+            if model is None:
+                continue
+            _ = await hsm.started(ability_scope, ability, model)
+        await hsm.Group(*lifecycle_abilities, ctx=ability_scope).dispatch(
+            ability_scope,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+        )
 
     @staticmethod
     async def _stop_abilities(ctx: hsm.Context, instance: "Bot") -> None:
         del ctx
         lifetime = instance.context()
-        for ability in reversed(Bot._lifecycle_abilities(instance)):
-            if not _instance_is_started(ability):
-                continue
-            _ = await ability.detach(ctx=lifetime)
-            await hsm.stop(ability, lifetime)
+        lifecycle_abilities = Bot._lifecycle_abilities(instance)
+        group = hsm.Group(*lifecycle_abilities)
+        await group.dispatch(
+            lifetime,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+        )
+        await group.stop(lifetime)
 
     @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
@@ -242,7 +253,7 @@ class Bot(hsm.Instance, abc.ABC):
                 await hsm.Instance.dispatch(
                     device,
                     world.context,
-                    bot.device.DetachEvent.with_data(bot.device.DetachEventData(bot=instance)),
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
                 )
             await Bot._stop_abilities(lifetime, instance)
         except Exception as error:
@@ -377,7 +388,7 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _dispatch_actors(instance: "Bot") -> dict[str, hsm.Instance]:
-        actors: dict[str, hsm.Instance] = dict(instance._devices)
+        actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
         for ability in (
             *instance._input,
             *instance._output,
@@ -434,12 +445,11 @@ class Bot(hsm.Instance, abc.ABC):
     async def _cancel_bot_processing_child(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         del event
         ability = instance._cognition
-        owner = abilities.Ability.current_owner(ability)
-        if owner is not None and _instance_is_started(ability):
-            lifetime = owner.context() if _instance_is_started(owner) else instance.context()
+        if _instance_is_started(ability):
+            lifetime = instance.context()
             _ = await ability.detach(ctx=lifetime)
             await hsm.stop(ability, lifetime)
-            _ = await ability.attach(owner=owner, ctx=lifetime)
+            _ = await ability.attach(owner=instance, ctx=lifetime)
         _ = hsm.dispatch(ctx, instance, _BotProcessingChildCancelledEvent.with_data(None))
 
     @staticmethod
@@ -600,7 +610,7 @@ class Bot(hsm.Instance, abc.ABC):
                 await hsm.Instance.dispatch(
                     device,
                     world.context,
-                    bot.device.AttachEvent.with_data(bot.device.AttachEventData(bot=instance)),
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
                 )
                 requested_devices.append(reference)
         except Exception:
@@ -656,9 +666,9 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> bool:
         del ctx
         state = Bot._activation_state(instance)
-        if state is None or event.name != bot.device.AttachEvent.name:
+        if state is None or event.name != attachment.AttachCompleteEvent.name:
             return False
-        if not isinstance(event.data, bot.device.AttachEventData):
+        if not isinstance(event.data, attachment.AttachCompleteData):
             return False
         device_reference = Bot._device_reference_for_source(instance, event.source)
         return device_reference in state.pending_devices and Bot._activation_event_targets_agent(instance, event)
@@ -671,7 +681,9 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> bool:
         del ctx
         state = Bot._activation_state(instance)
-        if state is None or event.name != bot.device.FirmwareInitializingFailedEvent.name:
+        if state is None or event.name != attachment.AttachFailedEvent.name:
+            return False
+        if not isinstance(event.data, attachment.FailedData):
             return False
         device_reference = Bot._device_reference_for_source(instance, event.source)
         return device_reference in state.pending_devices and Bot._activation_event_targets_agent(instance, event)
@@ -697,7 +709,7 @@ class Bot(hsm.Instance, abc.ABC):
         device_reference = Bot._device_reference_for_source(instance, event.source)
         pending_devices = tuple(reference for reference in state.pending_devices if reference != device_reference)
         attached_devices = state.attached_devices
-        if event.metadata.get(bot.device.ATTACH_CREATED_METADATA_KEY) is True and device_reference is not None:
+        if isinstance(event.data, attachment.AttachCompleteData) and event.data.created and device_reference is not None:
             attached_devices = (*state.attached_devices, device_reference)
         Bot._set_activation_state(
             instance,
@@ -777,7 +789,7 @@ class Bot(hsm.Instance, abc.ABC):
                 await hsm.Instance.dispatch(
                     device,
                     world.context,
-                    bot.device.DetachEvent.with_data(bot.device.DetachEventData(bot=instance)),
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
                 )
             except Exception as error:
                 if cleanup_error is None:
@@ -792,7 +804,7 @@ class Bot(hsm.Instance, abc.ABC):
                 await hsm.Instance.dispatch(
                     device,
                     world.context,
-                    bot.device.DetachEvent.with_data(bot.device.DetachEventData(bot=instance)),
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
                 )
             except Exception as error:
                 if cleanup_error is None:
@@ -834,12 +846,12 @@ class Bot(hsm.Instance, abc.ABC):
             "activating",
             hsm.activity(_activate_activity),
             hsm.transition(
-                hsm.on(bot.device.AttachEvent),
+                hsm.on(attachment.AttachCompleteEvent),
                 hsm.guard(_matches_activation_device_attached),
                 hsm.effect(_mark_activation_device_attached),
             ),
             hsm.transition(
-                hsm.on(bot.device.FirmwareInitializingFailedEvent),
+                hsm.on(attachment.AttachFailedEvent),
                 hsm.guard(_matches_activation_device_failed),
                 hsm.effect(_mark_activation_device_failed),
                 hsm.target("../activation_rolling_back"),
@@ -869,12 +881,12 @@ class Bot(hsm.Instance, abc.ABC):
             "activation_rolling_back",
             hsm.entry(_dispatch_activation_rollback_ready_if_no_pending),
             hsm.transition(
-                hsm.on(bot.device.AttachEvent),
+                hsm.on(attachment.AttachCompleteEvent),
                 hsm.guard(_matches_activation_device_attached),
                 hsm.effect(_mark_rollback_device_attached),
             ),
             hsm.transition(
-                hsm.on(bot.device.FirmwareInitializingFailedEvent),
+                hsm.on(attachment.AttachFailedEvent),
                 hsm.guard(_matches_activation_device_failed),
                 hsm.effect(_mark_activation_device_failed),
             ),

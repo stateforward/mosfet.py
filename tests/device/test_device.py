@@ -2,6 +2,7 @@ from bot.abilities.hearing import voice
 
 import asyncio
 import collections.abc
+import dataclasses
 import datetime
 import inspect
 import typing
@@ -14,17 +15,14 @@ import pytest
 import bot.device.device as device_module
 
 from bot.device import Device
+from bot.protocols import attachment
 from bot.device.events import (
     ActivateEvent,
-    AttachEvent,
     DeactivateEvent,
-    DetachEvent,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
     ActivateEventData,
-    AttachEventData,
     DeactivateEventData,
-    DetachEventData,
 )
 from bot.world import World
 from tests.hsm_instance_state import device_bots, device_firmware, device_peripherals
@@ -112,6 +110,28 @@ class ReleasableFailingInitializingDevice(Device):
         del ctx, event
         _ = await self.release.wait()
         raise RuntimeError("firmware failed")
+
+class AttachmentRecorder(hsm.Instance):
+    events: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "AttachmentRecorder", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.events.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "AttachmentRecorder",
+        hsm.initial(hsm.target("recording")),
+        hsm.state(
+            "recording",
+            hsm.transition(hsm.on(attachment.AttachCompleteEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.AttachFailedEvent), hsm.effect(_record)),
+        ),
+    )
 
 class _FirmwareProbeData(pydantic.BaseModel):
     """Test payload for a firmware-only event."""
@@ -311,6 +331,36 @@ def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> 
     assert state == "/Device/failed"
     assert agents == ()
 
+def test_device_deferred_attach_preserves_completion_correlation() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        world = World()
+        release = asyncio.Event()
+        device = SlowInitializingDevice(release)
+        requester = AttachmentRecorder()
+        _ = await hsm.started(world.context, requester, requester.model)
+        _ = await hsm.started(world.context, device, device.model)
+
+        await hsm.Instance.dispatch(
+            device,
+            world.context,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data_and_id(
+                    attachment.AttachData(actor=requester),
+                    "deferred-attach",
+                ),
+                metadata={"traceparent": "deferred-trace"},
+            ),
+        )
+        release.set()
+        await wait_until(lambda: bool(requester.events))
+        return requester.events[0]
+
+    event = asyncio.run(run())
+
+    assert event.name == attachment.AttachCompleteEvent.name
+    assert event.id == "deferred-attach"
+    assert event.metadata == {"traceparent": "deferred-trace"}
+
 def test_device_attach_dispatch_returns_before_firmware_initialization_times_out() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
         world = World()
@@ -446,12 +496,12 @@ def test_device_detaching_one_of_multiple_bots_stays_attached() -> None:
 
         _ = await start_device_in_world(device)
 
-        await device.dispatch(device.context(), DetachEvent.with_data(DetachEventData(bot=first_bot)))
+        await device.dispatch(device.context(), attachment.DetachEvent.with_data(attachment.DetachData(actor=first_bot)))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (second_bot,)
 
-        await device.dispatch(device.context(), DetachEvent.with_data(DetachEventData(bot=second_bot)))
+        await device.dispatch(device.context(), attachment.DetachEvent.with_data(attachment.DetachData(actor=second_bot)))
 
         assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
@@ -477,7 +527,7 @@ def test_device_malformed_attach_event_is_ineligible() -> None:
         device = Device()
 
         _ = await start_device_in_world(device)
-        await device.dispatch(device.context(), AttachEvent.with_data({"bot": {"id": "bot-device-owner"}}))
+        await device.dispatch(device.context(), attachment.AttachEvent.with_data({"actor": {"id": "bot-device-owner"}}))
 
         assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
@@ -490,7 +540,7 @@ def test_device_malformed_detach_event_is_ineligible() -> None:
         device = Device(bots=(bot_instance,))
 
         _ = await start_device_in_world(device)
-        await device.dispatch(device.context(), DetachEvent.with_data({"bot": {"id": "bot-device-owner"}}))
+        await device.dispatch(device.context(), attachment.DetachEvent.with_data({"actor": {"id": "bot-device-owner"}}))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (bot_instance,)
@@ -507,25 +557,25 @@ def test_device_declares_required_bot_abilities_on_subclasses() -> None:
     assert device.required_bot_abilities == (voice.VoiceDetection,)
 
 def test_device_event_schemas_describe_attachment_and_activation() -> None:
-    attach_schema = object_dict(AttachEvent.schema)
-    detach_schema = object_dict(DetachEvent.schema)
+    attach_schema = object_dict(attachment.AttachEvent.schema)
+    detach_schema = object_dict(attachment.DetachEvent.schema)
     activate_schema = object_dict(ActivateEvent.schema)
     deactivate_schema = object_dict(DeactivateEvent.schema)
 
-    assert AttachEvent.name == "device.attach"
-    assert attach_schema == AttachEventData.model_json_schema()
-    assert attach_schema["required"] == ["bot"]
-    attached_bot = AttachEventData.model_validate({"bot": {"id": "bot-device-owner"}}).bot
+    assert attachment.AttachEvent.name == "attachment.attach"
+    assert attach_schema == attachment.AttachData.model_json_schema()
+    assert attach_schema["required"] == ["actor"]
+    attached_bot = attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}}).actor
     assert isinstance(attached_bot, hsm.Instance)
     assert getattr(attached_bot, "id") == "bot-device-owner"
     attach_properties = object_dict(attach_schema["properties"])
-    attach_agent_schema = object_dict(attach_properties["bot"])
+    attach_agent_schema = object_dict(attach_properties["actor"])
     assert attach_agent_schema["required"] == ["id"]
-    assert DetachEvent.name == "device.detach"
-    assert detach_schema == DetachEventData.model_json_schema()
-    assert detach_schema["required"] == ["bot"]
+    assert attachment.DetachEvent.name == "attachment.detach"
+    assert detach_schema == attachment.DetachData.model_json_schema()
+    assert detach_schema["required"] == ["actor"]
     try:
-        _ = AttachEventData.model_validate({"bot": {"id": 42}})
+        _ = attachment.AttachData.model_validate({"actor": {"id": 42}})
     except ValueError:
         pass
     else:
@@ -545,25 +595,33 @@ def test_device_model_tracks_initialization_attachment_and_activation_state() ->
     assert "/Device/initializing" in model.members
     assert "/Device/initialization_failing" in model.members
     assert "/Device/detached" in model.members
+    assert "/Device/attaching" in model.members
     assert "/Device/attached" in model.members
     assert "/Device/attached/inactive" in model.members
     assert "/Device/attached/active" in model.members
     transitions = transition_map(model)
+    deferred_map = typing.cast(
+        collections.abc.Mapping[str, collections.abc.Mapping[str, str]],
+        getattr(model, "deferred_map"),
+    )
     assert "device.firmware.initializing.done" in transitions["/Device/initializing"]
     assert "device.firmware.initializing.failed" in transitions["/Device/initializing"]
     assert "device.firmware.initializing.cleaned_up" in transitions["/Device/initialization_failing"]
     assert any(
         "_firmware_initializing_timeout_delay" in event for event in transitions["/Device/initialization_failing"]
     )
-    assert "device.attach" in transitions["/Device/initializing"]
-    assert "device.detach" in transitions["/Device/initializing"]
-    assert "device.attach" in transitions["/Device/failed"]
+    assert "attachment.attach" in deferred_map["/Device/initializing"]
+    assert "attachment.detach" in deferred_map["/Device/initializing"]
+    assert "attachment.attach" in deferred_map["/Device/initialization_failing"]
+    assert "attachment.detach" in deferred_map["/Device/initialization_failing"]
+    assert "attachment.attach" in transitions["/Device/failed"]
     assert "device.attach.completed" not in transitions.get("/Device", {})
     assert "device.attach.failed" not in transitions.get("/Device", {})
-    assert "device.attach" in transitions["/Device/detached"]
-    assert "device.attach" in transitions["/Device/attached"]
-    assert "device.detach" in transitions["/Device/attached"]
-    assert len(transitions["/Device/attached"]["device.detach"]) == 2
+    assert "attachment.attach" in transitions["/Device/detached"]
+    assert "attachment.attach.complete" in transitions["/Device/attaching"]
+    assert "attachment.attach" in transitions["/Device/attached"]
+    assert "attachment.detach" in transitions["/Device/attached"]
+    assert len(transitions["/Device/attached"]["attachment.detach"]) == 3
     assert "device.activate" in transitions["/Device/attached/inactive"]
     assert "device.deactivate" in transitions["/Device/attached/active"]
 
@@ -678,12 +736,12 @@ def test_device_firmware_started_hook_delegates_to_subclass_before_initial_attac
 def test_device_attach_and_detach_effects_update_attached_bots() -> None:
     device = Device()
     bot_instance = hsm.Instance()
-    attach_event = AttachEvent.with_data(AttachEventData(bot=bot_instance))
-    detach_event = DetachEvent.with_data(DetachEventData(bot=bot_instance))
+    attach_event = attachment.AttachEvent.with_data(attachment.AttachData(actor=bot_instance))
+    detach_event = attachment.DetachEvent.with_data(attachment.DetachData(actor=bot_instance))
 
     transitions = transition_map(Device.model)
-    attach_effects = transitions["/Device/detached"]["device.attach"][0].effect
-    detach_effects = transitions["/Device/attached"]["device.detach"][0].effect
+    attach_effects = transitions["/Device/detached"]["attachment.attach"][0].effect
+    detach_effects = transitions["/Device/attached"]["attachment.detach"][0].effect
     assert attach_effects[0].startswith("/Device/observer/event/")
     assert detach_effects[0].startswith("/Device/observer/event/")
     attach_effect_path = attach_effects[1]
@@ -704,16 +762,16 @@ def test_device_attach_and_detach_effects_update_attached_bots() -> None:
 def test_device_attach_transition_is_guarded_by_valid_new_agent() -> None:
     device = Device()
     bot_instance = hsm.Instance()
-    attach_event = AttachEvent.with_data(AttachEventData(bot=bot_instance))
-    malformed_event = AttachEvent.with_data({"bot": {"id": "bot-device-owner"}})
+    attach_event = attachment.AttachEvent.with_data(attachment.AttachData(actor=bot_instance))
+    malformed_event = attachment.AttachEvent.with_data({"actor": {"id": "bot-device-owner"}})
     transitions = transition_map(Device.model)
-    detached_attach_transition = transitions["/Device/detached"]["device.attach"][0]
-    attached_attach_transitions = transitions["/Device/attached"]["device.attach"]
+    detached_attach_transition = transitions["/Device/detached"]["attachment.attach"][0]
+    attached_attach_transitions = transitions["/Device/attached"]["attachment.attach"]
     attached_new_attach_transition = next(
-        transition for transition in attached_attach_transitions if str(transition.guard).endswith("_can_attach_bot")
+        transition for transition in attached_attach_transitions if str(transition.guard).endswith("_can_attach")
     )
     attached_duplicate_attach_transition = next(
-        transition for transition in attached_attach_transitions if str(transition.guard).endswith("_is_attached_bot")
+        transition for transition in attached_attach_transitions if str(transition.guard).endswith("_is_attached")
     )
 
     assert detached_attach_transition.guard is not None
@@ -757,44 +815,49 @@ def test_device_detach_transition_is_guarded_by_attached_bot() -> None:
     other_bot = hsm.Instance()
     missing_bot = hsm.Instance()
     device = Device()
-    detach_event = DetachEvent.with_data(DetachEventData(bot=bot_instance))
-    other_detach_event = DetachEvent.with_data(DetachEventData(bot=other_bot))
-    missing_detach_event = DetachEvent.with_data(DetachEventData(bot=missing_bot))
+    detach_event = attachment.DetachEvent.with_data(attachment.DetachData(actor=bot_instance))
+    other_detach_event = attachment.DetachEvent.with_data(attachment.DetachData(actor=other_bot))
+    missing_detach_event = attachment.DetachEvent.with_data(attachment.DetachData(actor=missing_bot))
     transitions = transition_map(Device.model)
-    detach_transitions = transitions["/Device/attached"]["device.detach"]
+    detach_transitions = transitions["/Device/attached"]["attachment.detach"]
 
-    detach_would_leave_bots_transition = next(
-        transition for transition in detach_transitions if str(transition.guard).endswith("_detach_would_leave_bots")
+    detach_would_leave_attachments_transition = next(
+        transition
+        for transition in detach_transitions
+        if str(transition.guard).endswith("_detach_would_leave_attachments")
     )
-    detach_last_bot_transition = next(
-        transition for transition in detach_transitions if str(transition.guard).endswith("_detach_last_bot")
+    detach_last_attachment_transition = next(
+        transition for transition in detach_transitions if str(transition.guard).endswith("_detach_last_attachment")
     )
-    assert detach_would_leave_bots_transition.guard is not None
-    assert detach_last_bot_transition.guard is not None
-    detach_would_leave_bots = callable_object(
-        typing.cast(object, getattr(Device.model.members[detach_would_leave_bots_transition.guard], "expression"))
+    assert detach_would_leave_attachments_transition.guard is not None
+    assert detach_last_attachment_transition.guard is not None
+    detach_would_leave_attachments = callable_object(
+        typing.cast(
+            object,
+            getattr(Device.model.members[detach_would_leave_attachments_transition.guard], "expression"),
+        )
     )
-    detach_last_bot = callable_object(
-        typing.cast(object, getattr(Device.model.members[detach_last_bot_transition.guard], "expression"))
+    detach_last_attachment = callable_object(
+        typing.cast(object, getattr(Device.model.members[detach_last_attachment_transition.guard], "expression"))
     )
-    attach_effect_path = transitions["/Device/detached"]["device.attach"][0].effect[1]
+    attach_effect_path = transitions["/Device/detached"]["attachment.attach"][0].effect[1]
 
     attach_operation = callable_object(
         typing.cast(object, getattr(Device.model.members[attach_effect_path], "operation"))
     )
 
-    _ = attach_operation(hsm.Context(), device, AttachEvent.with_data(AttachEventData(bot=bot_instance)))
+    _ = attach_operation(hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=bot_instance)))
 
-    assert not detach_would_leave_bots(hsm.Context(), device, detach_event)
-    assert detach_last_bot(hsm.Context(), device, detach_event)
-    assert not detach_would_leave_bots(hsm.Context(), device, missing_detach_event)
-    assert not detach_last_bot(hsm.Context(), device, missing_detach_event)
+    assert not detach_would_leave_attachments(hsm.Context(), device, detach_event)
+    assert detach_last_attachment(hsm.Context(), device, detach_event)
+    assert not detach_would_leave_attachments(hsm.Context(), device, missing_detach_event)
+    assert not detach_last_attachment(hsm.Context(), device, missing_detach_event)
 
-    _ = attach_operation(hsm.Context(), device, AttachEvent.with_data(AttachEventData(bot=other_bot)))
+    _ = attach_operation(hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=other_bot)))
 
-    assert detach_would_leave_bots(hsm.Context(), device, detach_event)
-    assert not detach_last_bot(hsm.Context(), device, detach_event)
-    assert detach_would_leave_bots(hsm.Context(), device, other_detach_event)
+    assert detach_would_leave_attachments(hsm.Context(), device, detach_event)
+    assert not detach_last_attachment(hsm.Context(), device, detach_event)
+    assert detach_would_leave_attachments(hsm.Context(), device, other_detach_event)
 
 def test_device_detaches_json_bots_by_stable_id() -> None:
     async def run() -> None:
@@ -803,11 +866,11 @@ def test_device_detaches_json_bots_by_stable_id() -> None:
         _ = await start_device_in_world(device)
         await device.dispatch(
             device.context(),
-            AttachEvent.with_data(AttachEventData.model_validate({"bot": {"id": "bot-device-owner"}})),
+            attachment.AttachEvent.with_data(attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})),
         )
         await device.dispatch(
             device.context(),
-            DetachEvent.with_data(DetachEventData.model_validate({"bot": {"id": "bot-device-owner"}})),
+            attachment.DetachEvent.with_data(attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})),
         )
 
         assert device.state() == "/Device/detached"
@@ -830,11 +893,11 @@ def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
         await device.attach(world, bot_instance)
         await device.dispatch(
             device.context(),
-            AttachEvent.with_data(AttachEventData.model_validate({"bot": {"id": "bot-device-owner"}})),
+            attachment.AttachEvent.with_data(attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})),
         )
         await device.dispatch(
             device.context(),
-            DetachEvent.with_data(DetachEventData.model_validate({"bot": {"id": "bot-device-owner"}})),
+            attachment.DetachEvent.with_data(attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})),
         )
 
         assert device.state() == "/Device/detached"

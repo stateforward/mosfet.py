@@ -11,8 +11,8 @@ import bot.devices.phone as phone_contracts
 import bot.devices.phone.phone as phone_module
 
 from bot.device import Device
-from bot.device.events import AttachEvent, AttachEventData
 from bot.devices import phone as phone_device
+from bot.protocols import attachment
 
 from bot.world import SoundEvent, World
 from tests.hsm_instance_state import (
@@ -290,7 +290,7 @@ def test_phone_service_ingress_does_not_forward_non_service_events() -> None:
 
         await service.receive(
             phone.context(),
-            AttachEvent.with_data(AttachEventData(bot=hsm.Instance())),
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=hsm.Instance())),
         )
         await asyncio.sleep(0)
 

@@ -7,16 +7,11 @@ import hsm
 import pydantic
 
 from bot import abilities
-
+from bot.protocols import attachment
 
 from bot.device.events import (
     ActivateEvent,
-    ATTACH_CREATED_METADATA_KEY,
-    AttachEvent,
-    AttachEventData,
     DeactivateEvent,
-    DetachEvent,
-    DetachEventData,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
@@ -39,26 +34,6 @@ _FirmwareInitializingCleanedUpEvent = hsm.Event[str](
 )
 
 
-def _bot_identifiers(bot: hsm.Instance) -> tuple[str, ...]:
-    identifiers: list[str] = []
-    try:
-        runtime_id = hsm.id(bot)
-    except hsm.ErrorValidatingModel:
-        runtime_id = ""
-    if runtime_id:
-        identifiers.append(runtime_id)
-    schema_id = getattr(bot, "id", None)
-    if isinstance(schema_id, str) and schema_id and schema_id not in identifiers:
-        identifiers.append(schema_id)
-    return tuple(identifiers)
-
-
-def _same_bot(left: hsm.Instance, right: hsm.Instance) -> bool:
-    if left is right:
-        return True
-    return not set(_bot_identifiers(left)).isdisjoint(_bot_identifiers(right))
-
-
 def _require_attach_world_scope(world: World, instance: "Device") -> None:
     instance_scope = instance.context().value(hsm.Keys.Instances)
     world_scope = world.context.value(hsm.Keys.Instances)
@@ -69,14 +44,14 @@ def _require_attach_world_scope(world: World, instance: "Device") -> None:
     raise RuntimeError("Device is already started in another world.")
 
 
-class Device(hsm.Instance):
+class Device(hsm.Instance, attachment.Attachment):
     """Environment interaction surface that records attached HSM bot references."""
 
     firmware_model: typing.ClassVar[hsm.Model] = _DEFAULT_FIRMWARE
+    _attachment_limit: typing.ClassVar[int | None] = None
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
     required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
     _peripherals: tuple["Device", ...]
-    _bots: list[hsm.Instance]
     _pending_bots: list[hsm.Instance]
     _firmware: hsm.Instance | None
 
@@ -94,7 +69,8 @@ class Device(hsm.Instance):
         peripherals: collections.abc.Iterable["Device"] = (),
     ) -> None:
         super().__init__()
-        self._bots = []
+        self._attachments = []
+        self._attachment_timeout = datetime.timedelta(seconds=30)
         self._pending_bots = list(bots)
         self._peripherals = tuple(peripherals)
         self._firmware = None
@@ -119,15 +95,16 @@ class Device(hsm.Instance):
             visit(root)
         return tuple(ordered)
 
-    async def attach(self, world: World, bot: hsm.Instance) -> None:
+    async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
+        world = World.from_context(ctx)
         _require_attach_world_scope(world, self)
-        await hsm.Instance.dispatch(self, world.context, AttachEvent.with_data(AttachEventData(bot=bot)))
+        await hsm.Instance.dispatch(self, ctx, event)
 
-    async def detach(self, world: World, bot: hsm.Instance) -> None:
+    async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
         if not self.state() or self.state() == self.model.qualified_name:
             return
-        require_world_scope(world, self, participant="Device")
-        await hsm.Instance.dispatch(self, world.context, DetachEvent.with_data(DetachEventData(bot=bot)))
+        require_world_scope(World.from_context(ctx), self, participant="Device")
+        await hsm.Instance.dispatch(self, ctx, event)
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
@@ -167,125 +144,6 @@ class Device(hsm.Instance):
     def _on_inactive_exit(self, ctx: hsm.Context, event: hsm.Event) -> None:
         del ctx, event
 
-    def _attached_bot_index(self, bot: hsm.Instance) -> int | None:
-        for index, attached_bot in enumerate(self._bots):
-            if _same_bot(attached_bot, bot):
-                return index
-        return None
-
-    def _pending_bot_index(self, bot: hsm.Instance) -> int | None:
-        for index, pending_bot in enumerate(self._pending_bots):
-            if _same_bot(pending_bot, bot):
-                return index
-        return None
-
-    @staticmethod
-    def _is_attached_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, AttachEventData) and instance._attached_bot_index(data.bot) is not None
-
-    @staticmethod
-    def _can_attach_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, AttachEventData) and instance._attached_bot_index(data.bot) is None
-
-    @staticmethod
-    def _is_pending_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, AttachEventData) and instance._pending_bot_index(data.bot) is not None
-
-    @staticmethod
-    def _can_queue_pending_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return (
-            isinstance(data, AttachEventData)
-            and instance._attached_bot_index(data.bot) is None
-            and instance._pending_bot_index(data.bot) is None
-        )
-
-    @staticmethod
-    def _can_remove_pending_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, DetachEventData) and instance._pending_bot_index(data.bot) is not None
-
-    @staticmethod
-    def _detach_would_leave_bots(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        if not isinstance(data, DetachEventData):
-            return False
-        return instance._attached_bot_index(data.bot) is not None and len(instance._bots) > 1
-
-    @staticmethod
-    def _detach_last_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        if not isinstance(data, DetachEventData):
-            return False
-        return instance._attached_bot_index(data.bot) is not None and len(instance._bots) == 1
-
-    @staticmethod
-    def _attach_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, AttachEventData)
-        instance._bots.append(data.bot)
-        if data.bot.state():
-            bot_identifiers = _bot_identifiers(data.bot)
-            _ = data.bot.dispatch(
-                ctx,
-                dataclasses.replace(
-                    AttachEvent.with_data(data),
-                    source=hsm.id(instance),
-                    target=bot_identifiers[0] if bot_identifiers else "",
-                    metadata={**event.metadata, ATTACH_CREATED_METADATA_KEY: True},
-                ),
-            )
-
-    @staticmethod
-    def _notify_attached_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, AttachEventData)
-        if not data.bot.state():
-            return
-        bot_identifiers = _bot_identifiers(data.bot)
-        _ = data.bot.dispatch(
-            ctx,
-            dataclasses.replace(
-                AttachEvent.with_data(data),
-                source=hsm.id(instance),
-                target=bot_identifiers[0] if bot_identifiers else "",
-                metadata={**event.metadata, ATTACH_CREATED_METADATA_KEY: False},
-            ),
-        )
-
-    @staticmethod
-    def _queue_pending_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, AttachEventData)
-        instance._pending_bots.append(data.bot)
-
-    @staticmethod
-    def _remove_pending_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, DetachEventData)
-        index = typing.cast(int, instance._pending_bot_index(data.bot))
-        del instance._pending_bots[index]
-
-    @staticmethod
-    def _detach_bot(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, DetachEventData)
-        index = typing.cast(int, instance._attached_bot_index(data.bot))
-        del instance._bots[index]
-
     async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
         # Firmware outlives this activity: parent under the device machine context, not activity ctx.
         # Activity cancel on state exit would otherwise mark firmware/service contexts done (HSM-CONTEXT-001).
@@ -305,7 +163,7 @@ class Device(hsm.Instance):
         pending_bots = tuple(self._pending_bots)
         self._pending_bots.clear()
         for bot in pending_bots:
-            _ = self.dispatch(ctx, AttachEvent.with_data(AttachEventData(bot=bot)))
+            _ = self.dispatch(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=bot)))
 
     @staticmethod
     async def _initialize_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
@@ -375,15 +233,19 @@ class Device(hsm.Instance):
         pending_bots = tuple(instance._pending_bots)
         instance._pending_bots.clear()
         for bot in pending_bots:
-            if not bot.state():
-                continue
-            bot_identifiers = _bot_identifiers(bot)
-            _ = bot.dispatch(
+            _ = hsm.dispatch(
                 ctx,
+                bot,
                 dataclasses.replace(
-                    event,
+                    attachment.AttachFailedEvent.with_data(
+                        attachment.FailedData(
+                            actor=bot,
+                            kind=attachment.FailureKind.INITIALIZATION,
+                            message=typing.cast(FirmwareInitializingFailedEventData, event.data).message,
+                        )
+                    ),
                     source=hsm.id(instance),
-                    target=bot_identifiers[0] if bot_identifiers else "",
+                    target=attachment.Attachment._actor_id(bot),
                     metadata=dict(event.metadata),
                 ),
             )
@@ -391,18 +253,22 @@ class Device(hsm.Instance):
     @staticmethod
     def _dispatch_failed_firmware_attachment(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, AttachEventData)
-        if not data.bot.state():
-            return
-        bot_identifiers = _bot_identifiers(data.bot)
-        _ = data.bot.dispatch(
+        assert isinstance(data, attachment.AttachData)
+        target = data.actor if data.reply_to is None else data.reply_to
+        _ = hsm.dispatch(
             ctx,
+            target,
             dataclasses.replace(
-                FirmwareInitializingFailedEvent.with_data(
-                    FirmwareInitializingFailedEventData(message="Device firmware initialization failed.")
+                attachment.AttachFailedEvent.with_data(
+                    attachment.FailedData(
+                        actor=data.actor,
+                        kind=attachment.FailureKind.INITIALIZATION,
+                        message="Device firmware initialization failed.",
+                    )
                 ),
+                id=event.id,
                 source=hsm.id(instance),
-                target=bot_identifiers[0] if bot_identifiers else "",
+                target=attachment.Attachment._actor_id(target),
                 metadata=dict(event.metadata),
             ),
         )
@@ -453,26 +319,13 @@ class Device(hsm.Instance):
     async def _do_active_activity_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
         await instance._do_active_activity(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Device",
         hsm.initial(hsm.target("initializing")),
         hsm.state(
             "initializing",
             hsm.activity(_initialize_firmware_activity),
-            hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_is_pending_bot),
-            ),
-            hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_can_queue_pending_bot),
-                hsm.effect(_queue_pending_bot),
-            ),
-            hsm.transition(
-                hsm.on(DetachEvent),
-                hsm.guard(_can_remove_pending_bot),
-                hsm.effect(_remove_pending_bot),
-            ),
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent),
             hsm.transition(
                 hsm.after(_firmware_initializing_timeout_delay),
                 hsm.target("../initialization_failing"),
@@ -489,22 +342,7 @@ class Device(hsm.Instance):
         hsm.state(
             "initialization_failing",
             hsm.activity(_cleanup_failed_firmware_activity),
-            # Attach may arrive while cleanup is still running (durable firmware stop is not free).
-            # Queue the bot so failure dispatch after cleanup can notify them (HSM-CONTEXT-001 timing).
-            hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_is_pending_bot),
-            ),
-            hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_can_queue_pending_bot),
-                hsm.effect(_queue_pending_bot),
-            ),
-            hsm.transition(
-                hsm.on(DetachEvent),
-                hsm.guard(_can_remove_pending_bot),
-                hsm.effect(_remove_pending_bot),
-            ),
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent),
             hsm.transition(
                 hsm.on(_FirmwareInitializingCleanedUpEvent),
                 hsm.effect(_dispatch_firmware_initializing_failure),
@@ -519,43 +357,73 @@ class Device(hsm.Instance):
         hsm.state(
             "failed",
             hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_can_attach_bot),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
                 hsm.effect(_dispatch_failed_firmware_attachment),
             ),
         ),
         hsm.state(
             "detached",
             hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_can_attach_bot),
-                hsm.effect(_attach_bot),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
+                hsm.effect(
+                    attachment.Attachment._attach,
+                    attachment.Attachment._remember_attachment_timeout,
+                    attachment.Attachment._queue_attach_complete,
+                ),
+                hsm.target("../attaching"),
+            ),
+        ),
+        hsm.state(
+            "attaching",
+            hsm.transition(
+                hsm.on(attachment.AttachCompleteEvent),
+                hsm.effect(attachment.Attachment._deliver_attach_complete),
                 hsm.target("../attached/inactive"),
+            ),
+            hsm.transition(
+                hsm.after(attachment.Attachment._attachment_timeout_delay),
+                hsm.effect(attachment.Attachment._timeout_attachment),
+                hsm.target("../detached"),
             ),
         ),
         hsm.state(
             "attached",
             hsm.initial(hsm.target("inactive")),
             hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_is_attached_bot),
-                hsm.effect(_notify_attached_bot),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._is_attached),
+                hsm.effect(attachment.Attachment._dispatch_attach_complete_existing),
             ),
             hsm.transition(
-                hsm.on(AttachEvent),
-                hsm.guard(_can_attach_bot),
-                hsm.effect(_attach_bot),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
+                hsm.effect(
+                    attachment.Attachment._attach,
+                    attachment.Attachment._dispatch_attach_complete_created,
+                ),
             ),
             hsm.transition(
-                hsm.on(DetachEvent),
-                hsm.guard(_detach_would_leave_bots),
-                hsm.effect(_detach_bot),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._is_attach_request),
+                hsm.effect(attachment.Attachment._dispatch_attach_failed),
             ),
             hsm.transition(
-                hsm.on(DetachEvent),
-                hsm.guard(_detach_last_bot),
-                hsm.effect(_detach_bot),
+                hsm.on(attachment.DetachEvent),
+                hsm.guard(attachment.Attachment._detach_would_leave_attachments),
+                hsm.effect(attachment.Attachment._detach, attachment.Attachment._dispatch_detach_complete_removed),
+            ),
+            hsm.transition(
+                hsm.on(attachment.DetachEvent),
+                hsm.guard(attachment.Attachment._detach_last_attachment),
+                hsm.effect(attachment.Attachment._detach, attachment.Attachment._dispatch_detach_complete_removed),
                 hsm.target("../detached"),
+            ),
+            hsm.transition(
+                hsm.on(attachment.DetachEvent),
+                hsm.guard(attachment.Attachment._is_detach_request),
+                hsm.effect(attachment.Attachment._dispatch_detach_failed),
             ),
             hsm.state(
                 "inactive",

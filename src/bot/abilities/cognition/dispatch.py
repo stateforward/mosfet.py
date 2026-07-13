@@ -90,7 +90,6 @@ def _schemas_from_actors(
 def build_processing_input(
     cognition_input: InputData,
     *,
-    owner: hsm.Instance | None = None,
     extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
 ) -> processing.InputData:
     """Build a processing input: stimulus + schemas + named actors.
@@ -102,8 +101,6 @@ def build_processing_input(
     actors: dict[str, hsm.Instance] = dict(cognition_input.actors)
     if extra_actors:
         actors.update(dict(extra_actors))
-    if owner is not None:
-        actors.setdefault("bot", owner)
     return processing.InputData(
         input=cognition_input.stimulus,
         schemas=_schemas_from_actors(actors),

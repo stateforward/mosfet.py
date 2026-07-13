@@ -69,7 +69,8 @@
   then `cognition.InputEvent`; `from bot import abilities` then `abilities.Ability`;
   `from bot.abilities import ability` then `ability.FailureData`; `from bot.devices import phone` then
   `phone.RingingEvent`; `from bot.devices import audio` then `audio.OutputEvent`; `from bot import device` then
-  `device.AttachEvent`. Prefer `from bot.abilities import processing` then `processing.InputData` over
+  `device.Device`; `from bot.protocols import attachment` then `attachment.AttachEvent` /
+  `attachment.AttachCompleteEvent`. Prefer `from bot.abilities import processing` then `processing.InputData` over
   flattening domain symbols into the caller's namespace (`from … import Ability`, `from … import InputData`).
   Event **names** carry their domain (`bot.*`, `world.*`, `phone.*`); Python access must match that domain package.
   **Never export or import a public `events` package** — event types belong on the domain package that owns them

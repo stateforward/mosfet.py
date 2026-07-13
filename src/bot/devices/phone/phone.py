@@ -1150,18 +1150,6 @@ class Phone(bot.device.Device):
             transfer_timeout=transfer_timeout,
         )
 
-    @property
-    def speaker(self) -> audio.Speaker:
-        """Owned speaker peripheral (for bot output / speaking playout)."""
-
-        return self._speaker
-
-    @property
-    def microphone(self) -> audio.Microphone:
-        """Owned microphone peripheral."""
-
-        return self._microphone
-
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
         if event.name in self.model.events:
@@ -1186,7 +1174,7 @@ class Phone(bot.device.Device):
         if self._firmware is None:
             return
         # Service/media outlive firmware-init activity; attach under device lifetime context (HSM-CONTEXT-001).
-        await World.from_context(self.context()).attach(self._service, self._firmware)
+        await self._service.attach(World.from_context(self.context()), self._firmware)
 
     @typing.override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:

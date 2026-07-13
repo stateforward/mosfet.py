@@ -97,8 +97,6 @@ class _HostTurnOwner(hsm.Instance):
 
 
 async def _ensure_attached(machine: ability.Ability[typing.Any, typing.Any], ctx: hsm.Context) -> None:
-    if ability.Ability.current_owner(machine) is not None:
-        return
     owner = _HostTurnOwner()
     assert owner.model is not None
     try:
@@ -107,7 +105,6 @@ async def _ensure_attached(machine: ability.Ability[typing.Any, typing.Any], ctx
         if "already has a running HSM" not in str(error):
             raise
     _ = await machine.attach(owner=owner, ctx=ctx)
-    await _wait_until(lambda: ability.Ability.current_owner(machine) is owner)
 
 
 async def _apply_and_await_output(

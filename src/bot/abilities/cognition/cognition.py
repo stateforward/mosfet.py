@@ -7,6 +7,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
@@ -134,12 +136,6 @@ def _coerce_output(output: object) -> OutputData:
     raise TypeError("Cognition processing produced output that does not match its output schema.")
 
 
-def _owner(instance: "Cognition") -> typing.Any | None:
-    """Body owner used for focus/clear dispatch (duck-typed; no Bot import)."""
-
-    return ability.Ability.current_owner(instance)
-
-
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
     """Metadata safe to forward on host apply / terminals (no turn payload)."""
 
@@ -219,9 +215,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in Cognition._cognition_children(instance):
-            owner = ability.Ability.current_owner(child)
-            if owner is not None and owner is not instance:
-                raise ValueError(f"{type(child).__name__} is already owned by {type(owner).__name__}.")
             _ = await child.attach(owner=instance, ctx=ctx)
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
@@ -231,11 +224,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         for child in Cognition._cognition_children(instance):
-            if ability.Ability.current_owner(child) is instance:
-                _ = child.detach(ctx=ctx)
+            _ = child.detach(ctx=ctx)
 
     @staticmethod
     def _build_processing_input(
@@ -245,7 +237,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         # Reasoning is a normal actor/tool for intuition multi-select — not a hardcoded edge.
         return build_processing_input(
             cognition_input,
-            owner=_owner(instance),
             extra_actors={"reasoning": instance._reasoning},
         )
 

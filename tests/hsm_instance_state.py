@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc
 import asyncio
 import typing
+import weakref
 
 import hsm
 
@@ -14,6 +15,21 @@ from bot.devices import audio as audio_device
 from bot.devices import phone as phone_device
 
 from bot.device import Device
+
+_ABILITY_TERMINAL_OWNERS: weakref.WeakKeyDictionary[
+    abilities.Ability[typing.Any, typing.Any], hsm.Instance
+] = weakref.WeakKeyDictionary()
+
+def remember_ability_terminal_owner(
+    ability: abilities.Ability[typing.Any, typing.Any],
+    owner: hsm.Instance,
+) -> None:
+    _ABILITY_TERMINAL_OWNERS[ability] = owner
+
+def ability_terminal_owner(
+    ability: abilities.Ability[typing.Any, typing.Any],
+) -> hsm.Instance | None:
+    return _ABILITY_TERMINAL_OWNERS.get(ability)
 
 def _record_ability_terminal_mirror_event(
     ctx: hsm.Context,
@@ -91,12 +107,13 @@ async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability
     owner = _AbilityTerminalMirror(ability)
     _ = await hsm.started(context, owner, typing.cast(hsm.Model, owner.model))
     _ = await ability.attach(owner=owner, ctx=context)
+    remember_ability_terminal_owner(ability, owner)
 
 def bot_has_focus(bot: hsm.Instance) -> bool:
     return bot.state() == "/Bot/active/focused"
 
 def device_bots(device: Device) -> tuple[hsm.Instance, ...]:
-    return tuple(typing.cast(collections.abc.Iterable[hsm.Instance], vars(device)["_bots"]))
+    return tuple(typing.cast(collections.abc.Iterable[hsm.Instance], vars(device)["_attachments"]))
 
 def device_firmware(device: Device) -> hsm.Instance | None:
     return typing.cast(hsm.Instance | None, object.__getattribute__(device, "_firmware"))

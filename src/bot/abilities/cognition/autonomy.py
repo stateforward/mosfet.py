@@ -19,6 +19,8 @@ import typing
 import uuid
 
 import hsm
+
+from bot.protocols import attachment
 import pydantic
 
 from bot import habit
@@ -277,10 +279,6 @@ def _coerce_habit_output(data: object) -> types.OutputData | None:
     )
 
 
-def _owner(instance: "Autonomy") -> typing.Any | None:
-    return ability.Ability.current_owner(instance)
-
-
 def _zero_timeout(
     ctx: hsm.Context,
     instance: "Autonomy",
@@ -360,9 +358,6 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance._habits = ()
             _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
             return
-        owner = ability.Ability.current_owner(store)
-        if owner is not None and owner is not instance:
-            raise ValueError(f"{type(store).__name__} is already owned by {type(owner).__name__}.")
         _ = await store.attach(owner=instance, ctx=ctx)
         load_event = dataclasses.replace(
             store.input_event.with_data_and_id(
@@ -443,12 +438,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != ability.DetachEvent.name:
+        if event.name != attachment.DetachEvent.name:
             return
         Autonomy._detach_active(ctx, instance)
         instance._habits = ()
         store = instance._memory
-        if store is not None and ability.Ability.current_owner(store) is instance:
+        if store is not None:
             _ = store.detach(ctx=ctx)
 
     @staticmethod
@@ -456,8 +451,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         active = instance._active_behavior
         if active is None:
             return
-        if ability.Ability.current_owner(active) is instance:
-            _ = active.detach(ctx=ctx)
+        _ = active.detach(ctx=ctx)
         instance._active_behavior = None
 
     @staticmethod
@@ -763,7 +757,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             output = _coerce_habit_output(event.data)
             if output is None:
                 raise TypeError("Autonomy habit output is unhandled.")
-            input = dispatch.build_processing_input(cognition_input, owner=_owner(instance))
+            input = dispatch.build_processing_input(cognition_input)
             if input.actors and output:
                 selections = processing.coerce_event_selections(output)
                 if selections is None:

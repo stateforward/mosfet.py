@@ -419,7 +419,7 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
     assert decoder_calls == [b"voice"]
 
 def test_listening_detach_releases_owned_subabilities_while_detecting_voice() -> None:
-    async def run() -> tuple[tuple[hsm.Instance | None, ...], str]:
+    async def run() -> tuple[tuple[str, ...], str]:
         ctx = hsm.Context()
         listening_ability = RecordingListening(
             voice_detector=HangingVoiceDetector(),
@@ -435,15 +435,15 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
         )
 
         _ = await listening_ability.detach(ctx=ctx)
-        await wait_until(lambda: all(abilities.Ability.current_owner(ability) is None for ability in subabilities))
-        owners = tuple(abilities.Ability.current_owner(ability) for ability in subabilities)
+        await wait_until(lambda: all(ability.state().endswith("/detached") for ability in subabilities))
+        states = tuple(ability.state() for ability in subabilities)
         state = listening_ability.state()
         await listening_ability.stop(ctx)
-        return owners, state
+        return states, state
 
-    owners, state = asyncio.run(run())
+    states, state = asyncio.run(run())
 
-    assert owners == (None, None)
+    assert all(child_state.endswith("/detached") for child_state in states)
     assert state == "/RecordingListeningLifecycle/detached"
 
 def test_listening_dispatches_failure_when_detection_fails() -> None:

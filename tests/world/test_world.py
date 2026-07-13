@@ -5,7 +5,7 @@ import typing
 import hsm
 import pydantic
 
-from bot.world import Attachment, World
+from bot.world import World
 
 
 OBSERVED_EVENT = hsm.Event[str](
@@ -39,29 +39,6 @@ class BroadcastRecorder(hsm.Instance):
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(OBSERVED_EVENT), hsm.effect(_consume_observed_event))),
     )
-
-
-class AttachableRecorder:
-    attached: list[World]
-    detached: list[World]
-
-    def __init__(self) -> None:
-        self.attached = []
-        self.detached = []
-
-    async def attach(self, world: World) -> "AttachableRecorder":
-        self.attached.append(world)
-        return self
-
-    async def detach(self, world: World) -> "AttachableRecorder":
-        self.detached.append(world)
-        return self
-
-
-def test_attachment_protocol_names_world_first_attach_and_detach() -> None:
-    participant = AttachableRecorder()
-
-    assert isinstance(participant, Attachment)
 
 
 def test_world_is_hsm_context() -> None:
@@ -117,21 +94,11 @@ def test_world_from_done_context_preserves_broadcast_scope() -> None:
     assert inside_seen == [("hello", "inside")]
 
 
-def test_world_attach_delegates_without_exposing_registry_lookup() -> None:
-    async def run() -> tuple[AttachableRecorder, World]:
-        world = World()
-        participant = AttachableRecorder()
+def test_world_does_not_mediate_attachment() -> None:
+    world = World()
 
-        attached = await world.attach(participant)
-
-        assert attached is participant
-        _ = await world.detach(participant)
-        return participant, world
-
-    participant, world = asyncio.run(run())
-
-    assert participant.attached == [world]
-    assert participant.detached == [world]
+    assert not hasattr(world, "attach")
+    assert not hasattr(world, "detach")
     assert not hasattr(world, "agents")
     assert not hasattr(world, "devices")
     assert not hasattr(world, "get")

@@ -1030,11 +1030,14 @@ def test_cognitive_completes_when_trace_metadata_present() -> None:
         operation_id = "metadata-operation"
         # Use ability.apply path via dispatch so metadata can ride the event chain.
         from tests.bot.abilities.support import shared_hsm_context
+        from tests.hsm_instance_state import ability_terminal_owner
 
         shared = shared_hsm_context(ctx)
-        owner = abilities.Ability.current_owner(ability)
+        owner = ability_terminal_owner(ability)
         assert owner is not None
-        result_future = owner.result_for(operation_id)  # type: ignore[attr-defined]
+        result_for = getattr(owner, "result_for", None)
+        assert callable(result_for)
+        result_future = result_for(operation_id)
         _ = await hsm.dispatch(
             shared,
             ability,
