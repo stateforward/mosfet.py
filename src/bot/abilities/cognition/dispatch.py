@@ -41,7 +41,8 @@ async def dispatch_selected_events(
             if selection.target is not None and selection.target != "bot":
                 raise RuntimeError("Processing selected focus_device outside available device candidates.")
             data = bot.FocusDeviceEventData.model_validate(selection.data or {})
-            if candidates and data.device not in candidates:
+            bot_actor = input.actors.get("bot")
+            if data.device not in candidates and (candidates or isinstance(bot_actor, bot.Bot)):
                 raise RuntimeError("Processing selected focus_device outside available device candidates.")
         elif selection.event == bot.ClearFocusEvent.name and selection.target not in (None, "bot"):
             raise RuntimeError("Processing selected clear_focus for a non-bot target.")

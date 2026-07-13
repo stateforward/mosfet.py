@@ -561,6 +561,7 @@ def cognition_input() -> cognition.InputData:
         abilities=(),
         actors={"bot": _BotActor()},
         focus=None,
+        focus_candidates=("phone",),
     )
 
 

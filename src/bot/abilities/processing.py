@@ -456,7 +456,8 @@ class OutputData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Terminal processing result. handled is false only when the processor explicitly declined the input; "
-                "events contains the validated selections whose actor dispatches completed successfully."
+                "events contains the validated selections produced by the operation. Actor-backed selections are "
+                "included only after every recipient dispatch completes successfully."
             ),
             "examples": [
                 {
@@ -474,7 +475,9 @@ class OutputData(pydantic.BaseModel):
     )
     events: Events = pydantic.Field(
         default=(),
-        description="Validated event selections after every recipient dispatch completed successfully.",
+        description=(
+            "Validated event selections. When actors are supplied, every recipient dispatch completed successfully."
+        ),
     )
 
 
@@ -774,7 +777,7 @@ async def dispatch_selected_events(
             raw = domain_data
 
         try:
-            validated = validate_event_data(offered, raw)
+            _ = validate_event_data(offered, raw)
         except Exception as error:
             raise RuntimeError(f"Processing selected invalid event data for event: {selection.event}.") from error
 
@@ -782,7 +785,11 @@ async def dispatch_selected_events(
         declared = _instance_event_map(target).get(selection.event)
         if declared is None or declared.kind != hsm.CallEventKind:
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
-        dispatch_event = offered if validated is None else offered.with_data(validated)
+        try:
+            validated = validate_event_data(declared, raw)
+        except Exception as error:
+            raise RuntimeError(f"Processing selected invalid event data for event: {selection.event}.") from error
+        dispatch_event = declared if validated is None else declared.with_data(validated)
         prepared.append(
             (
                 target,
@@ -799,7 +806,15 @@ async def dispatch_selected_events(
     async def dispatch(target: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
         await target.dispatch(ctx, event)
 
-    await asyncio.gather(*(dispatch(target, event) for target, event in prepared))
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            for target, event in prepared:
+                _ = tasks.create_task(dispatch(target, event))
+    except ExceptionGroup as errors:
+        first = errors.exceptions[0]
+        if isinstance(first, Exception):
+            raise first
+        raise
 
 
 # --- private completion payloads / events ---
@@ -992,12 +1007,12 @@ class Processing(ability.Ability[InputData, typing.Any]):
         instance: "Processing",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """dispatching: fire all selected events concurrently when actors exist."""
+        """dispatching: validate and concurrently deliver every selected event."""
 
         data = event.data
         assert isinstance(data, _AppliedEventData)
         try:
-            # No actors: product only (e.g. reflection write phases).
+            # Actorless products are consumed by the owning composed ability (for example Reflection).
             if data.input.actors:
                 await dispatch_selected_events(
                     ctx,
