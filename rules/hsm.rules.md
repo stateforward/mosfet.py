@@ -119,7 +119,8 @@ read or write that machine's instance fields.
 
 Parent, child, sibling, provider, helper, callback, and module-level code MUST coordinate with the machine through
 typed HSM events. They MUST NOT inspect or mutate another machine's fields directly, including through a property,
-getter, public alias, renamed field, or coordination snapshot.
+getter, public alias, renamed field, or snapshot used to drive peer-machine coordination. Read-only operational
+observation MAY use documented snapshots under HSM-OBS-001.
 
 Behavior callbacks MUST mutate machine-private state only through the owning machine's behavior methods, declared attributes, or explicit runtime data structures.
 

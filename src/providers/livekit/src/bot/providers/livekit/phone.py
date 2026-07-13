@@ -131,6 +131,10 @@ _RemoteAudioReceivedEvent = hsm.Event[audio.AudioInputData](
     name="bot.provider.livekit.phone.remote_audio.received",
     schema=audio.AudioInputData,
 )
+_RoomAudioStatusEvent = hsm.Event[RoomAudioConnectedData](
+    name="bot.provider.livekit.phone.room_audio.status",
+    schema=RoomAudioConnectedData,
+)
 
 _AnswerCompletedEvent = hsm.Event[phone.CallConnectedData](
     name="bot.provider.livekit.phone.answer.completed",
@@ -839,26 +843,9 @@ class PhoneService(hsm.Instance):
 
         def record_connected(data: RoomAudioConnectedData) -> None:
             live_service = service_ref()
-            if live_service is None:
+            if live_service is None or not live_service.state():
                 return
-            live_service._local_track_sid = data.local_track_sid
-            room = live_service._room
-            if room is not None:
-                live_service._bind_room_presence(room)
-                live_service._scan_existing_remote_participants(room)
-            call_id = live_service._media_call_id
-            target_ref = live_service._attached_phone_target_ref
-            phone_event_target = None if target_ref is None else target_ref()
-            if call_id is None or phone_event_target is None or data.local_track_sid is None:
-                return
-            _ = phone_event_target.dispatch(
-                phone_event_target.context(),
-                dataclasses.replace(
-                    phone.ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=call_id)),
-                    source=hsm.id(live_service),
-                    target=hsm.id(phone_event_target),
-                ),
-            )
+            _ = live_service.dispatch(live_service.context(), _RoomAudioStatusEvent.with_data(data))
 
         bridge = create_audio_bridge(loop=self._loop)
         room = self._room
@@ -1056,6 +1043,32 @@ class PhoneService(hsm.Instance):
     def _clear_phone_event_target(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
         instance._attached_phone_target_ref = None
+
+    @staticmethod
+    def _apply_room_audio_status(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        assert isinstance(data, RoomAudioConnectedData)
+        instance._local_track_sid = data.local_track_sid
+        room = instance._room
+        if room is not None:
+            instance._bind_room_presence(room)
+            instance._scan_existing_remote_participants(room)
+        call_id = instance._media_call_id
+        phone_event_target = PhoneService._phone_event_target(instance)
+        if call_id is None or phone_event_target is None or data.local_track_sid is None:
+            return
+        _ = phone_event_target.dispatch(
+            ctx,
+            dataclasses.replace(
+                phone.ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=call_id)),
+                source=hsm.id(instance),
+                target=hsm.id(phone_event_target),
+            ),
+        )
 
     @staticmethod
     def _has_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -1485,6 +1498,10 @@ class PhoneService(hsm.Instance):
         ),
         hsm.transition(
             hsm.on(_ServiceAttachmentRejectedEvent),
+        ),
+        hsm.transition(
+            hsm.on(_RoomAudioStatusEvent),
+            hsm.effect(_apply_room_audio_status),
         ),
         hsm.transition(
             hsm.on(_ServiceDetachedEvent),
