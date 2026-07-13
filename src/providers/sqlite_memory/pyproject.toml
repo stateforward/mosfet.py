@@ -58,3 +58,4 @@ docstring-code-format = true
 include = ["src", "tests"]
 extraPaths = ["src", "../../../src", "../../.."]
 pythonVersion = "3.13"
+reportPrivateUsage = "error"

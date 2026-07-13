@@ -114,6 +114,13 @@ See:
 - [CORE-MEM-001](core.rules.md#core-mem-001-must-explicit-ownership)
 - [PAT-ACTOR-001](patterns.rules.md#pat-actor-001-must-actor-state-ownership)
 
+Machine instance state is pass-by-event only. Only the declaring machine class and its derived machine classes MAY
+read or write that machine's instance fields.
+
+Parent, child, sibling, provider, helper, callback, and module-level code MUST coordinate with the machine through
+typed HSM events. They MUST NOT inspect or mutate another machine's fields directly, including through a property,
+getter, public alias, renamed field, or coordination snapshot.
+
 Behavior callbacks MUST mutate machine-private state only through the owning machine's behavior methods, declared attributes, or explicit runtime data structures.
 
 Helpers MAY guard, adapt, or publish, but MUST NOT reach around ownership boundaries to mutate another object or machine's private state.

@@ -46,3 +46,4 @@ include = ["src"]
 extraPaths = ["src", "../../src/providers/gemini/src", "../../src/providers/livekit/src", "../../src/providers/sqlite_memory/src", "../../src"]
 pythonVersion = "3.13"
 reportMissingModuleSource = "none"
+reportPrivateUsage = "error"

@@ -41,3 +41,4 @@ include = ["src"]
 extraPaths = ["src", "../../src/providers/gemini/src", "../../src"]
 pythonVersion = "3.13"
 reportMissingModuleSource = "none"
+reportPrivateUsage = "error"

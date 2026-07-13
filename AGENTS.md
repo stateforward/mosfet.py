@@ -31,10 +31,17 @@
   a function.
 - ALWAYS prefer `@staticmethod` behavior callbacks on the owning class when callbacks need private fields, so they can
   access those fields directly instead of using `getattr` or `setattr`.
-- NEVER call single-underscore names (`_foo`, `_transact`, …) from outside the declaring class or module. Python does
-  not enforce privacy; basedpyright `reportPrivateUsage = "error"` on production code does. If another package needs
-  the capability, add a real public method (e.g. `Memory.execute`) or keep the callback as a `@staticmethod` on the
-  owning class. Do **not** rename `_x` → `x` only to silence the checker or to make tests greppable.
+- ALWAYS treat machine instance state as pass-by-event only. Only the declaring machine class and machine subclasses
+  may read or write that machine's instance fields. Parent, child, sibling, provider, helper, callback, and module-level
+  code MUST coordinate with the machine through typed HSM events; they MUST NOT inspect or mutate its fields directly.
+  Do not add a property, getter, snapshot field, public alias, or renamed field merely to route around this ownership
+  boundary. Snapshots are for external observation, never peer-machine coordination or progression.
+- NEVER call single-underscore names (`_foo`, `_transact`, …) from outside the declaring class or a derived class.
+  Python does not enforce privacy; the dedicated basedpyright privacy check applies `reportPrivateUsage = "error"` to
+  all production packages. If non-machine code needs a capability, add a real public behavior method only when the
+  object is not actor-owned (e.g. `Memory.execute`). Machine-to-machine capabilities MUST be modeled as typed events.
+  Prefer `@staticmethod` HSM callbacks on the owning machine so callbacks can access that machine's fields legally.
+  Do **not** rename `_x` → `x` only to silence the checker or to make tests greppable.
 - Prefer tests that only use public contracts (events, apply outputs, ClassVars, constructor args). Do not reach into
   private fields from tests unless no public assertion can cover the behavior; never copy private-access patterns from
   tests into `src/`. Seeing `obj._foo` in a test is not permission to use `_foo` in production.

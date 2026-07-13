@@ -87,6 +87,7 @@ jobs:
 
       - name: basedpyright
         run: |
+          uv run --locked --with basedpyright basedpyright --project basedpyright-private.json
           uv run --locked --with basedpyright basedpyright \
             scripts/check_release_version.py \
             src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py \

@@ -14,6 +14,7 @@ import weakref
 import hsm
 import pydantic
 import bot.device
+from livekit import rtc
 
 from bot.telemetry import observer
 from bot.world import World, require_world_scope
@@ -647,6 +648,7 @@ class PhoneService(hsm.Instance):
     _operation_timeout: datetime.timedelta
     _loop: asyncio.AbstractEventLoop | None
     _room: RoomHandle | None
+    _room_media_configured: bool
     _stream_factory: AudioStreamFactory | None
     _local_track_factory: LocalAudioTrackFactory | None
     _room_connect: RoomAudioConnectData | None
@@ -686,6 +688,7 @@ class PhoneService(hsm.Instance):
         self._operation_timeout = operation_timeout
         self._loop = loop
         self._room = room
+        self._room_media_configured = room is not None or url is not None
         self._stream_factory = stream_factory
         self._local_track_factory = local_track_factory
         self._room_connect = (
@@ -711,7 +714,7 @@ class PhoneService(hsm.Instance):
 
         # Do not treat a lazy media bridge as room-media: bare PhoneService() still reports
         # call control unavailable until url/token, an injected room, or a live room connect.
-        return self._room is not None or self._room_connect is not None or self._local_track_sid is not None
+        return self._room_media_configured or self._local_track_sid is not None
 
     @staticmethod
     def _participant_identity(participant: object) -> str:
@@ -839,7 +842,7 @@ class PhoneService(hsm.Instance):
             if live_service is None:
                 return
             live_service._local_track_sid = data.local_track_sid
-            room = None if live_service._track_path is None else live_service._track_path._room
+            room = live_service._room
             if room is not None:
                 live_service._bind_room_presence(room)
                 live_service._scan_existing_remote_participants(room)
@@ -858,11 +861,15 @@ class PhoneService(hsm.Instance):
             )
 
         bridge = create_audio_bridge(loop=self._loop)
+        room = self._room
+        if room is None:
+            room = typing.cast(RoomHandle, typing.cast(object, rtc.Room(loop=self._loop)))
+            self._room = room
         track_path = RoomAudioTrackPath(
             bridge=bridge,
             remote_audio_sink=consume_remote_audio,
             connection_sink=record_connected,
-            room=self._room,
+            room=room,
             stream_factory=self._stream_factory,
             local_track_factory=self._local_track_factory,
             operation_timeout=self._operation_timeout,
@@ -872,8 +879,6 @@ class PhoneService(hsm.Instance):
         self._track_path = track_path
         if self._room is not None:
             self._bind_room_presence(self._room)
-        elif track_path._room is not None:
-            self._bind_room_presence(track_path._room)
         return bridge, track_path
 
     async def dial(self, request: phone.DialData) -> phone.CallConnectedData:
@@ -934,7 +939,9 @@ class PhoneService(hsm.Instance):
             )
         if self._room_connect is not None and self._local_track_sid is None:
             await track_path.connect_room(track_path.context(), self._room_connect)
-            self._scan_existing_remote_participants(track_path._room)
+            room = self._room
+            assert room is not None
+            self._scan_existing_remote_participants(room)
 
     async def detach(self, world: World, target: hsm.Instance) -> None:
         """Detach this service from the phone-owned firmware target."""
@@ -961,7 +968,9 @@ class PhoneService(hsm.Instance):
             track_path.context(),
             RoomAudioConnectData(url=url, token=token, track_name=track_name),
         )
-        self._scan_existing_remote_participants(track_path._room)
+        room = self._room
+        assert room is not None
+        self._scan_existing_remote_participants(room)
 
     async def disconnect_room(self) -> None:
         """Disconnect room audio from the underlying LiveKit room."""
