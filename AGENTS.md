@@ -29,6 +29,10 @@
   schemas, or base abstraction behavior.
 - ALWAYS write helper and utility logic inline unless it is used from more than two functions or modules; then extract
   a function.
+- NEVER add ceremony-only wrappers that merely forward arguments, hide one operation, or rename an obvious local
+  operation. Keep the meaningful inputs, side effects, and control flow visible at the call site. Extract a helper only
+  when it provides domain semantics or removes genuinely repeated non-trivial logic; do not create indirection for
+  indirection's sake.
 - ALWAYS prefer `@staticmethod` behavior callbacks on the owning class when callbacks need private fields, so they can
   access those fields directly instead of using `getattr` or `setattr`.
 - ALWAYS treat machine instance state as pass-by-event only. Only the declaring machine class and machine subclasses
