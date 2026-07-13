@@ -178,6 +178,30 @@ def focus_event_offer() -> hsm.Event[object]:
     return bot.FocusDeviceEvent
 
 
+def _accept_focus_event(
+    ctx: hsm.Context,
+    instance: hsm.Instance,
+    event: hsm.Event[typing.Any],
+) -> None:
+    del ctx, instance, event
+
+
+class _BotActor(hsm.Instance):
+    """Minimal modeled recipient for cognition selections in unit tests."""
+
+    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+        "BotActor",
+        hsm.initial(hsm.target("/BotActor/active")),
+        hsm.state(
+            "active",
+            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_focus_event)),
+        ),
+    )
+
+    @typing.override
+    async def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+
 class RecordingIntuitionProcessor(processing.Processor):
     """Return events (with optional patched confidence) or unhandled OutputData."""
 
@@ -535,8 +559,17 @@ def cognition_input() -> cognition.InputData:
     return cognition.InputData(
         stimulus=bot.InputEventData(target_device="phone", priority=0),
         abilities=(),
+        actors={"bot": _BotActor()},
         focus=None,
     )
+
+
+async def started_cognition_input(ctx: hsm.Context) -> cognition.InputData:
+    data = cognition_input()
+    actor = data.actors["bot"]
+    assert actor.model is not None
+    _ = await hsm.started(ctx, actor, actor.model)
+    return data
 
 
 def deliberative_input(
@@ -974,7 +1007,7 @@ def test_cognitive_dispatch_returns_modeled_output_event_result() -> None:
         ability = RecordingCognition()
         ctx = await start_cognition_ability_for_test(ability)
 
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, ability.outputs, ability.state()
 
     result, outputs, state = asyncio.run(run())
@@ -1030,7 +1063,7 @@ def test_cognition_intuition_handles_without_reasoning() -> None:
         )
         ctx = await start_cognition_ability_for_test(ability)
 
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, intuition.calls, reasoning.calls
 
     result, intuition_calls, reasoning_calls = asyncio.run(run())
@@ -1056,7 +1089,7 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
         )
         ctx = await start_cognition_ability_for_test(ability)
 
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, intuition_processor.calls, reasoning_processor.calls
 
     result, intuition_calls, reasoning_calls = asyncio.run(run())
@@ -1091,7 +1124,7 @@ def test_intuition_low_confidence_escalates_to_reasoning_after_world_actions() -
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, len(reasoning_processor.calls), tuner.threshold()
 
     result, reasoning_calls, threshold = asyncio.run(run())
@@ -1133,7 +1166,7 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, len(reasoning_processor.calls), tuner.threshold(), tuner.n
 
     result, reasoning_calls, threshold, n = asyncio.run(run())
@@ -1168,7 +1201,7 @@ def test_intuition_high_confidence_skips_reasoning_cascade() -> None:
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         return result, len(reasoning_processor.calls)
 
     result, reasoning_calls = asyncio.run(run())
@@ -1221,7 +1254,7 @@ def test_intuition_multi_select_dispatches_action_and_reasoning_actors() -> None
         )
         ctx = await start_cognition_ability_for_test(ability)
         # Cognition completes when intuition handles (multi-select is not a cascade).
-        result = await dispatch_ability_for_test(ability, ctx, cognition_input())
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         # Give fire-and-forget reasoning a moment if it was dispatched.
         await asyncio.sleep(0.05)
         return result, len(reasoning_processor.calls), {item.event for item in result}
@@ -2044,10 +2077,13 @@ def test_autonomy_handles_matching_habit_without_intuition_processor() -> None:
         turn = cognition.InputData(
             stimulus=_ring_stimulus(),
             abilities=(),
-            actors={},
+            actors={"bot": _BotActor()},
             focus=None,
             focus_candidates=("phone",),
         )
+        bot_actor = turn.actors["bot"]
+        assert bot_actor.model is not None
+        _ = await hsm.started(ctx, bot_actor, bot_actor.model)
         _ = await dispatch_ability_for_test(ability, ctx, turn)
         await wait_until(lambda: bool(ability.outputs))
         return ability.outputs, intuition_processor.calls

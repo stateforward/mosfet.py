@@ -733,7 +733,11 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         )
 
     @staticmethod
-    def _complete_from_behavior(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
+    async def _dispatch_behavior_activity(
+        ctx: hsm.Context,
+        instance: "Autonomy",
+        event: hsm.Event[typing.Any],
+    ) -> None:
         parent_id, index = _parse_child_id(event.id if event.id else None)
         cognition_input = _cognition_input_from_event(event)
         candidates = _candidates_from_event(event)
@@ -764,10 +768,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 selections = processing.coerce_event_selections(output)
                 if selections is None:
                     raise TypeError("Autonomy habit output does not match event selections.")
-                processing.dispatch_selected_events(
+                await dispatch.dispatch_selected_events(
                     ctx,
                     input,
                     selections,
+                    operation_id=parent_id,
+                    source=instance,
                     metadata=public_metadata,
                 )
         except Exception as error:
@@ -960,7 +966,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_behavior_output_is_handled),
-                hsm.effect(_complete_from_behavior),
+                hsm.target("/Autonomy/dispatching"),
             ),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
@@ -975,6 +981,24 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.transition(
                 hsm.after(_zero_timeout),
                 hsm.effect(_silence_advance),
+            ),
+        ),
+        hsm.state(
+            "dispatching",
+            hsm.defer(input_event),
+            hsm.activity(_dispatch_behavior_activity),
+            hsm.exit(_detach_on_detach),
+            hsm.transition(
+                hsm.on(_ApplyCompletedEvent),
+                hsm.guard(_has_apply_completed),
+                hsm.effect(_complete_apply),
+                hsm.target("/Autonomy/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_ApplyFailedEvent),
+                hsm.guard(_has_apply_failure),
+                hsm.effect(_fail_apply),
+                hsm.target("/Autonomy/idle"),
             ),
         ),
         hsm.state(
@@ -1003,8 +1027,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_behavior_output_is_handled),
-                hsm.effect(_complete_from_behavior),
-                hsm.target("/Autonomy/running"),
+                hsm.target("/Autonomy/dispatching"),
             ),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),

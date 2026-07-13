@@ -15,6 +15,7 @@ from __future__ import annotations
 from . import ability
 
 import abc
+import asyncio
 import collections.abc
 import dataclasses
 import re
@@ -29,9 +30,6 @@ from bot.telemetry import observer
 
 # Processing inputs offer live HSM events (not a parallel offer DTO).
 Event = hsm.Event
-
-_FOCUS_DEVICE_EVENT = "bot.focus_device"
-_CLEAR_FOCUS_EVENT = "bot.clear_focus"
 
 # Single model-facing tool: multi-select is an events array, not N parallel tools.
 DISPATCH_TOOL_NAME: typing.Final[str] = "dispatch"
@@ -450,6 +448,36 @@ class Result(typing.Generic[ability.TOutput]):
         return cls(is_handled=False)
 
 
+class OutputData(pydantic.BaseModel):
+    """Typed terminal product from one processing operation."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": (
+                "Terminal processing result. handled is false only when the processor explicitly declined the input; "
+                "events contains the validated selections whose actor dispatches completed successfully."
+            ),
+            "examples": [
+                {
+                    "handled": True,
+                    "events": [{"event": "phone.answer_call", "target": "phone"}],
+                },
+                {"handled": False, "events": []},
+            ],
+        },
+    )
+
+    handled: bool = pydantic.Field(
+        default=True,
+        description="Whether the processor handled the input rather than explicitly declining it.",
+    )
+    events: Events = pydantic.Field(
+        default=(),
+        description="Validated event selections after every recipient dispatch completed successfully.",
+    )
+
+
 class InputData(pydantic.BaseModel):
     """Processing input: stimulus plus selectable event schemas."""
 
@@ -533,6 +561,8 @@ def coerce_event_selections(
 
     if output is None:
         return None
+    if isinstance(output, OutputData):
+        return output.events if output.handled else None
     if isinstance(output, Result):
         if not output.is_handled or output.output is None:
             return None
@@ -699,7 +729,7 @@ def _unavailable_message(*, event: str, target: str | None = None) -> str:
 def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
     if selection.target is not None:
         instance = input.actors.get(selection.target)
-        if instance is None:
+        if instance is None or selection.event not in _enabled_call_event_names(instance):
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
         return instance
     matches = [
@@ -709,27 +739,29 @@ def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
     ]
     if len(matches) == 1:
         return input.actors[matches[0]]
-    if len(input.actors) == 1:
-        return next(iter(input.actors.values()))
     raise RuntimeError(_unavailable_message(event=selection.event))
 
 
-def dispatch_selected_events(
+async def dispatch_selected_events(
     ctx: hsm.Context,
     input: InputData,
     selections: Events,
     *,
+    operation_id: str,
+    source: hsm.Instance,
     metadata: collections.abc.Mapping[str, object] | None = None,
 ) -> None:
-    """Validate selections and dispatch them fire-and-forget (all issued before return)."""
+    """Validate selections, dispatch actor messages concurrently, and await every recipient."""
 
     if not selections:
         return
     by_name = {event.name: event for event in input.schemas}
     event_metadata = dict(metadata or {})
+    prepared: list[tuple[hsm.Instance, hsm.Event[typing.Any]]] = []
 
     for selection in selections:
-        if selection.event not in by_name:
+        offered = by_name.get(selection.event)
+        if offered is None:
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
         # Domain validate never sees model-facing patches; strip using this input's patch type.
         domain_data, _meta = unpatch_event_data(selection.data, patch=input.patch)
@@ -741,90 +773,59 @@ def dispatch_selected_events(
             # Live deliberative frames (processing.InputData) and other non-mapping payloads.
             raw = domain_data
 
-        # Body focus events resolve to the bot actor, not via enabled CallEvent discovery.
-        # Handle them before _resolve_target so extra actors (e.g. reasoning) do not break focus.
-        if selection.event == _FOCUS_DEVICE_EVENT:
-            import bot as bot_mod
-            from bot.device import Device
-
-            if selection.target is not None and selection.target != "bot":
-                raise RuntimeError("Processing selected focus_device outside available device candidates.")
-            data = bot_mod.FocusDeviceEventData.model_validate(raw)
-            # Only real devices — sibling abilities on the actor map (e.g. reasoning) are not focus targets.
-            candidates = tuple(
-                name for name, instance in input.actors.items() if name != "bot" and isinstance(instance, Device)
-            )
-            meta_candidates = event_metadata.get("bot.focus_candidates")
-            if isinstance(meta_candidates, collections.abc.Sequence) and not isinstance(
-                meta_candidates, str | bytes | bytearray
-            ):
-                restricted = tuple(item for item in meta_candidates if isinstance(item, str) and item)
-                if restricted:
-                    candidates = restricted
-            if not candidates:
-                continue
-            if data.device not in candidates:
-                raise RuntimeError("Processing selected focus_device outside available device candidates.")
-            bot_target = input.actors.get("bot")
-            if bot_target is None:
-                raise RuntimeError(_unavailable_message(event=selection.event, target="bot"))
-            _ = bot_target.dispatch(
-                ctx,
-                dataclasses.replace(bot_mod.FocusDeviceEvent.with_data(data), metadata=event_metadata),
-            )
-            continue
-
-        if selection.event == _CLEAR_FOCUS_EVENT:
-            import bot as bot_mod
-            if selection.target is not None and selection.target != "bot":
-                raise RuntimeError("Processing selected clear_focus outside available device candidates.")
-            data = bot_mod.ClearFocusEventData.model_validate(raw)
-            bot_target = input.actors.get("bot")
-            if bot_target is None:
-                raise RuntimeError(_unavailable_message(event=selection.event, target="bot"))
-            _ = bot_target.dispatch(
-                ctx,
-                dataclasses.replace(bot_mod.ClearFocusEvent.with_data(data), metadata=event_metadata),
-            )
-            continue
-
-        target = _resolve_target(input, selection)
-        live = _instance_event_map(target).get(selection.event)
-        if live is None or live.kind != hsm.CallEventKind:
-            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
-        if selection.event not in _enabled_call_event_names(target):
-            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
-
         try:
-            validated = validate_event_data(live, raw)
+            validated = validate_event_data(offered, raw)
         except Exception as error:
             raise RuntimeError(f"Processing selected invalid event data for event: {selection.event}.") from error
-        dispatch_event = live if validated is None else live.with_data(validated)
-        dispatch_event = dataclasses.replace(dispatch_event, metadata=event_metadata)
-        _ = target.dispatch(ctx, dispatch_event)
+
+        target = _resolve_target(input, selection)
+        declared = _instance_event_map(target).get(selection.event)
+        if declared is None or declared.kind != hsm.CallEventKind:
+            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
+        dispatch_event = offered if validated is None else offered.with_data(validated)
+        prepared.append(
+            (
+                target,
+                dataclasses.replace(
+                    dispatch_event,
+                    id=operation_id,
+                    source=hsm.id(source),
+                    target=hsm.id(target),
+                    metadata=event_metadata,
+                ),
+            )
+        )
+
+    async def dispatch(target: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+        await target.dispatch(ctx, event)
+
+    await asyncio.gather(*(dispatch(target, event) for target, event in prepared))
 
 
 # --- private completion payloads / events ---
 
 
-@dataclasses.dataclass(frozen=True)
-class _AppliedData:
+class _AppliedEventData(pydantic.BaseModel):
     """Applying product: input needed for dispatch + events (HSM-COMPLETION-001)."""
 
-    input: InputData
-    events: Events
-    unhandled: bool = False
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    input: InputData = pydantic.Field(description="Validated processing input for this operation.")
+    output: OutputData = pydantic.Field(description="Typed processor result awaiting actor dispatch.")
 
 
-_AppliedEvent = hsm.Event[object](
+_AppliedEvent = hsm.Event[_AppliedEventData](
     name="bot.ability.processing.applied",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
+    schema=_AppliedEventData,
 )
-_DispatchedEvent = hsm.Event[object](
+_DispatchedEvent = hsm.Event[OutputData](
     name="bot.ability.processing.dispatched",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
+    schema=OutputData,
 )
 _FailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.processing.failed",
@@ -842,7 +843,7 @@ class Processor(abc.ABC):
         ...
 
 
-class Processing(ability.Ability[InputData, Events]):
+class Processing(ability.Ability[InputData, typing.Any]):
     """Leaf ability: apply an injected ``Processor``, then dispatch selected events if any.
 
     Model-facing system policy lives here (``instructions``), not on the provider Processor.
@@ -853,21 +854,15 @@ class Processing(ability.Ability[InputData, Events]):
     instructions: typing.ClassVar[str] = ""
     _instructions: str
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
         name="bot.ability.processing.input",
         data_type=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
         name="bot.ability.processing.output",
-        data_type=object,
-        description="Selected events array produced by processing.",
-        examples=[[{"event": "phone.answer_call"}]],
+        data_type=OutputData,
     )
-
-    # Aliases for older callers (Intuition, tests) that still name these "apply completed".
-    _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _DispatchedEvent
-    _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _FailedEvent
 
     @staticmethod
     def _has_input(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
@@ -877,17 +872,17 @@ class Processing(ability.Ability[InputData, Events]):
     @staticmethod
     def _has_applied(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, _AppliedData)
+        return isinstance(event.data, _AppliedEventData)
 
     @staticmethod
     def _applied_has_events(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, _AppliedData) and bool(event.data.events) and not event.data.unhandled
+        return isinstance(event.data, _AppliedEventData) and event.data.output.handled and bool(event.data.output.events)
 
     @staticmethod
     def _applied_is_unhandled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, _AppliedData) and event.data.unhandled
+        return isinstance(event.data, _AppliedEventData) and not event.data.output.handled
 
     @staticmethod
     def _has_failure(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
@@ -899,7 +894,7 @@ class Processing(ability.Ability[InputData, Events]):
         ctx: hsm.Context,
         instance: "Processing",
         event: hsm.Event[typing.Any],
-        output: object,
+        output: OutputData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -925,17 +920,19 @@ class Processing(ability.Ability[InputData, Events]):
     def _complete_empty(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
         """No events selected: terminal empty product, skip dispatching."""
 
-        Processing._emit_output(ctx, instance, event, ())
+        Processing._emit_output(ctx, instance, event, OutputData())
 
     @staticmethod
     def _complete_unhandled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
         """Processor declined the input (composition)."""
 
-        Processing._emit_output(ctx, instance, event, Result[Events].unhandled())
+        Processing._emit_output(ctx, instance, event, OutputData(handled=False))
 
     @staticmethod
     def _complete_dispatched(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
-        Processing._emit_output(ctx, instance, event, event.data)
+        output = event.data
+        assert isinstance(output, OutputData)
+        Processing._emit_output(ctx, instance, event, output)
 
     @staticmethod
     def _input_for_processor(instance: "Processing", input: InputData) -> InputData:
@@ -960,13 +957,14 @@ class Processing(ability.Ability[InputData, Events]):
         try:
             raw = await instance.processor.process(input)
             if isinstance(raw, Result) and not raw.is_handled:
-                applied = _AppliedData(input=input, events=(), unhandled=True)
+                output = OutputData(handled=False)
             else:
                 payload = raw.output if isinstance(raw, Result) else raw
                 coerced = coerce_event_selections(payload, patch=input.patch)
                 if coerced is None:
                     raise TypeError("Processor must return an array of events.")
-                applied = _AppliedData(input=input, events=coerced, unhandled=False)
+                output = OutputData(events=coerced)
+            applied = _AppliedEventData(input=input, output=output)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -997,14 +995,16 @@ class Processing(ability.Ability[InputData, Events]):
         """dispatching: fire all selected events concurrently when actors exist."""
 
         data = event.data
-        assert isinstance(data, _AppliedData)
+        assert isinstance(data, _AppliedEventData)
         try:
             # No actors: product only (e.g. reflection write phases).
             if data.input.actors:
-                dispatch_selected_events(
+                await dispatch_selected_events(
                     ctx,
                     data.input,
-                    data.events,
+                    data.output.events,
+                    operation_id=event.id or hsm.id(instance),
+                    source=instance,
                     metadata=dict(event.metadata),
                 )
         except Exception as error:
@@ -1022,7 +1022,7 @@ class Processing(ability.Ability[InputData, Events]):
             ctx,
             instance,
             dataclasses.replace(
-                _DispatchedEvent.with_data(data.events),
+                _DispatchedEvent.with_data(data.output),
                 id=event.id or None,
                 metadata=dict(event.metadata),
             ),
@@ -1111,6 +1111,7 @@ __all__ = [
     "Events",
     "InputEvent",
     "OutputEvent",
+    "OutputData",
     "InputData",
     "Processor",
     "Processing",

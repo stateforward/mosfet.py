@@ -1,4 +1,4 @@
-"""Build processing inputs from live actors (event dispatch is owned by Processing)."""
+"""Build processing inputs and enforce cognition's body-action constraints."""
 
 from __future__ import annotations
 
@@ -10,6 +10,50 @@ import typing
 import hsm
 
 from .input import InputData
+
+
+async def dispatch_selected_events(
+    ctx: hsm.Context,
+    input: processing.InputData,
+    selections: processing.Events,
+    *,
+    operation_id: str,
+    source: hsm.Instance,
+    metadata: collections.abc.Mapping[str, object] | None = None,
+) -> None:
+    """Validate body-action constraints, then dispatch through generic Processing."""
+
+    import bot
+    from bot import device
+
+    event_metadata = dict(metadata or {})
+    candidates = tuple(
+        name for name, actor in input.actors.items() if name != "bot" and isinstance(actor, device.Device)
+    )
+    restricted = event_metadata.get("bot.focus_candidates")
+    if isinstance(restricted, collections.abc.Sequence) and not isinstance(
+        restricted, str | bytes | bytearray
+    ):
+        candidates = tuple(item for item in restricted if isinstance(item, str) and item)
+
+    for selection in selections:
+        if selection.event == bot.FocusDeviceEvent.name:
+            if selection.target is not None and selection.target != "bot":
+                raise RuntimeError("Processing selected focus_device outside available device candidates.")
+            data = bot.FocusDeviceEventData.model_validate(selection.data or {})
+            if candidates and data.device not in candidates:
+                raise RuntimeError("Processing selected focus_device outside available device candidates.")
+        elif selection.event == bot.ClearFocusEvent.name and selection.target not in (None, "bot"):
+            raise RuntimeError("Processing selected clear_focus for a non-bot target.")
+
+    await processing.dispatch_selected_events(
+        ctx,
+        input,
+        selections,
+        operation_id=operation_id,
+        source=source,
+        metadata=event_metadata,
+    )
 
 
 def events_from_instance(instance: hsm.Instance) -> tuple[processing.Event[typing.Any], ...]:
@@ -68,5 +112,6 @@ def build_processing_input(
 
 __all__ = [
     "build_processing_input",
+    "dispatch_selected_events",
     "events_from_instance",
 ]

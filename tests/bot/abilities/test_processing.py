@@ -4,6 +4,7 @@ from bot.abilities import ability
 from bot.abilities import processing
 
 import asyncio
+import collections.abc
 import dataclasses
 import typing
 
@@ -340,6 +341,7 @@ def test_processing_uses_generic_input_and_output_event_schemas() -> None:
     assert input_schema["description"]
 
     assert processing.OutputEvent.name == "bot.ability.processing.output"
+    assert output_schema == processing.OutputData.model_json_schema()
     assert output_schema["description"]
     assert "examples" in output_schema
 
@@ -352,7 +354,7 @@ def test_processing_delegates_to_injected_ability() -> None:
 
     output = asyncio.run(run())
 
-    assert output == ()
+    assert output == processing.OutputData()
 
 def test_processing_does_not_add_public_result_methods() -> None:
     processing_ability = length_processing()
@@ -382,6 +384,148 @@ _SPEAK_EVENT = hsm.Event[_SpeakData](
     kind=hsm.CallEventKind,
     schema=_SpeakData,
 )
+
+
+def _accept_speak_event(
+    ctx: hsm.Context,
+    instance: hsm.Instance,
+    event: hsm.Event[typing.Any],
+) -> None:
+    del ctx, instance, event
+
+
+class _ControllableDispatchActor(hsm.Instance):
+    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+        "ControllableDispatchActor",
+        hsm.initial(hsm.target("/ControllableDispatchActor/active")),
+        hsm.state(
+            "active",
+            hsm.transition(hsm.on(_SPEAK_EVENT), hsm.effect(_accept_speak_event)),
+        ),
+    )
+
+    events: list[hsm.Event[typing.Any]]
+    result: asyncio.Future[None]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events = []
+        self.result = asyncio.get_running_loop().create_future()
+
+    @typing.override
+    def dispatch(
+        self,
+        ctx: hsm.Context,
+        event: hsm.Event[typing.Any],
+    ) -> collections.abc.Awaitable[None]:
+        if event.name == _SPEAK_EVENT.name:
+            self.events.append(event)
+            return self.result
+        return super().dispatch(ctx, event)
+
+
+def test_processing_reports_actor_dispatch_failure() -> None:
+    async def run() -> None:
+        actor = _ControllableDispatchActor()
+        processing_ability, _ = optional_recording(
+            (
+                processing.SelectedEvent(
+                    event=_SPEAK_EVENT.name,
+                    target="speaker",
+                    data={"text": "hello"},
+                ),
+            )
+        )
+        ctx = shared_hsm_context()
+        _ = await hsm.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+        actor.result.set_exception(RuntimeError("actor rejected dispatch"))
+
+        with pytest.raises(RuntimeError, match="actor rejected dispatch"):
+            _ = await dispatch_ability_for_test(
+                processing_ability,
+                ctx,
+                processing.InputData(
+                    input="speak",
+                    schemas=(_SPEAK_EVENT,),
+                    actors={"speaker": actor},
+                ),
+            )
+
+    asyncio.run(run())
+
+
+def test_processing_propagates_operation_source_and_target_to_actor_event() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        actor = _ControllableDispatchActor()
+        processing_ability, _ = optional_recording(
+            (
+                processing.SelectedEvent(
+                    event=_SPEAK_EVENT.name,
+                    target="speaker",
+                    data={"text": "hello"},
+                ),
+            )
+        )
+        ctx = shared_hsm_context()
+        _ = await hsm.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+        actor.result.set_result(None)
+
+        _ = await dispatch_ability_for_test(
+            processing_ability,
+            ctx,
+            processing.InputData(
+                input="speak",
+                schemas=(_SPEAK_EVENT,),
+                actors={"speaker": actor},
+            ),
+        )
+
+        assert len(actor.events) == 1
+        return actor.events[0], hsm.id(processing_ability)
+
+    dispatched, processing_id = asyncio.run(run())
+
+    assert dispatched.id
+    assert dispatched.source == processing_id
+    assert dispatched.target == "speaker"
+
+
+def test_processing_does_not_complete_before_actor_dispatch() -> None:
+    async def run() -> None:
+        actor = _ControllableDispatchActor()
+        selection = processing.SelectedEvent(
+            event=_SPEAK_EVENT.name,
+            target="speaker",
+            data={"text": "hello"},
+        )
+        processing_ability, _ = optional_recording((selection,))
+        ctx = shared_hsm_context()
+        _ = await hsm.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+
+        operation = asyncio.create_task(
+            dispatch_ability_for_test(
+                processing_ability,
+                ctx,
+                processing.InputData(
+                    input="speak",
+                    schemas=(_SPEAK_EVENT,),
+                    actors={"speaker": actor},
+                ),
+            )
+        )
+
+        for _ in range(100):
+            if actor.events:
+                break
+            await asyncio.sleep(0)
+
+        assert len(actor.events) == 1
+        assert not operation.done()
+
+        actor.result.set_result(None)
+        assert await operation == processing.OutputData(events=(selection,))
+
+    asyncio.run(run())
 
 
 def test_patched_event_data_model_requires_patch() -> None:
@@ -518,4 +662,3 @@ def test_events_from_dispatch_args_parses_canonical_names() -> None:
     assert selections[0].event == "bot.ability.speaking.input"
     assert selections[0].data == {"text": "hi"}
     assert selections[0].confidence == 90
-

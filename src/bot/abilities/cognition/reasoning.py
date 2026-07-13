@@ -13,6 +13,7 @@ import pydantic
 from bot.telemetry import observer
 
 from bot.habit import BreakData, ChangeData, CreateData
+from . import dispatch
 from . import episodes
 from . import types
 _REASONING_INPUT_METADATA_KEY = "bot.reasoning.input"
@@ -565,10 +566,12 @@ class Reasoning(processing.Processing):
             return
         if data.host_input.actors and reasoned.result:
             try:
-                processing.dispatch_selected_events(
+                await dispatch.dispatch_selected_events(
                     ctx,
                     data.host_input,
                     _selections_from_output(reasoned.result),
+                    operation_id=operation_id,
+                    source=instance,
                     metadata=_public_metadata(metadata),
                 )
             except Exception as error:
