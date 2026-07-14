@@ -19,10 +19,12 @@ from bot.telemetry import observer
 from bot.world import SoundEvent, VisualEvent, World, require_world_scope
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
-_DEFAULT_BOT_ACTIVATION_ROLLBACK_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
 _FOCUS_CANDIDATES_METADATA_KEY = "bot.focus_candidates"
 _PROCESSING_OPERATION_METADATA_KEY = "bot.processing.operation"
+_STARTED_DEVICES_METADATA_KEY = "bot.activation.started_devices"
+_STARTED_ABILITIES_METADATA_KEY = "bot.activation.started_abilities"
+_STARTED_ATTACHMENT_GROUP_METADATA_KEY = "bot.activation.started_attachment_group"
 
 
 _BotProcessingChildCancelledEvent = hsm.Event[object](
@@ -32,74 +34,8 @@ _BotProcessingChildCancelledEvent = hsm.Event[object](
 )
 
 
-class _BotActivationState(pydantic.BaseModel):
-    """Private bot field: device join/rollback bookkeeping during activation."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-    )
-
-    pending_devices: tuple[str, ...]
-    attached_devices: tuple[str, ...] = ()
-    started_devices: tuple[Device, ...] = ()
-
-
-_BotActivationRollbackReadyEvent = hsm.Event[object](
-    name="bot.activation.rollback.ready",
-    kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
-)
-
-
-class _BotActivationRollbackFailedEventData(pydantic.BaseModel):
-    """Private signal that activation rollback cleanup could not complete."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    message: str
-
-
-_BotActivationRollbackFailedEvent = hsm.Event[_BotActivationRollbackFailedEventData](
-    name="bot.activation.rollback.failed",
-    kind=hsm.ErrorEventKind,
-    schema=_BotActivationRollbackFailedEventData,
-)
-
-
-class _BotDeactivatingFailedEventData(pydantic.BaseModel):
-    """Private signal that bot deactivation cleanup failed or timed out."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    message: str
-
-
-_BotDeactivatingFailedEvent = hsm.Event[_BotDeactivatingFailedEventData](
-    name="bot.deactivating.failed",
-    kind=hsm.ErrorEventKind,
-    schema=_BotDeactivatingFailedEventData,
-)
-
-
 def _device_tree(*roots: Device) -> tuple[Device, ...]:
     return Device.device_tree(*roots)
-
-
-def _instance_is_started(instance: hsm.Instance) -> bool:
-    """Machine liveness via ``instance.state()`` (HSM-CONTEXT-001), not snapshots or ``is_done()``."""
-
-    state = instance.state()
-    if not state:
-        return False
-    model = getattr(instance, "model", None)
-    root = getattr(model, "qualified_name", None)
-    # Root-only qualified name means the machine is not in a region (unstarted/stopped).
-    return not (isinstance(root, str) and state == root)
-
-
-def _device_model_is_running(device: Device) -> bool:
-    return _instance_is_started(device)
 
 
 def _ability_attach_context(lifetime: hsm.Context) -> hsm.Context:
@@ -110,14 +46,13 @@ def _ability_attach_context(lifetime: hsm.Context) -> hsm.Context:
     fan-out, not a second direct world delivery.
     """
 
-    return hsm.Context(parent=lifetime, values={hsm.Keys.Instances: weakref.WeakValueDictionary()})
+    values: dict[typing.Hashable, object] = {hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()}
+    return hsm.Context(parent=lifetime, values=values)
 
 
 def _instance_id(instance: hsm.Instance) -> str:
-    """Stable HSM instance id; empty only when the machine is not started yet."""
+    """Return the stable id of an active configured actor."""
 
-    if not _instance_is_started(instance):
-        return ""
     return hsm.id(instance)
 
 
@@ -147,7 +82,6 @@ class Bot(hsm.Instance, abc.ABC):
 
     _innate_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
     _processing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_PROCESSING_TIMEOUT
-    _activation_rollback_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_ACTIVATION_ROLLBACK_TIMEOUT
     _deactivation_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_DEACTIVATION_TIMEOUT
     _devices: dict[str, Device]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
@@ -156,8 +90,7 @@ class Bot(hsm.Instance, abc.ABC):
     _acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _output: tuple[abilities.Ability[typing.Any, typing.Any], ...]
-    # Private activation join scratch. Processing correlation is event metadata only.
-    _activation_join: _BotActivationState | None
+    _attachments: attachment.Group
 
     @abc.abstractmethod
     def __init__(
@@ -172,8 +105,6 @@ class Bot(hsm.Instance, abc.ABC):
         super().__init__()
         if self._processing_timeout <= datetime.timedelta():
             raise ValueError("processing_timeout must be positive.")
-        if self._activation_rollback_timeout <= datetime.timedelta():
-            raise ValueError("activation_rollback_timeout must be positive.")
         if self._deactivation_timeout <= datetime.timedelta():
             raise ValueError("deactivation_timeout must be positive.")
         self._devices = dict(devices)
@@ -183,17 +114,24 @@ class Bot(hsm.Instance, abc.ABC):
         self._input = tuple(input)
         self._output = tuple(output)
         self._acquired_abilities = tuple(acquired_abilities)
-        self._activation_join = None
+        members: list[hsm.Instance] = []
+        seen_members: set[int] = set()
+        for member in (*self._devices.values(), *Bot._lifecycle_abilities(self)):
+            identifier = id(member)
+            if identifier not in seen_members:
+                seen_members.add(identifier)
+                members.append(member)
+        self._attachments = attachment.Group(*members)
 
     async def attach(self, world: World) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
-        if not _instance_is_started(self):
+        if not self.state() or self.state() == self.model.qualified_name:
             _ = await hsm.started(world.context, self, self.model)
         await self.dispatch(world.context, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
     async def detach(self, world: World) -> typing.Self:
-        if not _instance_is_started(self):
+        if not self.state() or self.state() == self.model.qualified_name:
             return self
         require_world_scope(world, self, participant="Bot")
         await self.dispatch(world.context, events.DeactivateEvent.with_data(events.DeactivateEventData()))
@@ -201,70 +139,46 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _lifecycle_abilities(instance: "Bot") -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
-        return (
+        configured = (
             instance._cognition,
             *instance._input,
             *instance._output,
             *instance._innate_ability_instances,
             *instance._acquired_abilities,
         )
-
-    @staticmethod
-    async def _start_abilities(ctx: hsm.Context, instance: "Bot") -> None:
-        del ctx
-        ability_scope = _ability_attach_context(instance.context())
-        lifecycle_abilities = Bot._lifecycle_abilities(instance)
-        for ability in lifecycle_abilities:
-            model = ability.model
-            if model is None:
-                continue
-            _ = await hsm.started(ability_scope, ability, model)
-        await hsm.Group(*lifecycle_abilities, ctx=ability_scope).dispatch(
-            ability_scope,
-            attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-        )
-
-    @staticmethod
-    async def _stop_abilities(ctx: hsm.Context, instance: "Bot") -> None:
-        del ctx
-        lifetime = instance.context()
-        lifecycle_abilities = Bot._lifecycle_abilities(instance)
-        group = hsm.Group(*lifecycle_abilities)
-        await group.dispatch(
-            lifetime,
-            attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-        )
-        await group.stop(lifetime)
+        lifecycle: list[abilities.Ability[typing.Any, typing.Any]] = []
+        seen: set[int] = set()
+        for ability in configured:
+            identifier = id(ability)
+            if identifier not in seen:
+                seen.add(identifier)
+                lifecycle.append(ability)
+        return tuple(lifecycle)
 
     @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        del ctx
+        world = World.from_context(instance.context())
+        await instance._attachments.detach(
+            world.context,
+            dataclasses.replace(
+                attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance._attachments),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    async def _deactivation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         del event
         lifetime = instance.context()
         world = World.from_context(lifetime)
-        try:
-            detached_devices: set[int] = set()
-            for device in instance._devices.values():
-                identifier = id(device)
-                if identifier in detached_devices:
-                    continue
-                detached_devices.add(identifier)
-                if not _device_model_is_running(device):
-                    continue
-                await hsm.Instance.dispatch(
-                    device,
-                    world.context,
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                )
-            await Bot._stop_abilities(lifetime, instance)
-        except Exception as error:
-            _ = instance.dispatch(
-                ctx,
-                _BotDeactivatingFailedEvent.with_data(
-                    _BotDeactivatingFailedEventData(message=f"Bot deactivation failed: {error}")
-                ),
-            )
-            return
-        _ = instance.dispatch(ctx, events.DeactivatingDoneEvent.with_data(events.DeactivatingDoneEventData()))
+        await hsm.stop(instance._attachments, world.context)
+        for ability in Bot._lifecycle_abilities(instance):
+            await hsm.stop(ability, lifetime)
+        _ = hsm.dispatch(ctx, instance, events.DeactivatingDoneEvent.with_data(events.DeactivatingDoneEventData()))
 
     @staticmethod
     def _device_reference_for_source(instance: "Bot", source: str) -> str | None:
@@ -373,13 +287,6 @@ class Bot(hsm.Instance, abc.ABC):
         return instance._processing_timeout
 
     @staticmethod
-    def _bot_activation_rollback_timeout(
-        ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]
-    ) -> datetime.timedelta:
-        del ctx, event
-        return instance._activation_rollback_timeout
-
-    @staticmethod
     def _bot_deactivation_timeout(
         ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]
     ) -> datetime.timedelta:
@@ -445,11 +352,23 @@ class Bot(hsm.Instance, abc.ABC):
     async def _cancel_bot_processing_child(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         del event
         ability = instance._cognition
-        if _instance_is_started(ability):
-            lifetime = instance.context()
-            _ = await ability.detach(ctx=lifetime)
-            await hsm.stop(ability, lifetime)
-            _ = await ability.attach(owner=instance, ctx=lifetime)
+        lifetime = instance.context()
+        _ = await ability.detach(
+            lifetime,
+            dataclasses.replace(
+                attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                source=hsm.id(instance),
+                target=hsm.id(ability),
+            ),
+        )
+        await hsm.stop(ability, lifetime)
+        _ = await ability.attach(
+            lifetime,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                source=hsm.id(instance),
+            ),
+        )
         _ = hsm.dispatch(ctx, instance, _BotProcessingChildCancelledEvent.with_data(None))
 
     @staticmethod
@@ -559,277 +478,88 @@ class Bot(hsm.Instance, abc.ABC):
         )
 
     @staticmethod
-    def _activation_state(instance: "Bot") -> _BotActivationState | None:
-        return instance._activation_join
-
-    @staticmethod
-    def _set_activation_state(instance: "Bot", state: _BotActivationState | None) -> None:
-        instance._activation_join = state
-
-    @staticmethod
-    def _clear_activation_state(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        del ctx, event
-        Bot._set_activation_state(instance, None)
-
-    @staticmethod
     async def _activate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        del event
-        # Devices and abilities outlive activate activity; parent under bot lifetime (HSM-CONTEXT-001).
         lifetime = instance.context()
         world = World.from_context(lifetime)
-        devices = _device_tree(*instance._devices.values())
-        device_references: list[tuple[str, Device]] = []
         started_devices: list[Device] = []
-        seen_devices: set[int] = set()
-        for reference, device in instance._devices.items():
-            identifier = id(device)
-            if identifier in seen_devices:
-                continue
-            seen_devices.add(identifier)
-            device_references.append((reference, device))
-        requested_devices: list[str] = []
+        started_abilities: list[abilities.Ability[typing.Any, typing.Any]] = []
+        group_started = False
         try:
-            for device in devices:
+            group_scope = _ability_attach_context(lifetime)
+            _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
+            group_started = True
+            for device in _device_tree(*instance._devices.values()):
                 require_world_scope(world, device, participant="Device")
-            for device in devices:
-                if not _device_model_is_running(device):
-                    _ = await hsm.started(world.context, device, device.model)
+                model = device.model
+                if model is None:
+                    raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
+                try:
+                    _ = await hsm.started(world.context, device, model)
                     started_devices.append(device)
-            await Bot._start_abilities(lifetime, instance)
-            Bot._set_activation_state(
-                instance,
-                _BotActivationState(
-                    pending_devices=tuple(reference for reference, _ in device_references),
-                    started_devices=tuple(started_devices),
+                except hsm.ErrorValidatingModel as error:
+                    if "already has a running HSM" not in str(error):
+                        raise
+            ability_scope = _ability_attach_context(lifetime)
+            for ability in Bot._lifecycle_abilities(instance):
+                model = ability.model
+                if model is None:
+                    raise RuntimeError(f"{type(ability).__name__} has no lifecycle model.")
+                _ = await hsm.started(ability_scope, ability, model)
+                started_abilities.append(ability)
+            await instance._attachments.attach(
+                world.context,
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    id=event.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._attachments),
+                    metadata={
+                        **event.metadata,
+                        _STARTED_DEVICES_METADATA_KEY: tuple(started_devices),
+                        _STARTED_ABILITIES_METADATA_KEY: tuple(started_abilities),
+                        _STARTED_ATTACHMENT_GROUP_METADATA_KEY: group_started,
+                    },
                 ),
             )
-            if not device_references:
-                _ = instance.dispatch(ctx, events.ActivatingDoneEvent.with_data(events.ActivatingDoneEventData()))
-                return
-            for reference, device in device_references:
-                await hsm.Instance.dispatch(
-                    device,
-                    world.context,
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                )
-                requested_devices.append(reference)
         except Exception:
-            state = Bot._activation_state(instance)
-            if state is not None:
-                Bot._set_activation_state(
-                    instance,
-                    state.model_copy(
-                        update={
-                            "pending_devices": tuple(
-                                reference for reference in requested_devices if reference in state.pending_devices
-                            )
-                        }
-                    ),
-                )
-                _ = instance.dispatch(ctx, events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()))
-                return
-            cleanup_error: Exception | None = None
-            try:
-                await Bot._stop_abilities(ctx, instance)
-            except Exception as error:
-                cleanup_error = error
-            if state is None:
-                for device in reversed(started_devices):
-                    if _device_model_is_running(device):
-                        try:
-                            await hsm.stop(device, world.context)
-                        except Exception as error:
-                            if cleanup_error is None:
-                                cleanup_error = error
-            if cleanup_error is not None:
-                _ = instance.dispatch(
-                    ctx,
-                    _BotActivationRollbackFailedEvent.with_data(
-                        _BotActivationRollbackFailedEventData(
-                            message=f"Bot activation rollback failed: {cleanup_error}"
-                        )
-                    ),
-                )
-                return
-            _ = instance.dispatch(ctx, events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()))
-
-    @staticmethod
-    def _activation_event_targets_agent(instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        bot_id = _instance_id(instance)
-        return bool(bot_id) and event.target == bot_id
-
-    @staticmethod
-    def _matches_activation_device_attached(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        state = Bot._activation_state(instance)
-        if state is None or event.name != attachment.AttachCompleteEvent.name:
-            return False
-        if not isinstance(event.data, attachment.AttachCompleteData):
-            return False
-        device_reference = Bot._device_reference_for_source(instance, event.source)
-        return device_reference in state.pending_devices and Bot._activation_event_targets_agent(instance, event)
-
-    @staticmethod
-    def _matches_activation_device_failed(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        state = Bot._activation_state(instance)
-        if state is None or event.name != attachment.AttachFailedEvent.name:
-            return False
-        if not isinstance(event.data, attachment.FailedData):
-            return False
-        device_reference = Bot._device_reference_for_source(instance, event.source)
-        return device_reference in state.pending_devices and Bot._activation_event_targets_agent(instance, event)
-
-    @staticmethod
-    def _has_activation_state(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, event
-        return Bot._activation_state(instance) is not None
-
-    @staticmethod
-    def _consume_pending_attach(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-        *,
-        on_empty: collections.abc.Callable[[hsm.Context, "Bot"], None],
-    ) -> None:
-        """Shared attach bookkeeping for activation success and rollback paths."""
-
-        state = Bot._activation_state(instance)
-        if state is None:
-            return
-        device_reference = Bot._device_reference_for_source(instance, event.source)
-        pending_devices = tuple(reference for reference in state.pending_devices if reference != device_reference)
-        attached_devices = state.attached_devices
-        if isinstance(event.data, attachment.AttachCompleteData) and event.data.created and device_reference is not None:
-            attached_devices = (*state.attached_devices, device_reference)
-        Bot._set_activation_state(
-            instance,
-            state.model_copy(update={"pending_devices": pending_devices, "attached_devices": attached_devices}),
-        )
-        if not pending_devices:
-            on_empty(ctx, instance)
-
-    @staticmethod
-    def _mark_activation_device_attached(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        def _done(done_ctx: hsm.Context, done_instance: "Bot") -> None:
-            _ = hsm.dispatch(
-                done_ctx,
-                done_instance,
-                events.ActivatingDoneEvent.with_data(events.ActivatingDoneEventData()),
-            )
-
-        Bot._consume_pending_attach(ctx, instance, event, on_empty=_done)
-
-    @staticmethod
-    def _mark_activation_device_failed(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        state = Bot._activation_state(instance)
-        if state is None:
-            return
-        device_reference = Bot._device_reference_for_source(instance, event.source)
-        pending_devices = tuple(reference for reference in state.pending_devices if reference != device_reference)
-        Bot._set_activation_state(instance, state.model_copy(update={"pending_devices": pending_devices}))
-        if not pending_devices:
-            _ = hsm.dispatch(ctx, instance, _BotActivationRollbackReadyEvent.with_data(None))
-
-    @staticmethod
-    def _mark_rollback_device_attached(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        def _ready(ready_ctx: hsm.Context, ready_instance: "Bot") -> None:
-            _ = hsm.dispatch(ready_ctx, ready_instance, _BotActivationRollbackReadyEvent.with_data(None))
-
-        Bot._consume_pending_attach(ctx, instance, event, on_empty=_ready)
-
-    @staticmethod
-    def _dispatch_activation_rollback_ready_if_no_pending(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        del event
-        state = Bot._activation_state(instance)
-        if state is None or not state.pending_devices:
-            _ = hsm.dispatch(ctx, instance, _BotActivationRollbackReadyEvent.with_data(None))
-
-    @staticmethod
-    async def _rollback_activation_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        del event
-        world = World.from_context(instance.context())
-        state = Bot._activation_state(instance)
-        pending_devices = () if state is None else state.pending_devices
-        attached_devices = () if state is None else state.attached_devices
-        started_devices = () if state is None else state.started_devices
-        cleanup_error: Exception | None = None
-        for reference in reversed(pending_devices):
-            device = instance._devices.get(reference)
-            if device is None:
-                continue
-            if not _device_model_is_running(device):
-                continue
-            try:
-                await hsm.Instance.dispatch(
-                    device,
-                    world.context,
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                )
-            except Exception as error:
-                if cleanup_error is None:
-                    cleanup_error = error
-        for reference in reversed(attached_devices):
-            device = instance._devices.get(reference)
-            if device is None:
-                continue
-            if not _device_model_is_running(device):
-                continue
-            try:
-                await hsm.Instance.dispatch(
-                    device,
-                    world.context,
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                )
-            except Exception as error:
-                if cleanup_error is None:
-                    cleanup_error = error
-        try:
-            await Bot._stop_abilities(ctx, instance)
-        except Exception as error:
-            if cleanup_error is None:
-                cleanup_error = error
-        for device in reversed(started_devices):
-            if _device_model_is_running(device):
-                try:
-                    await hsm.stop(device, world.context)
-                except Exception as error:
-                    if cleanup_error is None:
-                        cleanup_error = error
-        if cleanup_error is not None:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                _BotActivationRollbackFailedEvent.with_data(
-                    _BotActivationRollbackFailedEventData(message=f"Bot activation rollback failed: {cleanup_error}")
+                dataclasses.replace(
+                    events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()),
+                    metadata={
+                        **event.metadata,
+                        _STARTED_DEVICES_METADATA_KEY: tuple(started_devices),
+                        _STARTED_ABILITIES_METADATA_KEY: tuple(started_abilities),
+                        _STARTED_ATTACHMENT_GROUP_METADATA_KEY: group_started,
+                    },
                 ),
             )
-            return
+
+    @staticmethod
+    def _matches_attachment_group(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return event.source == hsm.id(instance._attachments) and event.target == hsm.id(instance)
+
+    @staticmethod
+    async def _activation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        lifetime = instance.context()
+        world = World.from_context(lifetime)
+        if event.metadata.get(_STARTED_ATTACHMENT_GROUP_METADATA_KEY) is True:
+            await hsm.stop(instance._attachments, world.context)
+        started_abilities: object = event.metadata.get(_STARTED_ABILITIES_METADATA_KEY, ())
+        if isinstance(started_abilities, tuple):
+            values = typing.cast(tuple[object, ...], started_abilities)
+            if all(isinstance(value, abilities.Ability) for value in values):
+                owned = typing.cast(tuple[abilities.Ability[typing.Any, typing.Any], ...], values)
+                for ability in reversed(owned):
+                    await hsm.stop(ability, lifetime)
+        started_devices: object = event.metadata.get(_STARTED_DEVICES_METADATA_KEY, ())
+        if isinstance(started_devices, tuple):
+            values = typing.cast(tuple[object, ...], started_devices)
+            devices = tuple(value for value in values if isinstance(value, Device))
+            for device in reversed(devices if len(devices) == len(values) else ()):
+                await hsm.stop(device, world.context)
         _ = hsm.dispatch(ctx, instance, events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()))
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
@@ -847,87 +577,49 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.activity(_activate_activity),
             hsm.transition(
                 hsm.on(attachment.AttachCompleteEvent),
-                hsm.guard(_matches_activation_device_attached),
-                hsm.effect(_mark_activation_device_attached),
-            ),
-            hsm.transition(
-                hsm.on(attachment.AttachFailedEvent),
-                hsm.guard(_matches_activation_device_failed),
-                hsm.effect(_mark_activation_device_failed),
-                hsm.target("../activation_rolling_back"),
-            ),
-            hsm.transition(
-                hsm.on(events.ActivatingDoneEvent),
-                hsm.effect(_clear_activation_state),
+                hsm.guard(_matches_attachment_group),
                 hsm.target("../active"),
             ),
             hsm.transition(
-                hsm.on(events.ActivatingFailedEvent),
-                hsm.guard(_has_activation_state),
-                hsm.target("../activation_rolling_back"),
-            ),
-            hsm.transition(
-                hsm.on(events.ActivatingFailedEvent),
-                hsm.effect(_clear_activation_state),
-                hsm.target("../inactive"),
-            ),
-            hsm.transition(
-                hsm.on(_BotActivationRollbackFailedEvent),
-                hsm.effect(_clear_activation_state),
-                hsm.target("../activation_failed"),
-            ),
-        ),
-        hsm.state(
-            "activation_rolling_back",
-            hsm.entry(_dispatch_activation_rollback_ready_if_no_pending),
-            hsm.transition(
-                hsm.on(attachment.AttachCompleteEvent),
-                hsm.guard(_matches_activation_device_attached),
-                hsm.effect(_mark_rollback_device_attached),
-            ),
-            hsm.transition(
                 hsm.on(attachment.AttachFailedEvent),
-                hsm.guard(_matches_activation_device_failed),
-                hsm.effect(_mark_activation_device_failed),
+                hsm.guard(_matches_attachment_group),
+                hsm.target("../activation_cleanup"),
             ),
             hsm.transition(
-                hsm.on(_BotActivationRollbackReadyEvent),
-                hsm.target("../activation_detaching"),
-            ),
-            hsm.transition(
-                hsm.after(_bot_activation_rollback_timeout),
-                hsm.target("../activation_detaching"),
+                hsm.on(events.ActivatingFailedEvent),
+                hsm.target("../activation_cleanup"),
             ),
         ),
         hsm.state(
-            "activation_detaching",
-            hsm.activity(_rollback_activation_activity),
+            "activation_cleanup",
+            hsm.activity(_activation_cleanup_activity),
             hsm.transition(
                 hsm.on(events.ActivatingFailedEvent),
-                hsm.effect(_clear_activation_state),
                 hsm.target("../inactive"),
             ),
             hsm.transition(
-                hsm.on(_BotActivationRollbackFailedEvent),
-                hsm.effect(_clear_activation_state),
-                hsm.target("../activation_failed"),
-            ),
-            hsm.transition(
-                hsm.after(_bot_activation_rollback_timeout),
-                hsm.effect(_clear_activation_state),
-                hsm.target("../activation_failed"),
+                hsm.after(_bot_deactivation_timeout),
+                hsm.target("../inactive"),
             ),
         ),
-        hsm.state("activation_failed"),
         hsm.state(
             "deactivating",
             hsm.activity(_deactivate_activity),
             hsm.transition(
-                hsm.on(events.DeactivatingDoneEvent),
-                hsm.target("../inactive"),
+                hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
+                hsm.guard(_matches_attachment_group),
+                hsm.target("../deactivation_cleanup"),
             ),
             hsm.transition(
-                hsm.on(_BotDeactivatingFailedEvent),
+                hsm.after(_bot_deactivation_timeout),
+                hsm.target("../deactivation_cleanup"),
+            ),
+        ),
+        hsm.state(
+            "deactivation_cleanup",
+            hsm.activity(_deactivation_cleanup_activity),
+            hsm.transition(
+                hsm.on(events.DeactivatingDoneEvent),
                 hsm.target("../inactive"),
             ),
             hsm.transition(

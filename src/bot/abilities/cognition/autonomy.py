@@ -165,9 +165,7 @@ def _child_operation_id(parent_operation_id: str, index: int) -> str:
 def _habit_select_input() -> memory.InputData:
     """Memory ability input: SELECT ACTIVE habits + triggers (skip DRAFT/BROKEN)."""
 
-    return memory.InputData(
-        statements=memory.compile_statements(*habit_storage.select_active_habits_clauses())
-    )
+    return memory.InputData(statements=memory.compile_statements(*habit_storage.select_active_habits_clauses()))
 
 
 def _habits_from_memory_output(output: memory.OutputData) -> tuple[Instance, ...]:
@@ -325,11 +323,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         Returns the updated inventory Instance.
         """
 
-        updated = (
-            habit_storage.mark_used(habit)
-            if outcome == "used"
-            else habit_storage.mark_failed(habit)
-        )
+        updated = habit_storage.mark_used(habit) if outcome == "used" else habit_storage.mark_failed(habit)
         store = instance._memory
         if store is not None:
             try:
@@ -358,7 +352,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance._habits = ()
             _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
             return
-        _ = await store.attach(owner=instance, ctx=ctx)
+        _ = await store.attach(
+            instance.context(),
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                source=hsm.id(instance),
+            ),
+        )
         load_event = dataclasses.replace(
             store.input_event.with_data_and_id(
                 _habit_select_input(),
@@ -444,14 +444,27 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         instance._habits = ()
         store = instance._memory
         if store is not None:
-            _ = store.detach(ctx=ctx)
+            _ = store.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _detach_active(ctx: hsm.Context, instance: "Autonomy") -> None:
         active = instance._active_behavior
         if active is None:
             return
-        _ = active.detach(ctx=ctx)
+        _ = active.detach(
+            instance.context(),
+            dataclasses.replace(
+                attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                source=hsm.id(instance),
+            ),
+        )
         instance._active_behavior = None
 
     @staticmethod
@@ -654,7 +667,6 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             )
             return
         instance._active_behavior = behavior
-        _ = await behavior.attach(owner=instance, ctx=ctx)
         child_metadata = dict(event.metadata)
         # Preserve stimulus provenance (e.g. bot.phone.call_id) for habit callbacks.
         stimulus = data.cognition_input.stimulus
@@ -671,15 +683,72 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         child_metadata[_AUTONOMY_INPUT_METADATA_KEY] = data.cognition_input
         child_metadata[_AUTONOMY_CANDIDATES_METADATA_KEY] = data.candidates
         child_metadata[_AUTONOMY_INDEX_METADATA_KEY] = data.index
-        payload = habit_input_payload(data.cognition_input)
+        _ = await behavior.attach(
+            instance.context(),
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                id=_child_operation_id(data.operation_id, data.index),
+                source=hsm.id(instance),
+                metadata=child_metadata,
+            ),
+        )
+
+    @staticmethod
+    def _matches_behavior_attach_complete(
+        ctx: hsm.Context,
+        instance: "Autonomy",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        active = instance._active_behavior
+        data = event.data
+        return (
+            active is not None
+            and isinstance(data, attachment.AttachCompleteData)
+            and data.actor is instance
+            and event.target == hsm.id(instance)
+            and event.source == hsm.id(active)
+            and _cognition_input_from_event(event) is not None
+        )
+
+    @staticmethod
+    def _matches_behavior_attach_failure(
+        ctx: hsm.Context,
+        instance: "Autonomy",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        active = instance._active_behavior
+        data = event.data
+        return (
+            active is not None
+            and isinstance(data, attachment.FailedData)
+            and data.actor is instance
+            and event.target == hsm.id(instance)
+            and event.source == hsm.id(active)
+            and _cognition_input_from_event(event) is not None
+        )
+
+    @staticmethod
+    def _dispatch_behavior_input(
+        ctx: hsm.Context,
+        instance: "Autonomy",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        behavior = instance._active_behavior
+        cognition_input = _cognition_input_from_event(event)
+        if behavior is None or cognition_input is None:
+            return
+        payload = habit_input_payload(cognition_input)
         input_event = dataclasses.replace(
             behavior.input_event.with_data_and_id(
                 payload,
-                _child_operation_id(data.operation_id, data.index),
+                event.id,
             ),
-            metadata=child_metadata,
+            metadata=dict(event.metadata),
         )
-        _ = hsm.dispatch(ctx, behavior, input_event)
+        _ = hsm.dispatch(instance.context(), behavior, input_event)
 
     @staticmethod
     def _matches_behavior_output(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
@@ -714,17 +783,11 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
 
     @staticmethod
     def _behavior_output_is_handled(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
-        return (
-            Autonomy._matches_behavior_output(ctx, instance, event)
-            and _coerce_habit_output(event.data) is not None
-        )
+        return Autonomy._matches_behavior_output(ctx, instance, event) and _coerce_habit_output(event.data) is not None
 
     @staticmethod
     def _behavior_output_is_unhandled(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
-        return (
-            Autonomy._matches_behavior_output(ctx, instance, event)
-            and _coerce_habit_output(event.data) is None
-        )
+        return Autonomy._matches_behavior_output(ctx, instance, event) and _coerce_habit_output(event.data) is None
 
     @staticmethod
     async def _dispatch_behavior_activity(
@@ -789,9 +852,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             ctx,
             instance,
             dataclasses.replace(
-                _ApplyCompletedEvent.with_data(
-                    _ApplyCompletedEventData(output=output, operation_id=parent_id)
-                ),
+                _ApplyCompletedEvent.with_data(_ApplyCompletedEventData(output=output, operation_id=parent_id)),
                 id=parent_id,
                 metadata=public_metadata,
             ),
@@ -808,8 +869,8 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         active = instance._active_behavior
         is_behavior_failure = (
             active is not None
-            and event.name == active.failed_event.name
             and event.source == hsm.id(active)
+            and event.name in {active.failed_event.name, attachment.AttachFailedEvent.name}
         )
         failed_habit = _habit_at_index(candidates, index) if is_behavior_failure else None
         Autonomy._detach_active(ctx, instance)
@@ -835,9 +896,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ApplyCompletedEvent.with_data(
-                        _ApplyCompletedEventData(output=None, operation_id=parent_id)
-                    ),
+                    _ApplyCompletedEvent.with_data(_ApplyCompletedEventData(output=None, operation_id=parent_id)),
                     id=parent_id,
                     metadata=_public_metadata(dict(event.metadata)),
                 ),
@@ -1001,6 +1060,18 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.activity(_start_candidate_activity),
             hsm.exit(_detach_on_detach),
             hsm.transition(
+                hsm.on(attachment.AttachCompleteEvent),
+                hsm.guard(_matches_behavior_attach_complete),
+                hsm.effect(_dispatch_behavior_input),
+                hsm.target("/Autonomy/running"),
+            ),
+            hsm.transition(
+                hsm.on(attachment.AttachFailedEvent),
+                hsm.guard(_matches_behavior_attach_failure),
+                hsm.effect(_advance_candidate),
+                hsm.target("/Autonomy/running"),
+            ),
+            hsm.transition(
                 hsm.on(_StartCandidateEvent),
                 hsm.guard(_has_start_candidate),
                 # Rebuild next candidate without leaving the start path.
@@ -1033,11 +1104,6 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_matches_behavior_failure),
                 hsm.effect(_advance_candidate),
-                hsm.target("/Autonomy/running"),
-            ),
-            # Activity finished dispatching habit input; wait for terminal in running.
-            hsm.transition(
-                hsm.after(_zero_timeout),
                 hsm.target("/Autonomy/running"),
             ),
         ),

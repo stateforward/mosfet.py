@@ -18,6 +18,7 @@ from bot.protocols import attachment
 
 from tests.type_helpers import invalid_value, object_dict
 
+
 class SlowTextGenerator(text.TextGenerator):
     release: asyncio.Event
 
@@ -28,6 +29,7 @@ class SlowTextGenerator(text.TextGenerator):
     async def generate(self, input: text.InputData) -> text.OutputData:
         _ = await self.release.wait()
         return text.OutputData(content=input.messages[-1].content.upper())
+
 
 class RecordingDelayedTextGenerator(text.TextGenerator):
     calls: list[str]
@@ -45,16 +47,19 @@ class RecordingDelayedTextGenerator(text.TextGenerator):
             _ = await self.release_first.wait()
         return text.OutputData(content=content.upper())
 
+
 class EchoTextGenerator(text.TextGenerator):
     @override
     async def generate(self, input: text.InputData) -> text.OutputData:
         return text.OutputData(content=input.messages[-1].content.upper())
+
 
 class WrongTextGenerator(text.TextGenerator):
     @override
     async def generate(self, input: text.InputData) -> text.OutputData:
         del input
         return invalid_value(text.OutputData, "not text generation output")
+
 
 class RecordingTextGeneration(text.TextGeneration):
     outputs: list[text.OutputData]
@@ -77,6 +82,7 @@ class RecordingTextGeneration(text.TextGeneration):
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
+
 def _record_ability_terminal_owner_event(
     ctx: hsm.Context,
     instance: "AbilityTerminalOwner",
@@ -84,6 +90,7 @@ def _record_ability_terminal_owner_event(
 ) -> None:
     del ctx
     instance.record(event)
+
 
 class AbilityTerminalOwner(hsm.Instance):
     model: typing.ClassVar[hsm.Model | None] = hsm.define(
@@ -119,6 +126,7 @@ class AbilityTerminalOwner(hsm.Instance):
             attachment.DetachFailedEvent.name,
         }:
             self.lifecycle.append(event)
+
 
 class _DirectApplyReferenceVisitor(ast.NodeVisitor):
     relative_path: str
@@ -168,9 +176,11 @@ class _DirectApplyReferenceVisitor(ast.NodeVisitor):
             return ".".join(self._scope)
         return "<module>"
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 async def start_recorded_generation(
     generation: RecordingTextGeneration,
@@ -178,8 +188,12 @@ async def start_recorded_generation(
     ctx = hsm.Context()
     owner = AbilityTerminalOwner()
     _ = await hsm.started(ctx, owner, require_model(owner.model))
-    _ = await generation.attach(owner=owner, ctx=ctx)
+    _ = await generation.attach(
+        ctx,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
     return ctx, owner
+
 
 def test_ability() -> None:
     ability = abilities.Ability[object, object]()
@@ -221,6 +235,7 @@ def test_ability() -> None:
     assert output_schema["examples"] == ["Summary text."]
     assert "output" not in object_dict(output_schema.get("properties", {}))
 
+
 def test_ability_operation_model_helper_is_removed_from_ability_sources() -> None:
     ability_sources = pathlib.Path("src/bot/abilities").rglob("*.py")
 
@@ -228,16 +243,19 @@ def test_ability_operation_model_helper_is_removed_from_ability_sources() -> Non
         source = source_path.read_text()
         assert "ability_operation_model" not in source, source_path
 
+
 def test_ability_does_not_cache_transient_output_or_failure() -> None:
     ability = abilities.Ability[object, object]()
 
     assert not hasattr(ability, "last_output")
     assert not hasattr(ability, "last_failure")
 
+
 def test_result_bridge_helper_is_removed() -> None:
     assert not hasattr(ability_module, "apply" + "_ability")
     assert not hasattr(abilities_module, "apply" + "_ability")
     assert "apply" + "_ability" not in ability_module.__all__
+
 
 def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
     async def run() -> list[hsm.Event[typing.Any]]:
@@ -246,8 +264,14 @@ def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
         owner = AbilityTerminalOwner()
 
         _ = await hsm.started(ctx, owner, require_model(owner.model))
-        _ = await child.attach(owner=owner, ctx=ctx)
-        _ = await child.detach(ctx=ctx)
+        _ = await child.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
+        _ = await child.detach(
+            ctx,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
+        )
 
         return owner.lifecycle
 
@@ -308,6 +332,7 @@ def test_ability_reports_correlated_attachment_success_and_conflict() -> None:
     assert failure.actor is other_owner
     assert failure.kind is attachment.FailureKind.CONFLICT
 
+
 def test_ability_owner_public_mutators_are_removed() -> None:
     ability = abilities.Ability[object, object]()
 
@@ -315,6 +340,7 @@ def test_ability_owner_public_mutators_are_removed() -> None:
     assert not hasattr(ability, "claim_owner")
     assert not hasattr(ability, "clear_owner")
     assert not hasattr(ability_module, "claim_ability_owner")
+
 
 def test_ability_attach_does_not_poll_active_state(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fail_sleep(delay: float) -> None:
@@ -328,7 +354,10 @@ def test_ability_attach_does_not_poll_active_state(monkeypatch: pytest.MonkeyPat
         owner = AbilityTerminalOwner()
         _ = await hsm.started(ctx, owner, require_model(owner.model))
 
-        _ = await generation.attach(owner=owner, ctx=ctx)
+        _ = await generation.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
 
         return generation.state()
 
@@ -336,12 +365,14 @@ def test_ability_attach_does_not_poll_active_state(monkeypatch: pytest.MonkeyPat
 
     assert state.endswith("/attached/behavior/idle")
 
+
 def test_ability_attach_source_does_not_poll_active_state() -> None:
     source = pathlib.Path(ability_module.__file__).read_text()
 
     assert ".state()" not in source
     assert "_await_ability_initialized" not in source
     assert "asyncio.sleep(0)" not in source
+
 
 def test_production_code_does_not_call_private_apply_hook_directly() -> None:
     root = pathlib.Path(__file__).resolve().parents[3]
@@ -357,6 +388,7 @@ def test_production_code_does_not_call_private_apply_hook_directly() -> None:
     disallowed = {reference for reference in references if not _is_modeled_ability_apply_hook_reference(reference)}
     assert disallowed == set()
 
+
 def _is_modeled_ability_apply_hook_reference(reference: str) -> bool:
     path, qualname, kind = reference.split(":")
     del path
@@ -366,6 +398,7 @@ def _is_modeled_ability_apply_hook_reference(reference: str) -> bool:
             ".run_behavior_activity",
         )
     )
+
 
 def test_apply_dispatches_input_event_without_result_bridge() -> None:
     async def run() -> tuple[object, list[text.OutputData]]:
@@ -391,6 +424,7 @@ def test_apply_dispatches_input_event_without_result_bridge() -> None:
 
     assert result is None
     assert outputs == [text.OutputData(content="HELLO")]
+
 
 def test_public_output_event_does_not_complete_in_flight_ability() -> None:
     async def run() -> None:
@@ -425,6 +459,7 @@ def test_public_output_event_does_not_complete_in_flight_ability() -> None:
         assert generation.state() == "/RecordingTextGenerationLifecycle/attached/behavior/idle"
 
     asyncio.run(run())
+
 
 def test_repeated_input_is_deferred_while_ability_is_applying() -> None:
     async def run() -> None:
@@ -463,6 +498,7 @@ def test_repeated_input_is_deferred_while_ability_is_applying() -> None:
 
     asyncio.run(run())
 
+
 def test_text_generation_rejects_input_event_with_wrong_payload_type() -> None:
     async def run() -> None:
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
@@ -493,6 +529,7 @@ def test_text_generation_rejects_input_event_with_wrong_payload_type() -> None:
         assert owner.outputs == [text.OutputData(content="HELLO")]
 
     asyncio.run(run())
+
 
 def test_text_generation_routes_wrong_output_type_to_failure() -> None:
     async def run() -> None:

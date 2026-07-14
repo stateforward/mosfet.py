@@ -2,6 +2,7 @@
 
 from bot import abilities
 from bot.abilities import memory
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -9,7 +10,7 @@ import typing
 
 import hsm
 
-from tests.hsm_instance_state import remember_ability_terminal_owner
+from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
 _TResult = typing.TypeVar("_TResult")
 
@@ -237,13 +238,21 @@ async def start_ability_tree(*abilities: abilities.Ability[typing.Any, typing.An
         owner = MemoryFixtureAbilityTerminalMirror(ability)
         assert owner.model is not None
         _ = await hsm.started(ctx, owner, owner.model)
-        _ = await ability.attach(owner=owner, ctx=ctx)
+        _ = await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
         remember_ability_terminal_owner(ability, owner)
 
 
 async def stop_ability_tree(*abilities: abilities.Ability[typing.Any, typing.Any]) -> None:
     for ability in abilities:
-        ability.detach()
+        owner = ability_terminal_owner(ability)
+        assert owner is not None
+        _ = await ability.detach(
+            ability.context(),
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
+        )
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 2.0) -> None:

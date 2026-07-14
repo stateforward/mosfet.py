@@ -471,14 +471,6 @@ class TimeoutAbilityAgent(AbilityAgent):
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
 
 
-class ActivationRollbackTimeoutAgent(BasicAgent):
-    _activation_rollback_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=100)
-
-
-class FastActivationRollbackTimeoutAgent(BasicAgent):
-    _activation_rollback_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=10)
-
-
 class FastDeactivationTimeoutAgent(BasicAgent):
     _deactivation_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=10)
 
@@ -517,20 +509,6 @@ class LifecycleDispatchFailingDevice(Device):
         if event.name in {attachment.AttachEvent.name, attachment.DetachEvent.name}:
             raise RuntimeError("device lifecycle dispatch override failed")
         return super().dispatch(ctx, event)
-
-
-class StopFailingDevice(Device):
-    @typing.override
-    def stop(self, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
-        del ctx
-        raise RuntimeError("device stop failed")
-
-
-class StopHangingDevice(Device):
-    @typing.override
-    async def stop(self, ctx: hsm.Context) -> None:
-        del ctx
-        _ = await asyncio.Event().wait()
 
 
 class SnapshotFailingDevice(Device):
@@ -621,15 +599,112 @@ def test_bot_activation_deduplicates_device_aliases() -> None:
     assert attached_to_agent
 
 
-def test_bot_activation_rollback_preserves_preexisting_device_attachment() -> None:
+def test_bot_uses_one_attachment_group_for_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[int, int, bool, str]:
+        active_bot = basic_agent(devices={"device": Device()})
+        world = World()
+        attach_calls = 0
+        detach_calls = 0
+        group_is_private = False
+        group_attach = attachment.Group.attach
+        group_detach = attachment.Group.detach
+
+        def attach_group(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> collections.abc.Awaitable[None]:
+            nonlocal attach_calls, group_is_private
+            attach_calls += 1
+            group_is_private = group.context().value(hsm.Keys.Instances) is not world.context.value(hsm.Keys.Instances)
+            return group_attach(group, ctx, event)
+
+        def detach_group(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.DetachData],
+        ) -> collections.abc.Awaitable[None]:
+            nonlocal detach_calls
+            detach_calls += 1
+            return group_detach(group, ctx, event)
+
+        monkeypatch.setattr(attachment.Group, "attach", attach_group)
+        monkeypatch.setattr(attachment.Group, "detach", detach_group)
+
+        _ = await active_bot.attach(world)
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        _ = await active_bot.detach(world)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return attach_calls, detach_calls, group_is_private, active_bot.state()
+
+    attach_calls, detach_calls, group_is_private, state = asyncio.run(run())
+
+    assert attach_calls == 1
+    assert detach_calls == 1
+    assert group_is_private
+    assert state == "/Bot/inactive"
+
+
+def test_bot_rejects_world_started_lifecycle_ability_without_stopping_it() -> None:
+    async def run() -> tuple[str, str, bool]:
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = AbilityAgent(devices={}, cognition=cognition_ability)
+        world = World()
+        model = cognition_ability.model
+        assert model is not None
+        _ = await hsm.started(world.context, cognition_ability, model)
+
+        _ = await active_bot.attach(world)
+        await asyncio.sleep(0.05)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+
+        return (
+            active_bot.state(),
+            cognition_ability.state(),
+            cognition_ability.context().value(hsm.Keys.Instances) is world.context.value(hsm.Keys.Instances),
+        )
+
+    state, ability_state, ability_stayed_in_world = asyncio.run(run())
+
+    assert state == "/Bot/inactive"
+    assert ability_state != "/IgnoreAbilityLifecycle"
+    assert ability_stayed_in_world
+
+
+def test_bot_deduplicates_repeated_lifecycle_ability_instance() -> None:
+    async def run() -> str:
+        shared = ProbeAbility()
+        active_bot = AbilityAgent(
+            devices={},
+            cognition=IgnoreAbility(),
+            input=(shared,),
+            output=(shared,),
+        )
+        world = World()
+
+        _ = await active_bot.attach(world)
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        _ = await active_bot.detach(world)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return active_bot.state()
+
+    assert asyncio.run(run()) == "/Bot/inactive"
+
+
+def test_bot_attachment_group_preserves_preexisting_device_attachment() -> None:
     async def run() -> tuple[str, bool]:
         first_device = Device()
         failing_device = ImmediatelyFailingInitializingDevice()
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
         world = World()
 
+        _ = await hsm.started(world.context, active_bot, active_bot.model)
         _ = await hsm.started(world.context, first_device, first_device.model)
-        await first_device.attach(world, active_bot)
+        await first_device.attach(
+            world.context,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=active_bot)),
+        )
+        await wait_until(lambda: device_bots(first_device) == (active_bot,))
         assert device_bots(first_device) == (active_bot,)
 
         _ = await active_bot.attach(world)
@@ -720,7 +795,7 @@ def test_bot_activation_rolls_back_when_device_failed_before_attachment() -> Non
     assert failing_stopped
 
 
-def test_bot_activation_rollback_uses_modeled_device_events_not_dispatch_override() -> None:
+def test_bot_attachment_group_uses_modeled_device_events_not_dispatch_override() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool]:
         first_device = LifecycleDispatchFailingDevice()
         failing_device = ImmediatelyFailingInitializingDevice()
@@ -772,113 +847,7 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
     assert failing_stopped
 
 
-def test_bot_activation_rollback_failure_enters_failed_state() -> None:
-    async def run() -> tuple[str, tuple[hsm.Instance, ...], str]:
-        first_device = StopFailingDevice()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
-
-        _ = await active_bot.attach(world)
-        await asyncio.sleep(0.02)
-        await wait_until(lambda: active_bot.state() == "/Bot/activation_failed")
-
-        return active_bot.state(), device_bots(first_device), first_device.state()
-
-    state, first_bots, first_state = asyncio.run(run())
-
-    assert state == "/Bot/activation_failed"
-    assert first_bots == ()
-    assert first_state == "/Device/detached"
-
-
-def test_bot_activation_detaching_times_out_hanging_cleanup() -> None:
-    async def run() -> tuple[str, tuple[hsm.Instance, ...], str]:
-        first_device = StopHangingDevice()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = FastActivationRollbackTimeoutAgent(devices={"first": first_device, "failing": failing_device})
-        world = World()
-
-        _ = await active_bot.attach(world)
-        await asyncio.sleep(0.05)
-        await wait_until(lambda: active_bot.state() == "/Bot/activation_failed")
-
-        return active_bot.state(), device_bots(first_device), first_device.state()
-
-    state, first_bots, first_state = asyncio.run(run())
-
-    assert state == "/Bot/activation_failed"
-    assert first_bots == ()
-    assert first_state == "/Device/detached"
-
-
-def test_bot_activation_rollback_times_out_missing_device_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool]:
-        silent_device = Device()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = ActivationRollbackTimeoutAgent(devices={"silent": silent_device, "failing": failing_device})
-        world = World()
-        original_dispatch = hsm.Instance.dispatch
-
-        def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-            if instance is silent_device and event.name == attachment.AttachEvent.name:
-                future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                future.set_result(None)
-                return future
-            return original_dispatch(instance, ctx, event)
-
-        monkeypatch.setattr(hsm.Instance, "dispatch", dispatch)
-
-        _ = await active_bot.attach(world)
-        await asyncio.sleep(0.15)
-        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
-
-        return (
-            active_bot.state(),
-            device_bots(silent_device),
-            silent_device.state() == "/Device",
-            failing_device.state() == "/Device",
-        )
-
-    state, silent_bots, silent_stopped, failing_stopped = asyncio.run(run())
-
-    assert state == "/Bot/inactive"
-    assert silent_bots == ()
-    assert silent_stopped
-    assert failing_stopped
-
-
-def test_bot_activation_rollback_timeout_clears_pending_device_attachment() -> None:
-    async def run() -> tuple[str, tuple[hsm.Instance, ...], str, tuple[hsm.Instance, ...]]:
-        terminal_states = {"/Bot/inactive", "/Bot/activation_failed"}
-        release = asyncio.Event()
-        slow_device = SlowInitializingDevice(release)
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = FastActivationRollbackTimeoutAgent(devices={"slow": slow_device, "failing": failing_device})
-        world = World()
-
-        _ = await active_bot.attach(world)
-        await asyncio.sleep(0.05)
-        await wait_until(lambda: active_bot.state() in terminal_states)
-
-        agents_after_rollback = device_bots(slow_device)
-        release.set()
-        await wait_until(lambda: slow_device.state() == "/Device/detached")
-        await hsm.stop(slow_device, world.context)
-        _ = await hsm.started(world.context, slow_device, slow_device.model)
-        await wait_until(lambda: slow_device.state() == "/Device/detached")
-
-        return active_bot.state(), agents_after_rollback, slow_device.state(), device_bots(slow_device)
-
-    state, agents_after_rollback, slow_state, agents_after_restart = asyncio.run(run())
-
-    assert state in {"/Bot/inactive", "/Bot/activation_failed"}
-    assert agents_after_rollback == ()
-    assert slow_state == "/Device/detached"
-    assert agents_after_restart == ()
-
-
-def test_bot_activation_rollback_handles_multiple_firmware_initialization_failures() -> None:
+def test_bot_attachment_group_handles_multiple_firmware_initialization_failures() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool, bool]:
         release = asyncio.Event()
         first_device = Device()
@@ -1085,10 +1054,9 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert model.initial == "/Bot/.initial"
     assert "/Bot/inactive" in model.members
     assert "/Bot/activating" in model.members
-    assert "/Bot/activation_rolling_back" in model.members
-    assert "/Bot/activation_detaching" in model.members
-    assert "/Bot/activation_failed" in model.members
+    assert "/Bot/activation_cleanup" in model.members
     assert "/Bot/deactivating" in model.members
+    assert "/Bot/deactivation_cleanup" in model.members
     assert "/Bot/active" in model.members
     assert "/Bot/active/unfocused" in model.members
     assert "/Bot/active/focused" in model.members
@@ -1096,19 +1064,13 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.activate" in transitions["/Bot/inactive"]
     assert "attachment.attach.complete" in transitions["/Bot/activating"]
     assert "attachment.attach.failed" in transitions["/Bot/activating"]
-    assert "bot.activated" in transitions["/Bot/activating"]
     assert "bot.activating.failed" in transitions["/Bot/activating"]
-    assert "bot.activation.rollback.failed" in transitions["/Bot/activating"]
-    assert "attachment.attach.complete" in transitions["/Bot/activation_rolling_back"]
-    assert "attachment.attach.failed" in transitions["/Bot/activation_rolling_back"]
-    assert "bot.activation.rollback.ready" in transitions["/Bot/activation_rolling_back"]
-    assert "bot.activating.failed" in transitions["/Bot/activation_detaching"]
-    assert "bot.activation.rollback.failed" in transitions["/Bot/activation_detaching"]
-    assert any("_bot_activation_rollback_timeout" in event for event in transitions["/Bot/activation_rolling_back"])
-    assert any("_bot_activation_rollback_timeout" in event for event in transitions["/Bot/activation_detaching"])
-    assert "bot.deactivated" in transitions["/Bot/deactivating"]
-    assert "bot.deactivating.failed" in transitions["/Bot/deactivating"]
+    assert "bot.activating.failed" in transitions["/Bot/activation_cleanup"]
+    assert "attachment.detached" in transitions["/Bot/deactivating"]
+    assert "attachment.detach.failed" in transitions["/Bot/deactivating"]
+    assert "bot.deactivated" in transitions["/Bot/deactivation_cleanup"]
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivating"])
+    assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivation_cleanup"])
     assert "world.sound" in transitions["/Bot/active"]
     assert "world.visual" in transitions["/Bot/active"]
     assert "bot.deactivate" in transitions["/Bot/active"]
@@ -2083,9 +2045,7 @@ def test_focused_agent_dispatches_multi_event_focus_selection() -> None:
             active_bot.context(),
             bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(
-            lambda: bot_has_focus(active_bot) and active_bot.state() == "/Bot/active/focused"
-        )
+        await wait_until(lambda: bot_has_focus(active_bot) and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), bot_has_focus(active_bot), active_bot.actions
 
@@ -2114,9 +2074,7 @@ def test_focused_agent_dispatches_multi_event_answer_then_focus() -> None:
 
         _ = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
-        await wait_until(
-            lambda: bot_has_focus(active_bot) and active_bot.state() == "/Bot/active/focused"
-        )
+        await wait_until(lambda: bot_has_focus(active_bot) and active_bot.state() == "/Bot/active/focused")
         assert device_firmware(phone) is not None
 
         return active_bot.state(), device_firmware(phone).state(), active_bot.actions
@@ -2139,7 +2097,9 @@ def test_focused_agent_dispatches_multi_event_answer_then_focus() -> None:
 
 
 def test_focused_agent_ability_can_change_focus_device() -> None:
-    async def run() -> tuple[str, list[cognition.InputData], list[processing.InputData], list[cognition.types.OutputData]]:
+    async def run() -> tuple[
+        str, list[cognition.InputData], list[processing.InputData], list[cognition.types.OutputData]
+    ]:
         ability = SequenceAbility(
             no_output("stay on phone"),
             focus_output("browser", "change focus"),
@@ -2181,7 +2141,9 @@ def test_focused_agent_ability_can_change_focus_device() -> None:
 
 
 def test_focused_agent_rejects_stale_completion_focus_outside_current_input() -> None:
-    async def run() -> tuple[str, list[cognition.InputData], list[processing.InputData], list[cognition.types.OutputData]]:
+    async def run() -> tuple[
+        str, list[cognition.InputData], list[processing.InputData], list[cognition.types.OutputData]
+    ]:
         release = asyncio.Event()
         ability = BlockingSequenceAbility(
             release=release,

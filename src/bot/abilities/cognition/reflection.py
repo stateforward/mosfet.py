@@ -469,9 +469,7 @@ def _last_diagnostic_messages(metadata: dict[str, object]) -> tuple[str, ...] | 
 
 def _load_habit(store: memory.Memory, *, name: str) -> Instance | None:
     out = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_habit_by_name_clauses(name))
-        )
+        memory.InputData(statements=memory.compile_statements(*habit_storage.select_habit_by_name_clauses(name)))
     )
     if len(out.results) < 2:
         return None
@@ -485,9 +483,7 @@ def _load_all_habits(store: memory.Memory) -> tuple[Instance, ...]:
     """Load full habit inventory (any status) for Reflection select context."""
 
     out = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
-        )
+        memory.InputData(statements=memory.compile_statements(*habit_storage.select_all_habits_clauses()))
     )
     if len(out.results) < 2:
         return ()
@@ -682,7 +678,13 @@ class Reflection(processing.Processing):
             instance._memory,
         )
         for child in children:
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
@@ -699,7 +701,14 @@ class Reflection(processing.Processing):
             instance._memory,
         )
         for child in children:
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _has_reflection_input(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -1309,8 +1318,7 @@ class Reflection(processing.Processing):
             name=data.written.name,
             source=data.written.source,
             triggers=data.written.triggers or (data.existing.triggers if data.existing else ()),
-            description=data.written.description
-            or (data.existing.description if data.existing else None),
+            description=data.written.description or (data.existing.description if data.existing else None),
             habit_instance=None,
             existing=data.existing,
         )

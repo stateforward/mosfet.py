@@ -1,4 +1,3 @@
-import bot
 from .. import ability
 from .. import processing
 
@@ -126,13 +125,14 @@ def _coerce_output(output: object) -> OutputData:
                 for item in selections
             )
         )
-        return typing.cast(OutputData, validated)
+        return validated
     if isinstance(output, list | tuple):
-        validated = OUTPUT_SCHEMA_CONTRACT.validate_python(tuple(output))
-        return typing.cast(OutputData, validated)
+        values = typing.cast(list[object] | tuple[object, ...], output)
+        validated = OUTPUT_SCHEMA_CONTRACT.validate_python(tuple(values))
+        return validated
     if isinstance(output, dict) and "event" in output:
         validated = OUTPUT_SCHEMA_CONTRACT.validate_python((output,))
-        return typing.cast(OutputData, validated)
+        return validated
     raise TypeError("Cognition processing produced output that does not match its output schema.")
 
 
@@ -215,7 +215,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in Cognition._cognition_children(instance):
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
@@ -227,7 +233,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
         if event.name != attachment.DetachEvent.name:
             return
         for child in Cognition._cognition_children(instance):
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _build_processing_input(
@@ -808,7 +821,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         data = event.data
         if not is_input(data):
             return False
-        return isinstance(data.stimulus, bot.InputEventData | hsm.Event)
+        return True
 
     @staticmethod
     def _has_output(

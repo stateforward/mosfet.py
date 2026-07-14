@@ -1,6 +1,7 @@
 from bot import abilities
 from bot.abilities import reading
 from bot.abilities import vision
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -14,12 +15,14 @@ import pytest
 
 import bot.abilities.reading.reading as reading_module
 
-from tests.hsm_instance_state import start_ability_tree
+from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
+
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 class StubVisualClassifier(vision.VisualClassifier):
     outputs: list[vision.classification.OutputData]
@@ -33,6 +36,7 @@ class StubVisualClassifier(vision.VisualClassifier):
     async def classify(self, input: vision.classification.InputData) -> vision.classification.OutputData:
         self.calls.append(input)
         return self.outputs.pop(0)
+
 
 class HangingVisualClassifier(vision.VisualClassifier):
     cancelled: bool
@@ -49,6 +53,7 @@ class HangingVisualClassifier(vision.VisualClassifier):
             self.cancelled = True
         raise AssertionError("unreachable")
 
+
 class StubTextDecoder(abilities.Decoder[str, str]):
     calls: list[str]
 
@@ -59,6 +64,7 @@ class StubTextDecoder(abilities.Decoder[str, str]):
     async def decode(self, input: str) -> str:
         self.calls.append(input)
         return f"text:{input}"
+
 
 class StubImageDecoder(abilities.Decoder[bytes, str]):
     calls: list[bytes]
@@ -71,6 +77,7 @@ class StubImageDecoder(abilities.Decoder[bytes, str]):
         self.calls.append(input)
         return "image text"
 
+
 class StubOutputEncoder(abilities.Encoder[reading.reading.OutputData, reading.reading.OutputData]):
     calls: list[reading.reading.OutputData]
 
@@ -81,6 +88,7 @@ class StubOutputEncoder(abilities.Encoder[reading.reading.OutputData, reading.re
     async def encode(self, input: reading.reading.OutputData) -> reading.reading.OutputData:
         self.calls.append(input)
         return input
+
 
 class HangingOutputEncoder(abilities.Encoder[reading.reading.OutputData, reading.reading.OutputData]):
     cancelled: bool
@@ -96,6 +104,7 @@ class HangingOutputEncoder(abilities.Encoder[reading.reading.OutputData, reading
         finally:
             self.cancelled = True
         raise AssertionError("unreachable")
+
 
 class RecordingReading(reading.Reading):
     outputs: list[reading.reading.OutputData]
@@ -130,11 +139,13 @@ class RecordingReading(reading.Reading):
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
+
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
     for _ in range(100):
         if condition():
             return
         await asyncio.sleep(0)
+
 
 def stub_reading(
     *,
@@ -149,6 +160,7 @@ def stub_reading(
         image_decoder=image_decoder or StubImageDecoder(),
         output_encoder=output_encoder or StubOutputEncoder(),
     )
+
 
 def test_reading_input_separates_text_and_image_payloads() -> None:
     text_input = reading.reading.InputData(kind="text", content="read this")
@@ -168,6 +180,7 @@ def test_reading_input_separates_text_and_image_payloads() -> None:
     with pytest.raises(ValueError):
         _ = reading.reading.InputData(kind="image", content="not image")
 
+
 def test_reading_output_records_normalized_text_and_source_kind() -> None:
     output = reading.reading.OutputData(text="normalized", source_kind="text")
 
@@ -177,6 +190,7 @@ def test_reading_output_records_normalized_text_and_source_kind() -> None:
 
     with pytest.raises(ValueError):
         _ = reading.reading.OutputData(text="", source_kind="image", confidence=1.1)
+
 
 def test_reading_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(reading.Reading.input_event.schema)
@@ -191,6 +205,7 @@ def test_reading_events_use_concrete_pydantic_schemas() -> None:
 
     assert reading.Reading.failed_event.name == "bot.ability.reading.failed"
     assert failed_schema == reading.FailedEventData.model_json_schema()
+
 
 def test_reading_records_injected_classification_decoding_and_encoding_abilities() -> None:
     visual_classifier = StubVisualClassifier()
@@ -207,7 +222,9 @@ def test_reading_records_injected_classification_decoding_and_encoding_abilities
     stored_visual_classifier = typing.cast(vision.VisualClassification, instance_state["_visual_classifier"])
     stored_text_decoder = typing.cast(abilities.Decoding[str, str], instance_state["_text_decoder"])
     stored_image_decoder = typing.cast(abilities.Decoding[bytes, str], instance_state["_image_decoder"])
-    stored_output_encoder = typing.cast(abilities.Encoding[reading.OutputData, reading.OutputData], instance_state["_output_encoder"])
+    stored_output_encoder = typing.cast(
+        abilities.Encoding[reading.OutputData, reading.OutputData], instance_state["_output_encoder"]
+    )
     subordinate_abilities = typing.cast(tuple[object, ...], instance_state["_subordinate_abilities"])
 
     assert stored_visual_classifier.classifier is visual_classifier
@@ -221,14 +238,18 @@ def test_reading_records_injected_classification_decoding_and_encoding_abilities
         stored_output_encoder,
     )
 
+
 def test_reading_apply_bridge_keeps_operation_state_out_of_instance() -> None:
     reading_ability = stub_reading()
 
     assert "_pending_apply_results" not in vars(reading_ability)
     assert "_active_apply_operation_id" not in vars(reading_ability)
 
+
 def test_reading_apply_runs_text_route_to_encoded_output() -> None:
-    async def run() -> tuple[reading.OutputData, list[vision.classification.InputData], list[str], list[reading.OutputData]]:
+    async def run() -> tuple[
+        reading.OutputData, list[vision.classification.InputData], list[str], list[reading.OutputData]
+    ]:
         visual_classifier = StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99))
         text_decoder = StubTextDecoder()
         output_encoder = StubOutputEncoder()
@@ -239,7 +260,9 @@ def test_reading_apply_runs_text_route_to_encoded_output() -> None:
         )
         await start_ability_tree(None, reading_ability)
 
-        output = await dispatch_ability_for_test(reading_ability, hsm.Context(), reading.InputData(kind="text", content="hello"))
+        output = await dispatch_ability_for_test(
+            reading_ability, hsm.Context(), reading.InputData(kind="text", content="hello")
+        )
         return output, visual_classifier.calls, text_decoder.calls, output_encoder.calls
 
     output, classification_calls, text_calls, encoder_calls = asyncio.run(run())
@@ -249,10 +272,13 @@ def test_reading_apply_runs_text_route_to_encoded_output() -> None:
     assert text_calls == ["hello"]
     assert encoder_calls == [reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)]
 
+
 def test_reading_ignores_stale_terminal_event_for_previous_apply_operation() -> None:
     async def run() -> tuple[list[reading.OutputData], str, bool]:
         async def run_apply(reading_ability: reading.Reading) -> reading.OutputData:
-            return await dispatch_ability_for_test(reading_ability, hsm.Context(), reading.InputData(kind="text", content="current"))
+            return await dispatch_ability_for_test(
+                reading_ability, hsm.Context(), reading.InputData(kind="text", content="current")
+            )
 
         reading_ability = RecordingReading(
             visual_classifier=StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99)),
@@ -287,6 +313,7 @@ def test_reading_ignores_stale_terminal_event_for_previous_apply_operation() -> 
     assert state == "/RecordingReadingLifecycle/attached/behavior/Focused/EncodingOutput"
     assert not task_done
 
+
 def test_reading_detach_releases_owned_subabilities_while_focused() -> None:
     async def run() -> tuple[tuple[str, ...], str]:
         ctx = hsm.Context()
@@ -306,7 +333,12 @@ def test_reading_detach_releases_owned_subabilities_while_focused() -> None:
             vars(reading_ability)["_subordinate_abilities"],
         )
 
-        _ = await reading_ability.detach(ctx=ctx)
+        owner = ability_terminal_owner(reading_ability)
+        assert owner is not None
+        _ = await reading_ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
+        )
         await wait_until(lambda: all(ability.state().endswith("/detached") for ability in subabilities))
         states = tuple(ability.state() for ability in subabilities)
         state = reading_ability.state()
@@ -317,6 +349,7 @@ def test_reading_detach_releases_owned_subabilities_while_focused() -> None:
 
     assert all(child_state.endswith("/detached") for child_state in states)
     assert state == "/RecordingReadingLifecycle/detached"
+
 
 def test_reading_model_tracks_focus_classification_decoding_and_encoding() -> None:
     model = model_view(require_model(reading.Reading.model))
@@ -358,8 +391,11 @@ def test_reading_model_tracks_focus_classification_decoding_and_encoding() -> No
         in model.transition_map["/ReadingLifecycle/attached/behavior/Focused/EncodingOutput"]
     )
 
+
 def test_reading_runs_text_route_to_encoded_output() -> None:
-    async def run() -> tuple[list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str]:
+    async def run() -> tuple[
+        list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str
+    ]:
         visual_classifier = StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99))
         text_decoder = StubTextDecoder()
         image_decoder = StubImageDecoder()
@@ -374,7 +410,13 @@ def test_reading_runs_text_route_to_encoded_output() -> None:
         _ = await reading_ability.apply(reading.InputData(kind="text", content="hello"))
         await wait_until(lambda: bool(reading_ability.outputs))
 
-        return reading_ability.outputs, visual_classifier.calls, text_decoder.calls, image_decoder.calls, reading_ability.state()
+        return (
+            reading_ability.outputs,
+            visual_classifier.calls,
+            text_decoder.calls,
+            image_decoder.calls,
+            reading_ability.state(),
+        )
 
     outputs, classification_calls, text_calls, image_calls, active_state = asyncio.run(run())
 
@@ -384,8 +426,11 @@ def test_reading_runs_text_route_to_encoded_output() -> None:
     assert image_calls == []
     assert active_state == "/RecordingReadingLifecycle/attached/behavior/Unfocused"
 
+
 def test_reading_runs_image_route_to_encoded_output() -> None:
-    async def run() -> tuple[list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str]:
+    async def run() -> tuple[
+        list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str
+    ]:
         visual_classifier = StubVisualClassifier(vision.classification.OutputData(kind="image", confidence=0.87))
         text_decoder = StubTextDecoder()
         image_decoder = StubImageDecoder()
@@ -400,7 +445,13 @@ def test_reading_runs_image_route_to_encoded_output() -> None:
         _ = await reading_ability.apply(reading.InputData(kind="image", content=b"image bytes"))
         await wait_until(lambda: bool(reading_ability.outputs))
 
-        return reading_ability.outputs, visual_classifier.calls, text_decoder.calls, image_decoder.calls, reading_ability.state()
+        return (
+            reading_ability.outputs,
+            visual_classifier.calls,
+            text_decoder.calls,
+            image_decoder.calls,
+            reading_ability.state(),
+        )
 
     outputs, classification_calls, text_calls, image_calls, active_state = asyncio.run(run())
 
@@ -410,10 +461,13 @@ def test_reading_runs_image_route_to_encoded_output() -> None:
     assert image_calls == [b"image bytes"]
     assert active_state == "/RecordingReadingLifecycle/attached/behavior/Unfocused"
 
+
 def test_reading_runs_unreadable_route_to_encoded_output() -> None:
     async def run() -> list[reading.OutputData]:
         reading_ability = RecordingReading(
-            visual_classifier=StubVisualClassifier(vision.classification.OutputData(kind="unreadable", confidence=0.76)),
+            visual_classifier=StubVisualClassifier(
+                vision.classification.OutputData(kind="unreadable", confidence=0.76)
+            ),
             text_decoder=StubTextDecoder(),
             image_decoder=StubImageDecoder(),
             output_encoder=StubOutputEncoder(),
@@ -428,6 +482,7 @@ def test_reading_runs_unreadable_route_to_encoded_output() -> None:
     outputs = asyncio.run(run())
 
     assert outputs == [reading.reading.OutputData(text="", source_kind="unreadable", confidence=0.76)]
+
 
 def test_reading_rejects_classification_that_does_not_match_input_payload() -> None:
     async def run() -> tuple[list[reading.OutputData], list[reading.FailedEventData], list[str], str]:

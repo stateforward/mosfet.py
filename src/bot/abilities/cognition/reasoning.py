@@ -18,6 +18,7 @@ from bot.habit import BreakData, ChangeData, CreateData
 from . import dispatch
 from . import episodes
 from . import types
+
 _REASONING_INPUT_METADATA_KEY = "bot.reasoning.input"
 # Host frame when CallData is used as the model-facing invoke (multi-select or cascade).
 HOST_INPUT_METADATA_KEY = "bot.reasoning.host_input"
@@ -331,7 +332,13 @@ class Reasoning(processing.Processing):
         del event
         store = instance._memory
         if store is not None:
-            _ = await store.attach(owner=instance, ctx=ctx)
+            _ = await store.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
@@ -344,7 +351,14 @@ class Reasoning(processing.Processing):
             return
         store = instance._memory
         if store is not None:
-            _ = store.detach(ctx=ctx)
+            _ = store.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _host_input_from_event(event: hsm.Event[typing.Any]) -> processing.InputData:
@@ -357,12 +371,8 @@ class Reasoning(processing.Processing):
             host = event.metadata.get(HOST_INPUT_METADATA_KEY)
             if isinstance(host, processing.InputData):
                 return host
-            raise TypeError(
-                "Reasoning CallData requires bot.reasoning.host_input metadata with processing.InputData."
-            )
-        raise TypeError(
-            f"Reasoning input must be processing.InputData or CallData, got {type(data)!r}."
-        )
+            raise TypeError("Reasoning CallData requires bot.reasoning.host_input metadata with processing.InputData.")
+        raise TypeError(f"Reasoning input must be processing.InputData or CallData, got {type(data)!r}.")
 
     @staticmethod
     def _has_reasoning_input(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
@@ -497,7 +507,9 @@ class Reasoning(processing.Processing):
             ctx,
             instance,
             dataclasses.replace(
-                _RecalledEvent.with_data(_RecalledEventData(host_input=input, prior_episodes=prior, memory_consulted=True)),
+                _RecalledEvent.with_data(
+                    _RecalledEventData(host_input=input, prior_episodes=prior, memory_consulted=True)
+                ),
                 id=operation_id,
                 metadata=metadata,
             ),

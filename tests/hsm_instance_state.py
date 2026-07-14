@@ -10,15 +10,17 @@ import hsm
 from bot import abilities
 from bot import habit
 from bot.abilities import cognition
+from bot.protocols import attachment
 
 from bot.devices import audio as audio_device
 from bot.devices import phone as phone_device
 
 from bot.device import Device
 
-_ABILITY_TERMINAL_OWNERS: weakref.WeakKeyDictionary[
-    abilities.Ability[typing.Any, typing.Any], hsm.Instance
-] = weakref.WeakKeyDictionary()
+_ABILITY_TERMINAL_OWNERS: weakref.WeakKeyDictionary[abilities.Ability[typing.Any, typing.Any], hsm.Instance] = (
+    weakref.WeakKeyDictionary()
+)
+
 
 def remember_ability_terminal_owner(
     ability: abilities.Ability[typing.Any, typing.Any],
@@ -26,10 +28,12 @@ def remember_ability_terminal_owner(
 ) -> None:
     _ABILITY_TERMINAL_OWNERS[ability] = owner
 
+
 def ability_terminal_owner(
     ability: abilities.Ability[typing.Any, typing.Any],
 ) -> hsm.Instance | None:
     return _ABILITY_TERMINAL_OWNERS.get(ability)
+
 
 def _record_ability_terminal_mirror_event(
     ctx: hsm.Context,
@@ -38,6 +42,7 @@ def _record_ability_terminal_mirror_event(
 ) -> None:
     del ctx
     instance.record(event)
+
 
 class _AbilityTerminalMirror(hsm.Instance):
     model: typing.ClassVar[hsm.Model | None] = hsm.define(
@@ -91,59 +96,81 @@ class _AbilityTerminalMirror(hsm.Instance):
                 message = failure.message if isinstance(failure, abilities.FailureData) else str(failure)
                 result.set_exception(RuntimeError(message))
 
+
 def _append_if_list(ability: abilities.Ability[typing.Any, typing.Any], attribute: str, data: object) -> None:
     values = getattr(ability, attribute, None)
     if isinstance(values, list):
         values = typing.cast(list[object], values)
         values.append(data)
 
+
 TResult = typing.TypeVar("TResult")
+
 
 async def await_result(awaitable: collections.abc.Awaitable[TResult]) -> TResult:
     return await awaitable
+
 
 async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     context = hsm.Context() if ctx is None else ctx
     owner = _AbilityTerminalMirror(ability)
     _ = await hsm.started(context, owner, typing.cast(hsm.Model, owner.model))
-    _ = await ability.attach(owner=owner, ctx=context)
+    _ = await ability.attach(
+        context,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
     remember_ability_terminal_owner(ability, owner)
+
 
 def bot_has_focus(bot: hsm.Instance) -> bool:
     return bot.state() == "/Bot/active/focused"
 
+
 def device_bots(device: Device) -> tuple[hsm.Instance, ...]:
     return tuple(typing.cast(collections.abc.Iterable[hsm.Instance], vars(device)["_attachments"]))
+
 
 def device_firmware(device: Device) -> hsm.Instance | None:
     return typing.cast(hsm.Instance | None, object.__getattribute__(device, "_firmware"))
 
+
 def device_peripherals(device: Device) -> tuple[Device, ...]:
     return typing.cast(tuple[Device, ...], object.__getattribute__(device, "_peripherals"))
+
 
 def phone_firmware(phone: phone_device.Phone) -> phone_device.PhoneFirmware:
     return typing.cast(phone_device.PhoneFirmware, object.__getattribute__(phone, "_firmware_instance"))
 
+
 def phone_microphone(phone: phone_device.Phone) -> audio_device.Microphone:
     return typing.cast(audio_device.Microphone, object.__getattribute__(phone, "_microphone"))
+
 
 def phone_speaker(phone: phone_device.Phone) -> audio_device.Speaker:
     return typing.cast(audio_device.Speaker, object.__getattribute__(phone, "_speaker"))
 
+
 def phone_current_call_id(firmware: phone_device.PhoneFirmware) -> str | None:
     return typing.cast(str | None, object.__getattribute__(firmware, "_current_call_id"))
+
 
 def phone_current_transfer_id(firmware: phone_device.PhoneFirmware) -> str | None:
     return typing.cast(str | None, object.__getattribute__(firmware, "_current_transfer_id"))
 
+
 def phone_current_transfer_target(firmware: phone_device.PhoneFirmware) -> phone_device.TransferTarget | None:
-    return typing.cast(phone_device.TransferTarget | None, object.__getattribute__(firmware, "_current_transfer_target"))
+    return typing.cast(
+        phone_device.TransferTarget | None, object.__getattribute__(firmware, "_current_transfer_target")
+    )
+
 
 def phone_closed_call_ids(firmware: phone_device.PhoneFirmware) -> frozenset[str]:
     return typing.cast(frozenset[str], object.__getattribute__(firmware, "_closed_call_ids"))
 
+
 def phone_service(firmware: phone_device.PhoneFirmware) -> phone_device.PhoneService:
     return typing.cast(phone_device.PhoneService, object.__getattribute__(firmware, "_service"))
+
 
 def habit_spec(instance: object) -> habit.source.Source:
     return typing.cast(habit.source.Source, object.__getattribute__(instance, "_spec"))

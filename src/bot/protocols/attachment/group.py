@@ -15,6 +15,7 @@ from .attachment import Attachment
 
 _OPERATION_METADATA_KEY = "attachment.group.operation"
 _MEMBER_INDEX_METADATA_KEY = "attachment.group.member.index"
+_REQUEST_CONTEXT_METADATA_KEY = "attachment.group.request.context"
 _MemberAttachCompleteEvent = hsm.Event[events.AttachCompleteData](
     name="attachment.group.member.attach.complete",
     kind=hsm.CompletionEventKind,
@@ -57,6 +58,7 @@ class _Operation:
     actor: hsm.Instance
     reply_to: hsm.Instance
     request_id: str
+    context: hsm.Context
     expected_sources: tuple[str, ...]
     metadata: dict[str, object]
     timeout: datetime.timedelta
@@ -293,7 +295,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 reply = await _Reply.started(instance.context(), operation, index, with_timeout=True)
                 replies[index] = reply
                 await member.attach(
-                    ctx,
+                    operation.context,
                     dataclasses.replace(
                         events.AttachEvent.with_data(
                             events.AttachData(actor=operation.actor, reply_to=reply, timeout=operation.timeout)
@@ -439,7 +441,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 reply = await _Reply.started(instance.context(), operation, index, with_timeout=False)
                 replies[index] = reply
                 await member.detach(
-                    ctx,
+                    operation.context,
                     dataclasses.replace(
                         events.DetachEvent.with_data(events.DetachData(actor=operation.actor, reply_to=reply)),
                         id=operation.request_id,
@@ -596,12 +598,15 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         del ctx
         data = event.data
         assert isinstance(data, events.AttachData)
+        request_context = event.metadata.pop(_REQUEST_CONTEXT_METADATA_KEY)
+        assert isinstance(request_context, hsm.Context)
         reply_to = data.actor if data.reply_to is None else data.reply_to
         event.metadata[_OPERATION_METADATA_KEY] = _Operation(
             coordinator=instance,
             actor=data.actor,
             reply_to=reply_to,
             request_id=event.id,
+            context=request_context,
             expected_sources=tuple(hsm.id(member) for member in instance._attachments),
             metadata=dict(event.metadata),
             timeout=data.timeout,
@@ -615,12 +620,15 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         del ctx
         data = event.data
         assert isinstance(data, events.DetachData)
+        request_context = event.metadata.pop(_REQUEST_CONTEXT_METADATA_KEY)
+        assert isinstance(request_context, hsm.Context)
         reply_to = data.actor if data.reply_to is None else data.reply_to
         event.metadata[_OPERATION_METADATA_KEY] = _Operation(
             coordinator=instance,
             actor=data.actor,
             reply_to=reply_to,
             request_id=event.id,
+            context=request_context,
             expected_sources=tuple(hsm.id(member) for member in instance._attachments),
             metadata=dict(event.metadata),
             timeout=instance._attachment_timeout,
@@ -710,7 +718,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=event.id,
                 source=hsm.id(instance),
                 target=hsm.id(reply_to),
-                metadata=dict(event.metadata),
+                metadata={key: value for key, value in event.metadata.items() if key != _REQUEST_CONTEXT_METADATA_KEY},
             ),
         )
 
@@ -761,7 +769,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=event.id,
                 source=hsm.id(instance),
                 target=hsm.id(reply_to),
-                metadata=dict(event.metadata),
+                metadata={key: value for key, value in event.metadata.items() if key != _REQUEST_CONTEXT_METADATA_KEY},
             ),
         )
 
@@ -913,7 +921,14 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ctx: hsm.Context,
         event: hsm.Event[events.AttachData],
     ) -> collections.abc.Awaitable[None]:
-        return hsm.Instance.dispatch(self, ctx, event)
+        return hsm.Instance.dispatch(
+            self,
+            ctx,
+            dataclasses.replace(
+                event,
+                metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
+            ),
+        )
 
     @typing.override
     def detach(
@@ -921,10 +936,21 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ctx: hsm.Context,
         event: hsm.Event[events.DetachData],
     ) -> collections.abc.Awaitable[None]:
-        return hsm.Instance.dispatch(self, ctx, event)
+        return hsm.Instance.dispatch(
+            self,
+            ctx,
+            dataclasses.replace(
+                event,
+                metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
+            ),
+        )
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name == events.AttachEvent.name and isinstance(event.data, events.AttachData):
+            return self.attach(ctx, event)
+        if event.name == events.DetachEvent.name and isinstance(event.data, events.DetachData):
+            return self.detach(ctx, event)
         if event.name in self.model.events:
             return hsm.Instance.dispatch(self, ctx, event)
 

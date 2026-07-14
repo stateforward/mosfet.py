@@ -91,6 +91,8 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
     _attachment_timeout: datetime.timedelta
     attach_calls: list[hsm.Event[attachment.AttachData]]
     detach_calls: list[hsm.Event[attachment.DetachData]]
+    attach_contexts: list[hsm.Context]
+    detach_contexts: list[hsm.Context]
     fail_attach: bool
     fail_detach: bool
     raise_attach: bool
@@ -133,6 +135,8 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self.attach_calls = []
         self.detach_calls = []
+        self.attach_contexts = []
+        self.detach_contexts = []
         self.fail_attach = fail_attach
         self.fail_detach = fail_detach
         self.raise_attach = raise_attach
@@ -156,6 +160,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
         event: hsm.Event[attachment.AttachData],
     ) -> None:
         self.attach_calls.append(event)
+        self.attach_contexts.append(ctx)
         _ = self.attach_started.set()
         if self.attach_release is not None:
             _ = await self.attach_release.wait()
@@ -200,6 +205,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
         event: hsm.Event[attachment.DetachData],
     ) -> None:
         self.detach_calls.append(event)
+        self.detach_contexts.append(ctx)
         _ = self.detach_started.set()
         if self.detach_release is not None:
             _ = await self.detach_release.wait()
@@ -257,6 +263,28 @@ def test_group_members_start_detached() -> None:
         return group.state()
 
     assert asyncio.run(run()) == "/AttachmentGroup/detached"
+
+
+def test_group_uses_the_durable_request_context_for_member_lifecycle() -> None:
+    async def run() -> tuple[bool, bool]:
+        ctx = hsm.Context()
+        group_ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        member = TestAttachment()
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(group_ctx, group, group.model)
+
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        actor.recorded.clear()
+        await group.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+
+        return member.attach_contexts == [ctx], member.detach_contexts == [ctx]
+
+    assert asyncio.run(run()) == (True, True)
 
 
 def test_group_manages_attachment_lifecycle() -> None:

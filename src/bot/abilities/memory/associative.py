@@ -508,9 +508,7 @@ def _dispatch_invalid_associative_memory_output_failure(
     instance: "AssociativeMemory",
     event: hsm.Event[typing.Any],
 ) -> None:
-    failure = ability.FailureData(
-        message="AssociativeMemory produced output that does not match its output schema."
-    )
+    failure = ability.FailureData(message="AssociativeMemory produced output that does not match its output schema.")
     terminal = dataclasses.replace(
         instance.failed_event.with_data(failure),
         id=event.id or None,
@@ -756,7 +754,13 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in instance._subordinate_abilities:
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _AssociativeMemoryChildrenAttachedEvent.with_data(None))
 
     @staticmethod
@@ -768,7 +772,14 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
         if event.name != attachment.DetachEvent.name:
             return
         for child in instance._subordinate_abilities:
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     def __init__(
         self,

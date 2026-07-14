@@ -104,7 +104,7 @@ class _SoundClassificationCompletedEventData(pydantic.BaseModel):
 
     sound: SoundData
     voice_detection: voice.detection.OutputData
-    classification: sound.classification.OutputData
+    classification: "sound.classification.OutputData"
 
 
 ListeningFailedEvent = hsm.Event[FailedEventData](
@@ -341,9 +341,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             if sound_classifier is not None
             else None
         )
-        self._speech_decoding = (
-            speech.SpeechDecoding(decoder=speech_decoder) if speech_decoder is not None else None
-        )
+        self._speech_decoding = speech.SpeechDecoding(decoder=speech_decoder) if speech_decoder is not None else None
         self._voice_diarization = (
             voice.diarization.VoiceDiarization(classifier=voice_diarizer) if voice_diarizer is not None else None
         )
@@ -644,7 +642,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     ) -> None:
         del event
         for child in Listening._listening_children(instance):
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _ListeningChildrenAttachedEvent.with_data(None))
 
     @staticmethod
@@ -656,7 +660,14 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         if event.name != attachment.DetachEvent.name:
             return
         for child in Listening._listening_children(instance):
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Listening",

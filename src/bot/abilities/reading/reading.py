@@ -873,7 +873,13 @@ class Reading(ability.Ability[InputData, OutputData]):
     ) -> None:
         del event
         for child in instance._subordinate_abilities:
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    source=hsm.id(instance),
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _ReadingChildrenAttachedEvent.with_data(None))
 
     @staticmethod
@@ -885,7 +891,14 @@ class Reading(ability.Ability[InputData, OutputData]):
         if event.name != attachment.DetachEvent.name:
             return
         for child in instance._subordinate_abilities:
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                instance.context(),
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    source=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
         _set_reading_active_operation_id(instance, None)
 
     def __init__(

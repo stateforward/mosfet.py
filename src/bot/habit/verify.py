@@ -13,6 +13,7 @@ import concurrent.futures
 import hsm
 
 from bot.abilities import processing
+from bot.protocols import attachment
 
 from . import compiler
 from . import diagnostic
@@ -74,7 +75,13 @@ async def _apply_once(
     )
     ctx = hsm.Context()
     _ = await hsm.started(ctx, owner, typing.cast(hsm.Model, owner.model))
-    _ = await behavior.attach(owner=owner, ctx=ctx)
+    _ = await behavior.attach(
+        ctx,
+        dataclasses.replace(
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+            source=hsm.id(owner),
+        ),
+    )
     operation_id = uuid.uuid4().hex
     input_event = dataclasses.replace(
         behavior.input_event.with_data_and_id(input_data, operation_id),

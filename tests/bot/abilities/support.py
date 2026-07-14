@@ -1,5 +1,6 @@
 from bot import abilities
 from bot.abilities import cognition
+from bot.protocols import attachment
 
 import asyncio
 import typing
@@ -12,6 +13,7 @@ from tests.hsm_instance_state import ability_terminal_owner, remember_ability_te
 
 _TAbilityOutput = typing.TypeVar("_TAbilityOutput")
 
+
 def shared_hsm_context(ctx: hsm.Context | None = None) -> hsm.Context:
     base = hsm.Context() if ctx is None else ctx
     instances = base.value(hsm.Keys.Instances)
@@ -19,9 +21,11 @@ def shared_hsm_context(ctx: hsm.Context | None = None) -> hsm.Context:
         return base
     return base.with_value(hsm.Keys.Instances, weakref.WeakValueDictionary[object, hsm.Instance]())
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 async def start_abilities_for_test(
     ctx: hsm.Context,
@@ -34,8 +38,12 @@ async def start_abilities_for_test(
             ability=ability,
         )
         _ = await hsm.started(ctx, recorder, require_model(recorder.model))
-        _ = await ability.attach(owner=recorder, ctx=ctx)
+        _ = await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
+        )
         remember_ability_terminal_owner(ability, recorder)
+
 
 class _AbilityTerminalRecorder(hsm.Instance):
     model: typing.ClassVar[hsm.Model | None] = None
@@ -63,6 +71,7 @@ class _AbilityTerminalRecorder(hsm.Instance):
             result = asyncio.get_running_loop().create_future()
             self.results[operation_id] = result
         return result
+
 
 def _record_terminal_event(
     ctx: hsm.Context,
@@ -101,13 +110,17 @@ def _record_terminal_event(
     if result is not None and not result.done():
         result.set_exception(RuntimeError(message))
 
-def _mirror_terminal_event(ability: abilities.Ability[typing.Any, typing.Any] | None, attribute: str, data: object) -> None:
+
+def _mirror_terminal_event(
+    ability: abilities.Ability[typing.Any, typing.Any] | None, attribute: str, data: object
+) -> None:
     if ability is None:
         return
     values = getattr(ability, attribute, None)
     if isinstance(values, list):
         values = typing.cast(list[object], values)
         values.append(data)
+
 
 _AbilityTerminalRecorder.model = hsm.define(
     "AbilityTerminalRecorder",
@@ -120,6 +133,7 @@ _AbilityTerminalRecorder.model = hsm.define(
         ),
     ),
 )
+
 
 async def dispatch_ability_for_test(
     ability: abilities.Ability[typing.Any, _TAbilityOutput],
@@ -141,14 +155,21 @@ async def dispatch_ability_for_test(
             ability=ability,
         )
         _ = await hsm.started(shared_ctx, recorder, require_model(recorder.model))
-        _ = await ability.attach(owner=recorder, ctx=shared_ctx)
+        _ = await ability.attach(
+            shared_ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
+        )
         remember_ability_terminal_owner(ability, recorder)
     elif not ability.state():
-        _ = await ability.attach(owner=recorder, ctx=shared_ctx)
+        _ = await ability.attach(
+            shared_ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
+        )
     operation_id = uuid.uuid4().hex
     result = recorder.result_for(operation_id)
     _ = await hsm.dispatch(shared_ctx, ability, ability.input_event.with_data_and_id(input, operation_id))
     return typing.cast(_TAbilityOutput, await asyncio.wait_for(result, timeout=timeout))
+
 
 def _register_ability_graph(ctx: hsm.Context, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     instances = ctx.value(hsm.Keys.Instances)

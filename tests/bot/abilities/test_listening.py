@@ -4,6 +4,7 @@ from bot.abilities import listening
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -15,12 +16,13 @@ from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
 from bot.world import SoundData, SoundEvent
-from tests.hsm_instance_state import start_ability_tree
+from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
 
 
 def sound(audio: bytes) -> SoundData:
     return SoundData(audio=audio, media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+
 
 class FixedVoiceDetector(voice.detection.VoiceDetector):
     output: voice.detection.OutputData
@@ -33,11 +35,13 @@ class FixedVoiceDetector(voice.detection.VoiceDetector):
         del input
         return self.output
 
+
 class FailingVoiceDetector(voice.detection.VoiceDetector):
     @override
     async def classify(self, input: bytes) -> voice.detection.OutputData:
         del input
         raise RuntimeError("voice detector offline")
+
 
 class HangingVoiceDetector(voice.detection.VoiceDetector):
     cancelled: bool
@@ -54,6 +58,7 @@ class HangingVoiceDetector(voice.detection.VoiceDetector):
             self.cancelled = True
         raise AssertionError("unreachable")
 
+
 class RecordingSpeechDecoder(speech.SpeechDecoder):
     calls: list[bytes]
 
@@ -64,6 +69,7 @@ class RecordingSpeechDecoder(speech.SpeechDecoder):
     async def decode(self, input: bytes) -> bytes:
         self.calls.append(input)
         return b"decoded:" + input
+
 
 class FixedVoiceDiarizer(voice.diarization.VoiceDiarizer):
     calls: list[bytes]
@@ -145,15 +151,18 @@ class RecordingListening(listening.Listening):
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
+
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
     for _ in range(1000):
         if condition():
             return
         await asyncio.sleep(0.001)
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 def _listening(
     *,
@@ -177,10 +186,12 @@ def _listening(
     )
     return listening_ability, speech_decoder
 
+
 def _stimulus(handoff: cognition.InputData) -> hsm.Event[typing.Any]:
     stimulus = handoff.stimulus
     assert isinstance(stimulus, hsm.Event)
     return stimulus
+
 
 def test_listening_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(listening.Listening.input_event.schema)
@@ -196,6 +207,7 @@ def test_listening_events_use_concrete_pydantic_schemas() -> None:
 
     assert listening.Listening.failed_event.name == "bot.ability.listening.failed"
     assert failed_schema == listening.FailedEventData.model_json_schema()
+
 
 def test_listening_defaults_to_voice_detection_without_requiring_speech_decoding() -> None:
     listening, decoder = _listening(decoder=False)
@@ -224,11 +236,13 @@ def test_listening_accepts_optional_voice_diarization_ability() -> None:
     assert isinstance(fields["_voice_diarization"], voice.diarization.VoiceDiarization)
     assert fields["_voice_diarization"].classifier is diarizer
 
+
 def test_listening_apply_bridge_keeps_operation_state_out_of_instance() -> None:
     listening, _ = _listening()
 
     assert "_pending_apply_results" not in vars(listening)
     assert "_active_apply_operation_id" not in vars(listening)
+
 
 def test_listening_apply_runs_voice_diarization_and_speech_decoding_pipeline() -> None:
     async def run() -> tuple[cognition.InputData, list[bytes], list[bytes]]:
@@ -280,6 +294,7 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
         "bot.ability.listening.speech_decoding.completed"
         in model.transition_map["/ListeningLifecycle/attached/behavior/DecodingSpeech"]
     )
+
 
 def test_listening_skips_cognition_input_when_no_voice() -> None:
     async def run() -> tuple[list[cognition.InputData], list[bytes], str]:
@@ -398,6 +413,7 @@ def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> 
     assert decoder_calls == [b"voice"]
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
 
+
 def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
     async def run() -> tuple[list[cognition.InputData], list[bytes], list[bytes]]:
         diarizer = FixedVoiceDiarizer()
@@ -418,6 +434,7 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
     assert diarizer_calls == [b"voice"]
     assert decoder_calls == [b"voice"]
 
+
 def test_listening_detach_releases_owned_subabilities_while_detecting_voice() -> None:
     async def run() -> tuple[tuple[str, ...], str]:
         ctx = hsm.Context()
@@ -427,14 +444,21 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
         )
         await start_ability_tree(ctx, listening_ability)
         _ = await listening_ability.apply(sound(b"voice"), ctx=ctx)
-        await wait_until(lambda: listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice")
+        await wait_until(
+            lambda: listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
+        )
         assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
         subabilities = (
             typing.cast(abilities.Ability[typing.Any, typing.Any], vars(listening_ability)["_voice_detection"]),
             typing.cast(abilities.Ability[typing.Any, typing.Any], vars(listening_ability)["_speech_decoding"]),
         )
 
-        _ = await listening_ability.detach(ctx=ctx)
+        owner = ability_terminal_owner(listening_ability)
+        assert owner is not None
+        _ = await listening_ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
+        )
         await wait_until(lambda: all(ability.state().endswith("/detached") for ability in subabilities))
         states = tuple(ability.state() for ability in subabilities)
         state = listening_ability.state()
@@ -445,6 +469,7 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
 
     assert all(child_state.endswith("/detached") for child_state in states)
     assert state == "/RecordingListeningLifecycle/detached"
+
 
 def test_listening_dispatches_failure_when_detection_fails() -> None:
     async def run() -> tuple[list[listening.FailedEventData], list[cognition.InputData], str]:
@@ -467,6 +492,7 @@ def test_listening_dispatches_failure_when_detection_fails() -> None:
     ]
     assert handoffs == []
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+
 
 def test_listening_failure_payload_reuses_ability_failure_message_shape() -> None:
     failure = listening.FailedEventData.from_ability_failure(
