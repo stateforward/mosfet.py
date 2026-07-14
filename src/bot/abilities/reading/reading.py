@@ -8,6 +8,7 @@ import binascii
 import collections.abc
 import dataclasses
 import typing
+import weakref
 
 import hsm
 
@@ -216,12 +217,6 @@ _ReadingOutputEncodedEvent = hsm.Event[OutputData](
     kind=hsm.CompletionEventKind,
     schema=OutputData,
 )
-_ReadingChildrenAttachedEvent = hsm.Event[object](
-    name="bot.ability.reading.children.attached",
-    kind=hsm.CompletionEventKind,
-    schema=object,
-)
-
 _ReadingBehavior = collections.abc.Callable[
     [hsm.Context, "Reading", hsm.Event[typing.Any]],
     collections.abc.Coroutine[None, None, None] | None,
@@ -843,11 +838,12 @@ class Reading(ability.Ability[InputData, OutputData]):
     input_event: typing.ClassVar[hsm.Event[InputData]] = ReadingInputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = ReadingOutputEvent
     failed_event: typing.ClassVar[hsm.Event[FailedEventData]] = ReadingFailedEvent
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _visual_classifier: vision.classification.VisualClassification
     _text_decoder: decoding.Decoding[str, str]
     _image_decoder: decoding.Decoding[bytes, str]
     _output_encoder: encoding.Encoding[typing.Any, typing.Any]
-    _subordinate_abilities: tuple[ability.Ability[typing.Any, typing.Any], ...]
+    _attachment_group: attachment.Group
 
     @staticmethod
     def visual_classifier(instance: "Reading") -> vision.classification.VisualClassification:
@@ -866,40 +862,137 @@ class Reading(ability.Ability[InputData, OutputData]):
         return instance._output_encoder
 
     @staticmethod
-    async def attach_subordinate_abilities(
+    async def _attach_children(
         ctx: hsm.Context,
         instance: "Reading",
         event: hsm.Event[typing.Any],
     ) -> None:
-        del event
-        for child in instance._subordinate_abilities:
-            _ = await child.attach(
-                instance.context(),
+        request = event.data
+        assert isinstance(request, attachment.AttachData)
+        reply: hsm.Instance | None = None
+        correlation: dict[str, object] = {}
+        source: hsm.Instance = instance._attachment_group
+        try:
+            private_scope = hsm.Context(
+                parent=instance.context(),
+                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
+            )
+            try:
+                _ = hsm.id(instance._attachment_group)
+            except hsm.ErrorValidatingModel:
+                try:
+                    _ = await hsm.started(private_scope, instance._attachment_group, instance._attachment_group.model)
+                except Exception:
+                    source = instance
+                    raise
+            reply, correlation = await instance._start_composite_attachment_reply(
+                source,
+                request,
+                event,
+            )
+            await instance._attachment_group.attach(
+                private_scope,
                 dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
+                    attachment.AttachEvent.with_data(
+                        attachment.AttachData(actor=instance, reply_to=reply, timeout=request.timeout)
+                    ),
+                    id=event.id,
                     source=hsm.id(instance),
+                    target=hsm.id(instance._attachment_group),
+                    metadata={
+                        **event.metadata,
+                        **correlation,
+                    },
                 ),
             )
-        _ = hsm.dispatch(ctx, instance, _ReadingChildrenAttachedEvent.with_data(None))
+        except Exception as error:
+            failure = attachment.FailedData(
+                actor=instance,
+                kind=attachment.FailureKind.DISPATCH,
+                message=f"Reading attachment Group start failed: {error}",
+            )
+            if reply is None:
+                instance._dispatch_composite_attachment_failure(
+                    ctx,
+                    source,
+                    request,
+                    event,
+                    failure,
+                )
+                return
+            _ = hsm.dispatch(
+                ctx,
+                reply,
+                dataclasses.replace(
+                    attachment.AttachFailedEvent.with_data(failure),
+                    id=event.id,
+                    source=hsm.id(source),
+                    target=hsm.id(reply),
+                    metadata={**event.metadata, **correlation},
+                ),
+            )
 
     @staticmethod
-    def detach_subordinate_abilities_on_detach(
+    async def _detach_children(
         ctx: hsm.Context,
         instance: "Reading",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        for child in instance._subordinate_abilities:
-            _ = child.detach(
-                instance.context(),
+        request = event.data
+        assert isinstance(request, attachment.DetachData)
+        reply: hsm.Instance | None = None
+        correlation: dict[str, object] = {}
+        try:
+            private_scope = hsm.Context(
+                parent=instance.context(),
+                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
+            )
+            reply, correlation = await instance._start_composite_attachment_reply(
+                instance._attachment_group,
+                request,
+                event,
+            )
+            await instance._attachment_group.detach(
+                private_scope,
                 dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                    attachment.DetachEvent.with_data(
+                        attachment.DetachData(actor=instance, reply_to=reply, timeout=request.timeout)
+                    ),
+                    id=event.id,
                     source=hsm.id(instance),
-                    metadata=dict(event.metadata),
+                    target=hsm.id(instance._attachment_group),
+                    metadata={
+                        **event.metadata,
+                        **correlation,
+                    },
                 ),
             )
-        _set_reading_active_operation_id(instance, None)
+        except Exception as error:
+            failure = attachment.FailedData(
+                actor=instance,
+                kind=attachment.FailureKind.DISPATCH,
+                message=f"Reading attachment Group detach failed: {error}",
+            )
+            if reply is None:
+                instance._dispatch_composite_attachment_failure(
+                    ctx,
+                    instance._attachment_group,
+                    request,
+                    event,
+                    failure,
+                )
+                return
+            _ = hsm.dispatch(
+                ctx,
+                reply,
+                dataclasses.replace(
+                    attachment.DetachFailedEvent.with_data(failure),
+                    id=event.id,
+                    source=hsm.id(instance._attachment_group),
+                    target=hsm.id(reply),
+                    metadata={**event.metadata, **correlation},
+                ),
+            )
 
     def __init__(
         self,
@@ -914,7 +1007,7 @@ class Reading(ability.Ability[InputData, OutputData]):
         self._text_decoder = decoding.Decoding(decoder=text_decoder)
         self._image_decoder = decoding.Decoding(decoder=image_decoder)
         self._output_encoder = encoding.Encoding(encoder=output_encoder)
-        self._subordinate_abilities = (
+        self._attachment_group = attachment.Group(
             self._visual_classifier,
             self._text_decoder,
             self._image_decoder,
@@ -927,17 +1020,17 @@ class Reading(ability.Ability[InputData, OutputData]):
         hsm.initial(hsm.target("/Reading/initializing")),
         hsm.state(
             "initializing",
-            hsm.defer(input_event),
-            hsm.activity(attach_subordinate_abilities),
-            hsm.exit(detach_subordinate_abilities_on_detach),
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(_attach_children),
             hsm.transition(
-                hsm.on(_ReadingChildrenAttachedEvent),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
                 hsm.target("/Reading/Unfocused"),
             ),
         ),
         hsm.state(
             "Unfocused",
-            hsm.exit(detach_subordinate_abilities_on_detach),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_reading_input),
@@ -947,7 +1040,6 @@ class Reading(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "Focused",
-            hsm.exit(detach_subordinate_abilities_on_detach),
             hsm.transition(
                 hsm.on(_ReadingStageFailedEvent),
                 hsm.guard(_has_reading_stage_failure),
@@ -1074,6 +1166,25 @@ class Reading(ability.Ability[InputData, OutputData]):
                 ),
             ),
         ),
+        hsm.state(
+            "detaching",
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.entry(_clear_reading_operation),
+            hsm.activity(_detach_children),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Reading/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Reading/Unfocused"),
+            ),
+        ),
+        hsm.state("degraded"),
         hsm.observe(observer),
     )
 

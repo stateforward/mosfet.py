@@ -4,6 +4,7 @@ from bot.abilities.language import text
 import asyncio
 import ast
 import collections.abc
+import dataclasses
 import importlib.util
 import pathlib
 import typing
@@ -11,6 +12,7 @@ import uuid
 from typing import override
 
 import hsm
+import pydantic
 import pytest
 import bot.abilities as abilities_module
 import bot.abilities.ability as ability_module
@@ -126,6 +128,99 @@ class AbilityTerminalOwner(hsm.Instance):
             attachment.DetachFailedEvent.name,
         }:
             self.lifecycle.append(event)
+
+
+class CompositeAbility(abilities.Ability[object, object]):
+    _composite_attachment_lifecycle = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.held_terminals: list[hsm.Event[typing.Any]] = []
+        self.hold_terminal = False
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if self.hold_terminal and event.name == self._composite_attachment_terminal_event.name:
+            self.held_terminals.append(event)
+            held = asyncio.get_running_loop().create_future()
+            held.set_result(None)
+            return held
+        return super().dispatch(ctx, event)
+
+    async def dispatch_terminal(
+        self,
+        ctx: hsm.Context,
+        request: attachment.AttachData | attachment.DetachData,
+        terminal: hsm.Event[typing.Any],
+        operation_id: str,
+    ) -> None:
+        operation_event = dataclasses.replace(terminal, id=operation_id)
+        reply, correlation = await self._start_composite_attachment_reply(
+            self,
+            request,
+            operation_event,
+        )
+        await hsm.dispatch(
+            ctx,
+            reply,
+            dataclasses.replace(
+                terminal,
+                id=operation_id,
+                source=hsm.id(self),
+                target=hsm.id(reply),
+                metadata=correlation,
+            ),
+        )
+
+    async def dispatch_uncorrelated_terminal(self, ctx: hsm.Context) -> None:
+        terminal = typing.cast(hsm.Event[typing.Any], self._composite_attachment_terminal_event)
+        await hsm.dispatch(
+            ctx,
+            self,
+            dataclasses.replace(
+                terminal,
+                data=None,
+                source="untrusted",
+                target=hsm.id(self),
+            ),
+        )
+
+    async def dispatch_substituted_reply_terminal(self, ctx: hsm.Context) -> None:
+        terminal = self.held_terminals[-1]
+        data = terminal.data
+        assert isinstance(data, pydantic.BaseModel)
+        substitute = hsm.Instance()
+        setattr(substitute, "id", hsm.id(getattr(data, "reply")))
+        self.hold_terminal = False
+        await super().dispatch(
+            ctx,
+            dataclasses.replace(
+                terminal,
+                data=data.model_copy(update={"reply": substitute}),
+            ),
+        )
+
+    async def dispatch_held_terminal(self, ctx: hsm.Context) -> None:
+        self.hold_terminal = False
+        await super().dispatch(ctx, self.held_terminals[-1])
+
+    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+        "CompositeAbility",
+        hsm.initial(hsm.target("initializing")),
+        hsm.state(
+            "initializing",
+            hsm.transition(
+                hsm.on(abilities.Ability._composite_attachment_terminal_event),
+                hsm.guard(abilities.Ability._is_composite_attach_complete),
+                hsm.effect(abilities.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/CompositeAbility/operational"),
+            ),
+        ),
+        hsm.state(
+            "operational",
+        ),
+        hsm.state("detaching"),
+    )
 
 
 class _DirectApplyReferenceVisitor(ast.NodeVisitor):
@@ -283,6 +378,168 @@ def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
     ]
     assert lifecycle[0].data.created
     assert lifecycle[1].data.removed
+
+
+def test_ordinary_ability_ignores_composite_terminal_events() -> None:
+    ordinary = require_model(text.TextGeneration.model)
+
+    assert "bot.ability.attachment.terminal" not in ordinary.events
+
+
+def test_composite_ability_waits_for_submodel_readiness_before_reporting_attached() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ctx = hsm.Context()
+        owner = AbilityTerminalOwner()
+        composite = CompositeAbility()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        request = attachment.AttachData(actor=owner)
+
+        _ = await composite.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(request, "composite-attach"),
+        )
+        assert owner.lifecycle == []
+        assert composite.state().endswith("/attached/behavior/initializing")
+
+        await composite.dispatch_terminal(
+            ctx,
+            request,
+            attachment.AttachCompleteEvent.with_data(attachment.AttachCompleteData(actor=composite, created=True)),
+            "composite-attach",
+        )
+        return owner.lifecycle, composite.state()
+
+    lifecycle, state = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == [attachment.AttachCompleteEvent.name]
+    assert lifecycle[0].id == "composite-attach"
+    assert state.endswith("/attached/behavior/operational")
+
+
+def test_composite_ability_rejects_uncorrelated_private_terminal() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ctx = hsm.Context()
+        owner = AbilityTerminalOwner()
+        composite = CompositeAbility()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await composite.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
+        await composite.dispatch_uncorrelated_terminal(ctx)
+        return owner.lifecycle, composite.state()
+
+    lifecycle, state = asyncio.run(run())
+
+    assert lifecycle == []
+    assert state.endswith("/attached/behavior/initializing")
+
+
+def test_composite_ability_rejects_substituted_reply_identity() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, str]:
+        ctx = hsm.Context()
+        owner = AbilityTerminalOwner()
+        composite = CompositeAbility()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        request = attachment.AttachData(actor=owner)
+        _ = await composite.attach(ctx, attachment.AttachEvent.with_data(request))
+        composite.hold_terminal = True
+        await composite.dispatch_terminal(
+            ctx,
+            request,
+            attachment.AttachCompleteEvent.with_data(attachment.AttachCompleteData(actor=composite, created=True)),
+            "identity-bound",
+        )
+        await composite.dispatch_substituted_reply_terminal(ctx)
+        rejected_state = composite.state()
+        await composite.dispatch_held_terminal(ctx)
+        await composite.dispatch_held_terminal(ctx)
+        return owner.lifecycle, rejected_state, composite.state()
+
+    lifecycle, rejected_state, accepted_state = asyncio.run(run())
+
+    assert rejected_state.endswith("/attached/behavior/initializing")
+    assert [event.name for event in lifecycle] == [attachment.AttachCompleteEvent.name]
+    assert accepted_state.endswith("/attached/behavior/operational")
+
+
+def test_composite_ability_initialization_failure_releases_owner_for_retry() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ctx = hsm.Context()
+        owner = AbilityTerminalOwner()
+        composite = CompositeAbility()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        request = attachment.AttachData(actor=owner)
+
+        _ = await composite.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(request, "composite-failed"),
+        )
+        await composite.dispatch_terminal(
+            ctx,
+            request,
+            attachment.AttachFailedEvent.with_data(
+                attachment.FailedData(
+                    actor=composite,
+                    kind=attachment.FailureKind.INITIALIZATION,
+                    message="children failed",
+                )
+            ),
+            "composite-failed",
+        )
+        _ = await composite.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(request, "composite-retry"),
+        )
+        return owner.lifecycle, composite.state()
+
+    lifecycle, state = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == [attachment.AttachFailedEvent.name]
+    assert lifecycle[0].id == "composite-failed"
+    assert state.endswith("/attached/behavior/initializing")
+
+
+def test_composite_ability_waits_for_private_detach_terminal() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, str]:
+        ctx = hsm.Context()
+        owner = AbilityTerminalOwner()
+        composite = CompositeAbility()
+        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        attach_request = attachment.AttachData(actor=owner)
+        detach_request = attachment.DetachData(actor=owner)
+        _ = await composite.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(attach_request, "composite-attach"),
+        )
+        await composite.dispatch_terminal(
+            ctx,
+            attach_request,
+            attachment.AttachCompleteEvent.with_data(attachment.AttachCompleteData(actor=composite, created=True)),
+            "composite-attach",
+        )
+        owner.lifecycle.clear()
+
+        _ = await composite.detach(
+            ctx,
+            attachment.DetachEvent.with_data_and_id(detach_request, "composite-detach"),
+        )
+        waiting_state = composite.state()
+        assert owner.lifecycle == []
+        await composite.dispatch_terminal(
+            ctx,
+            detach_request,
+            attachment.DetachedEvent.with_data(attachment.DetachedData(actor=composite, removed=True)),
+            "composite-detach",
+        )
+        return owner.lifecycle, waiting_state, composite.state()
+
+    lifecycle, waiting_state, final_state = asyncio.run(run())
+
+    assert waiting_state.endswith("/attached/behavior/detaching")
+    assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
+    assert lifecycle[0].id == "composite-detach"
+    assert final_state.endswith("/detached")
 
 
 def test_ability_reports_correlated_attachment_success_and_conflict() -> None:

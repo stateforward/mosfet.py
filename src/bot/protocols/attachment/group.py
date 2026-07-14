@@ -6,6 +6,7 @@ import dataclasses
 import datetime
 import enum
 import typing
+import weakref
 
 import hsm
 
@@ -47,6 +48,10 @@ _FORWARDED_EVENTS = {
 type _MemberResult = events.AttachCompleteData | events.DetachedData | events.FailedData
 
 
+class _Modeled(typing.Protocol):
+    model: hsm.Model | None
+
+
 class _OperationKind(enum.StrEnum):
     ATTACH = "attach"
     DETACH = "detach"
@@ -59,12 +64,13 @@ class _Operation:
     reply_to: hsm.Instance
     request_id: str
     context: hsm.Context
-    expected_sources: tuple[str, ...]
+    expected_members: tuple[hsm.Instance, ...]
     metadata: dict[str, object]
     timeout: datetime.timedelta
     kind: _OperationKind
     members: tuple[int, ...]
     results: dict[int, _MemberResult] = dataclasses.field(default_factory=dict)
+    attempted_members: set[int] = dataclasses.field(default_factory=set)
     created_members: tuple[int, ...] = ()
     failure: events.FailedData | None = None
     fallback_attached: bool = False
@@ -115,22 +121,24 @@ class _Reply(hsm.Instance):
         del instance
         operation = _operation(event)
         index = _member_index(event)
+        terminal = _MemberAttachFailedEvent if operation.kind is _OperationKind.ATTACH else _MemberDetachFailedEvent
+        operation_name = "attach" if operation.kind is _OperationKind.ATTACH else "detach"
         _ = hsm.dispatch(
             ctx,
             operation.coordinator,
             dataclasses.replace(
-                _MemberAttachFailedEvent.with_data(
+                terminal.with_data(
                     events.FailedData(
                         actor=operation.actor,
                         kind=events.FailureKind.TIMEOUT,
                         message=(
-                            f"Attachment Group member attach timed out after "
+                            f"Attachment Group member {operation_name} timed out after "
                             f"{operation.timeout.total_seconds():g} seconds."
                         ),
                     )
                 ),
                 id=operation.request_id,
-                source=operation.expected_sources[index],
+                source=hsm.id(operation.expected_members[index]),
                 target=hsm.id(operation.coordinator),
                 metadata={
                     **operation.metadata,
@@ -144,12 +152,15 @@ class _Reply(hsm.Instance):
     def _define_model(cls, operation: _Operation, index: int, *, with_timeout: bool) -> hsm.Model:
         def is_expected(ctx: hsm.Context, instance: _Reply, event: hsm.Event[typing.Any]) -> bool:
             del ctx
+            data = event.data
             return (
                 event.metadata.get(_OPERATION_METADATA_KEY) is operation
                 and event.metadata.get(_MEMBER_INDEX_METADATA_KEY) == index
                 and event.id == operation.request_id
-                and event.source == operation.expected_sources[index]
+                and event.source == hsm.id(operation.expected_members[index])
                 and event.target == hsm.id(instance)
+                and isinstance(data, (events.AttachCompleteData, events.DetachedData, events.FailedData))
+                and data.actor is operation.actor
             )
 
         if operation.kind is _OperationKind.ATTACH:
@@ -222,8 +233,12 @@ class _Reply(hsm.Instance):
         with_timeout: bool,
     ) -> "_Reply":
         reply = cls()
+        reply_ctx = hsm.Context(
+            parent=ctx,
+            values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
+        )
         try:
-            return await hsm.started(ctx, reply, cls._define_model(operation, index, with_timeout=with_timeout))
+            return await hsm.started(reply_ctx, reply, cls._define_model(operation, index, with_timeout=with_timeout))
         except asyncio.CancelledError:
             await hsm.stop(reply, hsm.Context())
             raise
@@ -253,6 +268,8 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         for member in attachments:
             if member is self or not isinstance(member, Attachment):
                 raise TypeError("Attachment Group members must implement attachment.Attachment.")
+            if typing.cast(_Modeled, typing.cast(object, member)).model is None:
+                raise TypeError("Attachment Group members must define an HSM lifecycle model.")
             visit(member, {id(self)})
         self._attachments: list[hsm.Instance] = list(attachments)
         self._attachment_timeout: datetime.timedelta = datetime.timedelta(seconds=30)
@@ -292,7 +309,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             assert isinstance(member, Attachment)
             reply: _Reply | None = None
             try:
-                reply = await _Reply.started(instance.context(), operation, index, with_timeout=True)
+                reply = await _Reply.started(operation.context, operation, index, with_timeout=True)
                 replies[index] = reply
                 await member.attach(
                     operation.context,
@@ -438,12 +455,19 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             assert isinstance(member, Attachment)
             reply: _Reply | None = None
             try:
-                reply = await _Reply.started(instance.context(), operation, index, with_timeout=False)
+                reply = await _Reply.started(operation.context, operation, index, with_timeout=True)
                 replies[index] = reply
+                operation.attempted_members.add(index)
                 await member.detach(
                     operation.context,
                     dataclasses.replace(
-                        events.DetachEvent.with_data(events.DetachData(actor=operation.actor, reply_to=reply)),
+                        events.DetachEvent.with_data(
+                            events.DetachData(
+                                actor=operation.actor,
+                                reply_to=reply,
+                                timeout=operation.timeout,
+                            )
+                        ),
                         id=operation.request_id,
                         source=hsm.id(instance),
                         target=hsm.id(member),
@@ -557,6 +581,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         del ctx
         operation = event.metadata.get(_OPERATION_METADATA_KEY)
         index = event.metadata.get(_MEMBER_INDEX_METADATA_KEY)
+        data = event.data
         return (
             isinstance(operation, _Operation)
             and isinstance(index, int)
@@ -564,8 +589,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             and index not in operation.results
             and 0 <= index < len(instance._attachments)
             and event.id == operation.request_id
-            and event.source == operation.expected_sources[index]
+            and event.source == hsm.id(operation.expected_members[index])
             and event.target == hsm.id(instance)
+            and isinstance(data, (events.AttachCompleteData, events.DetachedData, events.FailedData))
+            and data.actor is operation.actor
         )
 
     @staticmethod
@@ -607,7 +634,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             reply_to=reply_to,
             request_id=event.id,
             context=request_context,
-            expected_sources=tuple(hsm.id(member) for member in instance._attachments),
+            expected_members=tuple(instance._attachments),
             metadata=dict(event.metadata),
             timeout=data.timeout,
             kind=_OperationKind.ATTACH,
@@ -629,9 +656,9 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             reply_to=reply_to,
             request_id=event.id,
             context=request_context,
-            expected_sources=tuple(hsm.id(member) for member in instance._attachments),
+            expected_members=tuple(instance._attachments),
             metadata=dict(event.metadata),
-            timeout=instance._attachment_timeout,
+            timeout=data.timeout,
             kind=_OperationKind.DETACH,
             members=tuple(range(len(instance._attachments))),
             fallback_attached=True,
@@ -682,6 +709,38 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         del ctx, instance
         operation = _operation(event)
         operation.failure = _first_failure(operation)
+        operation.created_members = (
+            tuple(index for index in operation.members if index in operation.attempted_members)
+            if operation.failure is not None
+            else ()
+        )
+
+    @staticmethod
+    def _detach_needs_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        operation = _operation(event)
+        return operation.failure is not None and bool(operation.created_members)
+
+    @staticmethod
+    def _begin_detach_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        operation = _operation(event)
+        operation.kind = _OperationKind.ATTACH
+        operation.members = operation.created_members
+        operation.results.clear()
+        operation.timeout = instance._attachment_timeout
+
+    @staticmethod
+    def _finalize_detach_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        operation = _operation(event)
+        failure = _first_failure(operation)
+        if failure is not None:
+            operation.failure = events.FailedData(
+                actor=operation.actor,
+                kind=events.FailureKind.ROLLBACK,
+                message=f"{type(instance).__name__} detach recovery failed: {failure.message}",
+            )
 
     @staticmethod
     def _dispatch_attach_complete(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
@@ -888,6 +947,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ),
         hsm.state(
             "detaching",
+            hsm.defer(events.AttachEvent),
             hsm.activity(_detach_members_activity.__get__(None, object)),
             hsm.transition(
                 hsm.on(_MemberDetachedEvent, _MemberDetachFailedEvent),
@@ -904,6 +964,11 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         hsm.choice(
             "routing_detach_results",
             hsm.transition(
+                hsm.guard(_detach_needs_rollback),
+                hsm.effect(_begin_detach_rollback),
+                hsm.target("/AttachmentGroup/rolling_forward"),
+            ),
+            hsm.transition(
                 hsm.guard(_operation_failed),
                 hsm.effect(_dispatch_detach_failure),
                 hsm.target("/AttachmentGroup/attached"),
@@ -911,6 +976,22 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             hsm.transition(
                 hsm.effect(_dispatch_detached),
                 hsm.target("/AttachmentGroup/detached"),
+            ),
+        ),
+        hsm.state(
+            "rolling_forward",
+            hsm.defer(events.AttachEvent),
+            hsm.activity(_attach_members_activity.__get__(None, object)),
+            hsm.transition(
+                hsm.on(_MemberAttachCompleteEvent, _MemberAttachFailedEvent),
+                hsm.guard(_is_last_result),
+                hsm.effect(_record_result, _finalize_detach_rollback, _dispatch_detach_failure),
+                hsm.target("/AttachmentGroup/attached"),
+            ),
+            hsm.transition(
+                hsm.on(_MemberAttachCompleteEvent, _MemberAttachFailedEvent),
+                hsm.guard(_is_correlated),
+                hsm.effect(_record_result),
             ),
         ),
     )
@@ -921,14 +1002,55 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ctx: hsm.Context,
         event: hsm.Event[events.AttachData],
     ) -> collections.abc.Awaitable[None]:
-        return hsm.Instance.dispatch(
-            self,
-            ctx,
-            dataclasses.replace(
-                event,
-                metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
-            ),
+        async def start_members_and_dispatch() -> None:
+            for member in self._attachments:
+                model = typing.cast(_Modeled, typing.cast(object, member)).model
+                try:
+                    _ = hsm.id(member)
+                    continue
+                except hsm.ErrorValidatingModel:
+                    pass
+                assert model is not None
+                try:
+                    _ = await hsm.started(ctx, member, model)
+                except Exception as error:
+                    data = event.data
+                    assert isinstance(data, events.AttachData)
+                    reply_to = data.actor if data.reply_to is None else data.reply_to
+                    await hsm.dispatch(
+                        ctx,
+                        reply_to,
+                        dataclasses.replace(
+                            events.AttachFailedEvent.with_data(
+                                events.FailedData(
+                                    actor=data.actor,
+                                    kind=events.FailureKind.INITIALIZATION,
+                                    message=f"Attachment Group member start failed: {error}",
+                                )
+                            ),
+                            id=event.id,
+                            source=hsm.id(self),
+                            target=hsm.id(reply_to),
+                            metadata=dict(event.metadata),
+                        ),
+                    )
+                    return
+            await hsm.Instance.dispatch(
+                self,
+                ctx,
+                dataclasses.replace(
+                    event,
+                    metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
+                ),
+            )
+
+        task = asyncio.Task(
+            start_members_and_dispatch(),
+            loop=asyncio.get_running_loop(),
+            eager_start=True,
         )
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return task
 
     @typing.override
     def detach(

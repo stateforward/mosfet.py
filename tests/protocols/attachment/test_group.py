@@ -754,6 +754,117 @@ def test_group_attempts_every_detach_before_reporting_failure() -> None:
     assert len(failing.detach_calls) == 1
 
 
+def test_group_times_out_detach_and_accepts_a_retry() -> None:
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], int]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        member = TestAttachment(respond_detach=False)
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        actor.recorded.clear()
+
+        await group.detach(
+            ctx,
+            attachment.DetachEvent.with_data(
+                attachment.DetachData(actor=actor, timeout=datetime.timedelta(milliseconds=1))
+            ),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        member.respond_detach = True
+        actor.recorded.clear()
+        await group.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group.state(), actor.events, len(member.detach_calls)
+
+    state, recorded, detach_calls = asyncio.run(run())
+
+    assert state == "/AttachmentGroup/detached"
+    assert [event.name for event in recorded] == [
+        attachment.AttachCompleteEvent.name,
+        attachment.DetachFailedEvent.name,
+        attachment.DetachedEvent.name,
+    ]
+    assert isinstance(recorded[1].data, attachment.FailedData)
+    assert recorded[1].data.kind is attachment.FailureKind.TIMEOUT
+    assert detach_calls == 2
+
+
+def test_nested_group_propagates_detach_timeout_and_recovers_for_retry() -> None:
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], datetime.timedelta]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        leaf = TestAttachment(respond_detach=False)
+        nested = attachment.Group(leaf)
+        group = attachment.Group(nested)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, leaf, leaf.model)
+        _ = await hsm.started(ctx, nested, nested.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        actor.recorded.clear()
+
+        timeout = datetime.timedelta(milliseconds=1)
+        await group.detach(
+            ctx,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=actor, timeout=timeout)),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        leaf.respond_detach = True
+        actor.recorded.clear()
+        await group.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        first_request = leaf.detach_calls[0].data
+        assert isinstance(first_request, attachment.DetachData)
+        return group.state(), actor.events, first_request.timeout
+
+    state, recorded, propagated_timeout = asyncio.run(run())
+
+    assert state == "/AttachmentGroup/detached"
+    assert [event.name for event in recorded] == [
+        attachment.AttachCompleteEvent.name,
+        attachment.DetachFailedEvent.name,
+        attachment.DetachedEvent.name,
+    ]
+    assert isinstance(recorded[1].data, attachment.FailedData)
+    assert recorded[1].data.kind is attachment.FailureKind.TIMEOUT
+    assert propagated_timeout == datetime.timedelta(milliseconds=1)
+
+
+def test_group_reattaches_removed_members_before_reporting_detach_failure() -> None:
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], int]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        removed = TestAttachment()
+        failing = TestAttachment(fail_detach=True)
+        group = attachment.Group(removed, failing)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, removed, removed.model)
+        _ = await hsm.started(ctx, failing, failing.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        actor.recorded.clear()
+        removed.created = True
+
+        await group.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group.state(), actor.events, len(removed.attach_calls)
+
+    state, recorded, removed_attach_calls = asyncio.run(run())
+
+    assert state == "/AttachmentGroup/attached"
+    assert [event.name for event in recorded] == [
+        attachment.AttachCompleteEvent.name,
+        attachment.DetachFailedEvent.name,
+    ]
+    assert removed_attach_calls == 2
+
+
 def test_group_attempts_every_rollback_after_detach_failure() -> None:
     async def run() -> tuple[str, str, LifecycleRecorder, TestAttachment, TestAttachment, TestAttachment]:
         ctx = hsm.Context()
@@ -815,6 +926,48 @@ def test_group_converts_member_attach_exception_to_failure() -> None:
     assert [event.name for event in recorded] == [attachment.AttachFailedEvent.name]
     assert isinstance(recorded[0].data, attachment.FailedData)
     assert recorded[0].data.kind is attachment.FailureKind.DISPATCH
+
+
+def test_group_converts_member_start_exception_to_correlated_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]]]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        member = TestAttachment()
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, group, group.model)
+        started = hsm.started
+
+        async def fail_member_start[T: hsm.Instance](
+            start_ctx: hsm.Context | None,
+            instance: T,
+            model: hsm.Model,
+            config: hsm.Config | None = None,
+        ) -> T:
+            if instance is member:
+                raise RuntimeError("member start failed")
+            return await started(start_ctx, instance, model, config)
+
+        monkeypatch.setattr(hsm, "started", fail_member_start)
+        await group.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=actor),
+                "member-start-failed",
+            ),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group.state(), actor.events
+
+    state, recorded = asyncio.run(run())
+
+    assert state == "/AttachmentGroup/detached"
+    assert [event.name for event in recorded] == [attachment.AttachFailedEvent.name]
+    assert recorded[0].id == "member-start-failed"
+    assert isinstance(recorded[0].data, attachment.FailedData)
+    assert recorded[0].data.kind is attachment.FailureKind.INITIALIZATION
 
 
 def test_group_converts_reply_start_exception_to_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1103,6 +1256,52 @@ def test_group_reply_accepts_only_correlated_member_terminal_event() -> None:
     assert [event.id for event in recorded] == ["attach"]
 
 
+def test_group_attach_reply_ignores_terminal_for_another_actor() -> None:
+    async def run() -> tuple[str, str, list[hsm.Event[typing.Any]]]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        other_actor = LifecycleRecorder()
+        member = TestAttachment(respond_attach=False)
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, other_actor, other_actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
+        request = member.attach_calls[0]
+        assert isinstance(request.data, attachment.AttachData)
+        reply = request.data.reply_to
+        assert isinstance(reply, hsm.Instance)
+
+        wrong_actor = dataclasses.replace(
+            attachment.AttachCompleteEvent.with_data(attachment.AttachCompleteData(actor=other_actor, created=True)),
+            id=request.id,
+            source=hsm.id(member),
+            target=hsm.id(reply),
+            metadata=dict(request.metadata),
+        )
+        await hsm.Instance.dispatch(reply, ctx, wrong_actor)
+        group_state = group.state()
+        reply_state = reply.state()
+        await hsm.Instance.dispatch(
+            reply,
+            ctx,
+            dataclasses.replace(
+                wrong_actor,
+                data=attachment.AttachCompleteData(actor=actor, created=True),
+            ),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group_state, reply_state, actor.events
+
+    group_state, reply_state, recorded = asyncio.run(run())
+
+    assert group_state == "/AttachmentGroup/attaching"
+    assert reply_state == "/AttachmentGroupReply/waiting"
+    assert [event.name for event in recorded] == [attachment.AttachCompleteEvent.name]
+
+
 def test_group_attach_reply_ignores_detach_terminal_event() -> None:
     async def run() -> tuple[str, str, list[hsm.Event[typing.Any]]]:
         ctx = hsm.Context()
@@ -1191,6 +1390,58 @@ def test_group_detach_reply_ignores_attach_terminal_event() -> None:
         _ = detach_release.set()
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         return wrong_kind_group_state, wrong_kind_reply_state, actor.events
+
+    group_state, reply_state, recorded = asyncio.run(run())
+
+    assert group_state == "/AttachmentGroup/detaching"
+    assert reply_state == "/AttachmentGroupReply/waiting"
+    assert [event.name for event in recorded] == [
+        attachment.AttachCompleteEvent.name,
+        attachment.DetachedEvent.name,
+    ]
+
+
+def test_group_detach_reply_ignores_terminal_for_another_actor() -> None:
+    async def run() -> tuple[str, str, list[hsm.Event[typing.Any]]]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        other_actor = LifecycleRecorder()
+        member = TestAttachment(respond_detach=False)
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, other_actor, other_actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        actor.recorded.clear()
+        await group.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=actor)))
+        _ = await asyncio.wait_for(member.detach_started.wait(), timeout=1)
+        request = member.detach_calls[0]
+        assert isinstance(request.data, attachment.DetachData)
+        reply = request.data.reply_to
+        assert isinstance(reply, hsm.Instance)
+
+        wrong_actor = dataclasses.replace(
+            attachment.DetachedEvent.with_data(attachment.DetachedData(actor=other_actor, removed=True)),
+            id=request.id,
+            source=hsm.id(member),
+            target=hsm.id(reply),
+            metadata=dict(request.metadata),
+        )
+        await hsm.Instance.dispatch(reply, ctx, wrong_actor)
+        group_state = group.state()
+        reply_state = reply.state()
+        await hsm.Instance.dispatch(
+            reply,
+            ctx,
+            dataclasses.replace(
+                wrong_actor,
+                data=attachment.DetachedData(actor=actor, removed=True),
+            ),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group_state, reply_state, actor.events
 
     group_state, reply_state, recorded = asyncio.run(run())
 

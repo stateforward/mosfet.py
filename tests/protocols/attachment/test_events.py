@@ -1,6 +1,7 @@
 """Tests for the public attachment event contract."""
 
 import hsm
+import datetime
 
 from bot.protocols import attachment
 from tests.type_helpers import object_dict
@@ -29,6 +30,7 @@ def test_attachment_protocol_defines_correlated_lifecycle_outcomes() -> None:
     assert detach.id == "detach-operation"
     assert attach.data.reply_to is reply_to
     assert detach.data.reply_to is reply_to
+    assert detach.data.timeout == datetime.timedelta(seconds=30)
 
 
 def test_attachment_protocol_schemas_expose_actor_ids_but_not_runtime_reply_targets() -> None:

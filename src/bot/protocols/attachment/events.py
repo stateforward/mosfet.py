@@ -41,10 +41,14 @@ def _actor_from_schema(data: object) -> hsm.Instance:
     raise TypeError("Attachment actor must be an hsm.Instance or an object containing a string id.")
 
 
+def _actor_to_schema(actor: hsm.Instance) -> dict[str, str]:
+    return {"id": hsm.id(actor)}
+
+
 Actor = typing.Annotated[
     hsm.Instance,
     pydantic.BeforeValidator(_actor_from_schema),
-    pydantic.PlainSerializer(lambda actor: {"id": hsm.id(actor)}, return_type=dict[str, str], when_used="json"),
+    pydantic.PlainSerializer(_actor_to_schema, return_type=dict[str, str], when_used="json"),
     pydantic.WithJsonSchema(_ACTOR_JSON_SCHEMA),
 ]
 
@@ -94,6 +98,13 @@ class AttachData(_RequestData):
 
 class DetachData(_RequestData):
     """Request that the recipient remove its domain-specific relationship with ``actor``."""
+
+    timeout: datetime.timedelta = pydantic.Field(
+        default=datetime.timedelta(seconds=30),
+        gt=datetime.timedelta(0),
+        description="Maximum time the recipient may remain in its detaching state before recovery begins.",
+        examples=[30],
+    )
 
 
 class AttachCompleteData(pydantic.BaseModel):
