@@ -30,6 +30,7 @@ import typing
 import uuid
 
 import hsm
+from bot.protocols import attachment
 from sqlalchemy import insert
 from sqlalchemy import select
 
@@ -70,9 +71,7 @@ def _cognition_input_for_participated(
     """Map a participated turn onto cognition ``InputData`` (not a prebuilt processing input)."""
 
     factory = (
-        decision_input.agent_conversation_decision_input
-        if decision_input_factory is None
-        else decision_input_factory
+        decision_input.agent_conversation_decision_input if decision_input_factory is None else decision_input_factory
     )
     # Reuse host stimulus shaping; Cognition builds any deliberative input itself.
     shaped = factory(
@@ -96,7 +95,14 @@ class _HostTurnOwner(hsm.Instance):
     )
 
 
+def _is_behavior_ready(machine: ability.Ability[typing.Any, typing.Any]) -> bool:
+    state = machine.state() or ""
+    return "/attached/behavior/" in state and not state.endswith("/initializing")
+
+
 async def _ensure_attached(machine: ability.Ability[typing.Any, typing.Any], ctx: hsm.Context) -> None:
+    if _is_behavior_ready(machine):
+        return
     owner = _HostTurnOwner()
     assert owner.model is not None
     try:
@@ -104,7 +110,11 @@ async def _ensure_attached(machine: ability.Ability[typing.Any, typing.Any], ctx
     except hsm.ErrorValidatingModel as error:
         if "already has a running HSM" not in str(error):
             raise
-    _ = await machine.attach(owner=owner, ctx=ctx)
+    _ = await machine.attach(
+        ctx,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
+    await _wait_until(lambda: _is_behavior_ready(machine), timeout_seconds=30.0)
 
 
 async def _apply_and_await_output(

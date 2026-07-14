@@ -148,10 +148,7 @@ class LiveKitConfig:
         api_key = _env_first(env, "BOT_LIVEKIT_API_KEY", "LIVEKIT_API_KEY", "VA_LIVEKIT_API_KEY")
         api_secret = _env_first(env, "BOT_LIVEKIT_API_SECRET", "LIVEKIT_API_SECRET", "VA_LIVEKIT_API_SECRET")
         room = _env_first(env, "BOT_LIVEKIT_ROOM", "LIVEKIT_ROOM", "VA_LIVEKIT_ROOM") or "bot-phone-bot"
-        identity = (
-            _env_first(env, "BOT_LIVEKIT_IDENTITY", "LIVEKIT_IDENTITY", "VA_LIVEKIT_IDENTITY")
-            or "bot-phone-bot"
-        )
+        identity = _env_first(env, "BOT_LIVEKIT_IDENTITY", "LIVEKIT_IDENTITY", "VA_LIVEKIT_IDENTITY") or "bot-phone-bot"
         track_name = (
             _env_first(env, "BOT_LIVEKIT_TRACK_NAME", "LIVEKIT_TRACK_NAME", "VA_LIVEKIT_TRACK_NAME")
             or DEFAULT_LIVEKIT_TRACK_NAME
@@ -313,6 +310,8 @@ def _phone_cognition(
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
     # Fast intuition on Flash-Lite; reasoning/reflection on the configured cognition model.
+    # Ability attach limit is exclusive: only Reflection owns the shared memory lifecycle.
+    # Autonomy/Reasoning may still be selected; they do not re-attach the same Memory instance.
     intuition = Processor(
         client=_chat_client(config, model=DEFAULT_GEMINI_INTUITION_MODEL),
         provider="gemini_fast_intuition",
@@ -322,9 +321,9 @@ def _phone_cognition(
         provider="gemini",
     )
     return cognition.Cognition(
-        autonomy=cognition.Autonomy(memory=store),
+        autonomy=cognition.Autonomy(),
         intuition=cognition.Intuition(processor=intuition),
-        reasoning=cognition.Reasoning(processor=deliberate, memory=store),
+        reasoning=cognition.Reasoning(processor=deliberate),
         reflection=cognition.Reflection(processor=deliberate, memory=store),
     )
 
@@ -645,7 +644,9 @@ class PhoneBot(Bot):
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),
-            acquired_abilities=(self._conversation, self._memory),
+            # Conversation is bot-acquired. Memory is attached under Reflection only
+            # (Ability attachment is exclusive; do not double-attach the same instance).
+            acquired_abilities=(self._conversation,),
         )
         self._outputs = []
         self._failures = []

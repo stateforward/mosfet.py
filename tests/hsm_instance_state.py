@@ -119,6 +119,14 @@ async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability
         context,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
     )
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while asyncio.get_running_loop().time() < deadline:
+        state = ability.state() or ""
+        if "/attached/behavior/" in state and not state.endswith("/initializing"):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise RuntimeError(f"Timed out waiting for ability attach readiness in state {ability.state()!r}.")
     remember_ability_terminal_owner(ability, owner)
 
 

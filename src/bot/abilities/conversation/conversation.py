@@ -353,11 +353,6 @@ _ConversationParticipatingFailedEvent = hsm.Event[FailureData](
     kind=hsm.ErrorEventKind,
     schema=FailureData,
 )
-_ConversationChildrenAttachedEvent = hsm.Event[object](
-    name="bot.ability.conversation.children.attached",
-    kind=hsm.CompletionEventKind,
-    schema=object,
-)
 DECODING_FAILED_EVENT = _ConversationDecodingFailedEvent
 ParticipatingFailedEvent = _ConversationParticipatingFailedEvent
 
@@ -649,14 +644,35 @@ class Conversation(
     failed_event: typ.ClassVar[hsm.Event[FailureData]] = FailedEvent
     snapshot_request_event: typ.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
     snapshot_output_event: typ.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
+    _composite_attachment_lifecycle: typ.ClassVar[bool] = True
+    # Concrete Text/Voice conversations replace this via define_model; keep composite
+    # detach vertices so Ability lifecycle validation succeeds on the abstract base.
     submodel: typ.ClassVar[hsm.Model | None] = hsm.define(
         "Conversation",
         hsm.initial(hsm.target("/Conversation/silent")),
         hsm.state("silent"),
+        hsm.state(
+            "detaching",
+            hsm.activity(ability.Ability._detach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Conversation/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Conversation/silent"),
+            ),
+        ),
+        hsm.state("degraded"),
         hsm.observe(observer),
     )
     _decoding: decoding.Decoding[participating.ParticipationStimulus, str]
     _participating: participating.Participating
+    _attachment_group: attachment.Group
     _conversation_ref: str | None
     _participants_by_ref: dict[str, participating.ParticipantSnapshot]
 
@@ -673,6 +689,7 @@ class Conversation(
         super().__init__()
         self._decoding = decoding
         self._participating = participating
+        self._attachment_group = attachment.Group(self._decoding, self._participating)
         self._conversation_ref = None
         self._participants_by_ref = {}
 
@@ -875,12 +892,6 @@ class Conversation(
         assert isinstance(output, Response)
         _dispatch_conversation_terminal_output(ctx, instance, event, output)
 
-    def _owned_children(self) -> tuple[ability.Ability[typ.Any, typ.Any], ...]:
-        return (
-            typ.cast(ability.Ability[typ.Any, typ.Any], self._decoding),
-            typ.cast(ability.Ability[typ.Any, typ.Any], self._participating),
-        )
-
     @staticmethod
     def _record_participant_states(
         ctx: hsm.Context,
@@ -956,29 +967,6 @@ class Conversation(
     ) -> None:
         _fail_conversation_child(ctx, instance, event, "participating")
 
-    @staticmethod
-    async def _attach_children(
-        ctx: hsm.Context,
-        instance: "Conversation[typ.Any, typ.Any]",
-        event: hsm.Event[typ.Any],
-    ) -> None:
-        del event
-        for child in instance._owned_children():
-            _ = await child.attach(owner=instance, ctx=ctx)
-        _ = hsm.dispatch(ctx, instance, _ConversationChildrenAttachedEvent.with_data(None))
-
-    @staticmethod
-    def _detach_children_on_detach(
-        ctx: hsm.Context,
-        instance: "Conversation[typ.Any, typ.Any]",
-        event: hsm.Event[typ.Any],
-    ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        for child in instance._owned_children():
-            _ = child.detach(ctx=ctx)
-        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
-
     @classmethod
     def define_model(
         cls,
@@ -1011,17 +999,17 @@ class Conversation(
             ),
             hsm.state(
                 "initializing",
-                hsm.defer(input_event),
-                hsm.activity(cls._attach_children),
-                hsm.exit(cls._detach_children_on_detach),
+                hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+                hsm.activity(ability.Ability._attach_composite_group),
                 hsm.transition(
-                    hsm.on(_ConversationChildrenAttachedEvent),
+                    hsm.on(ability.Ability._composite_attachment_terminal_event),
+                    hsm.guard(ability.Ability._is_composite_attach_complete),
+                    hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
                     hsm.target(f"{root_path}/silent"),
                 ),
             ),
             hsm.state(
                 "silent",
-                hsm.exit(cls._detach_children_on_detach),
                 hsm.transition(
                     hsm.on(input_event),
                     hsm.guard(_has_correlated_input),
@@ -1035,7 +1023,6 @@ class Conversation(
             hsm.state(
                 "active",
                 hsm.defer(input_event),
-                hsm.exit(cls._detach_children_on_detach),
                 hsm.transition(
                     hsm.on(
                         _ConversationDecodingFailedEvent,
@@ -1085,6 +1072,24 @@ class Conversation(
                     ),
                 ),
             ),
+            hsm.state(
+                "detaching",
+                hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+                hsm.activity(ability.Ability._detach_composite_group),
+                hsm.transition(
+                    hsm.on(ability.Ability._composite_attachment_terminal_event),
+                    hsm.guard(ability.Ability._is_composite_rollback_failure),
+                    hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                    hsm.target(f"{root_path}/degraded"),
+                ),
+                hsm.transition(
+                    hsm.on(ability.Ability._composite_attachment_terminal_event),
+                    hsm.guard(ability.Ability._is_composite_detach_failed),
+                    hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                    hsm.target(f"{root_path}/silent"),
+                ),
+            ),
+            hsm.state("degraded"),
             hsm.observe(observer),
         )
 
