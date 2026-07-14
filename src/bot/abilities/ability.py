@@ -301,6 +301,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
 
     _attachment_limit: typing.ClassVar[int | None] = 1
     _attachments: list[hsm.Instance]
+    _attachment_group: attachment.Group
     _attachment_timeout: datetime.timedelta
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
     _composite_attachment_terminal_event: typing.ClassVar[hsm.Event[_CompositeAttachmentTerminalData]] = (
@@ -338,6 +339,139 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             owner,
             dataclasses.replace(terminal, source=hsm.id(instance), target=hsm.id(owner)),
         )
+
+    @staticmethod
+    async def _attach_composite_group(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        request = event.data
+        assert isinstance(request, attachment.AttachData)
+        reply: hsm.Instance | None = None
+        correlation: dict[str, object] = {}
+        source: hsm.Instance = instance._attachment_group
+        try:
+            private_scope = hsm.Context(
+                parent=instance.context(),
+                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
+            )
+            try:
+                _ = hsm.id(instance._attachment_group)
+            except hsm.ErrorValidatingModel:
+                try:
+                    _ = await hsm.started(private_scope, instance._attachment_group, instance._attachment_group.model)
+                except Exception:
+                    source = instance
+                    raise
+            reply, correlation = await instance._start_composite_attachment_reply(
+                source,
+                request,
+                event,
+            )
+            await instance._attachment_group.attach(
+                private_scope,
+                dataclasses.replace(
+                    attachment.AttachEvent.with_data(
+                        attachment.AttachData(actor=instance, reply_to=reply, timeout=request.timeout)
+                    ),
+                    id=event.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._attachment_group),
+                    metadata={
+                        **event.metadata,
+                        **correlation,
+                    },
+                ),
+            )
+        except Exception as error:
+            failure = attachment.FailedData(
+                actor=instance,
+                kind=attachment.FailureKind.DISPATCH,
+                message=f"{type(instance).__name__} attachment Group start failed: {error}",
+            )
+            if reply is None:
+                instance._dispatch_composite_attachment_failure(
+                    ctx,
+                    source,
+                    request,
+                    event,
+                    failure,
+                )
+                return
+            _ = hsm.dispatch(
+                ctx,
+                reply,
+                dataclasses.replace(
+                    attachment.AttachFailedEvent.with_data(failure),
+                    id=event.id,
+                    source=hsm.id(source),
+                    target=hsm.id(reply),
+                    metadata={**event.metadata, **correlation},
+                ),
+            )
+
+    @staticmethod
+    async def _detach_composite_group(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        request = event.data
+        assert isinstance(request, attachment.DetachData)
+        reply: hsm.Instance | None = None
+        correlation: dict[str, object] = {}
+        try:
+            private_scope = hsm.Context(
+                parent=instance.context(),
+                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
+            )
+            reply, correlation = await instance._start_composite_attachment_reply(
+                instance._attachment_group,
+                request,
+                event,
+            )
+            await instance._attachment_group.detach(
+                private_scope,
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(
+                        attachment.DetachData(actor=instance, reply_to=reply, timeout=request.timeout)
+                    ),
+                    id=event.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._attachment_group),
+                    metadata={
+                        **event.metadata,
+                        **correlation,
+                    },
+                ),
+            )
+        except Exception as error:
+            failure = attachment.FailedData(
+                actor=instance,
+                kind=attachment.FailureKind.DISPATCH,
+                message=f"{type(instance).__name__} attachment Group detach failed: {error}",
+            )
+            if reply is None:
+                instance._dispatch_composite_attachment_failure(
+                    ctx,
+                    instance._attachment_group,
+                    request,
+                    event,
+                    failure,
+                )
+                return
+            _ = hsm.dispatch(
+                ctx,
+                reply,
+                dataclasses.replace(
+                    attachment.DetachFailedEvent.with_data(failure),
+                    id=event.id,
+                    source=hsm.id(instance._attachment_group),
+                    target=hsm.id(reply),
+                    metadata={**event.metadata, **correlation},
+                ),
+            )
 
     @staticmethod
     def _deliver_composite_attachment_terminal(

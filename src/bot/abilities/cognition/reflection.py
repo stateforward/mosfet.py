@@ -30,6 +30,7 @@ import typing
 import uuid
 
 import hsm
+from sqlalchemy.sql import Executable
 
 from bot.protocols import attachment
 import pydantic
@@ -110,12 +111,6 @@ _REFLECTION_CHANGE_INTENT_METADATA_KEY = "bot.reflection.change_intent"
 _REFLECTION_EXISTING_HABIT_METADATA_KEY = "bot.reflection.existing_habit"
 _SELECT_ID_SUFFIX = ":reflection:select"
 _CHANGE_ID_SUFFIX = ":reflection:change"
-
-_InitializingCompleteEvent = hsm.Event[object](
-    name="bot.ability.reflection.initializing.complete",
-    kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
-)
 
 
 class InputData(pydantic.BaseModel):
@@ -399,9 +394,9 @@ def _habit_sample_input(cognition_input: input.InputData) -> tuple[object, dict[
     if isinstance(stimulus, hsm.Event):
         metadata.update(dict(stimulus.metadata))
     if cognition_input.focus_candidates:
-        metadata.setdefault("bot.focus_candidates", cognition_input.focus_candidates)
+        _ = metadata.setdefault("bot.focus_candidates", cognition_input.focus_candidates)
     if cognition_input.focus is not None:
-        metadata.setdefault("bot.bot.focus", cognition_input.focus)
+        _ = metadata.setdefault("bot.bot.focus", cognition_input.focus)
     return payload, metadata
 
 
@@ -415,8 +410,8 @@ def _habit_check_from_write(
 ) -> habit_diagnostic.Checked[Instance]:
     """Validate write payload into an installable Instance (or a Report)."""
 
-    from bot.habit import check
-    from bot.habit import verify_apply
+    from bot.habit.instance import check
+    from bot.habit.verify import verify_apply
 
     if source is None or not source.strip():
         report = habit_diagnostic.report_of(
@@ -460,16 +455,21 @@ def _diagnostic_messages(report: habit_diagnostic.Report) -> tuple[str, ...]:
 
 def _last_diagnostic_messages(metadata: dict[str, object]) -> tuple[str, ...] | None:
     value = metadata.get(_REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY)
-    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
-        return typing.cast(tuple[str, ...], value)
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return tuple(typing.cast(list[str], value))
+    if isinstance(value, (tuple, list)):
+        values = typing.cast(tuple[object, ...] | list[object], value)
+        messages = tuple(item for item in values if isinstance(item, str))
+        if len(messages) == len(values):
+            return messages
     return None
+
+
+def _compile_habit_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
+    return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
 
 
 def _load_habit(store: memory.Memory, *, name: str) -> Instance | None:
     out = store.execute(
-        memory.InputData(statements=memory.compile_statements(*habit_storage.select_habit_by_name_clauses(name)))
+        memory.InputData(statements=_compile_habit_statements(habit_storage.select_habit_by_name_clauses(name)))
     )
     if len(out.results) < 2:
         return None
@@ -483,7 +483,7 @@ def _load_all_habits(store: memory.Memory) -> tuple[Instance, ...]:
     """Load full habit inventory (any status) for Reflection select context."""
 
     out = store.execute(
-        memory.InputData(statements=memory.compile_statements(*habit_storage.select_all_habits_clauses()))
+        memory.InputData(statements=_compile_habit_statements(habit_storage.select_all_habits_clauses()))
     )
     if len(out.results) < 2:
         return ()
@@ -502,7 +502,7 @@ def _store_habit(
 
     del context_ref
     _ = store.execute(
-        memory.InputData(statements=memory.compile_statements(*habit_storage.replace_habit_clauses(habit)))
+        memory.InputData(statements=_compile_habit_statements(habit_storage.replace_habit_clauses(habit)))
     )
 
 
@@ -631,6 +631,7 @@ class Reflection(processing.Processing):
         type(None),
         description="Reflection completes with no product; habit work is applied as side effects only.",
     )
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
     _select_processing: processing.Processing
     _change_processing: processing.Processing
@@ -664,51 +665,6 @@ class Reflection(processing.Processing):
         if isinstance(prior, tuple):
             return typing.cast(tuple[CognitiveEpisode, ...], prior)
         return ()
-
-    @staticmethod
-    async def _attach_children_activity(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        del event
-        children: tuple[ability.Ability[typing.Any, typing.Any], ...] = (
-            instance._select_processing,
-            instance._change_processing,
-            instance._memory,
-        )
-        for child in children:
-            _ = await child.attach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                    source=hsm.id(instance),
-                ),
-            )
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
-
-    @staticmethod
-    def _detach_children_on_detach(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        children: tuple[ability.Ability[typing.Any, typing.Any], ...] = (
-            instance._select_processing,
-            instance._change_processing,
-            instance._memory,
-        )
-        for child in children:
-            _ = child.detach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                    source=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
 
     @staticmethod
     def _has_reflection_input(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -806,7 +762,7 @@ class Reflection(processing.Processing):
     ) -> None:
         data = event.data
         assert isinstance(data, processing.InputData)
-        input = typing.cast(processing.InputData, data)
+        input = data
         operation_id = event.id or None
         metadata = dict(event.metadata)
         try:
@@ -1061,10 +1017,9 @@ class Reflection(processing.Processing):
             )
             return
         try:
+            raw = typing.cast(object, event.data)
             create_intent = (
-                event.data
-                if isinstance(event.data, CreateData)
-                else CreateData.model_validate(event.data if event.data is not None else {})
+                raw if isinstance(raw, CreateData) else CreateData.model_validate(raw if raw is not None else {})
             )
         except Exception as error:
             _ = hsm.dispatch(
@@ -1122,11 +1077,8 @@ class Reflection(processing.Processing):
             )
             return
         try:
-            intent = (
-                event.data
-                if isinstance(event.data, ChangeData)
-                else ChangeData.model_validate(event.data if event.data is not None else {})
-            )
+            raw = typing.cast(object, event.data)
+            intent = raw if isinstance(raw, ChangeData) else ChangeData.model_validate(raw if raw is not None else {})
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1184,11 +1136,8 @@ class Reflection(processing.Processing):
             )
             return
         try:
-            data = (
-                event.data
-                if isinstance(event.data, BreakData)
-                else BreakData.model_validate(event.data if event.data is not None else {})
-            )
+            raw = typing.cast(object, event.data)
+            data = raw if isinstance(raw, BreakData) else BreakData.model_validate(raw if raw is not None else {})
             applied = _apply_break(data, store=instance._memory, context_ref=turn.cognition_input.focus)
         except Exception as error:
             _ = hsm.dispatch(
@@ -1476,17 +1425,17 @@ class Reflection(processing.Processing):
         hsm.initial(hsm.target("/Reflection/initializing")),
         hsm.state(
             "initializing",
-            hsm.defer(input_event),
-            hsm.activity(_attach_children_activity),
-            hsm.exit(_detach_children_on_detach),
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(
-                hsm.on(_InitializingCompleteEvent),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
                 hsm.target("/Reflection/idle"),
             ),
         ),
         hsm.state(
             "idle",
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_reflection_input),
@@ -1497,7 +1446,6 @@ class Reflection(processing.Processing):
             "recalling",
             hsm.defer(input_event),
             hsm.activity(_recall_activity),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(_RecalledEvent),
                 hsm.guard(_has_recalled),
@@ -1514,7 +1462,6 @@ class Reflection(processing.Processing):
         hsm.state(
             "processing",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_matches_select_empty),
@@ -1555,7 +1502,6 @@ class Reflection(processing.Processing):
         hsm.state(
             "changing",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_matches_change_output),
@@ -1598,7 +1544,6 @@ class Reflection(processing.Processing):
             "storing",
             hsm.defer(input_event),
             hsm.activity(_store_activity),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(_StoredEvent),
                 hsm.guard(_has_stored),
@@ -1612,6 +1557,24 @@ class Reflection(processing.Processing):
                 hsm.target("/Reflection/idle"),
             ),
         ),
+        hsm.state(
+            "detaching",
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._detach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Reflection/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Reflection/idle"),
+            ),
+        ),
+        hsm.state("degraded"),
         hsm.observe(observer),
     )
 
@@ -1621,7 +1584,7 @@ class Reflection(processing.Processing):
         processor: processing.Processor | ProcessorFactory,
         memory: memory.Memory,
     ) -> None:
-        ability.Ability.__init__(self)
+        super(processing.Processing, self).__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         # Shared transport; each phase stamps its own system policy on apply.
         self._select_processing = processing.Processing(
@@ -1633,6 +1596,11 @@ class Reflection(processing.Processing):
             instructions=type(self).change_instructions,
         )
         self._memory = memory
+        self._attachment_group: attachment.Group = attachment.Group(
+            self._select_processing,
+            self._change_processing,
+            self._memory,
+        )
         self._events = habit_events()
 
 
