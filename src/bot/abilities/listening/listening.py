@@ -136,11 +136,6 @@ _ListeningStageFailedEvent = hsm.Event[FailedEventData](
     kind=hsm.ErrorEventKind,
     schema=FailedEventData,
 )
-_ListeningChildrenAttachedEvent = hsm.Event[object](
-    name="bot.ability.listening.children.attached",
-    kind=hsm.CompletionEventKind,
-    schema=object,
-)
 
 
 def _listening_sound(event: hsm.Event[typing.Any]) -> SoundData | None:
@@ -321,10 +316,12 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     input_event: typing.ClassVar[hsm.Event[SoundData]] = SoundEvent
     output_event: typing.ClassVar[hsm.Event[cognition.InputData]] = cognition.InputEvent
     failed_event: typing.ClassVar[hsm.Event[FailedEventData]] = ListeningFailedEvent
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _voice_detection: voice.detection.VoiceDetection
     _sound_classification: sound.classification.SoundClassification | None
     _speech_decoding: speech.SpeechDecoding | None
     _voice_diarization: voice.diarization.VoiceDiarization | None
+    _attachment_group: attachment.Group
 
     def __init__(
         self,
@@ -345,6 +342,14 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         self._voice_diarization = (
             voice.diarization.VoiceDiarization(classifier=voice_diarizer) if voice_diarizer is not None else None
         )
+        children: list[hsm.Instance] = [self._voice_detection]
+        if self._sound_classification is not None:
+            children.append(self._sound_classification)
+        if self._voice_diarization is not None:
+            children.append(self._voice_diarization)
+        if self._speech_decoding is not None:
+            children.append(self._speech_decoding)
+        self._attachment_group = attachment.Group(*children)
 
     @staticmethod
     async def _run_voice_detection(
@@ -623,68 +628,22 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     ) -> bool:
         return _has_voice_diarization_completion(ctx, instance, event) and instance._speech_decoding is None
 
-    @staticmethod
-    def _listening_children(instance: "Listening") -> list[ability.Ability[typing.Any, typing.Any]]:
-        children: list[ability.Ability[typing.Any, typing.Any]] = [instance._voice_detection]
-        if instance._sound_classification is not None:
-            children.append(instance._sound_classification)
-        if instance._voice_diarization is not None:
-            children.append(instance._voice_diarization)
-        if instance._speech_decoding is not None:
-            children.append(instance._speech_decoding)
-        return children
-
-    @staticmethod
-    async def _attach_listening_children(
-        ctx: hsm.Context,
-        instance: "Listening",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        del event
-        for child in Listening._listening_children(instance):
-            _ = await child.attach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                    source=hsm.id(instance),
-                ),
-            )
-        _ = hsm.dispatch(ctx, instance, _ListeningChildrenAttachedEvent.with_data(None))
-
-    @staticmethod
-    def _detach_listening_children_on_detach(
-        ctx: hsm.Context,
-        instance: "Listening",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        for child in Listening._listening_children(instance):
-            _ = child.detach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                    source=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
-
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Listening",
         hsm.initial(hsm.target("/Listening/initializing")),
         hsm.state(
             "initializing",
-            hsm.defer(input_event),
-            hsm.activity(_attach_listening_children),
-            hsm.exit(_detach_listening_children_on_detach),
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(
-                hsm.on(_ListeningChildrenAttachedEvent),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
                 hsm.target("/Listening/Listening"),
             ),
         ),
         hsm.state(
             "Listening",
-            hsm.exit(_detach_listening_children_on_detach),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_listening_input),
@@ -695,7 +654,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             "DetectingVoice",
             hsm.defer(input_event),
             hsm.activity(_run_voice_detection),
-            hsm.exit(_detach_listening_children_on_detach),
             hsm.transition(
                 hsm.on(_VoiceDetectionCompletedEvent),
                 hsm.guard(_has_detected_no_voice_without_sound_classification),
@@ -722,7 +680,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             "ClassifyingSound",
             hsm.defer(input_event),
             hsm.activity(_run_sound_classification),
-            hsm.exit(_detach_listening_children_on_detach),
             hsm.transition(
                 hsm.on(_SoundClassificationCompletedEvent),
                 hsm.guard(_has_labeled_sound),
@@ -760,7 +717,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             "DiarizingVoice",
             hsm.defer(input_event),
             hsm.activity(_run_voice_diarization),
-            hsm.exit(_detach_listening_children_on_detach),
             hsm.transition(
                 hsm.on(_VoiceDiarizationCompletedEvent),
                 hsm.guard(_has_voice_diarization_completion_and_speech_decoding),
@@ -781,7 +737,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         ),
         hsm.state(
             "DecodingSpeech",
-            hsm.exit(_detach_listening_children_on_detach),
             hsm.transition(
                 hsm.on(_SpeechDecodingCompletedEvent),
                 hsm.guard(_has_speech_decoding_completion),
@@ -805,6 +760,24 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.activity(_run_diarized_speech_decoding),
             ),
         ),
+        hsm.state(
+            "detaching",
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._detach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Listening/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Listening/Listening"),
+            ),
+        ),
+        hsm.state("degraded"),
         hsm.observe(observer),
     )
 

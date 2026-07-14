@@ -8,6 +8,7 @@ from bot.protocols import attachment
 
 import asyncio
 import collections.abc
+import dataclasses
 import typing
 from typing import override
 
@@ -152,6 +153,35 @@ class RecordingListening(listening.Listening):
         return super().dispatch(ctx, event)
 
 
+class ListeningAttachmentOwner(hsm.Instance):
+    lifecycle: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _record(
+        ctx: hsm.Context,
+        instance: "ListeningAttachmentOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance.lifecycle.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "ListeningAttachmentOwner",
+        hsm.initial(hsm.target("recording")),
+        hsm.state(
+            "recording",
+            hsm.transition(hsm.on(attachment.AttachCompleteEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.AttachFailedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.DetachedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.DetachFailedEvent), hsm.effect(_record)),
+        ),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lifecycle = []
+
+
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
     for _ in range(1000):
         if condition():
@@ -209,39 +239,207 @@ def test_listening_events_use_concrete_pydantic_schemas() -> None:
     assert failed_schema == listening.FailedEventData.model_json_schema()
 
 
-def test_listening_defaults_to_voice_detection_without_requiring_speech_decoding() -> None:
-    listening, decoder = _listening(decoder=False)
-    fields = vars(listening)
+def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_for_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[tuple[hsm.Instance, ...]], int, str]:
+        groups: list[tuple[hsm.Instance, ...]] = []
+        requests: list[hsm.Event[attachment.AttachData]] = []
+        group_init = attachment.Group.__init__
 
-    assert isinstance(fields["_voice_detection"], voice.detection.VoiceDetection)
-    assert fields["_voice_detection"].classifier is not None
-    assert fields["_speech_decoding"] is None
-    assert decoder is None
-    assert fields["_voice_diarization"] is None
+        def record_group(group: attachment.Group, *members: hsm.Instance) -> None:
+            groups.append(members)
+            group_init(group, *members)
+
+        async def hold_attach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> None:
+            del group, ctx
+            requests.append(event)
+
+        monkeypatch.setattr(attachment.Group, "__init__", record_group)
+        monkeypatch.setattr(attachment.Group, "attach", hold_attach)
+        minimum = listening.Listening(
+            voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=False, confidence=0.9))
+        )
+        maximum = listening.Listening(
+            voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=True, confidence=0.9)),
+            sound_classifier=FixedSoundClassifier(),
+            voice_diarizer=FixedVoiceDiarizer(),
+            speech_decoder=RecordingSpeechDecoder(),
+        )
+        owner = hsm.Instance()
+        owner_model = hsm.define(
+            "ListeningAttachmentOwner",
+            hsm.initial(hsm.target("ready")),
+            hsm.state("ready"),
+        )
+        ctx = hsm.Context()
+        _ = await hsm.started(ctx, owner, owner_model)
+        await minimum.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "listening-attach",
+            ),
+        )
+        await wait_until(lambda: bool(requests) or minimum.state().endswith("/Listening"))
+        state = minimum.state()
+        await minimum.stop(minimum.context())
+        del maximum
+        return groups, len(requests), state
+
+    groups, request_count, state = asyncio.run(run())
+
+    assert len(groups) == 2
+    assert len(groups[0]) == 1
+    assert isinstance(groups[0][0], voice.detection.VoiceDetection)
+    assert len(groups[1]) == 4
+    assert isinstance(groups[1][0], voice.detection.VoiceDetection)
+    assert isinstance(groups[1][1], sound_hearing.classification.SoundClassification)
+    assert isinstance(groups[1][2], voice.diarization.VoiceDiarization)
+    assert isinstance(groups[1][3], speech.SpeechDecoding)
+    assert request_count == 1
+    assert state == "/ListeningLifecycle/attached/behavior/initializing"
 
 
-def test_listening_accepts_optional_speech_decoding_ability() -> None:
-    listening, decoder = _listening()
-    fields = vars(listening)
+def test_listening_reports_aggregate_attachment_failure_and_accepts_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int, str]:
+        requests: list[tuple[attachment.Group, hsm.Event[attachment.AttachData]]] = []
 
-    assert isinstance(fields["_speech_decoding"], speech.SpeechDecoding)
-    assert fields["_speech_decoding"].decoder is decoder
+        async def hold_attach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> None:
+            del ctx
+            requests.append((group, event))
+
+        monkeypatch.setattr(attachment.Group, "attach", hold_attach)
+        ctx = hsm.Context()
+        owner = ListeningAttachmentOwner()
+        listening_ability = listening.Listening(
+            voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=False, confidence=0.9))
+        )
+        _ = await hsm.started(ctx, owner, owner.model)
+        await listening_ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "listening-attach-failed",
+            ),
+        )
+        await wait_until(lambda: len(requests) == 1)
+        group, request = requests[0]
+        reply = request.data.reply_to
+        assert reply is not None
+        await hsm.dispatch(
+            ctx,
+            reply,
+            dataclasses.replace(
+                attachment.AttachFailedEvent.with_data(
+                    attachment.FailedData(
+                        actor=listening_ability,
+                        kind=attachment.FailureKind.INITIALIZATION,
+                        message="listening child failed",
+                    )
+                ),
+                id=request.id,
+                source=hsm.id(group),
+                target=hsm.id(reply),
+                metadata=dict(request.metadata),
+            ),
+        )
+        await wait_until(lambda: listening_ability.state().endswith("/detached"))
+        await listening_ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "listening-attach-retry",
+            ),
+        )
+        await wait_until(lambda: len(requests) == 2)
+        lifecycle = owner.lifecycle
+        state = listening_ability.state()
+        await listening_ability.stop(listening_ability.context())
+        return lifecycle, len(requests), state
+
+    lifecycle, request_count, state = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == [attachment.AttachFailedEvent.name]
+    assert lifecycle[0].id == "listening-attach-failed"
+    assert isinstance(lifecycle[0].data, attachment.FailedData)
+    assert lifecycle[0].data.kind is attachment.FailureKind.INITIALIZATION
+    assert request_count == 2
+    assert state == "/ListeningLifecycle/attached/behavior/initializing"
 
 
-def test_listening_accepts_optional_voice_diarization_ability() -> None:
-    diarizer = FixedVoiceDiarizer()
-    listening, _ = _listening(diarizer=diarizer)
-    fields = vars(listening)
+def test_listening_detaches_once_through_group_and_can_reattach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[hsm.Event[attachment.DetachData]], list[hsm.Event[typing.Any]], str]:
+        requests: list[hsm.Event[attachment.DetachData]] = []
+        group_detach = attachment.Group.detach
 
-    assert isinstance(fields["_voice_diarization"], voice.diarization.VoiceDiarization)
-    assert fields["_voice_diarization"].classifier is diarizer
+        async def record_detach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.DetachData],
+        ) -> None:
+            requests.append(event)
+            await group_detach(group, ctx, event)
 
+        monkeypatch.setattr(attachment.Group, "detach", record_detach)
+        ctx = hsm.Context()
+        owner = ListeningAttachmentOwner()
+        listening_ability = listening.Listening(
+            voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=False, confidence=0.9))
+        )
+        _ = await hsm.started(ctx, owner, owner.model)
+        await listening_ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "listening-first-attach",
+            ),
+        )
+        await wait_until(lambda: listening_ability.state().endswith("/Listening"))
+        owner.lifecycle.clear()
+        await listening_ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data_and_id(
+                attachment.DetachData(actor=owner),
+                "listening-detach",
+            ),
+        )
+        await wait_until(lambda: listening_ability.state().endswith("/detached"))
+        await listening_ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "listening-second-attach",
+            ),
+        )
+        await wait_until(lambda: listening_ability.state().endswith("/Listening"))
+        lifecycle = owner.lifecycle
+        state = listening_ability.state()
+        await listening_ability.stop(listening_ability.context())
+        return requests, lifecycle, state
 
-def test_listening_apply_bridge_keeps_operation_state_out_of_instance() -> None:
-    listening, _ = _listening()
+    requests, lifecycle, state = asyncio.run(run())
 
-    assert "_pending_apply_results" not in vars(listening)
-    assert "_active_apply_operation_id" not in vars(listening)
+    assert len(requests) == 1
+    assert requests[0].id == "listening-detach"
+    assert [event.name for event in lifecycle] == [
+        attachment.DetachedEvent.name,
+        attachment.AttachCompleteEvent.name,
+    ]
+    assert [event.id for event in lifecycle] == ["listening-detach", "listening-second-attach"]
+    assert state == "/ListeningLifecycle/attached/behavior/Listening"
 
 
 def test_listening_apply_runs_voice_diarization_and_speech_decoding_pipeline() -> None:
@@ -270,7 +468,7 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     assert model.qualified_name == "/ListeningLifecycle"
     assert model.initial == "/ListeningLifecycle/.initial"
     assert "/ListeningLifecycle/detached" in model.members
-    assert "/ListeningLifecycle/attaching" in model.members
+    assert "/ListeningLifecycle/attaching" not in model.members
     assert "/ListeningLifecycle/attached" in model.members
     assert "/ListeningLifecycle/attached/behavior/initializing" in model.members
     assert "/ListeningLifecycle/attached/behavior/Listening" in model.members
@@ -281,6 +479,11 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     assert "/ListeningLifecycle/attached/behavior/DecodingSpeech" in model.members
     assert "/ListeningLifecycle/attached/behavior/DecodingSpeech/Detected" in model.members
     assert "/ListeningLifecycle/attached/behavior/DecodingSpeech/Diarized" in model.members
+    assert "/ListeningLifecycle/attached/behavior/detaching" in model.members
+    assert "/ListeningLifecycle/attached/behavior/degraded" in model.members
+    initializing_events = model.transition_map["/ListeningLifecycle/attached/behavior/initializing"]
+    assert "bot.ability.attachment.terminal" in initializing_events
+    assert "bot.ability.listening.children.attached" not in initializing_events
     assert "world.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Listening"]
     assert (
         "bot.ability.listening.voice_detection.completed"
@@ -436,10 +639,11 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
 
 
 def test_listening_detach_releases_owned_subabilities_while_detecting_voice() -> None:
-    async def run() -> tuple[tuple[str, ...], str]:
+    async def run() -> tuple[bool, str]:
         ctx = hsm.Context()
+        detector = HangingVoiceDetector()
         listening_ability = RecordingListening(
-            voice_detector=HangingVoiceDetector(),
+            voice_detector=detector,
             speech_decoder=RecordingSpeechDecoder(),
         )
         await start_ability_tree(ctx, listening_ability)
@@ -448,10 +652,6 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
             lambda: listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
         )
         assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
-        subabilities = (
-            typing.cast(abilities.Ability[typing.Any, typing.Any], vars(listening_ability)["_voice_detection"]),
-            typing.cast(abilities.Ability[typing.Any, typing.Any], vars(listening_ability)["_speech_decoding"]),
-        )
 
         owner = ability_terminal_owner(listening_ability)
         assert owner is not None
@@ -459,15 +659,15 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
             ctx,
             attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
         )
-        await wait_until(lambda: all(ability.state().endswith("/detached") for ability in subabilities))
-        states = tuple(ability.state() for ability in subabilities)
+        await wait_until(lambda: listening_ability.state().endswith("/detached"))
+        await wait_until(lambda: detector.cancelled)
         state = listening_ability.state()
         await listening_ability.stop(ctx)
-        return states, state
+        return detector.cancelled, state
 
-    states, state = asyncio.run(run())
+    cancelled, state = asyncio.run(run())
 
-    assert all(child_state.endswith("/detached") for child_state in states)
+    assert cancelled
     assert state == "/RecordingListeningLifecycle/detached"
 
 
