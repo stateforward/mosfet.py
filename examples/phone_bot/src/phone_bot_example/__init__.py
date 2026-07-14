@@ -310,8 +310,8 @@ def _phone_cognition(
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
     # Fast intuition on Flash-Lite; reasoning/reflection on the configured cognition model.
-    # Ability attach limit is exclusive: only Reflection owns the shared memory lifecycle.
-    # Autonomy/Reasoning may still be selected; they do not re-attach the same Memory instance.
+    # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
+    # execute capability as injected collaborators without attaching it again.
     intuition = Processor(
         client=_chat_client(config, model=DEFAULT_GEMINI_INTUITION_MODEL),
         provider="gemini_fast_intuition",
@@ -321,9 +321,9 @@ def _phone_cognition(
         provider="gemini",
     )
     return cognition.Cognition(
-        autonomy=cognition.Autonomy(),
+        autonomy=cognition.Autonomy(memory=store),
         intuition=cognition.Intuition(processor=intuition),
-        reasoning=cognition.Reasoning(processor=deliberate),
+        reasoning=cognition.Reasoning(processor=deliberate, memory=store),
         reflection=cognition.Reflection(processor=deliberate, memory=store),
     )
 

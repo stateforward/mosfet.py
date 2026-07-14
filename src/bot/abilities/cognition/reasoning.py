@@ -9,7 +9,6 @@ import uuid
 
 import hsm
 
-from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
@@ -324,41 +323,13 @@ class Reasoning(processing.Processing):
     _memory: memory.Memory | None
 
     @staticmethod
-    async def _attach_memory_activity(
+    async def _initialize_activity(
         ctx: hsm.Context,
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
         del event
-        store = instance._memory
-        if store is not None:
-            _ = await store.attach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                    source=hsm.id(instance),
-                ),
-            )
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
-
-    @staticmethod
-    def _detach_memory_on_detach(
-        ctx: hsm.Context,
-        instance: "Reasoning",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        store = instance._memory
-        if store is not None:
-            _ = store.detach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                    source=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
 
     @staticmethod
     def _host_input_from_event(event: hsm.Event[typing.Any]) -> processing.InputData:
@@ -721,8 +692,7 @@ class Reasoning(processing.Processing):
         hsm.state(
             "initializing",
             hsm.defer(input_event),
-            hsm.activity(_attach_memory_activity),
-            hsm.exit(_detach_memory_on_detach),
+            hsm.activity(_initialize_activity),
             hsm.transition(
                 hsm.on(_InitializingCompleteEvent),
                 hsm.target("/Reasoning/idle"),
@@ -730,7 +700,6 @@ class Reasoning(processing.Processing):
         ),
         hsm.state(
             "idle",
-            hsm.exit(_detach_memory_on_detach),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_reasoning_input),
@@ -741,7 +710,6 @@ class Reasoning(processing.Processing):
             "recalling",
             hsm.defer(input_event),
             hsm.activity(_recall_activity),
-            hsm.exit(_detach_memory_on_detach),
             hsm.transition(
                 hsm.on(_RecalledEvent),
                 hsm.guard(_has_recalled),
@@ -758,7 +726,6 @@ class Reasoning(processing.Processing):
             "applying",
             hsm.defer(input_event),
             hsm.activity(_apply_activity),
-            hsm.exit(_detach_memory_on_detach),
             hsm.transition(
                 hsm.on(_ReasonedEvent),
                 hsm.guard(_reasoned_needs_retain),
@@ -781,7 +748,6 @@ class Reasoning(processing.Processing):
             "retaining",
             hsm.defer(input_event),
             hsm.activity(_retain_activity),
-            hsm.exit(_detach_memory_on_detach),
             hsm.transition(
                 hsm.on(_RetainedEvent),
                 hsm.guard(_has_retained),

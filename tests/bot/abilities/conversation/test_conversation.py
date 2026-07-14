@@ -1,5 +1,6 @@
 from bot import abilities
 import bot
+from bot.abilities import ability
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import decoding
@@ -20,8 +21,9 @@ import hsm
 import pydantic
 import pytest
 from bot.abilities.conversation import conversation as conversation_impl
+from bot.protocols import attachment
 
-from tests.hsm_instance_state import start_ability_tree
+from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view
 
 
@@ -32,7 +34,6 @@ def model_examples(model: type[pydantic.BaseModel]) -> list[dict[str, typing.Any
     assert isinstance(examples, list)
     assert examples
     return typing.cast(list[dict[str, typing.Any]], examples)
-
 
 
 class _HostAsProcessor(processing.Processor):
@@ -205,7 +206,7 @@ def brain_for_test(
     )
 
 
-def text_message(conversation_ref: str = "support-call") -> conversation.TextMessage:
+def text_message(conversation_ref: str = "support-call", content: str = "hello") -> conversation.TextMessage:
     return conversation.TextMessage(
         conversation_ref=conversation_ref,
         self_participant_ref="bot",
@@ -220,12 +221,10 @@ def text_message(conversation_ref: str = "support-call") -> conversation.TextMes
             participating.ParticipantSnapshot(
                 ref="caller",
                 kind="human",
-                state=participating.ParticipantStateSnapshot(
-                    presence="present", attention="available", turn="holding"
-                ),
+                state=participating.ParticipantStateSnapshot(presence="present", attention="available", turn="holding"),
             ),
         ),
-        content=participating.TextStimulus(source_participant_ref="caller", content="hello"),
+        content=participating.TextStimulus(source_participant_ref="caller", content=content),
     )
 
 
@@ -448,6 +447,167 @@ def test_voice_conversation_contribution_is_thin() -> None:
     assert participated.decoded_text == "hello"
 
 
+def test_host_contribution_does_not_observe_machine_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> conversation.ParticipatedTurn:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+
+        def fail_state_read() -> str:
+            raise AssertionError("host composition must not inspect machine state")
+
+        monkeypatch.setattr(conversation_ability, "state", fail_state_read)
+        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
+
+    participated = asyncio.run(run())
+
+    assert participated.decoded_text == "hello"
+
+
+def test_host_contribution_does_not_replace_machine_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> conversation.ParticipatedTurn:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+        original_setattr = RecordingConversation.__setattr__
+
+        def reject_dispatch_assignment(instance: object, name: str, value: object) -> None:
+            if name == "dispatch":
+                raise AssertionError("host composition must not replace machine dispatch")
+            original_setattr(instance, name, value)
+
+        monkeypatch.setattr(RecordingConversation, "__setattr__", reject_dispatch_assignment)
+        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
+
+    participated = asyncio.run(run())
+
+    assert participated.decoded_text == "hello"
+
+
+def test_concurrent_host_contributions_return_their_correlated_turns() -> None:
+    async def run() -> tuple[conversation.ParticipatedTurn, conversation.ParticipatedTurn, bool]:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+        original_dispatch = conversation_ability.dispatch
+        first, second = await asyncio.gather(
+            conversation.contribute_conversation_turn(
+                conversation_ability,
+                text_message("first-call", "first"),
+            ),
+            conversation.contribute_conversation_turn(
+                conversation_ability,
+                text_message("second-call", "second"),
+            ),
+        )
+        return first, second, conversation_ability.dispatch == original_dispatch
+
+    first, second, dispatch_restored = asyncio.run(run())
+
+    assert (first.input.conversation_ref, first.decoded_text) == ("first-call", "first")
+    assert (second.input.conversation_ref, second.decoded_text) == ("second-call", "second")
+    assert dispatch_restored
+
+
+def test_host_contribution_reports_terminal_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+        monkeypatch.setattr(
+            conversation_impl.Conversation,
+            "_build_contribution_response",
+            staticmethod(lambda instance, participated: object()),
+        )
+        with pytest.raises(RuntimeError, match="output type does not match"):
+            await conversation.contribute_conversation_turn(conversation_ability, text_message())
+
+    asyncio.run(run())
+
+
+def test_host_correlation_metadata_is_not_owner_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> list[dict[str, object]]:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+        owner = ability_terminal_owner(conversation_ability)
+        assert owner is not None
+        metadata: list[dict[str, object]] = []
+        original_record = owner.record
+
+        def record(event: hsm.Event[typing.Any]) -> None:
+            metadata.append(dict(event.metadata))
+            original_record(event)
+
+        monkeypatch.setattr(owner, "record", record)
+        _ = await conversation.contribute_conversation_turn(conversation_ability, text_message())
+        return metadata
+
+    metadata = asyncio.run(run())
+
+    assert all(conversation_impl.conversation_result_metadata_key not in item for item in metadata)
+    assert all(ability.TERMINAL_RESULT_METADATA_KEY not in item for item in metadata)
+
+
+def test_start_ability_tree_waits_for_attachment_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> conversation.ParticipatedTurn:
+        conversation_ability = RecordingConversation()
+
+        def fail_state_read() -> str:
+            raise AssertionError("test lifecycle setup must await typed attachment events")
+
+        monkeypatch.setattr(conversation_ability, "state", fail_state_read)
+        await start_conversation(conversation_ability)
+        _ = await conversation_ability.apply(text_message())
+        await wait_until(lambda: conversation_ability.last_participated_turn() is not None)
+        participated = conversation_ability.last_participated_turn()
+        assert participated is not None
+        return participated
+
+    participated = asyncio.run(run())
+
+    assert participated.decoded_text == "hello"
+
+
+def test_start_ability_tree_surfaces_typed_attachment_failure() -> None:
+    async def run() -> None:
+        decoding_ability = text_decoding_ability()
+        await start_ability_tree(None, decoding_ability)
+        conversation_ability = conversation.TextConversation(
+            decoding=decoding_ability,
+            participating=participating.Participating(),
+        )
+        with pytest.raises(RuntimeError, match="cannot accept this attachment"):
+            await start_ability_tree(None, conversation_ability)
+
+    asyncio.run(run())
+
+
+def test_conversation_detach_clears_prior_turn_state() -> None:
+    async def run() -> tuple[conversation.ParticipatedTurn | None, conversation.Snapshot]:
+        conversation_ability = RecordingConversation()
+        await start_conversation(conversation_ability)
+        _ = await conversation_ability.apply(text_message())
+        await wait_until(lambda: conversation_ability.last_participated_turn() is not None)
+        owner = ability_terminal_owner(conversation_ability)
+        assert owner is not None
+        _ = await conversation_ability.detach(
+            conversation_ability.context(),
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
+        )
+        await wait_until(lambda: (conversation_ability.state() or "").endswith("/detached"))
+        await start_conversation(conversation_ability)
+        _ = await conversation_ability.dispatch(
+            conversation_ability.context(),
+            conversation.SnapshotRequestEvent.with_data(conversation.SnapshotRequest(request_ref="after-detach")),
+        )
+        await wait_until(lambda: bool(conversation_ability.snapshots))
+        return conversation_ability.last_participated_turn(), conversation_ability.snapshots[-1]
+
+    participated, snapshot = asyncio.run(run())
+
+    assert participated is None
+    assert snapshot.conversation_ref is None
+    assert snapshot.participants == ()
+
+
 def test_host_text_respond_turn_yields_encoded_response() -> None:
     async def run() -> tuple[
         conversation.Response,
@@ -460,20 +620,23 @@ def test_host_text_respond_turn_yields_encoded_response() -> None:
         intuition = RecordingIntuitionProcessor()
         store = RecordingConversationMemory()
         typing = typing_ability()
+        encoding_ability = text_encoding_ability(encoder)
         conversation_ability = conversation.TextConversation(
             decoding=text_decoding_ability(decoder),
             participating=participating.Participating(),
             typing=typing,
-            encoding=text_encoding_ability(encoder),
+            encoding=encoding_ability,
         )
         cognition_ability = brain_for_test(intuition_processor=intuition)
         await start_conversation(conversation_ability)
+        for stage in (cognition_ability, store, typing, encoding_ability):
+            await start_ability_tree(None, stage)
         response = await conversation.run_host_text_respond_turn(
             conversation=conversation_ability,
             cognition=cognition_ability,
             memory=store,
             text_generation=typing,
-            encoding=text_encoding_ability(encoder) if conversation_ability.encoding is None else conversation_ability.encoding,
+            encoding=encoding_ability,
             message=text_message(),
         )
         return response, intuition.calls, store.inputs, encoder.inputs
@@ -497,6 +660,9 @@ def test_host_voice_respond_turn_yields_bytes_response() -> None:
         cognition_ability = brain_for_test()
         store = memory_ability()
         await start_conversation(conversation_ability)
+        assert conversation_ability.encoding is not None
+        for stage in (cognition_ability, store, conversation_ability.encoding):
+            await start_ability_tree(None, stage)
         response = await conversation.run_host_voice_respond_turn(
             conversation=conversation_ability,
             cognition=cognition_ability,

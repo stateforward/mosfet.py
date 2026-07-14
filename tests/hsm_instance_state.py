@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc
 import asyncio
 import typing
+import uuid
 import weakref
 
 import hsm
@@ -74,6 +75,16 @@ class _AbilityTerminalMirror(hsm.Instance):
     def record(self, event: hsm.Event[typing.Any]) -> None:
         operation_id = event.id if event.id else None
         result = self.results.get(operation_id) if operation_id is not None else None
+        if event.name == attachment.AttachCompleteEvent.name:
+            if result is not None and not result.done():
+                result.set_result(event.data)
+            return
+        if event.name == attachment.AttachFailedEvent.name:
+            if result is not None and not result.done():
+                failure = event.data
+                message = failure.message if isinstance(failure, attachment.FailedData) else str(failure)
+                result.set_exception(RuntimeError(message))
+            return
         product_event = event
         product_data = event.data
         if event.name == cognition.InputEvent.name and isinstance(event.data, cognition.InputData):
@@ -115,18 +126,13 @@ async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability
     context = hsm.Context() if ctx is None else ctx
     owner = _AbilityTerminalMirror(ability)
     _ = await hsm.started(context, owner, typing.cast(hsm.Model, owner.model))
+    operation_id = uuid.uuid4().hex
+    attached = owner.result_for(operation_id)
     _ = await ability.attach(
         context,
-        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=owner), operation_id),
     )
-    deadline = asyncio.get_running_loop().time() + 30.0
-    while asyncio.get_running_loop().time() < deadline:
-        state = ability.state() or ""
-        if "/attached/behavior/" in state and not state.endswith("/initializing"):
-            break
-        await asyncio.sleep(0.01)
-    else:
-        raise RuntimeError(f"Timed out waiting for ability attach readiness in state {ability.state()!r}.")
+    _ = await asyncio.wait_for(attached, timeout=30.0)
     remember_ability_terminal_owner(ability, owner)
 
 

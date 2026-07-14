@@ -37,12 +37,20 @@ _AUTONOMY_INPUT_METADATA_KEY = "bot.autonomy.input"
 _AUTONOMY_CANDIDATES_METADATA_KEY = "bot.autonomy.candidates"
 _AUTONOMY_INDEX_METADATA_KEY = "bot.autonomy.candidate_index"
 _AUTONOMY_ID_MARKER = ":autonomy:"
-_LOAD_HABITS_ID_SUFFIX = ":load_habits"
-_LOAD_HABITS_OPERATION_ID = f"autonomy{_LOAD_HABITS_ID_SUFFIX}"
 _InitializingCompleteEvent = hsm.Event[object](
     name="bot.ability.autonomy.initializing.complete",
     kind=hsm.CompletionEventKind,
     schema=pydantic.TypeAdapter(object),
+)
+_HabitsLoadedEvent = hsm.Event[memory.OutputData](
+    name="bot.ability.autonomy.habits.loaded",
+    kind=hsm.CompletionEventKind,
+    schema=memory.OutputData,
+)
+_HabitsLoadFailedEvent = hsm.Event[ability.FailureData](
+    name="bot.ability.autonomy.habits.load.failed",
+    kind=hsm.ErrorEventKind,
+    schema=ability.FailureData,
 )
 
 
@@ -339,12 +347,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         return updated
 
     @staticmethod
-    async def _attach_activity(
+    async def _initialize_activity(
         ctx: hsm.Context,
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Attach memory (if any) and request habit load through the Memory ability."""
+        """Load installed habits through the injected Memory capability."""
 
         del event
         store = instance._memory
@@ -352,60 +360,16 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance._habits = ()
             _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
             return
-        _ = await store.attach(
-            instance.context(),
-            dataclasses.replace(
-                attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                source=hsm.id(instance),
-            ),
-        )
-        load_event = dataclasses.replace(
-            store.input_event.with_data_and_id(
-                _habit_select_input(),
-                _LOAD_HABITS_OPERATION_ID,
-            ),
-            metadata={},
-        )
-        _ = hsm.dispatch(ctx, store, load_event)
-
-    @staticmethod
-    def _matches_load_habits_output(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        store = instance._memory
-        if store is None:
-            return False
-        child_id = event.id if event.id else None
-        return (
-            event.name == store.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(store)
-            and child_id is not None
-            and child_id.endswith(_LOAD_HABITS_ID_SUFFIX)
-            and isinstance(event.data, memory.OutputData)
-        )
-
-    @staticmethod
-    def _matches_load_habits_failure(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        store = instance._memory
-        if store is None:
-            return False
-        child_id = event.id if event.id else None
-        return (
-            event.name == store.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(store)
-            and child_id is not None
-            and child_id.endswith(_LOAD_HABITS_ID_SUFFIX)
-        )
+        try:
+            output = store.execute(_habit_select_input())
+        except Exception as error:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _HabitsLoadFailedEvent.with_data(ability.FailureData(message=str(error))),
+            )
+            return
+        _ = hsm.dispatch(ctx, instance, _HabitsLoadedEvent.with_data(output))
 
     @staticmethod
     def _on_load_habits_output(
@@ -442,16 +406,6 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             return
         Autonomy._detach_active(ctx, instance)
         instance._habits = ()
-        store = instance._memory
-        if store is not None:
-            _ = store.detach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                    source=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
 
     @staticmethod
     def _detach_active(ctx: hsm.Context, instance: "Autonomy") -> None:
@@ -945,16 +899,14 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         hsm.state(
             "initializing",
             hsm.defer(input_event),
-            hsm.activity(_attach_activity),
+            hsm.activity(_initialize_activity),
             hsm.exit(_detach_on_detach),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
-                hsm.guard(_matches_load_habits_output),
+                hsm.on(_HabitsLoadedEvent),
                 hsm.effect(_on_load_habits_output),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
-                hsm.guard(_matches_load_habits_failure),
+                hsm.on(_HabitsLoadFailedEvent),
                 hsm.effect(_on_load_habits_failure),
             ),
             hsm.transition(

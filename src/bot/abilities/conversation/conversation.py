@@ -11,6 +11,7 @@ from .. import decoding
 from .. import participating
 
 import abc
+import asyncio
 import dataclasses
 import typing as typ
 
@@ -30,6 +31,7 @@ _LAST_PARTICIPATED_ATTRIBUTE = "conversation_last_participated"
 # Event-chain keys for async child stages (HSM-COMPLETION-001). Never instance.set.
 _CONVERSATION_MESSAGE_METADATA_KEY = "bot.conversation.message"
 _CONVERSATION_DECODED_METADATA_KEY = "bot.conversation.decoded"
+conversation_result_metadata_key = "bot.conversation.result"
 _CONVERSATION_CHILD_ID_MARKER = ":conversation:"
 _CONVERSATION_TEXT_INPUT_EXAMPLE: JsonDict = {
     "conversation_ref": "support-call",
@@ -380,6 +382,7 @@ def _public_conversation_metadata(metadata: dict[str, object]) -> dict[str, obje
         not in (
             _CONVERSATION_MESSAGE_METADATA_KEY,
             _CONVERSATION_DECODED_METADATA_KEY,
+            conversation_result_metadata_key,
         )
     }
 
@@ -516,7 +519,12 @@ def _dispatch_conversation_phase_failure(
     _ = hsm.dispatch(
         ctx,
         instance,
-        _conversation_event_with_operation(failure_event, source, operation_id=operation_id),
+        _conversation_event_with_operation(
+            failure_event,
+            source,
+            operation_id=operation_id,
+            public_metadata=False,
+        ),
     )
 
 
@@ -558,6 +566,9 @@ def _dispatch_conversation_terminal_failure(
     source: hsm.Event[typ.Any],
     failure: FailureData,
 ) -> None:
+    result = source.metadata.get(conversation_result_metadata_key)
+    if isinstance(result, asyncio.Future) and not result.done():
+        result.set_exception(RuntimeError(failure.message))
     terminal = _conversation_event_with_operation(instance.failed_event.with_data(failure), source)
     terminal = dataclasses.replace(terminal, source=hsm.id(instance))
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
@@ -800,6 +811,7 @@ class Conversation(
                 _ConversationDecodingCompletedEvent.with_data(turn),
                 event,
                 operation_id=operation_id,
+                public_metadata=False,
             ),
         )
 
@@ -851,6 +863,7 @@ class Conversation(
                 _ConversationParticipatingCompletedEvent.with_data(participated),
                 event,
                 operation_id=operation_id,
+                public_metadata=False,
             ),
         )
 
@@ -890,6 +903,9 @@ class Conversation(
             _dispatch_conversation_terminal_failure(ctx, instance, event, failure)
             return
         assert isinstance(output, Response)
+        result = event.metadata.get(conversation_result_metadata_key)
+        if isinstance(result, asyncio.Future) and not result.done():
+            result.set_result(participated)
         _dispatch_conversation_terminal_output(ctx, instance, event, output)
 
     @staticmethod
@@ -903,6 +919,17 @@ class Conversation(
         assert isinstance(input, Message)
         instance._conversation_ref = input.conversation_ref
         instance._participants_by_ref = {participant.ref: participant for participant in input.participants}
+
+    @staticmethod
+    def _clear_prior_turn_on_detach(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> None:
+        del ctx, event
+        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
+        instance._conversation_ref = None
+        instance._participants_by_ref = {}
 
     @staticmethod
     def _dispatch_conversation_snapshot(
@@ -1074,6 +1101,7 @@ class Conversation(
             ),
             hsm.state(
                 "detaching",
+                hsm.entry(cls._clear_prior_turn_on_detach),
                 hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
                 hsm.activity(ability.Ability._detach_composite_group),
                 hsm.transition(

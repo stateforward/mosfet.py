@@ -22,30 +22,18 @@ from .conversation import (
     Response,
     TextMessage,
     VoiceMessage,
+    conversation_result_metadata_key,
 )
 
 import asyncio
 import collections.abc
+import dataclasses
 import typing
 import uuid
 
 import hsm
-from bot.protocols import attachment
 from sqlalchemy import insert
 from sqlalchemy import select
-
-
-async def _wait_until(
-    condition: collections.abc.Callable[[], bool],
-    *,
-    timeout_seconds: float = 5.0,
-) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while asyncio.get_running_loop().time() < deadline:
-        if condition():
-            return
-        await asyncio.sleep(0.01)
-    raise RuntimeError("Timed out waiting for host conversation turn stage.")
 
 
 def _target_device_ref(participated: ParticipatedTurn) -> str:
@@ -85,38 +73,6 @@ def _cognition_input_for_participated(
     )
 
 
-class _HostTurnOwner(hsm.Instance):
-    """Transient owner used to attach host-composed abilities for one turn stage."""
-
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
-        "HostTurnOwner",
-        hsm.initial(hsm.target("/HostTurnOwner/ready")),
-        hsm.state("ready"),
-    )
-
-
-def _is_behavior_ready(machine: ability.Ability[typing.Any, typing.Any]) -> bool:
-    state = machine.state() or ""
-    return "/attached/behavior/" in state and not state.endswith("/initializing")
-
-
-async def _ensure_attached(machine: ability.Ability[typing.Any, typing.Any], ctx: hsm.Context) -> None:
-    if _is_behavior_ready(machine):
-        return
-    owner = _HostTurnOwner()
-    assert owner.model is not None
-    try:
-        _ = await hsm.started(ctx, owner, owner.model)
-    except hsm.ErrorValidatingModel as error:
-        if "already has a running HSM" not in str(error):
-            raise
-    _ = await machine.attach(
-        ctx,
-        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
-    )
-    await _wait_until(lambda: _is_behavior_ready(machine), timeout_seconds=30.0)
-
-
 async def _apply_and_await_output(
     machine: ability.Ability[typing.Any, typing.Any],
     input: object,
@@ -124,36 +80,21 @@ async def _apply_and_await_output(
     ctx: hsm.Context,
     accept: collections.abc.Callable[[object], bool],
 ) -> object:
-    """Dispatch one ability input and wait for its terminal output without re-owning it."""
+    """Dispatch to an attached ability and await its terminal output without re-owning it."""
 
-    await _ensure_attached(machine, ctx)
-
-    outputs: list[object] = []
-    failures: list[object] = []
-    original_dispatch = machine.dispatch
-
-    def capturing_dispatch(ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
-            terminal = typing.cast(hsm.Event[typing.Any], event.data)
-            if accept(terminal.data):
-                outputs.append(terminal.data)
-        if event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
-            terminal = typing.cast(hsm.Event[typing.Any], event.data)
-            failures.append(terminal.data)
-        return original_dispatch(ctx, event)
-
-    machine.dispatch = capturing_dispatch  # type: ignore[method-assign]
-    try:
-        _ = await machine.apply(input, ctx=ctx)
-        await _wait_until(lambda: bool(outputs) or bool(failures))
-    finally:
-        machine.dispatch = original_dispatch  # type: ignore[method-assign]
-
-    if failures:
-        raise RuntimeError(f"{type(machine).__name__} failed during host conversation turn: {failures[0]!r}")
-    if not outputs:
+    operation_id = uuid.uuid4().hex
+    result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+    input_event = dataclasses.replace(
+        machine.input_event.with_data_and_id(input, operation_id),
+        metadata={ability.TERMINAL_RESULT_METADATA_KEY: result},
+    )
+    _ = await hsm.dispatch(ctx, machine, input_event)
+    terminal = await asyncio.wait_for(result, timeout=5.0)
+    if terminal.name == machine.failed_event.name:
+        raise RuntimeError(f"{type(machine).__name__} failed during host conversation turn: {terminal.data!r}")
+    if not accept(terminal.data):
         raise RuntimeError(f"{type(machine).__name__} produced no accepted output during host conversation turn.")
-    return outputs[0]
+    return terminal.data
 
 
 async def contribute_conversation_turn(
@@ -162,28 +103,17 @@ async def contribute_conversation_turn(
     *,
     ctx: hsm.Context | None = None,
 ) -> ParticipatedTurn:
-    """Run decode → participate and return the participated turn for host composition."""
+    """Run an attached conversation through decode → participate for host composition."""
 
     context = conversation.context() if ctx is None else ctx
-    await _ensure_attached(conversation, context)
-
-    completed: list[bool] = []
-    original_dispatch = conversation.dispatch
-
-    def capturing_dispatch(ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
-            completed.append(True)
-        return original_dispatch(ctx, event)
-
-    conversation.dispatch = capturing_dispatch  # type: ignore[method-assign]
-    try:
-        _ = await conversation.apply(message, ctx=context)
-        await _wait_until(lambda: bool(completed))
-    finally:
-        conversation.dispatch = original_dispatch  # type: ignore[method-assign]
-
-    last_turn = getattr(conversation, "last_participated_turn", None)
-    participated = last_turn() if callable(last_turn) else None
+    operation_id = uuid.uuid4().hex
+    result: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+    input_event = dataclasses.replace(
+        conversation.input_event.with_data_and_id(message, operation_id),
+        metadata={conversation_result_metadata_key: result},
+    )
+    _ = await hsm.dispatch(context, conversation, input_event)
+    participated = await asyncio.wait_for(result, timeout=5.0)
     if not isinstance(participated, ParticipatedTurn):
         raise RuntimeError("Conversation produced no participated turn.")
     return participated
@@ -198,7 +128,7 @@ async def run_host_voice_respond_turn(
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Host path: contribute → decide → remember → encode into a voice Response."""
+    """Run attached host abilities through contribute → decide → remember → encode."""
 
     context = conversation.context() if ctx is None else ctx
 
@@ -282,7 +212,7 @@ async def run_host_text_respond_turn(
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Host path: contribute → decide → remember → generate text → encode into a Response."""
+    """Run attached host abilities through contribute → decide → remember → generate → encode."""
 
     context = conversation.context() if ctx is None else ctx
 

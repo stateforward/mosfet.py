@@ -18,6 +18,7 @@ TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
 _DataType = type[object] | tuple[type[object], ...] | None
 _COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY = "bot.ability.attachment.operation"
+TERMINAL_RESULT_METADATA_KEY = "bot.ability.terminal.result"
 
 
 class _CompositeAttachmentTerminalData(pydantic.BaseModel):
@@ -329,15 +330,25 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         instance: "Ability[typing.Any, typing.Any]",
         event: hsm.Event[typing.Any],
     ) -> None:
+        terminal = event.data
+        assert isinstance(terminal, hsm.Event)
+        result = terminal.metadata.get(TERMINAL_RESULT_METADATA_KEY)
+        if isinstance(result, asyncio.Future) and not result.done():
+            result.set_result(terminal)
+        metadata = dict(terminal.metadata)
+        _ = metadata.pop(TERMINAL_RESULT_METADATA_KEY, None)
         if not instance._attachments:
             return
         owner = instance._attachments[0]
-        terminal = event.data
-        assert isinstance(terminal, hsm.Event)
         _ = hsm.dispatch(
             ctx,
             owner,
-            dataclasses.replace(terminal, source=hsm.id(instance), target=hsm.id(owner)),
+            dataclasses.replace(
+                terminal,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=metadata,
+            ),
         )
 
     @staticmethod

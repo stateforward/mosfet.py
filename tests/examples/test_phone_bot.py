@@ -90,6 +90,14 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "create_phone_gateway" not in source
 
 
+def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
+    source = _example_source()
+
+    assert "autonomy=cognition.Autonomy(memory=store)" in source
+    assert "reasoning=cognition.Reasoning(processor=deliberate, memory=store)" in source
+    assert "reflection=cognition.Reflection(processor=deliberate, memory=store)" in source
+
+
 def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_path: pathlib.Path) -> None:
     env_path = tmp_path / ".env"
     _ = env_path.write_text(
