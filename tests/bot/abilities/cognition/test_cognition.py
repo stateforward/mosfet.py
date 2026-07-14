@@ -4,10 +4,12 @@ from bot import habit as habit_events
 from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
 import dataclasses
+import sqlite3
 import typing
 
 import hsm
@@ -73,7 +75,6 @@ habit = hsm.define(
 """.strip()
 
 
-
 def _insert_content(
     *,
     content: str,
@@ -87,6 +88,7 @@ def _insert_content(
 ) -> memory.Statement:
     import uuid
     from sqlalchemy import insert
+
     table = memory.memory_table
     clause = insert(table).values(
         memory_id=memory_id or uuid.uuid4().hex,
@@ -105,6 +107,7 @@ def _insert_content(
 
 def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, limit: int = 50) -> memory.Statement:
     from sqlalchemy import or_, select
+
     table = memory.memory_table
     clause = select(table).where(table.c.query_tags == query_tags)
     if context_ref is not None:
@@ -202,6 +205,7 @@ class _BotActor(hsm.Instance):
     async def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         del ctx, event
 
+
 class RecordingIntuitionProcessor(processing.Processor):
     """Return events (with optional patched confidence) or unhandled OutputData."""
 
@@ -242,6 +246,7 @@ class RecordingIntuitionProcessor(processing.Processor):
 
 class DelayedIntuitionProcessor(processing.Processor):
     calls: list[processing.InputData]
+    cancelled: bool
     release_first: asyncio.Event
     output: processing.Events | cognition.intuition.OutputData
 
@@ -252,6 +257,7 @@ class DelayedIntuitionProcessor(processing.Processor):
         confidence: int | None = 99,
     ) -> None:
         self.calls = []
+        self.cancelled = False
         self.release_first = asyncio.Event()
         if isinstance(output, cognition.intuition.OutputData):
             if output.result is None:
@@ -262,12 +268,14 @@ class DelayedIntuitionProcessor(processing.Processor):
             self.output = _as_events(output, confidence=confidence)
 
     @typing.override
-    async def process(
-        self, input: processing.InputData
-    ) -> processing.Events | processing.Result[processing.Events]:
+    async def process(self, input: processing.InputData) -> processing.Events | processing.Result[processing.Events]:
         self.calls.append(input)
         if len(self.calls) == 1:
-            _ = await self.release_first.wait()
+            try:
+                _ = await self.release_first.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         if isinstance(self.output, cognition.intuition.OutputData):
             if self.output.result is None:
                 return processing.Result[processing.Events].unhandled()
@@ -466,10 +474,7 @@ class FixedProcessor(processing.Processor):
     async def process(self, input: processing.InputData) -> processing.Events:
         instructions = input.instructions or ""
         self.builds.append(instructions)
-        if (
-            instructions == cognition.reflection.CHANGE_INSTRUCTIONS
-            or "changing phase" in instructions
-        ):
+        if instructions == cognition.reflection.CHANGE_INSTRUCTIONS or "changing phase" in instructions:
             return await self.write_step.process(input)
         return await self.step.process(input)
 
@@ -499,9 +504,13 @@ class RecordingReflectionAbility(cognition.Reflection):
 
     processor: FixedProcessor
 
-    def __init__(self, selection: cognition.types.OutputData | None = None) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        selection: cognition.types.OutputData | None = None,
+    ) -> None:
         processor = FixedProcessor(selection or habit_create_selection())
-        super().__init__(processor=processor, memory=memory.Memory())
+        super().__init__(processor=processor, memory=memory.Memory(connection=connection))
         self.processor = processor
 
 
@@ -593,9 +602,7 @@ def cognition_abilities(
 ) -> tuple[cognition.Intuition, cognition.Reasoning]:
     intuition = cognition.Intuition(
         processor=intuition_processor
-        or RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=no_output("fast"))
-        ),
+        or RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast"))),
     )
     reasoning = cognition.Reasoning(
         processor=reasoning_processor or RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
@@ -623,6 +630,35 @@ async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
         if condition():
             return
         await asyncio.sleep(0)
+
+
+class CognitionAttachmentOwner(hsm.Instance):
+    lifecycle: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _record(
+        ctx: hsm.Context,
+        instance: "CognitionAttachmentOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance.lifecycle.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "CognitionAttachmentOwner",
+        hsm.initial(hsm.target("recording")),
+        hsm.state(
+            "recording",
+            hsm.transition(hsm.on(attachment.AttachCompleteEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.AttachFailedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.DetachedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(attachment.DetachFailedEvent), hsm.effect(_record)),
+        ),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lifecycle = []
 
 
 async def start_cognition_ability_for_test(
@@ -654,14 +690,264 @@ def test_cognitive_abilities_are_concrete_processing_abilities() -> None:
     reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "deliberate"))
     intuition = cognition.Intuition(processor=intuition_processor)
     reasoning = cognition.Reasoning(processor=reasoning_processor)
-    reflection = RecordingReflectionAbility()
+    connection = sqlite3.connect(":memory:")
+    try:
+        reflection = RecordingReflectionAbility(connection)
 
-    assert isinstance(intuition, abilities.Ability)
-    assert isinstance(intuition, processing.Processing)
-    assert isinstance(reasoning, abilities.Ability)
-    assert isinstance(reasoning, processing.Processing)
-    assert isinstance(reflection, abilities.Ability)
-    assert isinstance(reflection, processing.Processing)
+        assert isinstance(intuition, abilities.Ability)
+        assert isinstance(intuition, processing.Processing)
+        assert isinstance(reasoning, abilities.Ability)
+        assert isinstance(reasoning, processing.Processing)
+        assert isinstance(reflection, abilities.Ability)
+        assert isinstance(reflection, processing.Processing)
+    finally:
+        connection.close()
+
+
+def test_cognition_builds_one_group_for_optional_children_and_waits_for_aggregate_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[tuple[hsm.Instance, ...]], int, str]:
+        groups: list[tuple[hsm.Instance, ...]] = []
+        requests: list[hsm.Event[attachment.AttachData]] = []
+        group_init = attachment.Group.__init__
+
+        def record_group(group: attachment.Group, *members: hsm.Instance) -> None:
+            groups.append(members)
+            group_init(group, *members)
+
+        async def hold_attach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> None:
+            del group, ctx
+            requests.append(event)
+
+        monkeypatch.setattr(attachment.Group, "__init__", record_group)
+        monkeypatch.setattr(attachment.Group, "attach", hold_attach)
+        intuition, reasoning = cognition_abilities()
+        minimal = cognition.Cognition(intuition=intuition, reasoning=reasoning)
+        connection = sqlite3.connect(":memory:")
+        try:
+            maximal = cognition.Cognition(
+                autonomy=cognition.Autonomy(),
+                intuition=cognition.Intuition(processor=RecordingIntuitionProcessor(no_output("fast"))),
+                reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor(no_output("slow"))),
+                reflection=cognition.Reflection(
+                    processor=FixedProcessor(no_output("reflect")),
+                    memory=memory.Memory(connection=connection),
+                ),
+            )
+        finally:
+            connection.close()
+        owner = hsm.Instance()
+        owner_model = hsm.define(
+            "CognitionAttachmentOwner",
+            hsm.initial(hsm.target("ready")),
+            hsm.state("ready"),
+        )
+        ctx = hsm.Context()
+        _ = await hsm.started(ctx, owner, owner_model)
+        await minimal.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "cognition-attach",
+            ),
+        )
+        await wait_until(lambda: bool(requests) or minimal.state().endswith("/idle"))
+        state = minimal.state()
+        await minimal.stop(minimal.context())
+        del maximal
+        cognition_groups = [
+            members
+            for members in groups
+            if members and isinstance(members[0], cognition.Autonomy | cognition.Intuition)
+        ]
+        return cognition_groups, len(requests), state
+
+    groups, request_count, state = asyncio.run(run())
+
+    assert len(groups) == 2
+    assert len(groups[0]) == 2
+    assert isinstance(groups[0][0], cognition.Intuition)
+    assert isinstance(groups[0][1], cognition.Reasoning)
+    assert len(groups[1]) == 4
+    assert isinstance(groups[1][0], cognition.Autonomy)
+    assert isinstance(groups[1][1], cognition.Intuition)
+    assert isinstance(groups[1][2], cognition.Reasoning)
+    assert isinstance(groups[1][3], cognition.Reflection)
+    assert request_count == 1
+    assert state == "/CognitionLifecycle/attached/behavior/initializing"
+
+
+def test_cognition_reports_aggregate_attachment_failure_and_accepts_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int, str]:
+        requests: list[tuple[attachment.Group, hsm.Event[attachment.AttachData]]] = []
+
+        async def hold_attach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> None:
+            del ctx
+            requests.append((group, event))
+
+        monkeypatch.setattr(attachment.Group, "attach", hold_attach)
+        ctx = hsm.Context()
+        owner = CognitionAttachmentOwner()
+        ability = make_cognition()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "cognition-attach-failed",
+            ),
+        )
+        await wait_until(lambda: len(requests) == 1)
+        group, request = requests[0]
+        reply = request.data.reply_to
+        assert reply is not None
+        await hsm.dispatch(
+            ctx,
+            reply,
+            dataclasses.replace(
+                attachment.AttachFailedEvent.with_data(
+                    attachment.FailedData(
+                        actor=ability,
+                        kind=attachment.FailureKind.INITIALIZATION,
+                        message="cognition child failed",
+                    )
+                ),
+                id=request.id,
+                source=hsm.id(group),
+                target=hsm.id(reply),
+                metadata=dict(request.metadata),
+            ),
+        )
+        await wait_until(lambda: ability.state().endswith("/detached"))
+        await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "cognition-attach-retry",
+            ),
+        )
+        await wait_until(lambda: len(requests) == 2)
+        lifecycle = owner.lifecycle
+        state = ability.state()
+        await ability.stop(ability.context())
+        return lifecycle, len(requests), state
+
+    lifecycle, request_count, state = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == [attachment.AttachFailedEvent.name]
+    assert lifecycle[0].id == "cognition-attach-failed"
+    assert isinstance(lifecycle[0].data, attachment.FailedData)
+    assert lifecycle[0].data.kind is attachment.FailureKind.INITIALIZATION
+    assert request_count == 2
+    assert state == "/CognitionLifecycle/attached/behavior/initializing"
+
+
+def test_cognition_detaches_once_through_group_and_can_reattach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[hsm.Event[attachment.DetachData]], list[hsm.Event[typing.Any]], str]:
+        requests: list[hsm.Event[attachment.DetachData]] = []
+        group_detach = attachment.Group.detach
+
+        async def record_detach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.DetachData],
+        ) -> None:
+            requests.append(event)
+            await group_detach(group, ctx, event)
+
+        monkeypatch.setattr(attachment.Group, "detach", record_detach)
+        ctx = hsm.Context()
+        owner = CognitionAttachmentOwner()
+        ability = make_cognition()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "cognition-first-attach",
+            ),
+        )
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        await ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data_and_id(
+                attachment.DetachData(actor=owner),
+                "cognition-detach",
+            ),
+        )
+        await wait_until(lambda: ability.state().endswith("/detached"))
+        await ability.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner),
+                "cognition-second-attach",
+            ),
+        )
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        lifecycle = owner.lifecycle
+        state = ability.state()
+        await ability.stop(ability.context())
+        return requests, lifecycle, state
+
+    requests, lifecycle, state = asyncio.run(run())
+
+    assert len(requests) == 1
+    assert requests[0].id == "cognition-detach"
+    assert [event.name for event in lifecycle] == [
+        attachment.DetachedEvent.name,
+        attachment.AttachCompleteEvent.name,
+    ]
+    assert [event.id for event in lifecycle] == ["cognition-detach", "cognition-second-attach"]
+    assert state == "/CognitionLifecycle/attached/behavior/idle"
+
+
+def test_cognition_detach_cancels_active_intuition_through_group() -> None:
+    async def run() -> tuple[bool, list[hsm.Event[typing.Any]], str]:
+        processor = DelayedIntuitionProcessor(no_output("held"))
+        ability = make_cognition(intuition_processor=processor)
+        ctx = hsm.Context()
+        owner = CognitionAttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data(await started_cognition_input(ctx)))
+        await wait_until(lambda: bool(processor.calls))
+        assert ability.state().endswith("/intuiting")
+        await ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data_and_id(
+                attachment.DetachData(actor=owner),
+                "cognition-active-detach",
+            ),
+        )
+        await wait_until(lambda: ability.state().endswith("/detached"))
+        await wait_until(lambda: processor.cancelled)
+        lifecycle = owner.lifecycle
+        state = ability.state()
+        await ability.stop(ability.context())
+        return processor.cancelled, lifecycle, state
+
+    cancelled, lifecycle, state = asyncio.run(run())
+
+    assert cancelled
+    assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
+    assert lifecycle[0].id == "cognition-active-detach"
+    assert state == "/CognitionLifecycle/detached"
 
 
 def test_intuition_and_reasoning_own_instructions_on_ability() -> None:
@@ -899,16 +1185,10 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
         object_dict(cognition.Cognition.output_event.schema)
         == pydantic.TypeAdapter(cognition.types.OutputData).json_schema()
     )
-    assert (
-        object_dict(cognition.Intuition.input_event.schema)
-        == processing.InputData.model_json_schema()
-    )
+    assert object_dict(cognition.Intuition.input_event.schema) == processing.InputData.model_json_schema()
     assert object_dict(cognition.Intuition.output_event.schema)
     # Reasoning CallEvent is model-facing CallData (empty invoke); host frame rides metadata.
-    assert (
-        object_dict(cognition.Reasoning.input_event.schema)
-        == cognition.reasoning.CallData.model_json_schema()
-    )
+    assert object_dict(cognition.Reasoning.input_event.schema) == cognition.reasoning.CallData.model_json_schema()
     assert (
         object_dict(cognition.Reasoning.output_event.schema)
         == pydantic.TypeAdapter(cognition.types.OutputData).json_schema()
@@ -952,17 +1232,18 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     assert view.qualified_name == "/CognitionLifecycle"
     assert view.initial == "/CognitionLifecycle/.initial"
     assert "/CognitionLifecycle/detached" in view.members
-    assert "/CognitionLifecycle/attaching" in view.members
+    assert "/CognitionLifecycle/attaching" not in view.members
     assert "/CognitionLifecycle/attached" in view.members
     assert "/CognitionLifecycle/attached/behavior/initializing" in view.members
     assert "/CognitionLifecycle/attached/behavior/idle" in view.members
     assert "/CognitionLifecycle/attached/behavior/autonomizing" in view.members
     assert "/CognitionLifecycle/attached/behavior/intuiting" in view.members
     assert "/CognitionLifecycle/attached/behavior/reasoning" in view.members
-    assert (
-        "bot.ability.cognition.initializing.complete"
-        in view.transition_map["/CognitionLifecycle/attached/behavior/initializing"]
-    )
+    assert "/CognitionLifecycle/attached/behavior/detaching" in view.members
+    assert "/CognitionLifecycle/attached/behavior/degraded" in view.members
+    initializing_events = view.transition_map["/CognitionLifecycle/attached/behavior/initializing"]
+    assert "bot.ability.attachment.terminal" in initializing_events
+    assert "bot.ability.cognition.initializing.complete" not in initializing_events
     assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/idle"]
     assert "*" in view.transition_map["/CognitionLifecycle/attached/behavior/autonomizing"]
     assert "*" in view.transition_map["/CognitionLifecycle/attached/behavior/intuiting"]
@@ -1218,9 +1499,7 @@ def test_cognition_puts_reasoning_on_intuition_actor_map() -> None:
     """Reasoning is a normal actor for intuition multi-select (not a Cognition intercept)."""
 
     async def run() -> set[str]:
-        processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=())
-        )
+        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=()))
         ability = RecordingCognition(intuition_processor=processor)
         ctx = await start_cognition_ability_for_test(ability)
         _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
@@ -1246,9 +1525,7 @@ def test_intuition_multi_select_dispatches_action_and_reasoning_actors() -> None
                 reason="need deliberate follow-through",
             ),
         )
-        intuition_processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=act_and_reason)
-        )
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=act_and_reason))
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "deliberate"))
         )
@@ -1273,9 +1550,7 @@ def test_intuition_multi_select_dispatches_action_and_reasoning_actors() -> None
 
 def test_intuition_processor_receives_input() -> None:
     async def run() -> tuple[cognition.types.OutputData | None, list[processing.InputData]]:
-        processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=())
-        )
+        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=()))
         intuition = cognition.Intuition(processor=processor)
         ctx = await start_cognition_ability_for_test(intuition)
 
@@ -1349,9 +1624,7 @@ def test_cognitive_routes_invalid_output_to_failed_event() -> None:
 
 def test_cognitive_defers_repeated_input_while_processing() -> None:
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
-        intuition_processor = DelayedIntuitionProcessor(
-            cognition.intuition.OutputData(result=no_output("intuition"))
-        )
+        intuition_processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
         ability = RecordingCognition(intuition_processor=intuition_processor)
         ctx = shared_hsm_context()
         ctx = await start_cognition_ability_for_test(ability, ctx)
@@ -1380,9 +1653,7 @@ def test_cognitive_defers_repeated_input_while_processing() -> None:
 def test_intuition_no_operations_returns_to_idle_and_accepts_next_input() -> None:
     async def run() -> tuple[str, cognition.types.OutputData | None, cognition.types.OutputData | None]:
         intuition = cognition.Intuition(
-            processor=RecordingIntuitionProcessor(
-                cognition.intuition.OutputData(result=None, reason="no ops")
-            )
+            processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=None, reason="no ops"))
         )
         ctx = shared_hsm_context()
         ctx = await start_cognition_ability_for_test(intuition, ctx)
@@ -1400,12 +1671,8 @@ def test_intuition_no_operations_returns_to_idle_and_accepts_next_input() -> Non
 
 
 def test_intuition_defers_repeated_input_while_dispatching() -> None:
-    async def run() -> tuple[
-        str, list[cognition.types.OutputData | None], list[processing.InputData]
-    ]:
-        processor = DelayedIntuitionProcessor(
-            cognition.intuition.OutputData(result=no_output("intuition"))
-        )
+    async def run() -> tuple[str, list[cognition.types.OutputData | None], list[processing.InputData]]:
+        processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
         intuition = cognition.Intuition(processor=processor)
         ctx = shared_hsm_context()
         ctx = await start_cognition_ability_for_test(intuition, ctx)
@@ -1428,9 +1695,7 @@ def test_intuition_defers_repeated_input_while_dispatching() -> None:
 
 
 def test_reasoning_defers_repeated_input_while_applying() -> None:
-    async def run() -> tuple[
-        str, list[cognition.types.OutputData], list[processing.InputData]
-    ]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[processing.InputData]]:
         processor = DelayedReasoningProcessor()
         reasoning = cognition.Reasoning(processor=processor)
         ctx = shared_hsm_context()
@@ -1560,6 +1825,7 @@ def test_reflection_creates_validates_and_stores_habit() -> None:
         episodes = cognition.episodes.episodes_from_output(recalled)
 
         from bot.habit import storage as habit_storage
+
         habit_select = memory.InputData(
             statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
         )
@@ -1649,9 +1915,7 @@ habit = hsm.define(
         from bot.habit import storage as habit_storage
 
         habit_out = store.execute(
-            memory.InputData(
-                statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
-            )
+            memory.InputData(statements=memory.compile_statements(*habit_storage.select_all_habits_clauses()))
         )
         habits = habit_storage.instances_from_habit_results(
             tuple(row.as_mapping() for row in habit_out.results[0].rows),
@@ -1727,6 +1991,7 @@ habit = hsm.define(
             ),
         )
         from bot.habit import storage as habit_storage
+
         habit_select = memory.InputData(
             statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
         )
@@ -1796,9 +2061,7 @@ async def _seed_habit_record(
             triggers=triggers if triggers else None,
         )
     _ = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*habit_storage.insert_habit_clauses(habit))
-        )
+        memory.InputData(statements=memory.compile_statements(*habit_storage.insert_habit_clauses(habit)))
     )
 
 
@@ -1858,15 +2121,14 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
             ),
         )
         from bot.habit import storage as habit_storage
+
         habit_select = memory.InputData(
             statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
         )
         habit_out = store.execute(habit_select)
         sources = _habit_sources_from_output(habit_out)
         select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(
-            store.execute(select)
-        )
+        episodes = cognition.episodes.episodes_from_output(store.execute(select))
         latest_habit = episodes[-1].habit if episodes else None
         return result, sources, processor.change_step.calls, latest_habit
 
@@ -1930,6 +2192,7 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
             ),
         )
         from bot.habit import storage as habit_storage
+
         habit_select = memory.InputData(
             statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
         )
@@ -1940,18 +2203,14 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
             tuple(row.as_mapping() for row in habit_out.results[1].rows),
         )
         active_out = store.execute(
-            memory.InputData(
-                statements=memory.compile_statements(*habit_storage.select_active_habits_clauses())
-            )
+            memory.InputData(statements=memory.compile_statements(*habit_storage.select_active_habits_clauses()))
         )
         active = habit_storage.instances_from_habit_results(
             tuple(row.as_mapping() for row in active_out.results[0].rows),
             tuple(row.as_mapping() for row in active_out.results[1].rows),
         )
         select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(
-            store.execute(select)
-        )
+        episodes = cognition.episodes.episodes_from_output(store.execute(select))
         return (
             result,
             sources,
@@ -2068,9 +2327,7 @@ def test_autonomy_handles_matching_habit_without_intuition_processor() -> None:
             source=_FOCUS_RING_HABIT_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
-        intuition_processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(reason="should not run")
-        )
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="should not run"))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "should not run"))
         ability = RecordingCognition(
             autonomy=autonomy,

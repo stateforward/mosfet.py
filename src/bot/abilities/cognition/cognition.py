@@ -86,11 +86,6 @@ _ApplyFailedEvent = hsm.Event[_UseFailedEventData](
     kind=hsm.ErrorEventKind,
     schema=_UseFailedEventData,
 )
-_InitializingCompleteEvent = hsm.Event[object](
-    name="bot.ability.cognition.initializing.complete",
-    kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
-)
 
 
 def _failure(operation_id: str | None, message: str) -> _UseFailedEventData:
@@ -172,10 +167,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _autonomy: autonomy.Autonomy | None
     _intuition: intuition.Intuition
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection | None
+    _attachment_group: attachment.Group
 
     @staticmethod
     def _autonomy_operation_id(event: hsm.Event[typing.Any]) -> str:
@@ -196,51 +193,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
     def _reflection_operation_id(operation_id: str | None) -> str:
         base = operation_id if operation_id else uuid.uuid4().hex
         return f"{base}:reflection"
-
-    @staticmethod
-    def _cognition_children(instance: "Cognition") -> list[ability.Ability[typing.Any, typing.Any]]:
-        children: list[ability.Ability[typing.Any, typing.Any]] = []
-        if instance._autonomy is not None:
-            children.append(instance._autonomy)
-        children.extend((instance._intuition, instance._reasoning))
-        if instance._reflection is not None:
-            children.append(instance._reflection)
-        return children
-
-    @staticmethod
-    async def _attach_children_activity(
-        ctx: hsm.Context,
-        instance: "Cognition",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        del event
-        for child in Cognition._cognition_children(instance):
-            _ = await child.attach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                    source=hsm.id(instance),
-                ),
-            )
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
-
-    @staticmethod
-    def _detach_children_on_detach(
-        ctx: hsm.Context,
-        instance: "Cognition",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        if event.name != attachment.DetachEvent.name:
-            return
-        for child in Cognition._cognition_children(instance):
-            _ = child.detach(
-                instance.context(),
-                dataclasses.replace(
-                    attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
-                    source=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
 
     @staticmethod
     def _build_processing_input(
@@ -859,17 +811,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.initial(hsm.target("/Cognition/initializing")),
         hsm.state(
             "initializing",
-            hsm.defer(input_event),
-            hsm.activity(_attach_children_activity),
-            hsm.exit(_detach_children_on_detach),
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(
-                hsm.on(_InitializingCompleteEvent),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
                 hsm.target("/Cognition/idle"),
             ),
         ),
         hsm.state(
             "idle",
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
@@ -895,7 +847,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "autonomizing",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_autonomy_is_handled),
@@ -924,7 +875,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "intuiting",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_intuition_is_handled),
@@ -953,7 +903,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "reasoning",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_matches_reasoning_output),
@@ -976,7 +925,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "completing",
             hsm.defer(input_event),
-            hsm.exit(_detach_children_on_detach),
             hsm.transition(
                 hsm.on(_ProcessingCompletedEvent),
                 hsm.guard(_has_matching_apply_operation),
@@ -992,6 +940,24 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.target("/Cognition/idle"),
             ),
         ),
+        hsm.state(
+            "detaching",
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._detach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Cognition/idle"),
+            ),
+        ),
+        hsm.state("degraded"),
         hsm.observe(observer),
     )
 
@@ -1008,6 +974,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._intuition = intuition
         self._reasoning = reasoning
         self._reflection = reflection
+        children: list[hsm.Instance] = []
+        if autonomy is not None:
+            children.append(autonomy)
+        children.extend((intuition, reasoning))
+        if reflection is not None:
+            children.append(reflection)
+        self._attachment_group = attachment.Group(*children)
 
 
 __all__ = [
