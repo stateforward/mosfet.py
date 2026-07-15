@@ -701,6 +701,11 @@ class Reasoning(processing.Processing):
         hsm.state(
             "idle",
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+            ),
+            hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_reasoning_input),
                 hsm.target("/Reasoning/recalling"),
@@ -710,6 +715,12 @@ class Reasoning(processing.Processing):
             "recalling",
             hsm.defer(input_event),
             hsm.activity(_recall_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reasoning/idle"),
+            ),
             hsm.transition(
                 hsm.on(_RecalledEvent),
                 hsm.guard(_has_recalled),
@@ -726,6 +737,12 @@ class Reasoning(processing.Processing):
             "applying",
             hsm.defer(input_event),
             hsm.activity(_apply_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reasoning/idle"),
+            ),
             hsm.transition(
                 hsm.on(_ReasonedEvent),
                 hsm.guard(_reasoned_needs_retain),
@@ -748,6 +765,12 @@ class Reasoning(processing.Processing):
             "retaining",
             hsm.defer(input_event),
             hsm.activity(_retain_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reasoning/idle"),
+            ),
             hsm.transition(
                 hsm.on(_RetainedEvent),
                 hsm.guard(_has_retained),

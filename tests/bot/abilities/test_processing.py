@@ -2,6 +2,7 @@ import bot
 from bot import abilities
 from bot.abilities import ability
 from bot.abilities import processing
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -31,9 +32,11 @@ _MODELED_PROCESSING_FAILED_EVENT = hsm.Event[abilities.FailureData](
     schema=abilities.FailureData,
 )
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 async def start_abilities(
     *abilities: abilities.Ability[typing.Any, typing.Any],
@@ -46,6 +49,7 @@ async def start_abilities(
             _ = await hsm.started(ctx, machine, require_model(machine.model))
     return ctx
 
+
 def _has_modeled_processing_input(
     ctx: hsm.Context,
     instance: "ModeledChildProcessing",
@@ -53,6 +57,7 @@ def _has_modeled_processing_input(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, processing.InputData)
+
 
 def _has_modeled_processing_output(
     ctx: hsm.Context,
@@ -62,6 +67,7 @@ def _has_modeled_processing_output(
     del ctx, instance
     return processing.coerce_event_selections(event.data) is not None
 
+
 def _has_modeled_processing_failure(
     ctx: hsm.Context,
     instance: "ModeledChildProcessing",
@@ -69,6 +75,7 @@ def _has_modeled_processing_failure(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, abilities.FailureData)
+
 
 async def _run_modeled_processing_apply(
     ctx: hsm.Context,
@@ -91,6 +98,7 @@ async def _run_modeled_processing_apply(
         ),
     )
 
+
 def _dispatch_modeled_processing_output(
     ctx: hsm.Context,
     instance: "ModeledChildProcessing",
@@ -105,6 +113,7 @@ def _dispatch_modeled_processing_output(
         source=hsm.id(instance),
     )
     _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+
 
 def _dispatch_modeled_processing_failure(
     ctx: hsm.Context,
@@ -137,9 +146,7 @@ class OptionalRecordingProcessor(processing.Processor):
     calls: list[str]
     output: processing.Events | processing.Result[processing.Events] | None
 
-    def __init__(
-        self, output: processing.Events | processing.Result[processing.Events] | None
-    ) -> None:
+    def __init__(self, output: processing.Events | processing.Result[processing.Events] | None) -> None:
         self.calls = []
         self.output = output
 
@@ -205,6 +212,33 @@ def cancellation_recording() -> tuple[processing.Processing, CancellationRecordi
     return processing.Processing(processor=proc), proc
 
 
+class ProcessingCancellationOwner(hsm.Instance):
+    terminals: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _record(
+        ctx: hsm.Context,
+        instance: "ProcessingCancellationOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance.terminals.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "ProcessingCancellationOwner",
+        hsm.initial(hsm.target("recording")),
+        hsm.state(
+            "recording",
+            hsm.transition(hsm.on(attachment.AttachCompleteEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record)),
+        ),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminals = []
+
+
 class FailingRecordingProcessor(processing.Processor):
     calls: list[str]
 
@@ -228,9 +262,7 @@ class ContextRecordingProcessor(processing.Processor):
     output: processing.Events | processing.Result[processing.Events] | None
     _ctx: hsm.Context | None
 
-    def __init__(
-        self, output: processing.Events | processing.Result[processing.Events] | None
-    ) -> None:
+    def __init__(self, output: processing.Events | processing.Result[processing.Events] | None) -> None:
         self.values = []
         self.output = output
         self._ctx = None
@@ -252,6 +284,7 @@ def context_recording(
 ) -> tuple[processing.Processing, ContextRecordingProcessor]:
     proc = ContextRecordingProcessor(output)
     return processing.Processing(processor=proc), proc
+
 
 class _ModeledNoopProcessor(processing.Processor):
     @typing.override
@@ -299,6 +332,7 @@ class ModeledChildProcessing(processing.Processing):
         del ctx, input
         raise AssertionError("direct _apply bypassed modeled child dispatch")
 
+
 def test_processing_defines_base_operation_contract() -> None:
     processing_ability = length_processing()
 
@@ -306,6 +340,7 @@ def test_processing_defines_base_operation_contract() -> None:
     assert processing.Processing.input_event is processing.InputEvent
     assert processing.Processing.output_event is processing.OutputEvent
     assert processing.Processing.model is not None
+
 
 def test_processing_input_models_host_decision_input() -> None:
     event = bot.FocusDeviceEvent
@@ -322,6 +357,7 @@ def test_processing_input_models_host_decision_input() -> None:
     assert "operation_sources" not in processing.InputData.model_json_schema()["properties"]
     assert processing.Event is hsm.Event
 
+
 def test_processing_input_rejects_legacy_capabilities_field() -> None:
     with pytest.raises(ValueError):
         _ = processing.InputData.model_validate(
@@ -331,6 +367,7 @@ def test_processing_input_rejects_legacy_capabilities_field() -> None:
                 "devices": ["phone"],
             }
         )
+
 
 def test_processing_uses_generic_input_and_output_event_schemas() -> None:
     input_schema = object_dict(processing.InputEvent.schema)
@@ -345,6 +382,7 @@ def test_processing_uses_generic_input_and_output_event_schemas() -> None:
     assert output_schema["description"]
     assert "examples" in output_schema
 
+
 def test_processing_delegates_to_injected_ability() -> None:
     async def run() -> object:
         processing_ability = length_processing()
@@ -355,6 +393,7 @@ def test_processing_delegates_to_injected_ability() -> None:
     output = asyncio.run(run())
 
     assert output == processing.OutputData()
+
 
 def test_processing_does_not_add_public_result_methods() -> None:
     processing_ability = length_processing()
@@ -640,9 +679,10 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     assert "confidence" in data_schema["properties"]
     assert "event" in branch["required"] and "data" in branch["required"]
     assert "description" in tool["function"]
-    assert "multi-select" in tool["function"]["description"].lower() or "multiple" in tool[
-        "function"
-    ]["description"].lower()
+    assert (
+        "multi-select" in tool["function"]["description"].lower()
+        or "multiple" in tool["function"]["description"].lower()
+    )
 
 
 def test_events_from_dispatch_args_parses_canonical_names() -> None:
@@ -662,3 +702,70 @@ def test_events_from_dispatch_args_parses_canonical_names() -> None:
     assert selections[0].event == "bot.ability.speaking.input"
     assert selections[0].data == {"text": "hi"}
     assert selections[0].confidence == 90
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_processing_cancellation_requires_owner_and_preserves_exact_token(active: bool) -> None:
+    async def run() -> tuple[str, bool, list[hsm.Event[typing.Any]]]:
+        machine, processor = cancellation_recording()
+        ctx = shared_hsm_context()
+        owner = ProcessingCancellationOwner()
+        intruder = ProcessingCancellationOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await hsm.started(ctx, intruder, intruder.model)
+        await machine.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
+        owner.terminals.clear()
+        if active:
+            _ = await hsm.dispatch(
+                ctx,
+                machine,
+                machine.input_event.with_data_and_id(
+                    processing.InputData(input="first", schemas=()),
+                    "operation",
+                ),
+            )
+            for _ in range(100):
+                if machine.state().endswith("/applying"):
+                    break
+                await asyncio.sleep(0)
+
+        forged = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="operation", token="wrong-authority-token")
+            ),
+            id="operation",
+            source=hsm.id(intruder),
+            target=hsm.id(machine),
+        )
+        _ = await hsm.dispatch(ctx, machine, forged)
+        await asyncio.sleep(0)
+        assert not [event for event in owner.terminals if event.name == processing.CancelledEvent.name]
+
+        accepted = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="operation", token="exact-operation-token")
+            ),
+            id="operation",
+            source=hsm.id(owner),
+            target=hsm.id(machine),
+        )
+        _ = await hsm.dispatch(ctx, machine, accepted)
+        for _ in range(100):
+            if any(event.name == processing.CancelledEvent.name for event in owner.terminals):
+                break
+            await asyncio.sleep(0)
+        return machine.state(), processor.cancelled, owner.terminals
+
+    state, cancelled, terminals = asyncio.run(run())
+    acknowledgements = [event for event in terminals if event.name == processing.CancelledEvent.name]
+    assert state.endswith("/idle")
+    assert cancelled is active
+    assert len(acknowledgements) == 1
+    data = acknowledgements[0].data
+    assert isinstance(data, processing.CancelledData)
+    assert data.token == "exact-operation-token"
+    assert acknowledgements[0].source
+    assert acknowledgements[0].target

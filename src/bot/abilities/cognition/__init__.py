@@ -14,7 +14,17 @@ from . import autonomy, dispatch, episodes, input, intuition, reasoning, reflect
 
 if typing.TYPE_CHECKING:
     from .autonomy import Autonomy
-    from .cognition import InputEvent, OutputEvent, Cognition, InputData, OutputData
+    from .cognition import (
+        CancelData,
+        CancelEvent,
+        CancelledData,
+        CancelledEvent,
+        Cognition,
+        InputData,
+        InputEvent,
+        OutputData,
+        OutputEvent,
+    )
     from .episodes import CognitiveEpisode
     from .input import is_input
     from .intuition import Intuition
@@ -25,6 +35,10 @@ if typing.TYPE_CHECKING:
 _LAZY_EXPORT_MODULES = {
     "InputEvent": ".cognition",
     "OutputEvent": ".cognition",
+    "CancelData": ".cognition",
+    "CancelEvent": ".cognition",
+    "CancelledData": ".cognition",
+    "CancelledEvent": ".cognition",
     "Cognition": ".cognition",
     "InputData": ".cognition",
     "OutputData": ".cognition",
@@ -41,6 +55,10 @@ _LAZY_EXPORT_MODULES = {
 __all__ = [
     "InputEvent",
     "OutputEvent",
+    "CancelData",
+    "CancelEvent",
+    "CancelledData",
+    "CancelledEvent",
     "Cognition",
     "InputData",
     "OutputData",

@@ -306,16 +306,22 @@ class RecordingReasoningProcessor(processing.Processor):
 class DelayedReasoningProcessor(processing.Processor):
     calls: list[processing.InputData]
     release_first: asyncio.Event
+    cancelled: bool
 
     def __init__(self) -> None:
         self.calls = []
         self.release_first = asyncio.Event()
+        self.cancelled = False
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(input)
         if len(self.calls) == 1:
-            _ = await self.release_first.wait()
+            try:
+                _ = await self.release_first.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         return ()
 
 
@@ -653,6 +659,8 @@ class CognitionAttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(attachment.AttachFailedEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(attachment.DetachedEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(attachment.DetachFailedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(cognition.CancelledEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record)),
         ),
     )
 
@@ -948,6 +956,107 @@ def test_cognition_detach_cancels_active_intuition_through_group() -> None:
     assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
     assert lifecycle[0].id == "cognition-active-detach"
     assert state == "/CognitionLifecycle/detached"
+
+
+@pytest.mark.parametrize("child", ["intuition", "reasoning"])
+def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
+    async def run() -> tuple[bool, list[hsm.Event[typing.Any]], str]:
+        intuition_processor = DelayedIntuitionProcessor(no_output("held"))
+        reasoning_processor = DelayedReasoningProcessor()
+        if child == "reasoning":
+            ability = make_cognition(
+                intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
+                reasoning_processor=reasoning_processor,
+            )
+        else:
+            ability = make_cognition(
+                intuition_processor=intuition_processor,
+                reasoning_processor=reasoning_processor,
+            )
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+
+        operation_id = f"cancel-{child}"
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            ability.input_event.with_data_and_id(await started_cognition_input(ctx), operation_id),
+        )
+        expected_state = f"/{child}"
+        await wait_until(lambda: ability.state().endswith(expected_state))
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            dataclasses.replace(
+                cognition.CancelEvent.with_data(
+                    cognition.CancelData(operation_id=operation_id, token=f"token-{child}")
+                ),
+                id=operation_id,
+                source=hsm.id(owner),
+                target=hsm.id(ability),
+            ),
+        )
+        await wait_until(lambda: any(event.name == cognition.CancelledEvent.name for event in owner.lifecycle))
+
+        cancelled = intuition_processor.cancelled if child == "intuition" else reasoning_processor.cancelled
+        return cancelled, owner.lifecycle, ability.state()
+
+    cancelled, lifecycle, state = asyncio.run(run())
+
+    terminals = [event for event in lifecycle if event.name == cognition.CancelledEvent.name]
+    assert cancelled
+    assert len(terminals) == 1
+    assert terminals[0].id == f"cancel-{child}"
+    assert isinstance(terminals[0].data, cognition.CancelledData)
+    assert terminals[0].data.operation_id == f"cancel-{child}"
+    assert terminals[0].data.token == f"token-{child}"
+    assert state.endswith("/idle")
+
+
+def test_autonomy_cancellation_requires_attachment_owner_and_preserves_token() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        ability = cognition.Autonomy()
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        intruder = CognitionAttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await hsm.started(ctx, intruder, intruder.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        forged = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="autonomy-operation", token="forged-token")
+            ),
+            id="autonomy-operation:autonomy",
+            source=hsm.id(intruder),
+            target=hsm.id(ability),
+        )
+        _ = await hsm.dispatch(ctx, ability, forged)
+        await asyncio.sleep(0)
+        assert not owner.lifecycle
+        accepted = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="autonomy-operation", token="exact-token")
+            ),
+            id="autonomy-operation:autonomy",
+            source=hsm.id(owner),
+            target=hsm.id(ability),
+        )
+        _ = await hsm.dispatch(ctx, ability, accepted)
+        await wait_until(lambda: bool(owner.lifecycle))
+        return owner.lifecycle
+
+    terminals = asyncio.run(run())
+    assert len(terminals) == 1
+    data = terminals[0].data
+    assert isinstance(data, processing.CancelledData)
+    assert data.token == "exact-token"
+    assert terminals[0].id == "autonomy-operation:autonomy"
 
 
 def test_intuition_and_reasoning_own_instructions_on_ability() -> None:

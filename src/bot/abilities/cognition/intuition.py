@@ -65,6 +65,7 @@ class EventPatch(pydantic.BaseModel):
         examples=[100, 86, 55, 20, 0],
     )
 
+
 _AppliedEvent = hsm.Event[object](
     name="bot.ability.intuition.applied",
     kind=hsm.CompletionEventKind,
@@ -266,11 +267,7 @@ def _world_actions(
     """Action events safe to fire before handing an uncertain turn to deliberate reasoning."""
 
     schemas = {event.name: event for event in current_input.schemas}
-    return tuple(
-        item
-        for item in output
-        if not _is_deliberative_input_event(item.event, schemas)
-    )
+    return tuple(item for item in output if not _is_deliberative_input_event(item.event, schemas))
 
 
 def _selections_from_output(
@@ -502,6 +499,11 @@ class Intuition(processing.Processing):
         hsm.state(
             "idle",
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+            ),
+            hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_intuition_input),
                 hsm.target("/Intuition/applying"),
@@ -511,6 +513,12 @@ class Intuition(processing.Processing):
             "applying",
             hsm.defer(input_event),
             hsm.activity(_apply_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Intuition/idle"),
+            ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
                 hsm.guard(_has_applied),

@@ -28,6 +28,40 @@ _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 
 
+class CancelData(pydantic.BaseModel):
+    """Request cancellation of one active cognition turn."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(
+        min_length=1,
+        description="Bot turn identifier whose active cognition work must be cancelled.",
+        examples=["turn-123"],
+    )
+    token: str = pydantic.Field(
+        min_length=1,
+        description="Opaque cancellation capability created by the Bot operation actor.",
+        examples=["8d72b83f17654f1788c012ab132b4afd"],
+    )
+
+
+class CancelledData(pydantic.BaseModel):
+    """Confirmation that one cognition turn no longer owns active child work."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(
+        min_length=1,
+        description="Bot turn identifier whose cognition work reached the idle boundary.",
+        examples=["turn-123"],
+    )
+    token: str = pydantic.Field(
+        min_length=1,
+        description="Exact cancellation capability that reached the idle boundary.",
+        examples=["8d72b83f17654f1788c012ab132b4afd"],
+    )
+
+
 class _ProcessingCompletedEventData(pydantic.BaseModel):
     """Private completion payload carrying applied output and the original cognition turn."""
 
@@ -75,6 +109,15 @@ InputEvent = ability.ability_input_event(
 OutputEvent = hsm.Event[OutputData](
     name="bot.ability.cognition.output",
     schema=OUTPUT_SCHEMA_CONTRACT,
+)
+CancelEvent = hsm.Event[CancelData](
+    name="bot.ability.cognition.cancel",
+    schema=CancelData,
+)
+CancelledEvent = hsm.Event[CancelledData](
+    name="bot.ability.cognition.cancelled",
+    kind=hsm.CompletionEventKind,
+    schema=CancelledData,
 )
 _ProcessingCompletedEvent = hsm.Event[_ProcessingCompletedEventData](
     name="bot.ability.cognition.processing.completed",
@@ -153,6 +196,35 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
             parent = child_id[: -len(suffix)]
             return parent or None
     return child_id
+
+
+def _active_bot_operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | None:
+    """Read the immutable Bot capability only while its operation actor is cancelling."""
+
+    operation = event.metadata.get("bot.processing.operation")
+    actor = event.metadata.get("bot.processing.actor")
+    if not isinstance(operation, pydantic.BaseModel) or not isinstance(actor, hsm.Instance):
+        return None
+    values = operation.model_dump(mode="json")
+    request_id = values.get("request_id")
+    token = values.get("token")
+    actor_id = values.get("actor_id")
+    if (
+        not isinstance(request_id, str)
+        or not isinstance(token, str)
+        or not isinstance(actor_id, str)
+        or actor_id != token
+        or hsm.id(actor) != actor_id
+        or actor.state() not in {"/BotProcessingTimer/waiting", "/BotProcessingTimer/cancelling"}
+    ):
+        return None
+    return request_id, token
+
+
+def _has_bot_operation_metadata(event: hsm.Event[typing.Any]) -> bool:
+    """Return whether this event claims the Bot's private operation-capability path."""
+
+    return "bot.processing.operation" in event.metadata or "bot.processing.actor" in event.metadata
 
 
 class Cognition(ability.Ability[InputData, OutputData]):
@@ -806,6 +878,123 @@ class Cognition(ability.Ability[InputData, OutputData]):
             return data.operation_id == operation_id
         return operation_id is None
 
+    @staticmethod
+    def _is_cancel_request(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if not (
+            isinstance(data, CancelData)
+            and event.id == data.operation_id
+            and event.target == hsm.id(instance)
+            and bool(instance._attachments)
+            and event.source == hsm.id(instance._attachments[0])
+        ):
+            return False
+        operation = _active_bot_operation(event)
+        if _has_bot_operation_metadata(event):
+            return operation == (data.operation_id, data.token)
+        return True
+
+    @staticmethod
+    def _dispatch_cancel_to_child(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+        child: ability.Ability[typing.Any, typing.Any],
+        suffix: str,
+    ) -> None:
+        data = event.data
+        assert isinstance(data, CancelData)
+        child_operation_id = f"{data.operation_id}{suffix}"
+        _ = hsm.dispatch(
+            ctx,
+            child,
+            dataclasses.replace(
+                processing.CancelEvent.with_data(
+                    processing.CancelData(operation_id=child_operation_id, token=data.token)
+                ),
+                id=child_operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(child),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _cancel_autonomy(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        child = instance._autonomy
+        assert child is not None
+        Cognition._dispatch_cancel_to_child(ctx, instance, event, child, _AUTONOMY_ID_SUFFIX)
+
+    @staticmethod
+    def _cancel_intuition(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        Cognition._dispatch_cancel_to_child(ctx, instance, event, instance._intuition, _INTUITION_ID_SUFFIX)
+
+    @staticmethod
+    def _cancel_reasoning(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        Cognition._dispatch_cancel_to_child(ctx, instance, event, instance._reasoning, _REASONING_ID_SUFFIX)
+
+    @staticmethod
+    def _matches_child_cancelled(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if (
+            not isinstance(data, processing.CancelledData)
+            or event.id != data.operation_id
+            or event.target != hsm.id(instance)
+        ):
+            return False
+        expected: dict[str, str] = {
+            hsm.id(instance._intuition): _INTUITION_ID_SUFFIX,
+            hsm.id(instance._reasoning): _REASONING_ID_SUFFIX,
+        }
+        if instance._autonomy is not None:
+            expected[hsm.id(instance._autonomy)] = _AUTONOMY_ID_SUFFIX
+        suffix = expected.get(event.source)
+        parent_id = _parent_operation_id(event)
+        if suffix is None or parent_id is None or event.id != f"{parent_id}{suffix}":
+            return False
+        operation = _active_bot_operation(event)
+        if _has_bot_operation_metadata(event):
+            return operation == (parent_id, data.token)
+        return True
+
+    @staticmethod
+    def _emit_cancelled(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        if isinstance(event.data, CancelData):
+            operation_id = event.data.operation_id
+            token = event.data.token
+        else:
+            data = event.data
+            assert isinstance(data, processing.CancelledData)
+            operation = _active_bot_operation(event)
+            if operation is not None:
+                operation_id, token = operation
+            else:
+                operation_id = _parent_operation_id(event)
+                assert operation_id is not None
+                token = data.token
+        owner = instance._attachments[0]
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                CancelledEvent.with_data(CancelledData(operation_id=operation_id, token=token)),
+                id=operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=dict(event.metadata),
+            ),
+        )
+
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Cognition",
         hsm.initial(hsm.target("/Cognition/initializing")),
@@ -822,6 +1011,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "idle",
+            hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_emit_cancelled),
+            ),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
@@ -847,6 +1041,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "autonomizing",
             hsm.defer(input_event),
+            hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel_autonomy),
+                hsm.target("/Cognition/cancelling"),
+            ),
             hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_autonomy_is_handled),
@@ -876,6 +1076,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "intuiting",
             hsm.defer(input_event),
             hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel_intuition),
+                hsm.target("/Cognition/cancelling"),
+            ),
+            hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_intuition_is_handled),
                 hsm.effect(_complete_from_intuition),
@@ -904,6 +1110,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "reasoning",
             hsm.defer(input_event),
             hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel_reasoning),
+                hsm.target("/Cognition/cancelling"),
+            ),
+            hsm.transition(
                 hsm.on(hsm.AnyEvent),
                 hsm.guard(_matches_reasoning_output),
                 hsm.effect(_complete_from_reasoning),
@@ -926,6 +1138,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "completing",
             hsm.defer(input_event),
             hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_emit_cancelled),
+                hsm.target("/Cognition/idle"),
+            ),
+            hsm.transition(
                 hsm.on(_ProcessingCompletedEvent),
                 hsm.guard(_has_matching_apply_operation),
                 hsm.guard(_has_output),
@@ -937,6 +1155,16 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.guard(_has_matching_apply_operation),
                 hsm.guard(_has_failure),
                 hsm.effect(_dispatch_failure),
+                hsm.target("/Cognition/idle"),
+            ),
+        ),
+        hsm.state(
+            "cancelling",
+            hsm.defer(input_event),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.guard(_matches_child_cancelled),
+                hsm.effect(_emit_cancelled),
                 hsm.target("/Cognition/idle"),
             ),
         ),

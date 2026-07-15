@@ -310,8 +310,7 @@ def _selection_item_branch(
             "target": {
                 "type": "string",
                 "description": (
-                    "Optional actor name that should receive the event when more than one actor "
-                    "can accept it."
+                    "Optional actor name that should receive the event when more than one actor can accept it."
                 ),
             },
             "reason": {
@@ -481,6 +480,51 @@ class OutputData(pydantic.BaseModel):
     )
 
 
+class CancelData(pydantic.BaseModel):
+    """Request cancellation of one active processing operation."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(
+        min_length=1,
+        description="Parent operation identifier whose active processing work must be cancelled.",
+        examples=["turn-123"],
+    )
+    token: str = pydantic.Field(
+        min_length=1,
+        description="Opaque cancellation capability created by the owning operation actor.",
+        examples=["8d72b83f17654f1788c012ab132b4afd"],
+    )
+
+
+class CancelledData(pydantic.BaseModel):
+    """Confirmation that one processing operation no longer owns active work."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(
+        min_length=1,
+        description="Parent operation identifier whose processing work reached the idle boundary.",
+        examples=["turn-123"],
+    )
+    token: str = pydantic.Field(
+        min_length=1,
+        description="Exact cancellation capability accepted by this processing actor.",
+        examples=["8d72b83f17654f1788c012ab132b4afd"],
+    )
+
+
+CancelEvent = hsm.Event[CancelData](
+    name="bot.ability.processing.cancel",
+    schema=CancelData,
+)
+CancelledEvent = hsm.Event[CancelledData](
+    name="bot.ability.processing.cancelled",
+    kind=hsm.CompletionEventKind,
+    schema=CancelledData,
+)
+
+
 class InputData(pydantic.BaseModel):
     """Processing input: stimulus plus selectable event schemas."""
 
@@ -613,14 +657,8 @@ def _one_selection(
         else:
             domain_data = None if domain is None else value.data
         resolved_meta = value.meta if value.meta is not None else meta
-        resolved_confidence = (
-            value.confidence if value.confidence is not None else _confidence_from_meta(resolved_meta)
-        )
-        if (
-            domain_data == value.data
-            and resolved_confidence == value.confidence
-            and resolved_meta == value.meta
-        ):
+        resolved_confidence = value.confidence if value.confidence is not None else _confidence_from_meta(resolved_meta)
+        if domain_data == value.data and resolved_confidence == value.confidence and resolved_meta == value.meta:
             return value
         return dataclasses.replace(
             value,
@@ -736,9 +774,7 @@ def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
         return instance
     matches = [
-        name
-        for name, instance in input.actors.items()
-        if selection.event in _enabled_call_event_names(instance)
+        name for name, instance in input.actors.items() if selection.event in _enabled_call_event_names(instance)
     ]
     if len(matches) == 1:
         return input.actors[matches[0]]
@@ -892,7 +928,9 @@ class Processing(ability.Ability[InputData, typing.Any]):
     @staticmethod
     def _applied_has_events(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, _AppliedEventData) and event.data.output.handled and bool(event.data.output.events)
+        return (
+            isinstance(event.data, _AppliedEventData) and event.data.output.handled and bool(event.data.output.events)
+        )
 
     @staticmethod
     def _applied_is_unhandled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
@@ -903,6 +941,34 @@ class Processing(ability.Ability[InputData, typing.Any]):
     def _has_failure(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, ability.FailureData)
+
+    @staticmethod
+    def _is_cancel_request(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        if (
+            not isinstance(event.data, CancelData)
+            or event.id != event.data.operation_id
+            or event.target != hsm.id(instance)
+        ):
+            return False
+        return bool(instance._attachments) and event.source == hsm.id(instance._attachments[0])
+
+    @staticmethod
+    def _emit_cancelled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, CancelData)
+        owner = instance._attachments[0]
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                CancelledEvent.with_data(CancelledData(operation_id=data.operation_id, token=data.token)),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     def _emit_output(
@@ -1049,6 +1115,11 @@ class Processing(ability.Ability[InputData, typing.Any]):
         hsm.state(
             "idle",
             hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_emit_cancelled),
+            ),
+            hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
                 hsm.target("/Processing/applying"),
@@ -1058,6 +1129,12 @@ class Processing(ability.Ability[InputData, typing.Any]):
             "applying",
             hsm.defer(input_event),
             hsm.activity(_apply_activity),
+            hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_emit_cancelled),
+                hsm.target("/Processing/idle"),
+            ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
                 hsm.guard(_has_applied),
@@ -1091,6 +1168,12 @@ class Processing(ability.Ability[InputData, typing.Any]):
             "dispatching",
             hsm.defer(input_event),
             hsm.activity(_dispatch_activity),
+            hsm.transition(
+                hsm.on(CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_emit_cancelled),
+                hsm.target("/Processing/idle"),
+            ),
             hsm.transition(
                 hsm.on(_DispatchedEvent),
                 hsm.effect(_complete_dispatched),

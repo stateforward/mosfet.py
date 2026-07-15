@@ -893,6 +893,37 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             _ApplyCompletedEvent.with_data(_ApplyCompletedEventData(output=None, operation_id=None)),
         )
 
+    @staticmethod
+    def _is_cancel_request(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return (
+            isinstance(event.data, processing.CancelData)
+            and event.id in {event.data.operation_id, f"{event.data.operation_id}:autonomy"}
+            and event.target == hsm.id(instance)
+            and bool(instance._attachments)
+            and event.source == hsm.id(instance._attachments[0])
+        )
+
+    @staticmethod
+    def _cancel(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, processing.CancelData)
+        Autonomy._detach_active(ctx, instance)
+        owner = instance._attachments[0]
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                processing.CancelledEvent.with_data(
+                    processing.CancelledData(operation_id=data.operation_id, token=data.token)
+                ),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=dict(event.metadata),
+            ),
+        )
+
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Autonomy",
         hsm.initial(hsm.target("/Autonomy/initializing")),
@@ -918,6 +949,11 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             "idle",
             hsm.exit(_detach_on_detach),
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel),
+            ),
+            hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_autonomy_input),
                 hsm.target("/Autonomy/matching"),
@@ -928,6 +964,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.defer(input_event),
             hsm.activity(_match_activity),
             hsm.exit(_detach_on_detach),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel),
+                hsm.target("/Autonomy/idle"),
+            ),
             hsm.transition(
                 hsm.on(_MatchedEvent),
                 hsm.guard(_has_matched),
@@ -951,6 +993,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             "running",
             hsm.defer(input_event),
             hsm.exit(_detach_on_detach),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel),
+                hsm.target("/Autonomy/idle"),
+            ),
             hsm.transition(
                 hsm.on(_StartCandidateEvent),
                 hsm.guard(_has_start_candidate),
@@ -994,6 +1042,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.activity(_dispatch_behavior_activity),
             hsm.exit(_detach_on_detach),
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel),
+                hsm.target("/Autonomy/idle"),
+            ),
+            hsm.transition(
                 hsm.on(_ApplyCompletedEvent),
                 hsm.guard(_has_apply_completed),
                 hsm.effect(_complete_apply),
@@ -1011,6 +1065,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             hsm.defer(input_event),
             hsm.activity(_start_candidate_activity),
             hsm.exit(_detach_on_detach),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_cancel_request),
+                hsm.effect(_cancel),
+                hsm.target("/Autonomy/idle"),
+            ),
             hsm.transition(
                 hsm.on(attachment.AttachCompleteEvent),
                 hsm.guard(_matches_behavior_attach_complete),

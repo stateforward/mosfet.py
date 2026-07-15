@@ -11,6 +11,8 @@ import hsm
 
 from .input import InputData
 
+_ACTION_SOURCE_METADATA_KEY = "bot.cognition.action_source"
+
 
 async def dispatch_selected_events(
     ctx: hsm.Context,
@@ -27,13 +29,12 @@ async def dispatch_selected_events(
     from bot import device
 
     event_metadata = dict(metadata or {})
+    event_metadata[_ACTION_SOURCE_METADATA_KEY] = source
     candidates = tuple(
         name for name, actor in input.actors.items() if name != "bot" and isinstance(actor, device.Device)
     )
     restricted = event_metadata.get("bot.focus_candidates")
-    if isinstance(restricted, collections.abc.Sequence) and not isinstance(
-        restricted, str | bytes | bytearray
-    ):
+    if isinstance(restricted, collections.abc.Sequence) and not isinstance(restricted, str | bytes | bytearray):
         candidates = tuple(item for item in restricted if isinstance(item, str) and item)
 
     for selection in selections:
