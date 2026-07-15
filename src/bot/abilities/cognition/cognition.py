@@ -2,6 +2,8 @@ from .. import ability
 from .. import processing
 
 import dataclasses
+import datetime
+import collections.abc
 import typing
 import uuid
 
@@ -12,7 +14,7 @@ import pydantic
 
 from bot.telemetry import observer
 
-from .dispatch import build_processing_input
+from . import dispatch
 from .input import InputData, is_input
 from . import autonomy
 from . import intuition
@@ -26,6 +28,9 @@ _COGNITION_INPUT_METADATA_KEY = "bot.cognition.input"
 _AUTONOMY_ID_SUFFIX = ":autonomy"
 _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
+_REFLECTION_ID_SUFFIX = ":reflection"
+_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+_CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 
 
 class CancelData(pydantic.BaseModel):
@@ -199,7 +204,7 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
 
 
 def _active_bot_operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | None:
-    """Read the immutable Bot capability only while its operation actor is cancelling."""
+    """Validate the immutable Bot cancellation capability without inspecting peer state."""
 
     operation = event.metadata.get("bot.processing.operation")
     actor = event.metadata.get("bot.processing.actor")
@@ -215,7 +220,6 @@ def _active_bot_operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | Non
         or not isinstance(actor_id, str)
         or actor_id != token
         or hsm.id(actor) != actor_id
-        or actor.state() not in {"/BotProcessingTimer/waiting", "/BotProcessingTimer/cancelling"}
     ):
         return None
     return request_id, token
@@ -225,6 +229,77 @@ def _has_bot_operation_metadata(event: hsm.Event[typing.Any]) -> bool:
     """Return whether this event claims the Bot's private operation-capability path."""
 
     return "bot.processing.operation" in event.metadata or "bot.processing.actor" in event.metadata
+
+
+def _normalized_child_event(event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:
+    data = event.data
+    assert isinstance(data, dispatch.TerminalData)
+    operation = data.operation
+    payload: object = data.failure if data.failure is not None else data.output
+    return hsm.Event[object](
+        name=data.terminal_name,
+        data=payload,
+        id=operation.request_id,
+        source=operation.child_id,
+        target=operation.actor_id,
+        metadata=dict(event.metadata),
+        schema=pydantic.TypeAdapter(object),
+    )
+
+
+def _matches_child_terminal(
+    event: hsm.Event[typing.Any],
+    *,
+    owner: hsm.Instance,
+    child: ability.Ability[typing.Any, typing.Any],
+    suffix: str,
+    phase: str,
+    terminal_name: str,
+) -> bool:
+    data = event.data
+    if not isinstance(data, dispatch.TerminalData):
+        return False
+    operation = data.operation
+    expected_outcomes = {"output"} if terminal_name == child.output_event.name else {"failure", "timed_out"}
+    return (
+        dispatch.matches_active_operation(owner, event)
+        and event.name == dispatch.TerminalEvent.name
+        and event.source == operation.actor_id
+        and event.target == hsm.id(owner)
+        and operation.owner_id == hsm.id(owner)
+        and operation.child_id == hsm.id(child)
+        and operation.phase == phase
+        and operation.request_id == f"{operation.operation_id}{suffix}"
+        and data.terminal_name == terminal_name
+        and data.outcome in expected_outcomes
+        and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
+    )
+
+
+def _matches_teardown_failure(
+    event: hsm.Event[typing.Any],
+    *,
+    owner: hsm.Instance,
+    child: ability.Ability[typing.Any, typing.Any],
+    suffix: str,
+    phase: str,
+) -> bool:
+    data = event.data
+    if not isinstance(data, dispatch.TerminalData):
+        return False
+    operation = data.operation
+    return (
+        data.outcome == "cancel_timeout"
+        and data.failure is not None
+        and dispatch.matches_active_operation(owner, event)
+        and event.source == operation.actor_id
+        and event.target == hsm.id(owner)
+        and operation.owner_id == hsm.id(owner)
+        and operation.child_id == hsm.id(child)
+        and operation.phase == phase
+        and operation.request_id == f"{operation.operation_id}{suffix}"
+        and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
+    )
 
 
 class Cognition(ability.Ability[InputData, OutputData]):
@@ -264,7 +339,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     @staticmethod
     def _reflection_operation_id(operation_id: str | None) -> str:
         base = operation_id if operation_id else uuid.uuid4().hex
-        return f"{base}:reflection"
+        return f"{base}{_REFLECTION_ID_SUFFIX}"
 
     @staticmethod
     def _build_processing_input(
@@ -272,13 +347,22 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input: InputData,
     ) -> processing.InputData:
         # Reasoning is a normal actor/tool for intuition multi-select — not a hardcoded edge.
-        return build_processing_input(
+        return dispatch.build_processing_input(
             cognition_input,
             extra_actors={"reasoning": instance._reasoning},
         )
 
     @staticmethod
-    def _start_autonomy(
+    def _child_metadata(event: hsm.Event[typing.Any], cognition_input: InputData) -> dict[str, object]:
+        metadata = dict(event.metadata)
+        metadata[_COGNITION_INPUT_METADATA_KEY] = cognition_input
+        bot_operation = _active_bot_operation(event)
+        if bot_operation is not None:
+            metadata[dispatch.CANCEL_TOKEN_METADATA_KEY] = bot_operation[1]
+        return metadata
+
+    @staticmethod
+    async def _start_autonomy(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
@@ -287,8 +371,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         assert is_input(data)
         autonomy_ability = instance._autonomy
         assert autonomy_ability is not None
-        child_metadata = dict(event.metadata)
-        child_metadata[_COGNITION_INPUT_METADATA_KEY] = data
+        child_metadata = Cognition._child_metadata(event, data)
         input_event = dataclasses.replace(
             autonomy_ability.input_event.with_data_and_id(
                 data,
@@ -296,23 +379,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, autonomy_ability, input_event)
+        await dispatch.Operation.begin(
+            owner=instance,
+            child=autonomy_ability,
+            request=input_event,
+            operation_id=event.id if event.id else input_event.id.removesuffix(_AUTONOMY_ID_SUFFIX),
+            phase="autonomy",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
 
     @staticmethod
-    def _begin_turn(
-        ctx: hsm.Context,
-        instance: "Cognition",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Start autonomy when injected; otherwise open with intuition."""
-
-        if instance._autonomy is not None:
-            Cognition._start_autonomy(ctx, instance, event)
-            return
-        Cognition._start_intuition_from_input(ctx, instance, event)
-
-    @staticmethod
-    def _start_intuition_from_input(
+    async def _start_intuition_from_input(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
@@ -333,8 +410,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
-        child_metadata = dict(event.metadata)
-        child_metadata[_COGNITION_INPUT_METADATA_KEY] = data
+        child_metadata = Cognition._child_metadata(event, data)
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
                 input,
@@ -342,7 +418,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, instance._intuition, input_event)
+        await dispatch.Operation.begin(
+            owner=instance,
+            child=instance._intuition,
+            request=input_event,
+            operation_id=operation_id if operation_id else input_event.id.removesuffix(_INTUITION_ID_SUFFIX),
+            phase="intuition",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
 
     @staticmethod
     def _matches_autonomy_output(
@@ -354,14 +437,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child = instance._autonomy
         if child is None:
             return False
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_AUTONOMY_ID_SUFFIX)
-            and _cognition_input_from_event(event) is not None
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_AUTONOMY_ID_SUFFIX,
+            phase="autonomy",
+            terminal_name=child.output_event.name,
         )
 
     @staticmethod
@@ -374,13 +456,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child = instance._autonomy
         if child is None:
             return False
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_AUTONOMY_ID_SUFFIX)
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_AUTONOMY_ID_SUFFIX,
+            phase="autonomy",
+            terminal_name=child.failed_event.name,
         )
 
     @staticmethod
@@ -389,7 +471,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return Cognition._matches_autonomy_output(ctx, instance, event) and event.data is not None
+        return (
+            Cognition._matches_autonomy_output(ctx, instance, event) and _normalized_child_event(event).data is not None
+        )
 
     @staticmethod
     def _autonomy_is_unhandled(
@@ -397,7 +481,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return Cognition._matches_autonomy_output(ctx, instance, event) and event.data is None
+        return Cognition._matches_autonomy_output(ctx, instance, event) and _normalized_child_event(event).data is None
 
     @staticmethod
     def _complete_from_autonomy(
@@ -405,6 +489,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        event = _normalized_child_event(event)
         cognition_input = _cognition_input_from_event(event)
         operation_id = _parent_operation_id(event)
         public_metadata = _public_metadata(dict(event.metadata))
@@ -451,20 +536,21 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _start_intuition(
+    async def _start_intuition(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
         """Start intuition from an autonomy unhandled terminal (input rides metadata)."""
 
+        event = _normalized_child_event(event)
         cognition_input = _cognition_input_from_event(event)
         operation_id = _parent_operation_id(event)
         public_metadata = _public_metadata(dict(event.metadata))
         if cognition_input is None:
             # Idle path still passes the input event body.
             if is_input(event.data):
-                Cognition._start_intuition_from_input(ctx, instance, event)
+                await Cognition._start_intuition_from_input(ctx, instance, event)
                 return
             _ = hsm.dispatch(
                 ctx,
@@ -501,7 +587,25 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, instance._intuition, input_event)
+        await dispatch.Operation.begin(
+            owner=instance,
+            child=instance._intuition,
+            request=input_event,
+            operation_id=operation_id if operation_id else input_event.id.removesuffix(_INTUITION_ID_SUFFIX),
+            phase="intuition",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
+
+    @staticmethod
+    async def _start_intuition_activity(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        if isinstance(event.data, dispatch.TerminalData):
+            await Cognition._start_intuition(ctx, instance, event)
+            return
+        await Cognition._start_intuition_from_input(ctx, instance, event)
 
     @staticmethod
     def _matches_intuition_output(
@@ -511,14 +615,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._intuition
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_INTUITION_ID_SUFFIX)
-            and _cognition_input_from_event(event) is not None
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_INTUITION_ID_SUFFIX,
+            phase="intuition",
+            terminal_name=child.output_event.name,
         )
 
     @staticmethod
@@ -529,13 +632,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._intuition
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_INTUITION_ID_SUFFIX)
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_INTUITION_ID_SUFFIX,
+            phase="intuition",
+            terminal_name=child.failed_event.name,
         )
 
     @staticmethod
@@ -544,7 +647,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return Cognition._matches_intuition_output(ctx, instance, event) and event.data is not None
+        return (
+            Cognition._matches_intuition_output(ctx, instance, event)
+            and _normalized_child_event(event).data is not None
+        )
 
     @staticmethod
     def _intuition_is_unhandled(
@@ -554,7 +660,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         # Host cascade only: unhandled means Cognition starts reasoning. Handled multi-select
         # (including reasoning.input as a normal actor) is intuition's job via dispatch.
-        return Cognition._matches_intuition_output(ctx, instance, event) and event.data is None
+        return Cognition._matches_intuition_output(ctx, instance, event) and _normalized_child_event(event).data is None
 
     @staticmethod
     def _complete_from_intuition(
@@ -562,6 +668,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        event = _normalized_child_event(event)
         cognition_input = _cognition_input_from_event(event)
         operation_id = _parent_operation_id(event)
         public_metadata = _public_metadata(dict(event.metadata))
@@ -608,11 +715,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _start_reasoning(
+    async def _start_reasoning(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        event = _normalized_child_event(event)
         cognition_input = _cognition_input_from_event(event)
         operation_id = _parent_operation_id(event)
         public_metadata = _public_metadata(dict(event.metadata))
@@ -655,7 +763,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, instance._reasoning, input_event)
+        await dispatch.Operation.begin(
+            owner=instance,
+            child=instance._reasoning,
+            request=input_event,
+            operation_id=operation_id if operation_id else input_event.id.removesuffix(_REASONING_ID_SUFFIX),
+            phase="reasoning",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
 
     @staticmethod
     def _matches_reasoning_output(
@@ -665,14 +780,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._reasoning
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_REASONING_ID_SUFFIX)
-            and _cognition_input_from_event(event) is not None
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_REASONING_ID_SUFFIX,
+            phase="reasoning",
+            terminal_name=child.output_event.name,
         )
 
     @staticmethod
@@ -683,13 +797,44 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._reasoning
-        child_id = event.id if event.id else None
-        return (
-            event.name == child.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_REASONING_ID_SUFFIX)
+        return _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_REASONING_ID_SUFFIX,
+            phase="reasoning",
+            terminal_name=child.failed_event.name,
+        )
+
+    @staticmethod
+    def _matches_child_teardown_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if not isinstance(data, dispatch.TerminalData):
+            return False
+        operation = data.operation
+        candidates: list[tuple[ability.Ability[typing.Any, typing.Any], str, str]] = [
+            (instance._intuition, _INTUITION_ID_SUFFIX, "intuition"),
+            (instance._reasoning, _REASONING_ID_SUFFIX, "reasoning"),
+        ]
+        if instance._autonomy is not None:
+            candidates.append((instance._autonomy, _AUTONOMY_ID_SUFFIX, "autonomy"))
+        if instance._reflection is not None:
+            candidates.append((instance._reflection, _REFLECTION_ID_SUFFIX, "reflection"))
+        return any(
+            operation.child_id == hsm.id(child)
+            and _matches_teardown_failure(
+                event,
+                owner=instance,
+                child=child,
+                suffix=suffix,
+                phase=phase,
+            )
+            for child, suffix, phase in candidates
         )
 
     @staticmethod
@@ -698,6 +843,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        event = _normalized_child_event(event)
         cognition_input = _cognition_input_from_event(event)
         operation_id = _parent_operation_id(event)
         public_metadata = _public_metadata(dict(event.metadata))
@@ -749,6 +895,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        event = _normalized_child_event(event)
         operation_id = _parent_operation_id(event)
         failure = (
             event.data
@@ -764,6 +911,23 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 metadata=_public_metadata(dict(event.metadata)),
             ),
         )
+
+    @staticmethod
+    def _fail_cancel_teardown(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        assert isinstance(data, dispatch.TerminalData)
+        failure = data.failure or ability.FailureData(message="Cognition child cancellation timed out.")
+        terminal = dataclasses.replace(
+            instance.failed_event.with_data(failure),
+            id=data.operation.operation_id,
+            metadata=_public_metadata(dict(event.metadata)),
+            source=hsm.id(instance),
+        )
+        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _dispatch_output(
@@ -784,12 +948,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     @staticmethod
-    def _dispatch_reflection(
+    async def _dispatch_reflection(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Fire-and-forget habit reflection from the completion event only."""
+        """Start one supervised Reflection operation from the completion event."""
 
         reflection_ability = instance._reflection
         if reflection_ability is None:
@@ -808,7 +972,72 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             metadata=dict(event.metadata),
         )
-        _ = hsm.dispatch(ctx, reflection_ability, input_event)
+        try:
+            await dispatch.Operation.begin(
+                owner=instance,
+                child=reflection_ability,
+                request=input_event,
+                operation_id=(completion.operation_id or input_event.id.removesuffix(_REFLECTION_ID_SUFFIX)),
+                phase="reflection",
+                timeout=_CHILD_OPERATION_TIMEOUT,
+            )
+        except Exception as error:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _ApplyFailedEvent.with_data(
+                        _failure(completion.operation_id, f"Cognition could not start Reflection: {error}")
+                    ),
+                    id=completion.operation_id,
+                    metadata=dict(event.metadata),
+                ),
+            )
+
+    @staticmethod
+    def _has_reflection(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, event
+        return instance._reflection is not None
+
+    @staticmethod
+    def _matches_reflection_terminal(
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+        terminal_name: str,
+    ) -> bool:
+        child = instance._reflection
+        return child is not None and _matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_REFLECTION_ID_SUFFIX,
+            phase="reflection",
+            terminal_name=terminal_name,
+        )
+
+    @staticmethod
+    def _matches_reflection_output(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        child = instance._reflection
+        return child is not None and Cognition._matches_reflection_terminal(instance, event, child.output_event.name)
+
+    @staticmethod
+    def _matches_reflection_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        child = instance._reflection
+        return child is not None and Cognition._matches_reflection_terminal(instance, event, child.failed_event.name)
 
     @staticmethod
     def _dispatch_failure(
@@ -834,6 +1063,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx, event
         return instance._autonomy is not None
+
+    @staticmethod
+    def _forward_child_terminal(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        dispatch.forward_terminal(ctx, instance, event)
 
     @staticmethod
     def _has_input(
@@ -900,43 +1137,77 @@ class Cognition(ability.Ability[InputData, OutputData]):
         return True
 
     @staticmethod
-    def _dispatch_cancel_to_child(
+    async def _resolve_child_cancel(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
-        child: ability.Ability[typing.Any, typing.Any],
-        suffix: str,
+        phase: str,
     ) -> None:
         data = event.data
         assert isinstance(data, CancelData)
-        child_operation_id = f"{data.operation_id}{suffix}"
-        _ = hsm.dispatch(
-            ctx,
-            child,
-            dataclasses.replace(
-                processing.CancelEvent.with_data(
-                    processing.CancelData(operation_id=child_operation_id, token=data.token)
-                ),
-                id=child_operation_id,
-                source=hsm.id(instance),
-                target=hsm.id(child),
-                metadata=dict(event.metadata),
-            ),
+        await dispatch.CancelResolution.begin(
+            owner=instance,
+            operation_id=data.operation_id,
+            token=data.token,
+            phase=phase,
+            metadata=event.metadata,
+            teardown_timeout=_CANCEL_TEARDOWN_TIMEOUT,
         )
 
     @staticmethod
-    def _cancel_autonomy(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
-        child = instance._autonomy
-        assert child is not None
-        Cognition._dispatch_cancel_to_child(ctx, instance, event, child, _AUTONOMY_ID_SUFFIX)
+    async def _resolve_autonomy_cancel(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        await Cognition._resolve_child_cancel(ctx, instance, event, "autonomy")
 
     @staticmethod
-    def _cancel_intuition(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
-        Cognition._dispatch_cancel_to_child(ctx, instance, event, instance._intuition, _INTUITION_ID_SUFFIX)
+    async def _resolve_intuition_cancel(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        await Cognition._resolve_child_cancel(ctx, instance, event, "intuition")
 
     @staticmethod
-    def _cancel_reasoning(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
-        Cognition._dispatch_cancel_to_child(ctx, instance, event, instance._reasoning, _REASONING_ID_SUFFIX)
+    async def _resolve_reasoning_cancel(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        await Cognition._resolve_child_cancel(ctx, instance, event, "reasoning")
+
+    @staticmethod
+    def _matches_cancel_resolved(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if not isinstance(data, dispatch.CancelResolvedData):
+            return False
+        operation = data.operation
+        instances = instance.context().value(hsm.Keys.Instances)
+        actor = instances.get(operation.actor_id) if isinstance(instances, collections.abc.Mapping) else None
+        return (
+            dispatch.matches_active_resolution(instance, event)
+            and isinstance(actor, dispatch.Operation)
+            and hsm.id(actor) == operation.actor_id
+            and data.request.owner_id == hsm.id(instance)
+            and data.request.operation_id == operation.operation_id
+            and data.request.token == operation.token
+            and data.request.phase == operation.phase
+            and event.id == operation.operation_id
+            and event.source == operation.actor_id
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _matches_cancel_unresolved(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, dispatch.ResolveCancelData)
+            and dispatch.matches_active_resolution(instance, event)
+            and event.name == dispatch.CancelUnresolvedEvent.name
+            and event.source == data.resolver_id
+            and event.target == hsm.id(instance)
+            and event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY) == data
+        )
 
     @staticmethod
     def _matches_child_cancelled(
@@ -946,32 +1217,77 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         data = event.data
+        cancel = event.metadata.get(dispatch.CANCEL_METADATA_KEY)
+        request = event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY)
         if (
-            not isinstance(data, processing.CancelledData)
-            or event.id != data.operation_id
-            or event.target != hsm.id(instance)
+            not isinstance(data, dispatch.TerminalData)
+            or not isinstance(cancel, dispatch.CancelData)
+            or not isinstance(request, dispatch.ResolveCancelData)
         ):
             return False
-        expected: dict[str, str] = {
-            hsm.id(instance._intuition): _INTUITION_ID_SUFFIX,
-            hsm.id(instance._reasoning): _REASONING_ID_SUFFIX,
-        }
-        if instance._autonomy is not None:
-            expected[hsm.id(instance._autonomy)] = _AUTONOMY_ID_SUFFIX
-        suffix = expected.get(event.source)
-        parent_id = _parent_operation_id(event)
-        if suffix is None or parent_id is None or event.id != f"{parent_id}{suffix}":
+        operation = data.operation
+        return (
+            data.outcome == "cancelled"
+            and data.terminal_name == processing.CancelledEvent.name
+            and dispatch.matches_active_operation(instance, event)
+            and dispatch.matches_active_resolution(instance, event)
+            and cancel.owner_id == hsm.id(instance)
+            and cancel.child_id == operation.child_id
+            and cancel.request_id == operation.request_id
+            and cancel.operation_id == operation.operation_id
+            and cancel.token == operation.token
+            and cancel.resolver_id == request.resolver_id
+            and request.owner_id == hsm.id(instance)
+            and request.operation_id == operation.operation_id
+            and request.token == operation.token
+            and request.phase == operation.phase
+            and event.id == cancel.operation_id
+        )
+
+    @staticmethod
+    def _matches_cancel_teardown_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        data = event.data
+        cancel = event.metadata.get(dispatch.CANCEL_METADATA_KEY)
+        request = event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY)
+        if (
+            not Cognition._matches_child_teardown_failure(ctx, instance, event)
+            or not isinstance(data, dispatch.TerminalData)
+            or not isinstance(cancel, dispatch.CancelData)
+            or not isinstance(request, dispatch.ResolveCancelData)
+        ):
             return False
-        operation = _active_bot_operation(event)
-        if _has_bot_operation_metadata(event):
-            return operation == (parent_id, data.token)
-        return True
+        operation = data.operation
+        return (
+            dispatch.matches_active_resolution(instance, event)
+            and cancel.owner_id == hsm.id(instance)
+            and cancel.child_id == operation.child_id
+            and cancel.request_id == operation.request_id
+            and cancel.operation_id == operation.operation_id
+            and cancel.token == operation.token
+            and cancel.resolver_id == request.resolver_id
+            and request.owner_id == hsm.id(instance)
+            and request.operation_id == operation.operation_id
+            and request.token == operation.token
+            and request.phase == operation.phase
+        )
 
     @staticmethod
     def _emit_cancelled(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
         if isinstance(event.data, CancelData):
             operation_id = event.data.operation_id
             token = event.data.token
+        elif isinstance(event.data, dispatch.ResolveCancelData):
+            operation_id = event.data.operation_id
+            token = event.data.token
+        elif isinstance(event.data, dispatch.TerminalData):
+            request = event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY)
+            assert isinstance(request, dispatch.ResolveCancelData)
+            operation_id = request.operation_id
+            token = request.token
         else:
             data = event.data
             assert isinstance(data, processing.CancelledData)
@@ -1019,7 +1335,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
-                hsm.effect(_begin_turn),
                 hsm.target("/Cognition/routing"),
             ),
             hsm.transition(
@@ -1041,28 +1356,46 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "autonomizing",
             hsm.defer(input_event),
+            hsm.activity(_start_autonomy),
             hsm.transition(
                 hsm.on(CancelEvent),
                 hsm.guard(_is_cancel_request),
-                hsm.effect(_cancel_autonomy),
-                hsm.target("/Cognition/cancelling"),
+                hsm.target("/Cognition/resolving_autonomy_cancel"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(autonomy.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_autonomy_is_handled),
-                hsm.effect(_complete_from_autonomy),
+                hsm.effect(_complete_from_autonomy, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_autonomy_is_unhandled),
-                hsm.effect(_start_intuition),
+                hsm.effect(dispatch.retire_operation),
                 hsm.target("/Cognition/intuiting"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_child_teardown_failure),
+                hsm.effect(_fail_child, dispatch.retire_operation),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_autonomy_failure),
-                hsm.effect(_fail_child),
+                hsm.effect(_fail_child, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
@@ -1075,28 +1408,46 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "intuiting",
             hsm.defer(input_event),
+            hsm.activity(_start_intuition_activity),
             hsm.transition(
                 hsm.on(CancelEvent),
                 hsm.guard(_is_cancel_request),
-                hsm.effect(_cancel_intuition),
-                hsm.target("/Cognition/cancelling"),
+                hsm.target("/Cognition/resolving_intuition_cancel"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(intuition.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_intuition_is_handled),
-                hsm.effect(_complete_from_intuition),
+                hsm.effect(_complete_from_intuition, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_intuition_is_unhandled),
-                hsm.effect(_start_reasoning),
+                hsm.effect(dispatch.retire_operation),
                 hsm.target("/Cognition/reasoning"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_child_teardown_failure),
+                hsm.effect(_fail_child, dispatch.retire_operation),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_intuition_failure),
-                hsm.effect(_fail_child),
+                hsm.effect(_fail_child, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
@@ -1109,22 +1460,40 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "reasoning",
             hsm.defer(input_event),
+            hsm.activity(_start_reasoning),
             hsm.transition(
                 hsm.on(CancelEvent),
                 hsm.guard(_is_cancel_request),
-                hsm.effect(_cancel_reasoning),
-                hsm.target("/Cognition/cancelling"),
+                hsm.target("/Cognition/resolving_reasoning_cancel"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(reasoning.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_reasoning_output),
-                hsm.effect(_complete_from_reasoning),
+                hsm.effect(_complete_from_reasoning, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_child_teardown_failure),
+                hsm.effect(_fail_child, dispatch.retire_operation),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_reasoning_failure),
-                hsm.effect(_fail_child),
+                hsm.effect(_fail_child, dispatch.retire_operation),
                 hsm.target("/Cognition/completing"),
             ),
             hsm.transition(
@@ -1147,8 +1516,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(_ProcessingCompletedEvent),
                 hsm.guard(_has_matching_apply_operation),
                 hsm.guard(_has_output),
-                hsm.effect(_dispatch_output, _dispatch_reflection),
-                hsm.target("/Cognition/idle"),
+                hsm.effect(_dispatch_output),
+                hsm.target("/Cognition/post_completion"),
             ),
             hsm.transition(
                 hsm.on(_ApplyFailedEvent),
@@ -1158,14 +1527,129 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.target("/Cognition/idle"),
             ),
         ),
+        hsm.choice(
+            "post_completion",
+            hsm.transition(
+                hsm.guard(_has_reflection),
+                hsm.target("/Cognition/reflecting"),
+            ),
+            hsm.transition(hsm.target("/Cognition/idle")),
+        ),
+        hsm.state(
+            "reflecting",
+            hsm.defer(input_event),
+            hsm.activity(_dispatch_reflection),
+            hsm.transition(
+                hsm.on(reflection.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_reflection_output),
+                hsm.effect(dispatch.retire_operation),
+                hsm.target("/Cognition/idle"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_child_teardown_failure),
+                hsm.effect(dispatch.retire_operation),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_reflection_failure),
+                hsm.effect(dispatch.retire_operation),
+                hsm.target("/Cognition/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(_ApplyFailedEvent),
+                hsm.guard(_has_failure),
+                hsm.effect(_dispatch_failure),
+                hsm.target("/Cognition/degraded"),
+            ),
+        ),
+        hsm.state(
+            "resolving_autonomy_cancel",
+            hsm.defer(input_event),
+            hsm.activity(_resolve_autonomy_cancel),
+            hsm.transition(
+                hsm.on(dispatch.CancelResolvedEvent),
+                hsm.guard(_matches_cancel_resolved),
+                hsm.effect(dispatch.complete_resolution, dispatch.cancel_resolved_operation),
+                hsm.target("/Cognition/cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.CancelUnresolvedEvent),
+                hsm.guard(_matches_cancel_unresolved),
+                hsm.effect(dispatch.retire_resolution, _emit_cancelled),
+                hsm.target("/Cognition/idle"),
+            ),
+        ),
+        hsm.state(
+            "resolving_intuition_cancel",
+            hsm.defer(input_event),
+            hsm.activity(_resolve_intuition_cancel),
+            hsm.transition(
+                hsm.on(dispatch.CancelResolvedEvent),
+                hsm.guard(_matches_cancel_resolved),
+                hsm.effect(dispatch.complete_resolution, dispatch.cancel_resolved_operation),
+                hsm.target("/Cognition/cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.CancelUnresolvedEvent),
+                hsm.guard(_matches_cancel_unresolved),
+                hsm.effect(dispatch.retire_resolution, _emit_cancelled),
+                hsm.target("/Cognition/idle"),
+            ),
+        ),
+        hsm.state(
+            "resolving_reasoning_cancel",
+            hsm.defer(input_event),
+            hsm.activity(_resolve_reasoning_cancel),
+            hsm.transition(
+                hsm.on(dispatch.CancelResolvedEvent),
+                hsm.guard(_matches_cancel_resolved),
+                hsm.effect(dispatch.complete_resolution, dispatch.cancel_resolved_operation),
+                hsm.target("/Cognition/cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.CancelUnresolvedEvent),
+                hsm.guard(_matches_cancel_unresolved),
+                hsm.effect(dispatch.retire_resolution, _emit_cancelled),
+                hsm.target("/Cognition/idle"),
+            ),
+        ),
         hsm.state(
             "cancelling",
             hsm.defer(input_event),
             hsm.transition(
+                hsm.on(dispatch.CancelTeardownTimedOutEvent),
+                hsm.guard(dispatch.matches_teardown_timeout),
+                hsm.effect(dispatch.force_cancel_timeout),
+            ),
+            hsm.transition(
                 hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_child_cancelled),
-                hsm.effect(_emit_cancelled),
+                hsm.effect(dispatch.retire_resolution, dispatch.retire_operation, _emit_cancelled),
                 hsm.target("/Cognition/idle"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_cancel_teardown_failure),
+                hsm.effect(dispatch.retire_resolution, dispatch.retire_operation, _fail_cancel_teardown),
+                hsm.target("/Cognition/degraded"),
             ),
         ),
         hsm.state(

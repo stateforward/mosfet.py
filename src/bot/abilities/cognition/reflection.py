@@ -26,6 +26,8 @@ from .. import processing
 from .. import memory
 
 import dataclasses
+import datetime
+import collections.abc
 import typing
 import uuid
 
@@ -54,6 +56,7 @@ from bot.habit.source import STARLARK_API
 from bot.telemetry import observer
 
 from . import episodes
+from . import dispatch
 from . import input
 from . import types
 
@@ -109,8 +112,13 @@ _REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY = "bot.reflection.last_diagnostic_messa
 _REFLECTION_CREATE_INTENT_METADATA_KEY = "bot.reflection.create_intent"
 _REFLECTION_CHANGE_INTENT_METADATA_KEY = "bot.reflection.change_intent"
 _REFLECTION_EXISTING_HABIT_METADATA_KEY = "bot.reflection.existing_habit"
+_REFLECTION_CAPABILITY_METADATA_KEY = "bot.reflection.capability"
+_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY = "bot.reflection.cancel_capability"
 _SELECT_ID_SUFFIX = ":reflection:select"
 _CHANGE_ID_SUFFIX = ":reflection:change"
+_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+_CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
+_MAX_REFLECTION_FIX_ATTEMPTS = 2
 
 
 class InputData(pydantic.BaseModel):
@@ -273,6 +281,38 @@ class _ChangeWriteCheckedData(pydantic.BaseModel):
     existing: Instance | None = None
 
 
+class _SelectedEventData(pydantic.BaseModel):
+    """Authorized select result normalized by the operation actor."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    turn: InputData
+    prior_episodes: tuple[CognitiveEpisode, ...] = ()
+    selection: types.EventData
+    operation_id: str = pydantic.Field(min_length=1)
+
+
+class _ChangeRequestedEventData(pydantic.BaseModel):
+    """Typed request for one operation-scoped change-processing attempt."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    turn: InputData
+    prior_episodes: tuple[CognitiveEpisode, ...]
+    intent: ChangeData
+    existing: Instance
+    operation_id: str = pydantic.Field(min_length=1)
+    diagnostics: habit_diagnostic.Report | None = None
+    failed_source: str | None = None
+    create_intent: CreateData | None = None
+
+
 _RecalledEvent = hsm.Event[_RecalledEventData](
     name="bot.ability.reflection.recalled",
     kind=hsm.CompletionEventKind,
@@ -293,11 +333,57 @@ _ChangeWriteCheckedEvent = hsm.Event[_ChangeWriteCheckedData](
     kind=hsm.CompletionEventKind,
     schema=_ChangeWriteCheckedData,
 )
+_SelectedEvent = hsm.Event[_SelectedEventData](
+    name="bot.ability.reflection.selected",
+    kind=hsm.CompletionEventKind,
+    schema=_SelectedEventData,
+)
+_ChangeRequestedEvent = hsm.Event[_ChangeRequestedEventData](
+    name="bot.ability.reflection.change.requested",
+    schema=_ChangeRequestedEventData,
+)
+_ChangeStartedEvent = hsm.Event[dispatch.OperationData](
+    name="bot.ability.reflection.change.started",
+    kind=hsm.CompletionEventKind,
+    schema=dispatch.OperationData,
+)
 _StageFailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.reflection.stage.failed",
     kind=hsm.ErrorEventKind,
     schema=ability.FailureData,
 )
+
+
+class _ReflectionCapability(pydantic.BaseModel):
+    """Immutable authority for one complete Reflection turn."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str
+    actor_id: str
+    token: str
+
+
+class _ReflectionCancelCapability(pydantic.BaseModel):
+    """Immutable host cancellation authority retained through mediator teardown."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str
+    token: str
+    phase: typing.Literal["reflection-select", "reflection-change"]
+    parent_operation: dispatch.OperationData | None = None
+    turn_actor_id: str | None = None
+
+
+class _ReflectionOperation(hsm.Instance):
+    """Scoped identity actor retained for the full Reflection turn."""
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "ReflectionOperation",
+        hsm.initial(hsm.target("/ReflectionOperation/active")),
+        hsm.state("active"),
+    )
 
 
 def habit_events() -> tuple[processing.Event[typing.Any], ...]:
@@ -333,6 +419,7 @@ def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
             _REFLECTION_ABILITIES_METADATA_KEY,
             _REFLECTION_SKILLS_METADATA_KEY,
             _REFLECTION_OPERATION_ID_METADATA_KEY,
+            dispatch.OPERATION_METADATA_KEY,
         }
     }
 
@@ -672,24 +759,335 @@ class Reflection(processing.Processing):
         return isinstance(event.data, processing.InputData)
 
     @staticmethod
+    async def _start_operation(instance: "Reflection", operation_id: str) -> _ReflectionCapability:
+        actor = _ReflectionOperation()
+        private = hsm.Context(parent=instance.context(), values={hsm.Keys.Instances: {}})
+        started = await hsm.started(private, actor, actor.model)
+        capability = _ReflectionCapability(
+            operation_id=operation_id,
+            actor_id=hsm.id(started),
+            token=uuid.uuid4().hex,
+        )
+        instances = instance.context().value(hsm.Keys.Instances)
+        if isinstance(instances, collections.abc.MutableMapping):
+            instances[capability.actor_id] = started
+        return capability
+
+    @staticmethod
+    def _matches_operation(instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        if not isinstance(capability, _ReflectionCapability):
+            return False
+        instances = instance.context().value(hsm.Keys.Instances)
+        actor = instances.get(capability.actor_id) if isinstance(instances, collections.abc.Mapping) else None
+        return (
+            isinstance(actor, _ReflectionOperation)
+            and event.id == capability.operation_id
+            and event.source == capability.actor_id
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _private_event(
+        instance: "Reflection",
+        source_event: hsm.Event[typing.Any],
+        event_type: hsm.Event[typing.Any],
+        data: object,
+    ) -> hsm.Event[typing.Any]:
+        capability = source_event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        assert isinstance(capability, _ReflectionCapability)
+        return dataclasses.replace(
+            event_type.with_data(data),
+            id=capability.operation_id,
+            source=capability.actor_id,
+            target=hsm.id(instance),
+            metadata=dict(source_event.metadata),
+        )
+
+    @staticmethod
+    def _finish_operation(instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        cancel_capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        actor_id = (
+            capability.actor_id
+            if isinstance(capability, _ReflectionCapability)
+            else cancel_capability.turn_actor_id
+            if isinstance(cancel_capability, _ReflectionCancelCapability)
+            else None
+        )
+        instances = instance.context().value(hsm.Keys.Instances)
+        if actor_id is not None and isinstance(instances, collections.abc.MutableMapping):
+            _ = instances.pop(actor_id, None)
+
+    @staticmethod
+    def _is_reflection_cancel_request(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        return processing.Processing._is_cancel_request(ctx, instance, event)
+
+    @staticmethod
+    async def _resolve_select_cancel(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, processing.CancelData)
+        instances = instance.context().value(hsm.Keys.Instances)
+        turn_actor_id = (
+            next(
+                (hsm.id(actor) for actor in instances.values() if isinstance(actor, _ReflectionOperation)),
+                None,
+            )
+            if isinstance(instances, collections.abc.Mapping)
+            else None
+        )
+        capability = _ReflectionCancelCapability(
+            operation_id=data.operation_id,
+            token=data.token,
+            phase="reflection-select",
+            parent_operation=(
+                event.metadata.get(dispatch.OPERATION_METADATA_KEY)
+                if isinstance(event.metadata.get(dispatch.OPERATION_METADATA_KEY), dispatch.OperationData)
+                else None
+            ),
+            turn_actor_id=turn_actor_id,
+        )
+        await dispatch.CancelResolution.begin(
+            owner=instance,
+            operation_id=data.operation_id,
+            token=data.token,
+            phase=capability.phase,
+            metadata={
+                **event.metadata,
+                _REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability,
+            },
+            teardown_timeout=_CANCEL_TEARDOWN_TIMEOUT,
+        )
+
+    @staticmethod
+    async def _resolve_change_cancel(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, processing.CancelData)
+        instances = instance.context().value(hsm.Keys.Instances)
+        turn_actor_id = (
+            next(
+                (hsm.id(actor) for actor in instances.values() if isinstance(actor, _ReflectionOperation)),
+                None,
+            )
+            if isinstance(instances, collections.abc.Mapping)
+            else None
+        )
+        capability = _ReflectionCancelCapability(
+            operation_id=data.operation_id,
+            token=data.token,
+            phase="reflection-change",
+            parent_operation=(
+                event.metadata.get(dispatch.OPERATION_METADATA_KEY)
+                if isinstance(event.metadata.get(dispatch.OPERATION_METADATA_KEY), dispatch.OperationData)
+                else None
+            ),
+            turn_actor_id=turn_actor_id,
+        )
+        await dispatch.CancelResolution.begin(
+            owner=instance,
+            operation_id=data.operation_id,
+            token=data.token,
+            phase=capability.phase,
+            metadata={
+                **event.metadata,
+                _REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability,
+            },
+            teardown_timeout=_CANCEL_TEARDOWN_TIMEOUT,
+        )
+
+    @staticmethod
+    def _matches_cancel_unresolved(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        return (
+            isinstance(data, dispatch.ResolveCancelData)
+            and isinstance(capability, _ReflectionCancelCapability)
+            and dispatch.matches_active_resolution(instance, event)
+            and data.owner_id == hsm.id(instance)
+            and data.operation_id == capability.operation_id
+            and data.token == capability.token
+            and data.phase == capability.phase
+            and event.id == data.operation_id
+            and event.source == data.resolver_id
+            and event.target == hsm.id(instance)
+            and event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY) == data
+        )
+
+    @staticmethod
+    def _matches_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        cancel = event.metadata.get(dispatch.CANCEL_METADATA_KEY)
+        request = event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY)
+        if (
+            not isinstance(data, dispatch.TerminalData)
+            or not isinstance(capability, _ReflectionCancelCapability)
+            or not isinstance(cancel, dispatch.CancelData)
+            or not isinstance(request, dispatch.ResolveCancelData)
+        ):
+            return False
+        operation = data.operation
+        return (
+            data.outcome == "cancelled"
+            and data.terminal_name == processing.CancelledEvent.name
+            and dispatch.matches_active_operation(instance, event)
+            and dispatch.matches_active_resolution(instance, event)
+            and operation.owner_id == hsm.id(instance)
+            and operation.operation_id == capability.operation_id
+            and operation.token == capability.token
+            and operation.phase == capability.phase
+            and cancel.owner_id == operation.owner_id
+            and cancel.child_id == operation.child_id
+            and cancel.request_id == operation.request_id
+            and cancel.operation_id == operation.operation_id
+            and cancel.token == operation.token
+            and cancel.resolver_id == request.resolver_id
+            and request.owner_id == operation.owner_id
+            and request.operation_id == operation.operation_id
+            and request.token == operation.token
+            and request.phase == operation.phase
+            and event.id == capability.operation_id
+            and event.source == operation.actor_id
+            and event.target == hsm.id(instance)
+            and event.metadata.get(dispatch.CANCEL_METADATA_KEY) == cancel
+            and event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY) == request
+        )
+
+    @staticmethod
+    def _matches_cancel_teardown_failure(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        cancel = event.metadata.get(dispatch.CANCEL_METADATA_KEY)
+        request = event.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY)
+        if (
+            not isinstance(data, dispatch.TerminalData)
+            or not isinstance(capability, _ReflectionCancelCapability)
+            or not isinstance(cancel, dispatch.CancelData)
+            or not isinstance(request, dispatch.ResolveCancelData)
+        ):
+            return False
+        operation = data.operation
+        child = instance._select_processing if capability.phase == "reflection-select" else instance._change_processing
+        return (
+            data.outcome == "cancel_timeout"
+            and data.failure is not None
+            and data.terminal_name == child.failed_event.name
+            and dispatch.matches_active_operation(instance, event)
+            and dispatch.matches_active_resolution(instance, event)
+            and operation.owner_id == hsm.id(instance)
+            and operation.child_id == hsm.id(child)
+            and operation.operation_id == capability.operation_id
+            and operation.token == capability.token
+            and operation.phase == capability.phase
+            and cancel.owner_id == operation.owner_id
+            and cancel.child_id == operation.child_id
+            and cancel.request_id == operation.request_id
+            and cancel.operation_id == operation.operation_id
+            and cancel.token == operation.token
+            and cancel.resolver_id == request.resolver_id
+            and request.owner_id == operation.owner_id
+            and request.operation_id == operation.operation_id
+            and request.token == operation.token
+            and request.phase == operation.phase
+            and event.id == capability.operation_id
+            and event.source == operation.actor_id
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _matches_cancel_resolved(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        if not isinstance(data, dispatch.CancelResolvedData) or not isinstance(capability, _ReflectionCancelCapability):
+            return False
+        operation = data.operation
+        instances = instance.context().value(hsm.Keys.Instances)
+        actor = instances.get(operation.actor_id) if isinstance(instances, collections.abc.Mapping) else None
+        return (
+            dispatch.matches_active_resolution(instance, event)
+            and isinstance(actor, dispatch.Operation)
+            and hsm.id(actor) == operation.actor_id
+            and data.request.owner_id == hsm.id(instance)
+            and data.request.operation_id == capability.operation_id
+            and data.request.token == capability.token
+            and data.request.phase == capability.phase
+            and operation.owner_id == hsm.id(instance)
+            and operation.operation_id == capability.operation_id
+            and operation.token == capability.token
+            and operation.phase == capability.phase
+            and event.id == capability.operation_id
+            and event.source == operation.actor_id
+            and event.target == hsm.id(instance)
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
+        )
+
+    @staticmethod
+    def _emit_reflection_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        Reflection._finish_operation(instance, event)
+        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
+        if isinstance(capability, _ReflectionCancelCapability):
+            operation_id = capability.operation_id
+            token = capability.token
+        else:
+            data = event.data
+            assert isinstance(data, processing.CancelData)
+            operation_id = data.operation_id
+            token = data.token
+        owner = instance._attachments[0]
+        metadata = dict(event.metadata)
+        if isinstance(capability, _ReflectionCancelCapability):
+            if capability.parent_operation is None:
+                _ = metadata.pop(dispatch.OPERATION_METADATA_KEY, None)
+            else:
+                metadata[dispatch.OPERATION_METADATA_KEY] = capability.parent_operation
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                processing.CancelledEvent.with_data(
+                    processing.CancelledData(
+                        operation_id=operation_id,
+                        token=token,
+                    )
+                ),
+                id=operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=metadata,
+            ),
+        )
+
+    @staticmethod
     def _has_recalled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _RecalledEventData)
+        del ctx
+        return isinstance(event.data, _RecalledEventData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
     def _has_reflection_applied(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _AppliedEventData)
+        del ctx
+        return isinstance(event.data, _AppliedEventData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
     def _has_stored(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _StoredEventData)
+        del ctx
+        return isinstance(event.data, _StoredEventData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
     def _has_stage_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, ability.FailureData)
+        del ctx
+        return isinstance(event.data, ability.FailureData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
     def _dispatch_failure(
@@ -703,7 +1101,11 @@ class Reflection(processing.Processing):
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=operation_id,
-            metadata=_public_metadata(metadata),
+            metadata={
+                key: value
+                for key, value in _public_metadata(metadata).items()
+                if key != _REFLECTION_CAPABILITY_METADATA_KEY
+            },
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
@@ -719,7 +1121,11 @@ class Reflection(processing.Processing):
         terminal = dataclasses.replace(
             instance.output_event.with_data(None),
             id=operation_id,
-            metadata=_public_metadata(metadata),
+            metadata={
+                key: value
+                for key, value in _public_metadata(metadata).items()
+                if key != _REFLECTION_CAPABILITY_METADATA_KEY
+            },
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
@@ -728,6 +1134,7 @@ class Reflection(processing.Processing):
     def _fail_from_stage(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
+        Reflection._finish_operation(instance, event)
         Reflection._dispatch_failure(
             ctx,
             instance,
@@ -738,18 +1145,14 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _fail_child(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        failure = (
-            event.data
-            if isinstance(event.data, ability.FailureData)
-            else ability.FailureData(message="Reflection child failed.")
-        )
-        parent_id = Reflection._parent_id_from_child(event, _SELECT_ID_SUFFIX) or Reflection._parent_id_from_child(
-            event, _CHANGE_ID_SUFFIX
-        )
+        data = event.data
+        assert isinstance(data, dispatch.TerminalData)
+        Reflection._finish_operation(instance, event)
+        failure = data.failure or ability.FailureData(message="Reflection child failed.")
         Reflection._dispatch_failure(
             ctx,
             instance,
-            operation_id=parent_id,
+            operation_id=data.operation.operation_id,
             metadata=dict(event.metadata),
             failure=failure,
         )
@@ -763,8 +1166,11 @@ class Reflection(processing.Processing):
         data = event.data
         assert isinstance(data, processing.InputData)
         input = data
-        operation_id = event.id or None
+        operation_id = event.id if event.id else uuid.uuid4().hex
+        capability = await Reflection._start_operation(instance, operation_id)
         metadata = dict(event.metadata)
+        metadata[_REFLECTION_CAPABILITY_METADATA_KEY] = capability
+        correlated = dataclasses.replace(event, id=operation_id, metadata=metadata)
         try:
             turn = typing.cast(InputData, input.input)
             select_input = episodes.episode_select_input(context_ref=turn.cognition_input.focus)
@@ -774,31 +1180,35 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message=f"Reflection memory recall failed: {error}")
-                    ),
-                    id=operation_id,
-                    metadata=metadata,
+                Reflection._private_event(
+                    instance,
+                    correlated,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection memory recall failed: {error}"),
                 ),
             )
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _RecalledEvent.with_data(_RecalledEventData(host_input=input, prior_episodes=prior)),
-                id=operation_id,
-                metadata=metadata,
+            Reflection._private_event(
+                instance,
+                correlated,
+                _RecalledEvent,
+                _RecalledEventData(host_input=input, prior_episodes=prior),
             ),
         )
 
     @staticmethod
-    def _dispatch_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+    async def _dispatch_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RecalledEventData)
         turn = typing.cast(InputData, data.host_input.input)
-        child_metadata = _public_metadata(dict(event.metadata))
+        source_metadata = dict(event.metadata)
+        parent_operation = source_metadata.get(dispatch.OPERATION_METADATA_KEY)
+        if isinstance(parent_operation, dispatch.OperationData):
+            source_metadata[dispatch.CANCEL_TOKEN_METADATA_KEY] = parent_operation.token
+        child_metadata = _public_metadata(source_metadata)
         child_metadata[_REFLECTION_TURN_METADATA_KEY] = turn
         child_metadata[_REFLECTION_PRIOR_METADATA_KEY] = data.prior_episodes
         child_metadata[_REFLECTION_OPERATION_ID_METADATA_KEY] = event.id if event.id else uuid.uuid4().hex
@@ -823,90 +1233,139 @@ class Reflection(processing.Processing):
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, instance._select_processing, input_event)
+        operation_id = _operation_id_from_metadata(child_metadata)
+        assert operation_id is not None
+        await dispatch.Operation.begin(
+            owner=instance,
+            child=instance._select_processing,
+            request=input_event,
+            operation_id=operation_id,
+            phase="reflection-select",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
+
+    @staticmethod
+    def _forward_child_terminal(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        dispatch.forward_terminal(ctx, instance, event)
 
     @staticmethod
     def _matches_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         child = instance._select_processing
-        child_id = event.id if event.id else None
+        data = event.data
+        if not isinstance(data, dispatch.TerminalData):
+            return False
+        operation = data.operation
         return (
-            event.name == child.output_event.name
+            dispatch.matches_active_operation(instance, event)
+            and event.name == dispatch.TerminalEvent.name
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_SELECT_ID_SUFFIX)
+            and event.source == operation.actor_id
+            and operation.owner_id == hsm.id(instance)
+            and operation.child_id == hsm.id(child)
+            and operation.phase == "reflection-select"
+            and operation.request_id == f"{operation.operation_id}{_SELECT_ID_SUFFIX}"
+            and data.terminal_name == child.output_event.name
+            and data.outcome == "output"
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
         )
 
     @staticmethod
     def _matches_select_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        child = instance._select_processing
-        child_id = event.id if event.id else None
+        data = event.data
+        if not isinstance(data, dispatch.TerminalData):
+            return False
+        operation = data.operation
         return (
-            event.name == child.failed_event.name
+            dispatch.matches_active_operation(instance, event)
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(_SELECT_ID_SUFFIX)
+            and event.source == operation.actor_id
+            and operation.owner_id == hsm.id(instance)
+            and operation.child_id == hsm.id(instance._select_processing)
+            and operation.phase == "reflection-select"
+            and operation.request_id == f"{operation.operation_id}{_SELECT_ID_SUFFIX}"
+            and data.terminal_name == instance._select_processing.failed_event.name
+            and data.outcome in {"failure", "timed_out"}
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
         )
 
     @staticmethod
     def _matches_change_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         child = instance._change_processing
-        child_id = event.id if event.id else None
+        data = event.data
+        if not isinstance(data, dispatch.TerminalData):
+            return False
+        operation = data.operation
         return (
-            event.name == child.output_event.name
+            dispatch.matches_active_operation(instance, event)
+            and event.name == dispatch.TerminalEvent.name
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and _CHANGE_ID_SUFFIX in child_id
+            and event.source == operation.actor_id
+            and operation.owner_id == hsm.id(instance)
+            and operation.child_id == hsm.id(child)
+            and operation.phase == "reflection-change"
+            and operation.request_id.startswith(f"{operation.operation_id}{_CHANGE_ID_SUFFIX}:fix")
+            and data.terminal_name == child.output_event.name
+            and data.outcome == "output"
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
         )
 
     @staticmethod
     def _matches_change_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        child = instance._change_processing
-        child_id = event.id if event.id else None
+        data = event.data
+        if not isinstance(data, dispatch.TerminalData):
+            return False
+        operation = data.operation
         return (
-            event.name == child.failed_event.name
+            dispatch.matches_active_operation(instance, event)
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and child_id is not None
-            and _CHANGE_ID_SUFFIX in child_id
+            and event.source == operation.actor_id
+            and operation.owner_id == hsm.id(instance)
+            and operation.child_id == hsm.id(instance._change_processing)
+            and operation.phase == "reflection-change"
+            and operation.request_id.startswith(f"{operation.operation_id}{_CHANGE_ID_SUFFIX}:fix")
+            and data.terminal_name == instance._change_processing.failed_event.name
+            and data.outcome in {"failure", "timed_out"}
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == operation
         )
 
     @staticmethod
     def _on_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """Route select terminal: empty → store; create/change/break → seed/write/break."""
 
+        normalized = event.data
+        assert isinstance(normalized, dispatch.TerminalData)
         metadata = dict(event.metadata)
         turn = Reflection._turn_from_metadata(metadata)
-        operation_id = _operation_id_from_metadata(metadata) or (event.id if event.id else None)
+        operation_id = normalized.operation.operation_id
         if turn is None:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection select output is missing turn correlation.")
-                    ),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message="Reflection select output is missing turn correlation."),
                 ),
             )
             return
         try:
-            selection = _coerce_output_data(event.data)
+            selection = _coerce_output_data(normalized.output)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=str(error)),
                 ),
             )
             return
@@ -914,12 +1373,11 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _AppliedEvent.with_data(_AppliedEventData(turn=turn, habit=None)),
-                    id=operation_id,
-                    metadata={**_public_metadata(metadata), _REFLECTION_OPERATION_ID_METADATA_KEY: operation_id}
-                    if operation_id
-                    else _public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _AppliedEvent,
+                    _AppliedEventData(turn=turn, habit=None),
                 ),
             )
             return
@@ -927,61 +1385,90 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection select must return at most one habit event.")
-                    ),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message="Reflection select must return at most one habit event."),
                 ),
             )
             return
         chosen = selection[0]
-        habit_event = dataclasses.replace(
-            event_for_data_from_selection(chosen),
-            id=event.id or None,
-            metadata=dict(metadata),
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            Reflection._private_event(
+                instance,
+                event,
+                _SelectedEvent,
+                _SelectedEventData(
+                    turn=turn,
+                    prior_episodes=Reflection._prior_from_metadata(metadata),
+                    selection=chosen,
+                    operation_id=operation_id,
+                ),
+            ),
         )
-        _ = hsm.dispatch(ctx, instance, habit_event)
 
     @staticmethod
     def _matches_select_empty(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         return Reflection._matches_select_output(ctx, instance, event)
 
     @staticmethod
-    def _start_change(
+    def _selected_is(
         ctx: hsm.Context,
         instance: "Reflection",
-        *,
-        turn: InputData,
-        prior: tuple[CognitiveEpisode, ...],
-        intent: ChangeData,
-        existing: Instance,
-        operation_id: str,
-        metadata: dict[str, object],
-        diagnostics: habit_diagnostic.Report | None = None,
-        failed_source: str | None = None,
-        create_intent: CreateData | None = None,
+        event: hsm.Event[typing.Any],
+        name: str,
+    ) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, _SelectedEventData)
+            and Reflection._matches_operation(instance, event)
+            and event.id == data.operation_id
+            and data.selection.event == name
+        )
+
+    @staticmethod
+    def _selected_is_create(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        return Reflection._selected_is(ctx, instance, event, CreateEvent.name)
+
+    @staticmethod
+    def _selected_is_change(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        return Reflection._selected_is(ctx, instance, event, ChangeEvent.name)
+
+    @staticmethod
+    def _selected_is_break(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        return Reflection._selected_is(ctx, instance, event, BreakEvent.name)
+
+    @staticmethod
+    async def _start_change(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
     ) -> None:
-        child_metadata = dict(metadata)
-        child_metadata[_REFLECTION_TURN_METADATA_KEY] = turn
-        child_metadata[_REFLECTION_PRIOR_METADATA_KEY] = prior
-        child_metadata[_REFLECTION_OPERATION_ID_METADATA_KEY] = operation_id
-        child_metadata[_REFLECTION_CHANGE_INTENT_METADATA_KEY] = intent
-        child_metadata[_REFLECTION_EXISTING_HABIT_METADATA_KEY] = existing
-        if create_intent is not None:
-            child_metadata[_REFLECTION_CREATE_INTENT_METADATA_KEY] = create_intent
+        data = event.data
+        assert isinstance(data, _ChangeRequestedEventData)
+        child_metadata = dict(event.metadata)
+        child_metadata[_REFLECTION_TURN_METADATA_KEY] = data.turn
+        child_metadata[_REFLECTION_PRIOR_METADATA_KEY] = data.prior_episodes
+        child_metadata[_REFLECTION_OPERATION_ID_METADATA_KEY] = data.operation_id
+        child_metadata[_REFLECTION_CHANGE_INTENT_METADATA_KEY] = data.intent
+        child_metadata[_REFLECTION_EXISTING_HABIT_METADATA_KEY] = data.existing
+        if data.create_intent is not None:
+            child_metadata[_REFLECTION_CREATE_INTENT_METADATA_KEY] = data.create_intent
         if _REFLECTION_FIX_ATTEMPTS_METADATA_KEY not in child_metadata:
             child_metadata[_REFLECTION_FIX_ATTEMPTS_METADATA_KEY] = 0
         write_input = processing.InputData(
             input=ChangeWriteInput(
-                cognition_input=turn.cognition_input,
-                cognition_output=turn.cognition_output,
-                prior_episodes=prior,
-                intent=intent,
-                existing_habit=existing,
-                diagnostics=diagnostics,
-                failed_source=failed_source,
+                cognition_input=data.turn.cognition_input,
+                cognition_output=data.turn.cognition_output,
+                prior_episodes=data.prior_episodes,
+                intent=data.intent,
+                existing_habit=data.existing,
+                diagnostics=data.diagnostics,
+                failed_source=data.failed_source,
             ),
             schemas=(ChangeEvent,),
             actors={},
@@ -990,34 +1477,80 @@ class Reflection(processing.Processing):
         input_event = dataclasses.replace(
             instance._change_processing.input_event.with_data_and_id(
                 write_input,
-                f"{operation_id}{_CHANGE_ID_SUFFIX}:fix{fix_attempts}",
+                f"{data.operation_id}{_CHANGE_ID_SUFFIX}:fix{fix_attempts}",
             ),
             metadata=child_metadata,
         )
-        _ = hsm.dispatch(ctx, instance._change_processing, input_event)
+        operation = await dispatch.Operation.begin(
+            owner=instance,
+            child=instance._change_processing,
+            request=input_event,
+            operation_id=data.operation_id,
+            phase="reflection-change",
+            timeout=_CHILD_OPERATION_TIMEOUT,
+        )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            Reflection._private_event(
+                instance,
+                dataclasses.replace(
+                    event,
+                    metadata={**child_metadata, dispatch.OPERATION_METADATA_KEY: operation},
+                ),
+                _ChangeStartedEvent,
+                operation,
+            ),
+        )
+
+    @staticmethod
+    def _queue_change(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
+        data: _ChangeRequestedEventData,
+        metadata: dict[str, object],
+    ) -> None:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            Reflection._private_event(
+                instance,
+                dataclasses.replace(event, metadata=metadata),
+                _ChangeRequestedEvent,
+                data,
+            ),
+        )
+
+    @staticmethod
+    def _has_change_requested(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, _ChangeRequestedEventData) and Reflection._matches_operation(instance, event)
+
+    @staticmethod
+    def _has_change_started(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, dispatch.OperationData)
+            and Reflection._matches_operation(instance, event)
+            and event.metadata.get(dispatch.OPERATION_METADATA_KEY) == data
+            and data.owner_id == hsm.id(instance)
+            and data.child_id == hsm.id(instance._change_processing)
+            and data.phase == "reflection-change"
+        )
 
     @staticmethod
     def _on_create_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """CreateEvent → seed DRAFT empty habit (if new), then enter changing."""
 
+        selected = event.data
+        assert isinstance(selected, _SelectedEventData)
         metadata = dict(event.metadata)
-        turn = Reflection._turn_from_metadata(metadata)
-        prior = Reflection._prior_from_metadata(metadata)
-        if turn is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection create event is missing turn correlation.")
-                    ),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
-                ),
-            )
-            return
+        turn = selected.turn
+        prior = selected.prior_episodes
         try:
-            raw = typing.cast(object, event.data)
+            raw = typing.cast(object, selected.selection.data)
             create_intent = (
                 raw if isinstance(raw, CreateData) else CreateData.model_validate(raw if raw is not None else {})
             )
@@ -1025,10 +1558,11 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=str(error)),
                 ),
             )
             return
@@ -1043,50 +1577,43 @@ class Reflection(processing.Processing):
             reason=create_intent.reason,
             source=None,
         )
-        operation_id = _operation_id_from_metadata(metadata) or uuid.uuid4().hex
-        Reflection._start_change(
+        operation_id = selected.operation_id
+        Reflection._queue_change(
             ctx,
             instance,
-            turn=turn,
-            prior=prior,
-            intent=change_intent,
-            existing=existing,
-            operation_id=operation_id,
-            metadata=metadata,
-            create_intent=create_intent,
+            event,
+            _ChangeRequestedEventData(
+                turn=turn,
+                prior_episodes=prior,
+                intent=change_intent,
+                existing=existing,
+                operation_id=operation_id,
+                create_intent=create_intent,
+            ),
+            metadata,
         )
 
     @staticmethod
     def _on_change_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """ChangeEvent → load existing (any status) and enter changing."""
 
+        selected = event.data
+        assert isinstance(selected, _SelectedEventData)
         metadata = dict(event.metadata)
-        turn = Reflection._turn_from_metadata(metadata)
-        prior = Reflection._prior_from_metadata(metadata)
-        if turn is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection change event is missing turn correlation.")
-                    ),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
-                ),
-            )
-            return
+        turn = selected.turn
+        prior = selected.prior_episodes
         try:
-            raw = typing.cast(object, event.data)
+            raw = typing.cast(object, selected.selection.data)
             intent = raw if isinstance(raw, ChangeData) else ChangeData.model_validate(raw if raw is not None else {})
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=str(error)),
                 ),
             )
             return
@@ -1095,133 +1622,140 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message=f"Reflection change selected unknown habit: {intent.name}.")
-                    ),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection change selected unknown habit: {intent.name}."),
                 ),
             )
             return
-        operation_id = _operation_id_from_metadata(metadata) or uuid.uuid4().hex
-        Reflection._start_change(
+        operation_id = selected.operation_id
+        Reflection._queue_change(
             ctx,
             instance,
-            turn=turn,
-            prior=prior,
-            intent=intent,
-            existing=existing,
-            operation_id=operation_id,
-            metadata=metadata,
+            event,
+            _ChangeRequestedEventData(
+                turn=turn,
+                prior_episodes=prior,
+                intent=intent,
+                existing=existing,
+                operation_id=operation_id,
+            ),
+            metadata,
         )
 
     @staticmethod
     def _on_break_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """BreakEvent → set inventory status=BROKEN (no write phase)."""
 
-        metadata = dict(event.metadata)
-        turn = Reflection._turn_from_metadata(metadata)
-        if turn is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection break event is missing turn correlation.")
-                    ),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
-                ),
-            )
-            return
+        selected = event.data
+        assert isinstance(selected, _SelectedEventData)
+        turn = selected.turn
         try:
-            raw = typing.cast(object, event.data)
+            raw = typing.cast(object, selected.selection.data)
             data = raw if isinstance(raw, BreakData) else BreakData.model_validate(raw if raw is not None else {})
             applied = _apply_break(data, store=instance._memory, context_ref=turn.cognition_input.focus)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(ability.FailureData(message=f"Reflection break failed: {error}")),
-                    id=event.id or None,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection break failed: {error}"),
                 ),
             )
             return
-        operation_id = _operation_id_from_metadata(metadata)
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _AppliedEvent.with_data(_AppliedEventData(turn=turn, habit=applied)),
-                id=operation_id,
-                metadata={**_public_metadata(metadata), _REFLECTION_OPERATION_ID_METADATA_KEY: operation_id}
-                if operation_id
-                else _public_metadata(metadata),
+            Reflection._private_event(
+                instance,
+                event,
+                _AppliedEvent,
+                _AppliedEventData(turn=turn, habit=applied),
             ),
         )
 
     @staticmethod
     def _change_write_accepted(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
+        del ctx
         data = event.data
-        return isinstance(data, _ChangeWriteCheckedData) and data.habit_instance is not None
+        return (
+            isinstance(data, _ChangeWriteCheckedData)
+            and data.habit_instance is not None
+            and Reflection._matches_operation(instance, event)
+        )
 
     @staticmethod
     def _change_write_retryable(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
+        del ctx
         data = event.data
-        if not isinstance(data, _ChangeWriteCheckedData) or data.habit_instance is not None:
+        if (
+            not isinstance(data, _ChangeWriteCheckedData)
+            or data.habit_instance is not None
+            or not Reflection._matches_operation(instance, event)
+        ):
             return False
         messages = _diagnostic_messages(data.report)
         if not messages:
             return False
-        return data.previous_messages is None or data.previous_messages != messages
+        return _fix_attempts_from_metadata(dict(event.metadata)) < _MAX_REFLECTION_FIX_ATTEMPTS and (
+            data.previous_messages is None or data.previous_messages != messages
+        )
 
     @staticmethod
     def _change_write_abandoned(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
+        del ctx
         data = event.data
-        if not isinstance(data, _ChangeWriteCheckedData) or data.habit_instance is not None:
+        if (
+            not isinstance(data, _ChangeWriteCheckedData)
+            or data.habit_instance is not None
+            or not Reflection._matches_operation(instance, event)
+        ):
             return False
         messages = _diagnostic_messages(data.report)
         if not messages:
             return True
-        return data.previous_messages is not None and data.previous_messages == messages
+        return _fix_attempts_from_metadata(dict(event.metadata)) >= _MAX_REFLECTION_FIX_ATTEMPTS or (
+            data.previous_messages is not None and data.previous_messages == messages
+        )
 
     @staticmethod
     def _emit_change_write_checked(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """Parse/validate change product; emit ``_ChangeWriteCheckedEvent`` only."""
 
+        normalized = event.data
+        assert isinstance(normalized, dispatch.TerminalData)
         metadata = dict(event.metadata)
         turn = Reflection._turn_from_metadata(metadata)
         prior = Reflection._prior_from_metadata(metadata)
-        operation_id = _operation_id_from_metadata(metadata) or uuid.uuid4().hex
+        operation_id = normalized.operation.operation_id
         if turn is None:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message="Reflection change output is missing turn correlation.")
-                    ),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message="Reflection change output is missing turn correlation."),
                 ),
             )
             return
         try:
-            written = _change_data_from_output(event.data)
+            written = _change_data_from_output(normalized.output)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(ability.FailureData(message=f"Reflection change failed: {error}")),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection change failed: {error}"),
                 ),
             )
             return
@@ -1238,21 +1772,20 @@ class Reflection(processing.Processing):
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _ChangeWriteCheckedEvent.with_data(
-                    _ChangeWriteCheckedData(
-                        turn=turn,
-                        prior_episodes=prior,
-                        written=written,
-                        habit_instance=checked.value if checked.ok else None,
-                        report=checked.report,
-                        previous_messages=_last_diagnostic_messages(metadata),
-                        operation_id=operation_id,
-                        existing=existing if isinstance(existing, Instance) else None,
-                    )
+            Reflection._private_event(
+                instance,
+                event,
+                _ChangeWriteCheckedEvent,
+                _ChangeWriteCheckedData(
+                    turn=turn,
+                    prior_episodes=prior,
+                    written=written,
+                    habit_instance=checked.value if checked.ok else None,
+                    report=checked.report,
+                    previous_messages=_last_diagnostic_messages(metadata),
+                    operation_id=operation_id,
+                    existing=existing if isinstance(existing, Instance) else None,
                 ),
-                id=operation_id,
-                metadata=metadata,
             ),
         )
 
@@ -1301,10 +1834,11 @@ class Reflection(processing.Processing):
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _AppliedEvent.with_data(_AppliedEventData(turn=data.turn, habit=applied)),
-                id=data.operation_id,
-                metadata={**_public_metadata(metadata), _REFLECTION_OPERATION_ID_METADATA_KEY: data.operation_id},
+            Reflection._private_event(
+                instance,
+                event,
+                _AppliedEvent,
+                _AppliedEventData(turn=data.turn, habit=applied),
             ),
         )
 
@@ -1323,14 +1857,11 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(
-                            message=f"Reflection change fix missing existing habit: {data.written.name}."
-                        )
-                    ),
-                    id=data.operation_id,
-                    metadata=_public_metadata(metadata),
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection change fix missing existing habit: {data.written.name}."),
                 ),
             )
             return
@@ -1338,18 +1869,21 @@ class Reflection(processing.Processing):
         fix_metadata[_REFLECTION_FIX_ATTEMPTS_METADATA_KEY] = _fix_attempts_from_metadata(metadata) + 1
         fix_metadata[_REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY] = _diagnostic_messages(data.report)
         create_intent = metadata.get(_REFLECTION_CREATE_INTENT_METADATA_KEY)
-        Reflection._start_change(
+        Reflection._queue_change(
             ctx,
             instance,
-            turn=data.turn,
-            prior=data.prior_episodes,
-            intent=intent,
-            existing=existing,
-            operation_id=data.operation_id,
-            metadata=fix_metadata,
-            diagnostics=data.report,
-            failed_source=data.written.source,
-            create_intent=create_intent if isinstance(create_intent, CreateData) else None,
+            event,
+            _ChangeRequestedEventData(
+                turn=data.turn,
+                prior_episodes=data.prior_episodes,
+                intent=intent,
+                existing=existing,
+                operation_id=data.operation_id,
+                diagnostics=data.report,
+                failed_source=data.written.source,
+                create_intent=create_intent if isinstance(create_intent, CreateData) else None,
+            ),
+            fix_metadata,
         )
 
     @staticmethod
@@ -1360,17 +1894,16 @@ class Reflection(processing.Processing):
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _StageFailedEvent.with_data(
-                    ability.FailureData(
-                        message=(
-                            "Reflection change abandoned: same diagnostic message after fix attempt:\n"
-                            f"{data.report.render()}"
-                        )
+            Reflection._private_event(
+                instance,
+                event,
+                _StageFailedEvent,
+                ability.FailureData(
+                    message=(
+                        "Reflection change abandoned: same diagnostic message after fix or retry budget exhausted:\n"
+                        f"{data.report.render()}"
                     )
                 ),
-                id=data.operation_id,
-                metadata=_public_metadata(dict(event.metadata)),
             ),
         )
 
@@ -1382,8 +1915,6 @@ class Reflection(processing.Processing):
     ) -> None:
         data = event.data
         assert isinstance(data, _AppliedEventData)
-        operation_id = event.id or None
-        metadata = dict(event.metadata)
         try:
             episode = episode_from_turn(data.turn, habit=data.habit)
             _store_episode(instance._memory, episode, context_ref=data.turn.cognition_input.focus)
@@ -1391,28 +1922,29 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        ability.FailureData(message=f"Reflection episode store failed: {error}")
-                    ),
-                    id=operation_id,
-                    metadata=metadata,
+                Reflection._private_event(
+                    instance,
+                    event,
+                    _StageFailedEvent,
+                    ability.FailureData(message=f"Reflection episode store failed: {error}"),
                 ),
             )
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _StoredEvent.with_data(_StoredEventData()),
-                id=operation_id,
-                metadata=metadata,
+            Reflection._private_event(
+                instance,
+                event,
+                _StoredEvent,
+                _StoredEventData(),
             ),
         )
 
     @staticmethod
     def _complete_from_stored(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         metadata = dict(event.metadata)
+        Reflection._finish_operation(instance, event)
         Reflection._dispatch_output(
             ctx,
             instance,
@@ -1437,6 +1969,11 @@ class Reflection(processing.Processing):
         hsm.state(
             "idle",
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+            ),
+            hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_reflection_input),
                 hsm.target("/Reflection/recalling"),
@@ -1447,9 +1984,14 @@ class Reflection(processing.Processing):
             hsm.defer(input_event),
             hsm.activity(_recall_activity),
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
                 hsm.on(_RecalledEvent),
                 hsm.guard(_has_recalled),
-                hsm.effect(_dispatch_select),
                 hsm.target("/Reflection/processing"),
             ),
             hsm.transition(
@@ -1462,24 +2004,48 @@ class Reflection(processing.Processing):
         hsm.state(
             "processing",
             hsm.defer(input_event),
+            hsm.activity(_dispatch_select),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.target("/Reflection/resolving_select_cancel"),
+            ),
+            hsm.transition(
+                hsm.on(processing.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_select_empty),
-                hsm.effect(_on_select_output),
+                hsm.effect(_on_select_output, dispatch.retire_operation),
             ),
             hsm.transition(
-                hsm.on(CreateEvent),
+                hsm.on(_SelectedEvent),
+                hsm.guard(_selected_is_create),
                 hsm.effect(_on_create_event),
-                hsm.target("/Reflection/changing"),
             ),
             hsm.transition(
-                hsm.on(ChangeEvent),
+                hsm.on(_SelectedEvent),
+                hsm.guard(_selected_is_change),
                 hsm.effect(_on_change_event),
-                hsm.target("/Reflection/changing"),
             ),
             hsm.transition(
-                hsm.on(BreakEvent),
+                hsm.on(_SelectedEvent),
+                hsm.guard(_selected_is_break),
                 hsm.effect(_on_break_event),
+            ),
+            hsm.transition(
+                hsm.on(_ChangeRequestedEvent),
+                hsm.guard(_has_change_requested),
+                hsm.target("/Reflection/starting_change"),
             ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
@@ -1487,10 +2053,31 @@ class Reflection(processing.Processing):
                 hsm.target("/Reflection/storing"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_select_failure),
-                hsm.effect(_fail_child),
+                hsm.effect(_fail_child, dispatch.retire_operation),
                 hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_StageFailedEvent),
+                hsm.guard(_has_stage_failure),
+                hsm.effect(_fail_from_stage),
+                hsm.target("/Reflection/idle"),
+            ),
+        ),
+        hsm.state(
+            "starting_change",
+            hsm.defer(input_event),
+            hsm.activity(_start_change),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.target("/Reflection/resolving_change_cancel"),
+            ),
+            hsm.transition(
+                hsm.on(_ChangeStartedEvent),
+                hsm.guard(_has_change_started),
+                hsm.target("/Reflection/changing"),
             ),
             hsm.transition(
                 hsm.on(_StageFailedEvent),
@@ -1503,9 +2090,26 @@ class Reflection(processing.Processing):
             "changing",
             hsm.defer(input_event),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.target("/Reflection/resolving_change_cancel"),
+            ),
+            hsm.transition(
+                hsm.on(processing.OutputEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_change_output),
-                hsm.effect(_emit_change_write_checked),
+                hsm.effect(_emit_change_write_checked, dispatch.retire_operation),
             ),
             hsm.transition(
                 hsm.on(_ChangeWriteCheckedEvent),
@@ -1518,6 +2122,11 @@ class Reflection(processing.Processing):
                 hsm.effect(_retry_change_write),
             ),
             hsm.transition(
+                hsm.on(_ChangeRequestedEvent),
+                hsm.guard(_has_change_requested),
+                hsm.target("/Reflection/starting_change"),
+            ),
+            hsm.transition(
                 hsm.on(_ChangeWriteCheckedEvent),
                 hsm.guard(_change_write_abandoned),
                 hsm.effect(_abandon_change_write),
@@ -1528,9 +2137,9 @@ class Reflection(processing.Processing):
                 hsm.target("/Reflection/storing"),
             ),
             hsm.transition(
-                hsm.on(hsm.AnyEvent),
+                hsm.on(dispatch.TerminalEvent),
                 hsm.guard(_matches_change_failure),
-                hsm.effect(_fail_child),
+                hsm.effect(_fail_child, dispatch.retire_operation),
                 hsm.target("/Reflection/idle"),
             ),
             hsm.transition(
@@ -1545,6 +2154,12 @@ class Reflection(processing.Processing):
             hsm.defer(input_event),
             hsm.activity(_store_activity),
             hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
                 hsm.on(_StoredEvent),
                 hsm.guard(_has_stored),
                 hsm.effect(_complete_from_stored),
@@ -1555,6 +2170,65 @@ class Reflection(processing.Processing):
                 hsm.guard(_has_stage_failure),
                 hsm.effect(_fail_from_stage),
                 hsm.target("/Reflection/idle"),
+            ),
+        ),
+        hsm.state(
+            "resolving_select_cancel",
+            hsm.defer(input_event),
+            hsm.activity(_resolve_select_cancel),
+            hsm.transition(
+                hsm.on(dispatch.CancelResolvedEvent),
+                hsm.guard(_matches_cancel_resolved),
+                hsm.effect(dispatch.complete_resolution, dispatch.cancel_resolved_operation),
+                hsm.target("/Reflection/cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.CancelUnresolvedEvent),
+                hsm.guard(_matches_cancel_unresolved),
+                hsm.effect(dispatch.retire_resolution, _emit_reflection_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+        ),
+        hsm.state(
+            "resolving_change_cancel",
+            hsm.defer(input_event),
+            hsm.activity(_resolve_change_cancel),
+            hsm.transition(
+                hsm.on(dispatch.CancelResolvedEvent),
+                hsm.guard(_matches_cancel_resolved),
+                hsm.effect(dispatch.complete_resolution, dispatch.cancel_resolved_operation),
+                hsm.target("/Reflection/cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.CancelUnresolvedEvent),
+                hsm.guard(_matches_cancel_unresolved),
+                hsm.effect(dispatch.retire_resolution, _emit_reflection_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+        ),
+        hsm.state(
+            "cancelling",
+            hsm.defer(input_event),
+            hsm.transition(
+                hsm.on(dispatch.CancelTeardownTimedOutEvent),
+                hsm.guard(dispatch.matches_teardown_timeout),
+                hsm.effect(dispatch.force_cancel_timeout),
+            ),
+            hsm.transition(
+                hsm.on(processing.CancelledEvent),
+                hsm.effect(_forward_child_terminal),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_cancelled),
+                hsm.effect(dispatch.retire_resolution, dispatch.retire_operation, _emit_reflection_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
+                hsm.on(dispatch.TerminalEvent),
+                hsm.guard(_matches_cancel_teardown_failure),
+                hsm.effect(dispatch.retire_resolution, dispatch.retire_operation, _fail_child),
+                hsm.target("/Reflection/degraded"),
             ),
         ),
         hsm.state(

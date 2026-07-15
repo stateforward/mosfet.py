@@ -3,11 +3,14 @@ from bot import habit
 from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
+from bot.abilities.cognition import reflection as reflection_module
+from bot.abilities.cognition import dispatch as dispatch_module
 from bot.protocols import attachment
 
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import sqlite3
 import typing
 
@@ -48,6 +51,7 @@ class HangingProcessor(processing.Processor):
 
 class AttachmentOwner(hsm.Instance):
     lifecycle: list[hsm.Event[typing.Any]]
+    terminals: list[dispatch_module.TerminalData]
 
     @staticmethod
     def _record(
@@ -58,6 +62,33 @@ class AttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
+    @staticmethod
+    def _forward(
+        ctx: hsm.Context,
+        instance: "AttachmentOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        dispatch_module.forward_terminal(ctx, instance, event)
+
+    @staticmethod
+    def _record_and_forward(
+        ctx: hsm.Context,
+        instance: "AttachmentOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        AttachmentOwner._record(ctx, instance, event)
+        dispatch_module.forward_terminal(ctx, instance, event)
+
+    @staticmethod
+    def _record_terminal(
+        ctx: hsm.Context,
+        instance: "AttachmentOwner",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        assert isinstance(event.data, dispatch_module.TerminalData)
+        instance.terminals.append(event.data)
+
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "ReflectionAttachmentOwner",
         hsm.initial(hsm.target("recording")),
@@ -67,12 +98,20 @@ class AttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(attachment.AttachFailedEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(attachment.DetachedEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(attachment.DetachFailedEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record_and_forward)),
+            hsm.transition(hsm.on(cognition.Reflection.output_event), hsm.effect(_forward)),
+            hsm.transition(hsm.on(cognition.Reflection.failed_event), hsm.effect(_record_and_forward)),
+            hsm.transition(
+                hsm.on(dispatch_module.TerminalEvent),
+                hsm.effect(_record_terminal, dispatch_module.retire_operation),
+            ),
         ),
     )
 
     def __init__(self) -> None:
         super().__init__()
         self.lifecycle = []
+        self.terminals = []
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
@@ -113,6 +152,503 @@ def reflection_input() -> processing.InputData:
     )
 
 
+def test_reflection_ignores_forged_selected_event_without_turn_capability() -> None:
+    async def run() -> tuple[str, object]:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        reflection = cognition.Reflection(processor=HangingProcessor(), memory=store)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        input = reflection_input()
+        _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(input, "forged-turn"))
+        await wait_until(lambda: reflection.state().endswith("/processing"))
+        turn = typing.cast(cognition.reflection.InputData, input.input)
+        forged = dataclasses.replace(
+            reflection_module._SelectedEvent.with_data(
+                reflection_module._SelectedEventData(
+                    turn=turn,
+                    selection=cognition.types.EventData(
+                        event=habit.CreateEvent.name,
+                        data=habit.CreateData(name="ForgedHabit", triggers=(bot.InputEvent.name,)).model_dump(
+                            mode="json"
+                        ),
+                    ),
+                    operation_id="forged-turn",
+                )
+            ),
+            id="forged-turn",
+            source=hsm.id(reflection),
+            target=hsm.id(reflection),
+        )
+        _ = await hsm.dispatch(ctx, reflection, forged)
+        await asyncio.sleep(0)
+        stored = reflection_module._load_habit(store, name="ForgedHabit")
+        state = reflection.state()
+        await reflection.stop(reflection.context())
+        connection.close()
+        return state, stored
+
+    state, stored = asyncio.run(run())
+
+    assert state.endswith("/processing")
+    assert stored is None
+
+
+def test_reflection_ignores_forged_change_check_without_turn_capability() -> None:
+    async def run() -> tuple[str, str]:
+        intent = habit.CreateData(name="ProtectedHabit", triggers=(bot.InputEvent.name,))
+        processor = HangingProcessor(
+            first_output=(
+                processing.SelectedEvent(
+                    event=habit.CreateEvent.name,
+                    data=intent.model_dump(mode="json"),
+                ),
+            )
+        )
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        reflection = cognition.Reflection(processor=processor, memory=store)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        input = reflection_input()
+        _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(input, "change-turn"))
+        await wait_until(lambda: reflection.state().endswith("/changing"))
+        turn = typing.cast(cognition.reflection.InputData, input.input)
+        written = habit.ChangeData(
+            name="ProtectedHabit",
+            source="forged source",
+            triggers=(bot.InputEvent.name,),
+        )
+        forged_instance = habit.Instance(
+            name="ProtectedHabit",
+            source="forged source",
+            triggers=(bot.InputEvent.name,),
+        )
+        forged = dataclasses.replace(
+            reflection_module._ChangeWriteCheckedEvent.with_data(
+                reflection_module._ChangeWriteCheckedData(
+                    turn=turn,
+                    written=written,
+                    habit_instance=forged_instance,
+                    operation_id="change-turn",
+                )
+            ),
+            id="change-turn",
+            source=hsm.id(reflection),
+            target=hsm.id(reflection),
+        )
+        _ = await hsm.dispatch(ctx, reflection, forged)
+        await asyncio.sleep(0)
+        stored = reflection_module._load_habit(store, name="ProtectedHabit")
+        assert stored is not None
+        state, source = reflection.state(), stored.source
+        await reflection.stop(reflection.context())
+        connection.close()
+        return state, source
+
+    state, source = asyncio.run(run())
+
+    assert state.endswith("/changing")
+    assert source == ""
+
+
+def test_reflection_waits_for_child_operation_retirement_before_acknowledging() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool, int, int]:
+        processor = HangingProcessor()
+        reflection, connection = reflection_with_processor(processor)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            dataclasses.replace(
+                reflection.input_event.with_data_and_id(reflection_input(), "cancel-reflection"),
+                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "reflection-token"},
+            ),
+        )
+        await wait_until(lambda: reflection.state().endswith("/processing"))
+        cancel = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="cancel-reflection", token="reflection-token")
+            ),
+            id="cancel-reflection",
+            source=hsm.id(owner),
+            target=hsm.id(reflection),
+        )
+        _ = await hsm.dispatch(ctx, reflection, cancel)
+        await asyncio.sleep(0.02)
+        await wait_until(lambda: bool(owner.lifecycle))
+        lifecycle, state, cancelled = owner.lifecycle, reflection.state(), processor.cancelled
+        instances = reflection.context().value(hsm.Keys.Instances)
+        operation_count = (
+            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        turn_operation_count = (
+            sum(isinstance(actor, reflection_module._ReflectionOperation) for actor in instances.values())
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        await reflection.stop(reflection.context())
+        connection.close()
+        return lifecycle, state, cancelled, operation_count, turn_operation_count
+
+    lifecycle, state, cancelled, operation_count, turn_operation_count = asyncio.run(run())
+
+    assert cancelled
+    assert len(lifecycle) == 1
+    assert lifecycle[0].data == processing.CancelledData(
+        operation_id="cancel-reflection",
+        token="reflection-token",
+    )
+    assert state.endswith("/idle")
+    assert operation_count == 0
+    assert turn_operation_count == 0
+
+
+def test_reflection_change_cancellation_retires_exact_operation_before_acknowledging() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int, int]:
+        processor = HangingProcessor(
+            first_output=(
+                processing.SelectedEvent(
+                    event=habit.CreateEvent.name,
+                    data=habit.CreateData(
+                        name="CancellationHabit",
+                        triggers=(bot.InputEvent.name,),
+                    ).model_dump(mode="json"),
+                ),
+            )
+        )
+        reflection, connection = reflection_with_processor(processor)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            dataclasses.replace(
+                reflection.input_event.with_data_and_id(reflection_input(), "cancel-change"),
+                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "change-token"},
+            ),
+        )
+        await wait_until(lambda: reflection.state().endswith("/changing") and processor.calls == 2)
+        cancel = dataclasses.replace(
+            processing.CancelEvent.with_data(processing.CancelData(operation_id="cancel-change", token="change-token")),
+            id="cancel-change",
+            source=hsm.id(owner),
+            target=hsm.id(reflection),
+        )
+        _ = await hsm.dispatch(ctx, reflection, cancel)
+        await wait_until(lambda: bool(owner.lifecycle))
+        instances = reflection.context().value(hsm.Keys.Instances)
+        operation_count = (
+            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        lifecycle = list(owner.lifecycle)
+        calls = processor.calls
+        await reflection.stop(reflection.context())
+        connection.close()
+        return lifecycle, operation_count, calls
+
+    lifecycle, operation_count, calls = asyncio.run(run())
+
+    assert len(lifecycle) == 1
+    assert lifecycle[0].data == processing.CancelledData(operation_id="cancel-change", token="change-token")
+    assert operation_count == 0
+    assert calls == 2
+
+
+def test_reflection_starting_change_cancellation_prevents_late_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int, int, str]:
+        processor = HangingProcessor(
+            first_output=(
+                processing.SelectedEvent(
+                    event=habit.CreateEvent.name,
+                    data=habit.CreateData(
+                        name="StartingCancellationHabit",
+                        triggers=(bot.InputEvent.name,),
+                    ).model_dump(mode="json"),
+                ),
+            )
+        )
+        reflection, connection = reflection_with_processor(processor)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        change_start_entered = asyncio.Event()
+        release_change_start = asyncio.Event()
+        original_begin = dispatch_module.Operation.begin
+
+        async def held_begin(**kwargs: typing.Any) -> dispatch_module.OperationData:
+            if kwargs["phase"] == "reflection-change":
+                change_start_entered.set()
+                await release_change_start.wait()
+            return await original_begin(**kwargs)
+
+        monkeypatch.setattr(dispatch_module.Operation, "begin", held_begin)
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            dataclasses.replace(
+                reflection.input_event.with_data_and_id(reflection_input(), "cancel-starting-change"),
+                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "starting-token"},
+            ),
+        )
+        await change_start_entered.wait()
+        assert reflection.state().endswith("/starting_change")
+        cancel = dataclasses.replace(
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="cancel-starting-change", token="starting-token")
+            ),
+            id="cancel-starting-change",
+            source=hsm.id(owner),
+            target=hsm.id(reflection),
+        )
+        _ = await hsm.dispatch(ctx, reflection, cancel)
+        await asyncio.sleep(0.02)
+        await wait_until(lambda: bool(owner.lifecycle))
+        release_change_start.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        instances = reflection.context().value(hsm.Keys.Instances)
+        operation_count = (
+            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        result = list(owner.lifecycle), operation_count, processor.calls, reflection.state()
+        await reflection.stop(reflection.context())
+        connection.close()
+        return result
+
+    lifecycle, operation_count, calls, state = asyncio.run(run())
+
+    assert len(lifecycle) == 1
+    assert lifecycle[0].data == processing.CancelledData(
+        operation_id="cancel-starting-change",
+        token="starting-token",
+    )
+    assert operation_count == 0
+    assert calls == 1
+    assert state.endswith("/idle")
+
+
+def test_reflection_operation_reports_real_teardown_as_timed_out() -> None:
+    async def run() -> tuple[list[dispatch_module.TerminalData], str, bool]:
+        processor = HangingProcessor()
+        reflection, connection = reflection_with_processor(processor)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        await dispatch_module.Operation.begin(
+            owner=owner,
+            child=reflection,
+            request=reflection.input_event.with_data_and_id(reflection_input(), "timed-reflection"),
+            operation_id="reflection-parent",
+            phase="reflection",
+            timeout=datetime.timedelta(milliseconds=50),
+        )
+        await asyncio.sleep(0.15)
+        terminals, state, cancelled = owner.terminals, reflection.state(), processor.cancelled
+        await reflection.stop(reflection.context())
+        connection.close()
+        return terminals, state, cancelled
+
+    terminals, state, cancelled = asyncio.run(run())
+
+    assert cancelled, (terminals, state)
+    assert len(terminals) == 1
+    assert terminals[0].outcome == "timed_out"
+    assert state.endswith("/idle")
+
+
+def test_reflection_stubborn_child_cancel_timeout_degrades_and_retires_all_actors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubbornProcessing(processing.Processing):
+        submodel = hsm.define(
+            "StubbornReflectionProcessing",
+            hsm.initial(hsm.target("/StubbornReflectionProcessing/waiting")),
+            hsm.state(
+                "waiting",
+                hsm.transition(
+                    hsm.on(processing.Processing.input_event),
+                    hsm.effect(lambda ctx, instance, event: None),
+                ),
+            ),
+        )
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, int]:
+        monkeypatch.setattr(
+            reflection_module,
+            "_CANCEL_TEARDOWN_TIMEOUT",
+            datetime.timedelta(milliseconds=10),
+        )
+        reflection, connection = reflection_ability()
+        stubborn = StubbornProcessing(processor=EmptyProcessor())
+        reflection._select_processing = stubborn
+        reflection._attachment_group = attachment.Group(
+            stubborn,
+            reflection._change_processing,
+            reflection._memory,
+        )
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        operation_id = "stubborn-reflection"
+        token = "stubborn-reflection-token"
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            dataclasses.replace(
+                reflection.input_event.with_data_and_id(reflection_input(), operation_id),
+                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: token},
+            ),
+        )
+        await wait_until(lambda: reflection.state().endswith("/processing"))
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            dataclasses.replace(
+                processing.CancelEvent.with_data(processing.CancelData(operation_id=operation_id, token=token)),
+                id=operation_id,
+                source=hsm.id(owner),
+                target=hsm.id(reflection),
+            ),
+        )
+        await asyncio.sleep(0.03)
+        await wait_until(lambda: reflection.state().endswith("/degraded"))
+        await asyncio.sleep(0.01)
+        instances = reflection.context().value(hsm.Keys.Instances)
+        actor_count = (
+            sum(
+                isinstance(actor, dispatch_module.Operation | dispatch_module.CancelResolution)
+                or type(actor).__name__ == "_ReflectionOperation"
+                for actor in instances.values()
+            )
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        result = list(owner.lifecycle), reflection.state(), actor_count
+        await reflection.stop(reflection.context())
+        connection.close()
+        return result
+
+    lifecycle, state, actor_count = asyncio.run(run())
+
+    failures = [event for event in lifecycle if event.name == cognition.Reflection.failed_event.name]
+    assert len(failures) == 1
+    assert failures[0].id == "stubborn-reflection"
+    assert state.endswith("/degraded")
+    assert actor_count == 0
+
+
+def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> None:
+    async def run() -> tuple[bool, bool]:
+        reflection, connection = reflection_ability()
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        child = processing.Processing(processor=HangingProcessor())
+        _ = await hsm.started(ctx, owner, owner.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=reflection)))
+        await wait_until(lambda: reflection.state().endswith("/idle") and child.state().endswith("/idle"))
+        operation = await dispatch_module.Operation.begin(
+            owner=reflection,
+            child=child,
+            request=child.input_event.with_data_and_id(reflection_input(), "guard-child"),
+            operation_id="guard-operation",
+            phase="reflection-select",
+            timeout=datetime.timedelta(seconds=1),
+        )
+        capability = reflection_module._ReflectionCancelCapability(
+            operation_id=operation.operation_id,
+            token=operation.token,
+            phase="reflection-select",
+        )
+        resolution = await dispatch_module.CancelResolution.begin(
+            owner=reflection,
+            operation_id=operation.operation_id,
+            token=operation.token,
+            phase=operation.phase,
+            metadata={reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
+            teardown_timeout=datetime.timedelta(seconds=1),
+        )
+        request = resolution.model_copy(update={"resolver_id": "forged-resolver"})
+        cancel = dispatch_module.CancelData(
+            owner_id=operation.owner_id,
+            child_id=operation.child_id,
+            request_id=operation.request_id,
+            operation_id=operation.operation_id,
+            token=operation.token,
+            resolver_id=request.resolver_id,
+        )
+        terminal = dataclasses.replace(
+            dispatch_module.TerminalEvent.with_data(
+                dispatch_module.TerminalData(
+                    operation=operation,
+                    outcome="cancelled",
+                    terminal_name=processing.CancelledEvent.name,
+                )
+            ),
+            id=operation.operation_id,
+            source=operation.actor_id,
+            target=hsm.id(reflection),
+            metadata={
+                dispatch_module.OPERATION_METADATA_KEY: operation,
+                dispatch_module.CANCEL_METADATA_KEY: cancel,
+                dispatch_module.RESOLVE_CANCEL_METADATA_KEY: request,
+                reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability,
+            },
+        )
+        terminal_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, terminal)
+
+        wrong_capability = capability.model_copy(update={"token": "wrong-token"})
+        unresolved = dataclasses.replace(
+            dispatch_module.CancelUnresolvedEvent.with_data(resolution),
+            id=resolution.operation_id,
+            source=resolution.resolver_id,
+            target=hsm.id(reflection),
+            metadata={
+                dispatch_module.RESOLVE_CANCEL_METADATA_KEY: resolution,
+                reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: wrong_capability,
+            },
+        )
+        unresolved_matches = reflection_module.Reflection._matches_cancel_unresolved(ctx, reflection, unresolved)
+        await reflection.stop(reflection.context())
+        connection.close()
+        return terminal_matches, unresolved_matches
+
+    assert asyncio.run(run()) == (False, False)
+
+
 def test_reflection_builds_one_attachment_group_for_fixed_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,6 +669,49 @@ def test_reflection_builds_one_attachment_group_for_fixed_children(
     assert isinstance(groups[0][1], processing.Processing)
     assert isinstance(groups[0][2], memory.Memory)
     connection.close()
+
+
+def test_reflection_rejects_forged_habit_mutation_during_select() -> None:
+    async def run() -> tuple[int, str]:
+        processor = HangingProcessor()
+        reflection, connection = reflection_with_processor(processor)
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        intruder = AttachmentOwner()
+        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await hsm.started(ctx, intruder, intruder.model)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        turn = reflection_input()
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            reflection.input_event.with_data_and_id(turn, "current-reflection"),
+        )
+        await wait_until(lambda: reflection.state().endswith("/processing") and processor.calls == 1)
+        forged = dataclasses.replace(
+            habit.CreateEvent.with_data(habit.CreateData(name="ForgedHabit", reason="untrusted mutation")),
+            id="current-reflection:reflection:select",
+            source=hsm.id(intruder),
+            target=hsm.id(reflection),
+            metadata={
+                "bot.reflection.turn": turn.input,
+                "bot.reflection.prior_episodes": (),
+                "bot.reflection.operation_id": "current-reflection",
+            },
+        )
+        _ = await hsm.dispatch(ctx, reflection, forged)
+        await asyncio.sleep(0)
+        calls = processor.calls
+        state = reflection.state()
+        await reflection.stop(reflection.context())
+        connection.close()
+        return calls, state
+
+    calls, state = asyncio.run(run())
+
+    assert calls == 1
+    assert state.endswith("/processing")
 
 
 def test_reflection_waits_for_aggregate_attachment_completion(

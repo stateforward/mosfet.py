@@ -3,6 +3,7 @@ from .. import ability
 from .. import memory
 from .. import processing
 
+import collections.abc
 import dataclasses
 import typing
 import uuid
@@ -19,6 +20,7 @@ from . import episodes
 from . import types
 
 _REASONING_INPUT_METADATA_KEY = "bot.reasoning.input"
+_REASONING_CAPABILITY_METADATA_KEY = "bot.reasoning.capability"
 # Host frame when CallData is used as the model-facing invoke (multi-select or cascade).
 HOST_INPUT_METADATA_KEY = "bot.reasoning.host_input"
 DEFAULT_INSTRUCTIONS = (
@@ -240,11 +242,36 @@ _ReasoningStageFailedEvent = hsm.Event[ability.FailureData](
     schema=ability.FailureData,
 )
 
+
+class _ReasoningCapability(pydantic.BaseModel):
+    """JSON-safe authority minted for exactly one live reasoning operation."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str
+    actor_id: str
+    token: str
+
+
+class _ReasoningOperation(hsm.Instance):
+    """Scoped identity actor for a reasoning stage chain."""
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "ReasoningOperation",
+        hsm.initial(hsm.target("/ReasoningOperation/active")),
+        hsm.state("active"),
+    )
+
+
 ReasoningProcessor: typing.TypeAlias = processing.Processor
 
 
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {key: value for key, value in metadata.items() if key != _REASONING_INPUT_METADATA_KEY}
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in {_REASONING_INPUT_METADATA_KEY, _REASONING_CAPABILITY_METADATA_KEY}
+    }
 
 
 def _selections_from_output(output: types.OutputData) -> processing.Events:
@@ -273,7 +300,8 @@ def _episode_from_reasoning(
     reasoned: OutputData,
 ) -> episodes.CognitiveEpisode:
     stimulus = input.input
-    assert isinstance(stimulus, bot.InputEventData)
+    if not isinstance(stimulus, (bot.InputEventData, hsm.Event)):
+        raise TypeError(f"Reasoning cannot retain unsupported stimulus type {type(stimulus)!r}.")
     return episodes.CognitiveEpisode(
         focus=_context_ref_from_input(input),
         stimulus_name=episodes.stimulus_name(stimulus),
@@ -355,24 +383,91 @@ class Reasoning(processing.Processing):
         return False
 
     @staticmethod
+    def _matches_operation(instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
+        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
+        if not isinstance(capability, _ReasoningCapability):
+            return False
+        instances = instance.context().value(hsm.Keys.Instances)
+        actor = instances.get(event.source) if isinstance(instances, collections.abc.Mapping) else None
+        return (
+            event.id == capability.operation_id
+            and event.source == capability.actor_id
+            and event.target == hsm.id(instance)
+            and isinstance(actor, _ReasoningOperation)
+        )
+
+    @staticmethod
     def _has_recalled(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _RecalledEventData)
+        del ctx
+        return isinstance(event.data, _RecalledEventData) and Reasoning._matches_operation(instance, event)
 
     @staticmethod
     def _has_reasoned(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _ReasonedEventData)
+        del ctx
+        return isinstance(event.data, _ReasonedEventData) and Reasoning._matches_operation(instance, event)
 
     @staticmethod
     def _has_retained(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _RetainedEventData)
+        del ctx
+        return isinstance(event.data, _RetainedEventData) and Reasoning._matches_operation(instance, event)
 
     @staticmethod
     def _has_stage_failure(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return isinstance(event.data, ability.FailureData)
+        del ctx
+        return isinstance(event.data, ability.FailureData) and Reasoning._matches_operation(instance, event)
+
+    @staticmethod
+    async def _start_operation(instance: "Reasoning", operation_id: str) -> _ReasoningCapability:
+        operation = _ReasoningOperation()
+        private = hsm.Context(parent=instance.context(), values={hsm.Keys.Instances: {}})
+        started = await hsm.started(private, operation, operation.model)
+        actor_id = hsm.id(started)
+        instances = instance.context().value(hsm.Keys.Instances)
+        if isinstance(instances, collections.abc.MutableMapping):
+            instances[actor_id] = started
+        return _ReasoningCapability(
+            operation_id=operation_id,
+            actor_id=actor_id,
+            token=uuid.uuid4().hex,
+        )
+
+    @staticmethod
+    def _finish_operation(instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
+        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
+        instances = instance.context().value(hsm.Keys.Instances)
+        if isinstance(capability, _ReasoningCapability) and isinstance(instances, collections.abc.MutableMapping):
+            _ = instances.pop(capability.actor_id, None)
+
+    @staticmethod
+    def _cancel_operations(instance: "Reasoning") -> None:
+        instances = instance.context().value(hsm.Keys.Instances)
+        if not isinstance(instances, collections.abc.MutableMapping):
+            return
+        for actor_id, actor in tuple(instances.items()):
+            if isinstance(actor_id, str) and isinstance(actor, _ReasoningOperation):
+                _ = instances.pop(actor_id, None)
+
+    @staticmethod
+    def _cancel(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
+        Reasoning._cancel_operations(instance)
+        processing.Processing._emit_cancelled(ctx, instance, event)
+
+    @staticmethod
+    def _stage_event(
+        event_type: hsm.Event[typing.Any],
+        data: object,
+        *,
+        capability: _ReasoningCapability,
+        metadata: dict[str, object],
+        target: "Reasoning",
+    ) -> hsm.Event[typing.Any]:
+        return dataclasses.replace(
+            event_type.with_data(data),
+            id=capability.operation_id,
+            source=capability.actor_id,
+            target=hsm.id(target),
+            metadata={**metadata, _REASONING_CAPABILITY_METADATA_KEY: capability},
+        )
 
     @staticmethod
     def _dispatch_failure(
@@ -412,6 +507,7 @@ class Reasoning(processing.Processing):
     def _fail_from_stage(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
+        Reasoning._finish_operation(instance, event)
         Reasoning._dispatch_failure(
             ctx,
             instance,
@@ -426,35 +522,33 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
+        operation_id = event.id if event.id else uuid.uuid4().hex
+        capability = await Reasoning._start_operation(instance, operation_id)
+        metadata = dict(event.metadata)
+
+        def dispatch_stage(event_type: hsm.Event[typing.Any], data: object) -> None:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                Reasoning._stage_event(
+                    event_type,
+                    data,
+                    capability=capability,
+                    metadata=metadata,
+                    target=instance,
+                ),
+            )
+
         try:
             input = Reasoning._host_input_from_event(event)
         except TypeError as error:
-            operation_id = event.id or None
-            metadata = dict(event.metadata)
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ReasoningStageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                    id=operation_id,
-                    metadata=metadata,
-                ),
-            )
+            dispatch_stage(_ReasoningStageFailedEvent, ability.FailureData(message=str(error)))
             return
-        operation_id = event.id or None
-        metadata = dict(event.metadata)
         store = instance._memory
         if store is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _RecalledEvent.with_data(
-                        _RecalledEventData(host_input=input, prior_episodes=(), memory_consulted=False)
-                    ),
-                    id=operation_id,
-                    metadata=metadata,
-                ),
+            dispatch_stage(
+                _RecalledEvent,
+                _RecalledEventData(host_input=input, prior_episodes=(), memory_consulted=False),
             )
             return
         try:
@@ -462,28 +556,14 @@ class Reasoning(processing.Processing):
             recalled = store.execute(select_input)
             prior = episodes.episodes_from_output(recalled)
         except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ReasoningStageFailedEvent.with_data(
-                        ability.FailureData(message=f"Reasoning memory recall failed: {error}")
-                    ),
-                    id=operation_id,
-                    metadata=metadata,
-                ),
+            dispatch_stage(
+                _ReasoningStageFailedEvent,
+                ability.FailureData(message=f"Reasoning memory recall failed: {error}"),
             )
             return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _RecalledEvent.with_data(
-                    _RecalledEventData(host_input=input, prior_episodes=prior, memory_consulted=True)
-                ),
-                id=operation_id,
-                metadata=metadata,
-            ),
+        dispatch_stage(
+            _RecalledEvent,
+            _RecalledEventData(host_input=input, prior_episodes=prior, memory_consulted=True),
         )
 
     @staticmethod
@@ -512,10 +592,12 @@ class Reasoning(processing.Processing):
         return OutputData(result=result)
 
     @staticmethod
-    async def _apply_activity(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
+    async def _reason_activity(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RecalledEventData)
-        operation_id = event.id if event.id else uuid.uuid4().hex
+        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
+        assert isinstance(capability, _ReasoningCapability)
+        operation_id = capability.operation_id
         metadata = dict(event.metadata)
         metadata[_REASONING_INPUT_METADATA_KEY] = data.host_input
         metadata["bot.reasoning.memory_consulted"] = data.memory_consulted
@@ -539,10 +621,12 @@ class Reasoning(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _ReasoningStageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                    id=operation_id,
-                    metadata=_public_metadata(metadata),
+                Reasoning._stage_event(
+                    _ReasoningStageFailedEvent,
+                    ability.FailureData(message=str(error)),
+                    capability=capability,
+                    metadata=metadata,
+                    target=instance,
                 ),
             )
             return
@@ -560,26 +644,28 @@ class Reasoning(processing.Processing):
                 _ = hsm.dispatch(
                     ctx,
                     instance,
-                    dataclasses.replace(
-                        _ReasoningStageFailedEvent.with_data(ability.FailureData(message=str(error))),
-                        id=operation_id,
-                        metadata=_public_metadata(metadata),
+                    Reasoning._stage_event(
+                        _ReasoningStageFailedEvent,
+                        ability.FailureData(message=str(error)),
+                        capability=capability,
+                        metadata=metadata,
+                        target=instance,
                     ),
                 )
                 return
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _ReasonedEvent.with_data(
-                    _ReasonedEventData(
-                        host_input=data.host_input,
-                        reasoned=reasoned,
-                        memory_consulted=data.memory_consulted,
-                    )
+            Reasoning._stage_event(
+                _ReasonedEvent,
+                _ReasonedEventData(
+                    host_input=data.host_input,
+                    reasoned=reasoned,
+                    memory_consulted=data.memory_consulted,
                 ),
-                id=operation_id,
-                metadata=_public_metadata(metadata),
+                capability=capability,
+                metadata=metadata,
+                target=instance,
             ),
         )
 
@@ -587,7 +673,7 @@ class Reasoning(processing.Processing):
     def _reasoned_needs_retain(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         data = event.data
-        if not isinstance(data, _ReasonedEventData):
+        if not isinstance(data, _ReasonedEventData) or not Reasoning._matches_operation(instance, event):
             return False
         return instance._memory is not None and _should_retain_episode(data.reasoned)
 
@@ -601,6 +687,7 @@ class Reasoning(processing.Processing):
     def _complete_from_reasoned(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _ReasonedEventData)
+        Reasoning._finish_operation(instance, event)
         Reasoning._dispatch_output(
             ctx,
             instance,
@@ -613,6 +700,7 @@ class Reasoning(processing.Processing):
     def _complete_from_retained(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RetainedEventData)
+        Reasoning._finish_operation(instance, event)
         Reasoning._dispatch_output(
             ctx,
             instance,
@@ -629,28 +717,29 @@ class Reasoning(processing.Processing):
     ) -> None:
         data = event.data
         assert isinstance(data, _ReasonedEventData)
-        operation_id = event.id or None
+        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
+        assert isinstance(capability, _ReasoningCapability)
         metadata = dict(event.metadata)
         store = instance._memory
         if store is None:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _RetainedEvent.with_data(
-                        _RetainedEventData(
-                            result=data.reasoned.result,
-                            memory_consulted=data.memory_consulted,
-                            memory_written=False,
-                        )
+                Reasoning._stage_event(
+                    _RetainedEvent,
+                    _RetainedEventData(
+                        result=data.reasoned.result,
+                        memory_consulted=data.memory_consulted,
+                        memory_written=False,
                     ),
-                    id=operation_id,
+                    capability=capability,
                     metadata=metadata,
+                    target=instance,
                 ),
             )
             return
-        episode = _episode_from_reasoning(data.host_input, data.reasoned)
         try:
+            episode = _episode_from_reasoning(data.host_input, data.reasoned)
             insert_input = episodes.episode_insert_input(
                 episode,
                 context_ref=_context_ref_from_input(data.host_input),
@@ -661,28 +750,28 @@ class Reasoning(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                dataclasses.replace(
-                    _ReasoningStageFailedEvent.with_data(
-                        ability.FailureData(message=f"Reasoning memory retain failed: {error}")
-                    ),
-                    id=operation_id,
+                Reasoning._stage_event(
+                    _ReasoningStageFailedEvent,
+                    ability.FailureData(message=f"Reasoning memory retain failed: {error}"),
+                    capability=capability,
                     metadata=metadata,
+                    target=instance,
                 ),
             )
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
-                _RetainedEvent.with_data(
-                    _RetainedEventData(
-                        result=data.reasoned.result,
-                        memory_consulted=data.memory_consulted,
-                        memory_written=True,
-                    )
+            Reasoning._stage_event(
+                _RetainedEvent,
+                _RetainedEventData(
+                    result=data.reasoned.result,
+                    memory_consulted=data.memory_consulted,
+                    memory_written=True,
                 ),
-                id=operation_id,
+                capability=capability,
                 metadata=metadata,
+                target=instance,
             ),
         )
 
@@ -703,7 +792,7 @@ class Reasoning(processing.Processing):
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
-                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.effect(_cancel),
             ),
             hsm.transition(
                 hsm.on(input_event),
@@ -718,7 +807,7 @@ class Reasoning(processing.Processing):
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
-                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.effect(_cancel),
                 hsm.target("/Reasoning/idle"),
             ),
             hsm.transition(
@@ -736,11 +825,11 @@ class Reasoning(processing.Processing):
         hsm.state(
             "applying",
             hsm.defer(input_event),
-            hsm.activity(_apply_activity),
+            hsm.activity(_reason_activity),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
-                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.effect(_cancel),
                 hsm.target("/Reasoning/idle"),
             ),
             hsm.transition(
@@ -768,7 +857,7 @@ class Reasoning(processing.Processing):
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
-                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.effect(_cancel),
                 hsm.target("/Reasoning/idle"),
             ),
             hsm.transition(
