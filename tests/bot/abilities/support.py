@@ -166,11 +166,14 @@ async def dispatch_ability_for_test(
             attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
         )
     direct_operation_id = getattr(input, "operation_id", None)
+    parent_operation_id = getattr(input, "parent_operation_id", None)
     turn = getattr(input, "turn", None)
     turn_operation_id = getattr(turn, "operation_id", None)
     operation_id = (
         direct_operation_id
         if isinstance(direct_operation_id, str) and direct_operation_id
+        else parent_operation_id
+        if isinstance(parent_operation_id, str) and parent_operation_id
         else turn_operation_id
         if isinstance(turn_operation_id, str) and turn_operation_id
         else uuid.uuid4().hex

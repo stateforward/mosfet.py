@@ -4,6 +4,8 @@ from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import reflection as reflection_module
+from bot.abilities.cognition.reflection import reflection as reflection_impl
+from bot.abilities.cognition.reflection import revision
 from bot.protocols import attachment
 
 import asyncio
@@ -20,7 +22,8 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_n
 
 
 def test_reflection_never_uses_metadata_for_coordination() -> None:
-    assert_metadata_is_not_coordination(reflection_module)
+    for module in (reflection_impl, revision):
+        assert_metadata_is_not_coordination(module)
 
 
 class EmptyProcessor(processing.Processor):
@@ -137,8 +140,8 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         await wait_until(lambda: reflection.state().endswith("/processing"))
         turn = input
         forged = dataclasses.replace(
-            reflection_module._SelectedEvent.with_data(
-                reflection_module._SelectedEventData(
+            reflection_impl._SelectedEvent.with_data(
+                reflection_impl._SelectedEventData(
                     turn=turn,
                     selection=cognition.types.EventData(
                         event=habit.CreateEvent.name,
@@ -156,7 +159,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         )
         _ = await hsm.dispatch(ctx, reflection, forged)
         await asyncio.sleep(0)
-        stored = reflection_module._load_habit(store, name="ForgedHabit")
+        stored = reflection_impl._load_habit(store, name="ForgedHabit")
         state = reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -166,70 +169,6 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
 
     assert state.endswith("/processing")
     assert stored is None
-
-
-def test_reflection_ignores_forged_change_check_without_turn_capability() -> None:
-    async def run() -> tuple[str, str]:
-        intent = habit.CreateData(name="ProtectedHabit", triggers=(bot.InputEvent.name,))
-        processor = HangingProcessor(
-            first_output=(
-                processing.SelectedEvent(
-                    event=habit.CreateEvent.name,
-                    data=intent.model_dump(mode="json"),
-                ),
-            )
-        )
-        connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        reflection = cognition.Reflection(processor=processor, memory=store)
-        ctx = hsm.Context()
-        owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
-        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        await wait_until(lambda: reflection.state().endswith("/idle"))
-        input = reflection_input()
-        _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(input, "change-turn"))
-        await wait_until(lambda: "/changing/" in (reflection.state() or ""))
-        turn = input
-        written = habit.ChangeData(
-            name="ProtectedHabit",
-            source="forged source",
-            triggers=(bot.InputEvent.name,),
-        )
-        forged_instance = habit.Instance(
-            name="ProtectedHabit",
-            source="forged source",
-            triggers=(bot.InputEvent.name,),
-        )
-        forged = dataclasses.replace(
-            reflection_module._ChangeWriteCheckedEvent.with_data(
-                reflection_module._ChangeWriteCheckedData(
-                    turn=turn,
-                    written=written,
-                    habit_instance=forged_instance,
-                    operation_id="change-turn",
-                    generation="forged-operation-token",
-                    attempt=0,
-                    intent=written,
-                )
-            ),
-            id="change-turn",
-            source=hsm.id(reflection),
-            target=hsm.id(reflection),
-        )
-        _ = await hsm.dispatch(ctx, reflection, forged)
-        await asyncio.sleep(0)
-        stored = reflection_module._load_habit(store, name="ProtectedHabit")
-        assert stored is not None
-        state, source = reflection.state(), stored.source
-        await reflection.stop(reflection.context())
-        connection.close()
-        return state, source
-
-    state, source = asyncio.run(run())
-
-    assert "/changing/" in state
-    assert source == ""
 
 
 def test_reflection_waits_for_direct_child_cancel_before_acknowledging() -> None:
@@ -277,7 +216,7 @@ def test_reflection_waits_for_direct_child_cancel_before_acknowledging() -> None
     assert state.endswith("/idle")
 
 
-def test_reflection_change_cancellation_waits_for_exact_child_acknowledgement() -> None:
+def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], int]:
         processor = HangingProcessor(
             first_output=(
@@ -301,13 +240,15 @@ def test_reflection_change_cancellation_waits_for_exact_child_acknowledgement() 
             ctx,
             reflection,
             dataclasses.replace(
-                reflection.input_event.with_data_and_id(reflection_input(), "cancel-change"),
+                reflection.input_event.with_data_and_id(reflection_input(), "cancel:change:operation"),
             ),
         )
-        await wait_until(lambda: "/changing/" in (reflection.state() or "") and processor.calls == 2)
+        await wait_until(lambda: reflection.state().endswith("/revising") and processor.calls == 2)
         cancel = dataclasses.replace(
-            processing.CancelEvent.with_data(processing.CancelData(operation_id="cancel-change", token="change-token")),
-            id="cancel-change",
+            processing.CancelEvent.with_data(
+                processing.CancelData(operation_id="cancel:change:operation", token="change-token")
+            ),
+            id="cancel:change:operation",
             source=hsm.id(owner),
             target=hsm.id(reflection),
         )
@@ -322,7 +263,7 @@ def test_reflection_change_cancellation_waits_for_exact_child_acknowledgement() 
     lifecycle, calls = asyncio.run(run())
 
     assert len(lifecycle) == 1
-    assert lifecycle[0].data == processing.CancelledData(operation_id="cancel-change", token="change-token")
+    assert lifecycle[0].data == processing.CancelledData(operation_id="cancel:change:operation", token="change-token")
     assert calls == 2
 
 
@@ -351,7 +292,7 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
             reflection,
             reflection.input_event.with_data_and_id(reflection_input(), "cancel-starting-change"),
         )
-        await wait_until(lambda: "/changing/" in (reflection.state() or "") and processor.calls == 2)
+        await wait_until(lambda: reflection.state().endswith("/revising") and processor.calls == 2)
         cancel = dataclasses.replace(
             processing.CancelEvent.with_data(
                 processing.CancelData(operation_id="cancel-starting-change", token="starting-token")
@@ -397,7 +338,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, int]:
         monkeypatch.setattr(
-            reflection_module,
+            reflection_impl,
             "_CANCEL_TEARDOWN_TIMEOUT",
             datetime.timedelta(milliseconds=10),
         )
@@ -406,7 +347,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         reflection._select_processing = stubborn
         reflection._attachment_group = attachment.Group(
             stubborn,
-            reflection._change_processing,
+            reflection._revision,
             reflection._memory,
         )
         ctx = hsm.Context()
@@ -461,7 +402,7 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
         _ = await hsm.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
-        request_id = reflection_module.Reflection._child_id(reflection, reflection_module._SELECT_ID_SUFFIX)
+        request_id = reflection_module.Reflection._child_id(reflection, reflection_impl._SELECT_ID_SUFFIX)
         wrong_operation = dataclasses.replace(
             processing.CancelledEvent.with_data(
                 processing.CancelledData(operation_id="wrong-request", token="guard-token")
@@ -485,9 +426,64 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
     assert asyncio.run(run()) == (False, False)
 
 
+def test_reflection_revision_cancel_guard_requires_typed_parent_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reflection, connection = reflection_ability()
+    try:
+        monkeypatch.setattr(
+            hsm,
+            "id",
+            lambda actor: "reflection"
+            if actor is reflection
+            else "revision"
+            if actor is reflection._revision
+            else "select",
+        )
+        monkeypatch.setattr(processing, "active_operation", lambda owner, operation_id: object())
+        missing_parent = dataclasses.replace(
+            processing.CancelledEvent.with_data(
+                processing.CancelledData(operation_id="cancel:change:operation", token="typed-token")
+            ),
+            id="cancel:change:operation",
+            source="revision",
+            target="reflection",
+        )
+        wrong_parent = dataclasses.replace(
+            processing.CancelledEvent.with_data(
+                processing.CancelledData(
+                    operation_id="cancel:change:operation",
+                    token="typed-token",
+                    parent_operation_id="other-operation",
+                )
+            ),
+            id="cancel:change:operation",
+            source="revision",
+            target="reflection",
+        )
+        correlated = dataclasses.replace(
+            processing.CancelledEvent.with_data(
+                processing.CancelledData(
+                    operation_id="cancel:change:operation",
+                    token="typed-token",
+                    parent_operation_id="cancel:change:operation",
+                )
+            ),
+            id="cancel:change:operation",
+            source="revision",
+            target="reflection",
+        )
+
+        assert not cognition.Reflection._matches_cancelled(hsm.Context(), reflection, missing_parent)
+        assert not cognition.Reflection._matches_cancelled(hsm.Context(), reflection, wrong_parent)
+        assert cognition.Reflection._matches_cancelled(hsm.Context(), reflection, correlated)
+    finally:
+        connection.close()
+
+
 def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
+        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
         processor = HangingProcessor()
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
@@ -518,7 +514,7 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
 
 def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
+        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
@@ -555,38 +551,6 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
     assert len(lifecycle) == 1
     assert lifecycle[0].name == cognition.Reflection.failed_event.name
     assert state.endswith("/idle")
-
-
-def test_reflection_rejects_stale_change_attempt_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    reflection, connection = reflection_ability()
-    try:
-        monkeypatch.setattr(reflection, "state", lambda: "/Reflection/changing/attempt_1")
-        monkeypatch.setattr(hsm, "id", lambda actor: "reflection" if actor is reflection else "change-child")
-        turn = reflection_input()
-        change_input = reflection_module.ChangeWriteInput(
-            cognition_input=turn.cognition_input,
-            cognition_output=turn.cognition_output,
-            intent=habit.ChangeData(name="StaleHabit", source="source"),
-            existing_habit=habit.Instance(name="StaleHabit", source="source"),
-            operation_id="retry-turn",
-            generation="stale-operation-token",
-            attempt=0,
-        )
-        stale = dataclasses.replace(
-            reflection._change_processing.output_event.with_data(
-                processing.CompletionData(
-                    input=processing.InputData(input=change_input),
-                    output=processing.OutputData(),
-                )
-            ),
-            id=reflection_module.Reflection._change_child_id(reflection, 0),
-            source=hsm.id(reflection._change_processing),
-            target=hsm.id(reflection),
-        )
-
-        assert not reflection_module.Reflection._matches_change_output(hsm.Context(), reflection, stale)
-    finally:
-        connection.close()
 
 
 def test_reflection_rejects_valid_select_terminal_from_prior_turn(
@@ -638,11 +602,13 @@ def test_reflection_builds_one_attachment_group_for_fixed_children(
     reflection, connection = reflection_ability()
 
     assert isinstance(reflection, cognition.Reflection)
-    assert len(groups) == 1
-    assert len(groups[0]) == 3
+    assert len(groups) == 2
+    assert len(groups[0]) == 1
     assert isinstance(groups[0][0], processing.Processing)
-    assert isinstance(groups[0][1], processing.Processing)
-    assert isinstance(groups[0][2], memory.Memory)
+    assert len(groups[1]) == 3
+    assert isinstance(groups[1][0], processing.Processing)
+    assert isinstance(groups[1][1], revision.Revision)
+    assert isinstance(groups[1][2], memory.Memory)
     connection.close()
 
 
@@ -833,7 +799,7 @@ def test_reflection_defers_detach_during_initialization_then_detaches_once(
     [
         ("processing", None),
         (
-            "changing",
+            "revising",
             (
                 processing.SelectedEvent(
                     event=habit.CreateEvent.name,
@@ -891,8 +857,8 @@ def test_reflection_detaches_once_and_cancels_active_processing(
 
     requests, cancelled, lifecycle, state = asyncio.run(run())
 
-    assert len(requests) == 1
-    assert requests[0].id == f"reflection-{expected_state}-detach"
+    assert len(requests) == 2
+    assert all(request.id == f"reflection-{expected_state}-detach" for request in requests)
     assert cancelled
     assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
     assert lifecycle[0].id == f"reflection-{expected_state}-detach"
@@ -963,8 +929,8 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
 
     requests, lifecycle, state = asyncio.run(run())
 
-    assert len(requests) == 1
-    assert requests[0].id == f"reflection-{expected_state}-detach"
+    assert len(requests) == 2
+    assert all(request.id == f"reflection-{expected_state}-detach" for request in requests)
     assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
     assert lifecycle[0].id == f"reflection-{expected_state}-detach"
     assert state == "/ReflectionLifecycle/detached"
@@ -1095,8 +1061,8 @@ def test_reflection_detaches_once_through_group_and_can_reattach(
 
     requests, lifecycle, state = asyncio.run(run())
 
-    assert len(requests) == 1
-    assert requests[0].id == "reflection-detach"
+    assert len(requests) == 2
+    assert all(request.id == "reflection-detach" for request in requests)
     assert [event.name for event in lifecycle] == [
         attachment.DetachedEvent.name,
         attachment.AttachCompleteEvent.name,

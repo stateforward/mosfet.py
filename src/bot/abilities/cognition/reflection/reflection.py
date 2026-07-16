@@ -1,29 +1,28 @@
-"""Post-output reflection: select habit inventory, then change or break.
+"""Post-output reflection: recall, select habit inventory, break, and store.
 
 HSM phases (children attached; never call child ``_process`` / ``_apply``):
 1. recall priors
 2. **processing** — dispatch select processor (create | change | break | empty)
-3. **changing** — author / fix Starlark for a stored habit (empty stub or existing)
+3. **revising** — delegate create/change authoring and validation to ``Revision``
 4. **break** sets status=BROKEN (does not delete)
 5. store cognitive episode; complete with no host product
 
 Inventory policy:
-- ``bot.habit.create`` seeds a DRAFT empty inventory row, then enters **changing**.
-- ``bot.habit.change`` loads an existing row (any status) and enters **changing**.
+- ``bot.habit.create`` delegates DRAFT seeding and authoring to ``Revision``.
+- ``bot.habit.change`` delegates existing-row loading and authoring to ``Revision``.
 - Changing always upserts; status=ACTIVE only when checks pass (usage counters preserved), else
   status=DRAFT with status_reason=validation.
 - ``bot.habit.break`` sets status=BROKEN with status_reason / status_updated_at; row stays for later change.
 - Autonomy loads only status=ACTIVE habits; it writes ``used_*`` / ``failed_*`` practice telemetry.
 
-Change fix policy is HSM-visible: same diagnostic messages after a fix attempt → abandon;
-changed messages → retry change.
+Revision owns the HSM-visible author, validate, retry, and inventory persistence policy.
 """
 
 from __future__ import annotations
 
-from .. import ability
-from .. import processing
-from .. import memory
+from ... import ability
+from ... import processing
+from ... import memory
 
 import dataclasses
 import datetime
@@ -46,18 +45,14 @@ from bot.habit import (
     CreateEvent,
     event_for_data,
 )
-from bot.habit import diagnostic as habit_diagnostic
 from bot.habit import storage as habit_storage
-from bot.habit.instance import (
-    STATUS_REASON_VALIDATION,
-    Instance,
-)
-from bot.habit.source import STARLARK_API
+from bot.habit.instance import Instance
 from bot.telemetry import observer
 
-from . import episodes
-from . import input
-from . import types
+from .. import episodes
+from .. import input
+from .. import types
+from . import revision
 
 CognitiveEpisode = episodes.CognitiveEpisode
 stimulus_name = episodes.stimulus_name
@@ -70,42 +65,18 @@ SELECT_INSTRUCTIONS = (
     "and usage: used_count / last_used_at (handled Autonomy runs) and failed_count / last_failed_at. "
     "Prefer change over break when used_count is low (not enough practice evidence). "
     "Prefer break when failures or harm outweigh practice value; include reason. "
-    "create seeds a DRAFT empty habit then enters changing; change revises an existing habit; "
+    "create delegates a DRAFT habit revision; change revises an existing habit; "
     "break sets status=BROKEN (keeps inventory for later change; Autonomy will not run it). "
     "Select intent may omit source — do not invent source here."
 )
 
-CHANGE_INSTRUCTIONS = (
-    "You are in the changing phase: author or revise Starlark for the stored habit. "
-    "existing_habit is the current inventory row (source may be empty for a new create stub; "
-    "status may be DRAFT or BROKEN for unfinished or retired habits). "
-    "Select the offered bot.habit.change event once with the same name and required `source`. "
-    "If existing_habit.source is empty, write a full new program from this turn, prior_episodes, "
-    "and intent — invent event contracts, guards, and effects from the observed pattern only. "
-    "If source is non-empty, rewrite or patch it so it better fits this turn and prior_episodes. "
-    "Keep the model name stable unless the intent clearly renames the habit.\n"
-    "Habit terminal output must be a cognition event selection object (keys: event, target?, data?, reason?) "
-    "or a list of such objects, matching the shape of prior episode / this-turn outputs. "
-    "output_event JSON schema root must be type object. "
-    "Derive input fields, guards, and selection field names from the observed pattern. "
-    "At runtime, fill selection data from the live event data — "
-    "never hardcode identifier values copied from episode examples. "
-    "Set triggers to the stimulus names that should propose the habit. "
-    "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
-    "Starlark only: no Python docstrings, type annotations, or imports; callbacks are def name(event): ...\n"
-    "If diagnostics is present, prior source failed validation: revise `source` to clear every error "
-    "(use code, stage, message, and help). failed_source is the rejected program when provided. "
-    "Repeating the same diagnostic message after a fix ends change; change the source so messages clear.\n\n"
-    f"{STARLARK_API}"
-)
+CHANGE_INSTRUCTIONS = revision.CHANGE_INSTRUCTIONS
 
 INSTRUCTIONS = SELECT_INSTRUCTIONS
 
 _SELECT_ID_SUFFIX = ":reflection:select"
-_CHANGE_ID_SUFFIX = ":reflection:change"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
-_MAX_REFLECTION_FIX_ATTEMPTS = 2
 
 
 class InputData(pydantic.BaseModel):
@@ -168,67 +139,13 @@ class SelectInput(pydantic.BaseModel):
     generation: str = pydantic.Field(min_length=1)
 
 
-class ChangeWriteInput(pydantic.BaseModel):
-    """Changing-phase input: turn context, change intent, and the stored existing habit."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-        extra="forbid",
-        json_schema_extra={
-            "description": (
-                "Author or revise executable habit Starlark. existing_habit may be an empty DRAFT "
-                "create stub or an ACTIVE/DRAFT/BROKEN installed habit. Return ChangeData with source. "
-                "When diagnostics is set, revise failed_source."
-            ),
-        },
-    )
-
-    cognition_input: SkipJsonSchema[input.InputData] = pydantic.Field(
-        description="Original input payload given to cognition for this turn.",
-    )
-    cognition_output: types.OutputData = pydantic.Field(
-        description="Typed cognition output for this turn.",
-    )
-    prior_episodes: tuple[CognitiveEpisode, ...] = pydantic.Field(
-        default=(),
-        description="Prior cognition episodes recalled for this reflection.",
-    )
-    intent: ChangeData = pydantic.Field(
-        description="Change payload naming the habit to author or revise.",
-    )
-    existing_habit: Instance = pydantic.Field(
-        description=(
-            "Current inventory habit: empty DRAFT stub (create) or ACTIVE/DRAFT/BROKEN row (including source)."
-        ),
-    )
-    diagnostics: habit_diagnostic.Report | None = pydantic.Field(
-        default=None,
-        description="Structured validation failures from a prior change attempt, if any.",
-    )
-    failed_source: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description="Rejected Starlark source from the prior change attempt, when diagnostics is set.",
-    )
-    operation_id: str = pydantic.Field(min_length=1)
-    generation: str = pydantic.Field(min_length=1)
-    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
-    create_intent: CreateData | None = None
-    previous_messages: tuple[str, ...] | None = None
+ChangeWriteInput = revision.ChangeWriteInput
 
 
 ProcessorInput = SelectInput
 
 
-class ProcessorFactory(typing.Protocol):
-    """Build a leaf ``processing.Processor`` for Reflection phases (transport only).
-
-    System policy is owned by each phase's ``Processing(instructions=...)`` wrapper, not
-    the factory.
-    """
-
-    def __call__(self) -> processing.Processor: ...
+ProcessorFactory = revision.ProcessorFactory
 
 
 class _RecalledEventData(pydantic.BaseModel):
@@ -264,28 +181,6 @@ class _StoredEventData(pydantic.BaseModel):
     generation: str = pydantic.Field(min_length=1)
 
 
-class _ChangeWriteCheckedData(pydantic.BaseModel):
-    """Change-write validation result for HSM accept / retry / abandon guards."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-    )
-
-    turn: InputData
-    prior_episodes: tuple[CognitiveEpisode, ...] = ()
-    written: ChangeData
-    habit_instance: Instance | None = None
-    report: habit_diagnostic.Report = pydantic.Field(default_factory=habit_diagnostic.Report)
-    previous_messages: tuple[str, ...] | None = None
-    operation_id: str
-    generation: str = pydantic.Field(min_length=1)
-    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
-    intent: ChangeData
-    create_intent: CreateData | None = None
-    existing: Instance | None = None
-
-
 class _SelectedEventData(pydantic.BaseModel):
     """Authorized select result carried through the active Reflection state."""
 
@@ -299,27 +194,6 @@ class _SelectedEventData(pydantic.BaseModel):
     selection: types.EventData
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
-
-
-class _ChangeRequestedEventData(pydantic.BaseModel):
-    """Typed request for one operation-scoped change-processing attempt."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-    )
-
-    turn: InputData
-    prior_episodes: tuple[CognitiveEpisode, ...]
-    intent: ChangeData
-    existing: Instance
-    operation_id: str = pydantic.Field(min_length=1)
-    generation: str = pydantic.Field(min_length=1)
-    diagnostics: habit_diagnostic.Report | None = None
-    failed_source: str | None = None
-    create_intent: CreateData | None = None
-    attempt: int = pydantic.Field(default=0, ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
-    previous_messages: tuple[str, ...] | None = None
 
 
 _RecalledEvent = hsm.Event[_RecalledEventData](
@@ -337,34 +211,10 @@ _StoredEvent = hsm.Event[_StoredEventData](
     kind=hsm.CompletionEventKind,
     schema=_StoredEventData,
 )
-_ChangeWriteCheckedEvent = hsm.Event[_ChangeWriteCheckedData](
-    name="bot.ability.reflection.change_write.checked",
-    kind=hsm.CompletionEventKind,
-    schema=_ChangeWriteCheckedData,
-)
 _SelectedEvent = hsm.Event[_SelectedEventData](
     name="bot.ability.reflection.selected",
     kind=hsm.CompletionEventKind,
     schema=_SelectedEventData,
-)
-_ChangeRequestedEvent = hsm.Event[_ChangeRequestedEventData](
-    name="bot.ability.reflection.change.requested",
-    schema=_ChangeRequestedEventData,
-)
-
-
-class _ChangeStartedData(pydantic.BaseModel):
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    operation_id: str = pydantic.Field(min_length=1)
-    generation: str = pydantic.Field(min_length=1)
-    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
-
-
-_ChangeStartedEvent = hsm.Event[_ChangeStartedData](
-    name="bot.ability.reflection.change.started",
-    kind=hsm.CompletionEventKind,
-    schema=_ChangeStartedData,
 )
 
 
@@ -439,72 +289,6 @@ def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any
     raise TypeError(f"Reflection select returned unsupported event: {item.event}.")
 
 
-def _change_data_from_output(value: object) -> ChangeData:
-    if isinstance(value, ChangeData):
-        return value
-    selections = processing.coerce_event_selections(value)
-    if selections is not None:
-        if len(selections) != 1 or selections[0].event != ChangeEvent.name:
-            raise TypeError("Reflection write must return a single change event.")
-        return ChangeData.model_validate(selections[0].data or {})
-    return ChangeData.model_validate(value)
-
-
-def _habit_sample_input(cognition_input: input.InputData) -> tuple[object, dict[str, object]]:
-    """Build dry-run payload matching Autonomy's live typed habit input."""
-
-    from . import autonomy
-
-    payload = autonomy.habit_input_payload(cognition_input)
-    return payload, {}
-
-
-def _habit_check_from_write(
-    *,
-    name: str,
-    source: str | None,
-    triggers: tuple[str, ...],
-    description: str | None,
-    cognition_input: input.InputData | None = None,
-) -> habit_diagnostic.Checked[Instance]:
-    """Validate write payload into an installable Instance (or a Report)."""
-
-    from bot.habit.instance import check
-    from bot.habit.verify import verify_apply
-
-    if source is None or not source.strip():
-        report = habit_diagnostic.report_of(
-            habit_diagnostic.diagnostic(
-                code=habit_diagnostic.E0001_EMPTY,
-                message="Executable habit write requires non-empty starlark source.",
-                stage=habit_diagnostic.Stage.INVENTORY,
-                help=habit_diagnostic.help_for(habit_diagnostic.E0001_EMPTY),
-            )
-        )
-        return habit_diagnostic.Checked[Instance](value=None, report=report)
-    if cognition_input is None:
-        return check(
-            source,
-            name=name,
-            triggers=triggers if triggers else None,
-            description=description,
-            require_build=True,
-        )
-    sample_input, sample_metadata = _habit_sample_input(cognition_input)
-    return verify_apply(
-        source,
-        name=name,
-        triggers=triggers if triggers else None,
-        description=description,
-        input_data=sample_input,
-        metadata=sample_metadata,
-    )
-
-
-def _diagnostic_messages(report: habit_diagnostic.Report) -> tuple[str, ...]:
-    return tuple(item.message for item in report.errors)
-
-
 def _compile_habit_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
     return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
 
@@ -562,86 +346,6 @@ def _store_episode(
     _ = store.execute(insert_input)
 
 
-def _draft_stub_from_create(intent: CreateData) -> Instance:
-    """Empty DRAFT inventory row created when select chooses create."""
-
-    return habit_storage.mark_draft(
-        Instance(
-            name=intent.name,
-            source="",
-            triggers=intent.triggers,
-            description=intent.description or "",
-        )
-    )
-
-
-def _instance_for_inventory(
-    *,
-    name: str,
-    source: str | None,
-    triggers: tuple[str, ...],
-    description: str | None,
-    habit_instance: Instance | None,
-    existing: Instance | None = None,
-) -> Instance | None:
-    """Build inventory Instance: ACTIVE when checks passed, else DRAFT after validation failure.
-
-    Usage counters are preserved from ``existing`` (same habit name across change).
-    """
-
-    if habit_instance is not None:
-        active = habit_storage.mark_active(habit_instance)
-        return habit_storage.preserve_usage(active, existing)
-    if source is None or not source.strip():
-        return None
-    draft = habit_storage.mark_draft(
-        Instance(
-            name=name,
-            source=source.strip(),
-            triggers=triggers,
-            description=description or "",
-        ),
-        reason=STATUS_REASON_VALIDATION,
-    )
-    return habit_storage.preserve_usage(draft, existing)
-
-
-def _store_change_result(
-    data: ChangeData,
-    habit: Instance,
-    *,
-    store: memory.Memory,
-    context_ref: str | None,
-) -> ChangeData:
-    _store_habit(store, habit=habit, context_ref=context_ref)
-    return data.model_copy(
-        update={
-            "name": habit.name,
-            "triggers": habit.triggers,
-            "description": habit.description or None,
-            "source": habit.source,
-        }
-    )
-
-
-def _applied_habit_from_change(
-    written: ChangeData,
-    *,
-    create_intent: CreateData | None,
-) -> CreateData | ChangeData:
-    """Episode habit: CreateData when select was create, else ChangeData."""
-
-    if isinstance(create_intent, CreateData):
-        return CreateData(
-            name=written.name,
-            triggers=written.triggers,
-            description=written.description,
-            reason=written.reason or create_intent.reason,
-            source=written.source,
-        )
-    return written
-
-
 def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | None) -> BreakData:
     """Set status=BROKEN in inventory; do not delete (change can revive it later)."""
 
@@ -655,7 +359,7 @@ def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | No
 
 
 class Reflection(processing.Processing):
-    """Post-output ability: HSM select → seed-or-load → changing | break-mark."""
+    """Post-output ability: recall → select → revise or break → store."""
 
     instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS
     select_instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS
@@ -675,25 +379,13 @@ class Reflection(processing.Processing):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
     _select_processing: processing.Processing
-    _change_processing: processing.Processing
+    _revision: revision.Revision
     _memory: memory.Memory
     _events: tuple[processing.Event[typing.Any], ...]
 
     @staticmethod
     def _child_id(instance: "Reflection", suffix: str) -> str:
         return f"{hsm.id(instance)}{suffix}"
-
-    @staticmethod
-    def _change_child_id(instance: "Reflection", attempt: int) -> str:
-        return f"{Reflection._child_id(instance, _CHANGE_ID_SUFFIX)}:fix{attempt}"
-
-    @staticmethod
-    def _active_change_child_id(instance: "Reflection") -> str | None:
-        state = instance.state() or ""
-        for attempt in range(_MAX_REFLECTION_FIX_ATTEMPTS + 1):
-            if state.endswith(f"/attempt_{attempt}"):
-                return Reflection._change_child_id(instance, attempt)
-        return None
 
     @staticmethod
     def _has_reflection_input(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -705,18 +397,13 @@ class Reflection(processing.Processing):
         data = event.data
         if isinstance(data, processing.CompletionData):
             nested = data.input.input
-            if isinstance(nested, SelectInput | ChangeWriteInput):
+            if isinstance(nested, SelectInput):
                 return nested.operation_id, nested.generation
+        if isinstance(data, revision.OutputData | revision.FailureData):
+            return data.input.parent_operation_id, data.input.parent_generation
         if isinstance(
             data,
-            _RecalledEventData
-            | _AppliedEventData
-            | _StoredEventData
-            | _ChangeWriteCheckedData
-            | _SelectedEventData
-            | _ChangeRequestedEventData
-            | _ChangeStartedData
-            | _StageFailedData,
+            _RecalledEventData | _AppliedEventData | _StoredEventData | _SelectedEventData | _StageFailedData,
         ):
             return data.operation_id, data.generation
         return None
@@ -803,15 +490,15 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
-    def _cancel_change(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        request_id = Reflection._active_change_child_id(instance)
-        assert request_id is not None
+    def _cancel_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, processing.CancelData)
         Reflection._cancel_child(
             ctx,
             instance,
             event,
-            instance._change_processing,
-            request_id,
+            instance._revision,
+            data.operation_id,
         )
 
     @staticmethod
@@ -852,15 +539,16 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
-    def _cancel_change_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        request_id = Reflection._active_change_child_id(instance)
-        assert request_id is not None
+    def _cancel_revision_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        operation_id = processing.active_operation_id(instance)
+        if operation_id is None:
+            return
         Reflection._cancel_timed_out_child(
             ctx,
             instance,
-            event,
-            instance._change_processing,
-            request_id,
+            dataclasses.replace(event, id=operation_id),
+            instance._revision,
+            operation_id,
         )
 
     @staticmethod
@@ -879,11 +567,16 @@ class Reflection(processing.Processing):
         if not isinstance(data, processing.CancelledData):
             return False
         select_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
-        change_id = Reflection._child_id(instance, _CHANGE_ID_SUFFIX)
-        source_matches = (event.source == hsm.id(instance._select_processing) and data.operation_id == select_id) or (
-            event.source == hsm.id(instance._change_processing) and data.operation_id.startswith(f"{change_id}:fix")
+        select_matches = event.source == hsm.id(instance._select_processing) and data.operation_id == select_id
+        revision_matches = (
+            event.source == hsm.id(instance._revision)
+            and data.parent_operation_id is not None
+            and data.operation_id == data.parent_operation_id
+            and processing.active_operation(instance, data.parent_operation_id) is not None
         )
-        return source_matches and event.id == data.operation_id and event.target == hsm.id(instance)
+        return (
+            (select_matches or revision_matches) and event.id == data.operation_id and event.target == hsm.id(instance)
+        )
 
     @staticmethod
     def _cancel_timeout_delay(
@@ -993,7 +686,7 @@ class Reflection(processing.Processing):
         data = event.data
         assert isinstance(data, processing.FailureData)
         child_input = data.input.input
-        assert isinstance(child_input, SelectInput | ChangeWriteInput)
+        assert isinstance(child_input, SelectInput)
         Reflection._dispatch_failure(
             ctx,
             instance,
@@ -1004,10 +697,11 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _fail_cancel_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        operation_id = processing.active_operation_id(instance)
         Reflection._dispatch_failure(
             ctx,
             instance,
-            operation_id=None,
+            operation_id=operation_id,
             metadata=dict(event.metadata),
             failure=ability.FailureData(message="Reflection child cancellation timed out."),
         )
@@ -1032,6 +726,15 @@ class Reflection(processing.Processing):
                 target=hsm.id(owner),
                 metadata=_public_metadata(dict(event.metadata)),
             ),
+        )
+
+    @staticmethod
+    def _is_revision_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return (
+            isinstance(event.data, bot.RebootEventData)
+            and event.source == hsm.id(instance._revision)
+            and event.target == hsm.id(instance)
         )
 
     @staticmethod
@@ -1151,32 +854,73 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
-    def _matches_change_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+    def _matches_revision_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        child = instance._change_processing
-        completion = event.data
-        change_input = completion.input.input if isinstance(completion, processing.CompletionData) else None
+        data = event.data
         return (
-            isinstance(change_input, ChangeWriteInput)
-            and processing.matches_operation(instance, change_input.operation_id, change_input.generation)
-            and event.name == child.output_event.name
+            isinstance(data, revision.OutputData)
+            and processing.matches_operation(
+                instance,
+                data.input.parent_operation_id,
+                data.input.parent_generation,
+            )
+            and event.name == instance._revision.output_event.name
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and event.id == Reflection._active_change_child_id(instance)
+            and event.source == hsm.id(instance._revision)
+            and event.id == data.input.parent_operation_id
         )
 
     @staticmethod
-    def _matches_change_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+    def _matches_revision_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        failure = event.data
-        change_input = failure.input.input if isinstance(failure, processing.FailureData) else None
+        data = event.data
         return (
-            isinstance(change_input, ChangeWriteInput)
-            and processing.matches_operation(instance, change_input.operation_id, change_input.generation)
-            and event.name == instance._change_processing.failed_event.name
+            isinstance(data, revision.FailureData)
+            and processing.matches_operation(
+                instance,
+                data.input.parent_operation_id,
+                data.input.parent_generation,
+            )
+            and event.name == instance._revision.failed_event.name
             and event.target == hsm.id(instance)
-            and event.source == hsm.id(instance._change_processing)
-            and event.id == Reflection._active_change_child_id(instance)
+            and event.source == hsm.id(instance._revision)
+            and event.id == data.input.parent_operation_id
+        )
+
+    @staticmethod
+    def _apply_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, revision.OutputData)
+        turn = InputData(
+            cognition_input=data.input.cognition_input,
+            cognition_output=data.input.cognition_output,
+        )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            Reflection._private_event(
+                instance,
+                event,
+                _AppliedEvent,
+                _AppliedEventData(
+                    turn=turn,
+                    habit=data.applied,
+                    operation_id=data.input.parent_operation_id,
+                    generation=data.input.parent_generation,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _fail_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, revision.FailureData)
+        Reflection._dispatch_failure(
+            ctx,
+            instance,
+            operation_id=data.input.parent_operation_id,
+            metadata=dict(event.metadata),
+            failure=ability.FailureData(message=data.message),
         )
 
     @staticmethod
@@ -1286,120 +1030,19 @@ class Reflection(processing.Processing):
         return Reflection._selected_is(ctx, instance, event, BreakEvent.name)
 
     @staticmethod
-    async def _start_change(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        data = event.data
-        assert isinstance(data, _ChangeRequestedEventData)
-        write_input = processing.InputData(
-            input=ChangeWriteInput(
-                cognition_input=data.turn.cognition_input,
-                cognition_output=data.turn.cognition_output,
-                prior_episodes=data.prior_episodes,
-                intent=data.intent,
-                existing_habit=data.existing,
-                diagnostics=data.diagnostics,
-                failed_source=data.failed_source,
-                operation_id=data.operation_id,
-                generation=data.generation,
-                attempt=data.attempt,
-                create_intent=data.create_intent,
-                previous_messages=data.previous_messages,
-            ),
-            schemas=(ChangeEvent,),
-            actors={},
-        )
-        input_event = dataclasses.replace(
-            instance._change_processing.input_event.with_data_and_id(
-                write_input,
-                Reflection._change_child_id(instance, data.attempt),
-            ),
-            metadata=dict(event.metadata),
-        )
-        await hsm.dispatch(ctx, instance._change_processing, input_event)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                event,
-                _ChangeStartedEvent,
-                _ChangeStartedData(
-                    operation_id=data.operation_id,
-                    generation=data.generation,
-                    attempt=data.attempt,
-                ),
-            ),
-        )
-
-    @staticmethod
-    def _queue_change(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-        data: _ChangeRequestedEventData,
-        metadata: dict[str, object],
-    ) -> None:
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                dataclasses.replace(event, metadata=metadata),
-                _ChangeRequestedEvent,
-                data,
-            ),
-        )
-
-    @staticmethod
-    def _has_change_requested(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        return isinstance(event.data, _ChangeRequestedEventData) and Reflection._matches_operation(instance, event)
-
-    @staticmethod
-    def _has_change_started(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        data = event.data
-        return (
-            isinstance(data, _ChangeStartedData)
-            and Reflection._matches_operation(instance, event)
-            and data.operation_id == event.id
-        )
-
-    @staticmethod
-    def _change_attempt_is(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-        attempt: int,
-    ) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _ChangeStartedData) and event.data.attempt == attempt
-
-    @staticmethod
-    def _change_attempt_is_0(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        return Reflection._change_attempt_is(ctx, instance, event, 0)
-
-    @staticmethod
-    def _change_attempt_is_1(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        return Reflection._change_attempt_is(ctx, instance, event, 1)
-
-    @staticmethod
-    def _on_create_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        """CreateEvent → seed DRAFT empty habit (if new), then enter changing."""
-
+    def _dispatch_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         selected = event.data
         assert isinstance(selected, _SelectedEventData)
-        metadata = dict(event.metadata)
-        turn = selected.turn
-        prior = selected.prior_episodes
         try:
             raw = typing.cast(object, selected.selection.data)
-            create_intent = (
-                raw if isinstance(raw, CreateData) else CreateData.model_validate(raw if raw is not None else {})
-            )
+            if selected.selection.event == CreateEvent.name:
+                intent: CreateData | ChangeData = (
+                    raw if isinstance(raw, CreateData) else CreateData.model_validate(raw if raw is not None else {})
+                )
+            else:
+                intent = (
+                    raw if isinstance(raw, ChangeData) else ChangeData.model_validate(raw if raw is not None else {})
+                )
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1412,85 +1055,25 @@ class Reflection(processing.Processing):
                 ),
             )
             return
-        existing = _load_habit(instance._memory, name=create_intent.name)
-        if existing is None:
-            existing = _draft_stub_from_create(create_intent)
-            _store_habit(instance._memory, habit=existing, context_ref=turn.cognition_input.focus)
-        change_intent = ChangeData(
-            name=create_intent.name,
-            triggers=create_intent.triggers,
-            description=create_intent.description,
-            reason=create_intent.reason,
-            source=None,
-        )
-        operation_id = selected.operation_id
-        Reflection._queue_change(
+        _ = hsm.dispatch(
             ctx,
-            instance,
-            event,
-            _ChangeRequestedEventData(
-                turn=turn,
-                prior_episodes=prior,
-                intent=change_intent,
-                existing=existing,
-                operation_id=operation_id,
-                generation=selected.generation,
-                create_intent=create_intent,
-            ),
-            metadata,
-        )
-
-    @staticmethod
-    def _on_change_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        """ChangeEvent → load existing (any status) and enter changing."""
-
-        selected = event.data
-        assert isinstance(selected, _SelectedEventData)
-        metadata = dict(event.metadata)
-        turn = selected.turn
-        prior = selected.prior_episodes
-        try:
-            raw = typing.cast(object, selected.selection.data)
-            intent = raw if isinstance(raw, ChangeData) else ChangeData.model_validate(raw if raw is not None else {})
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message=str(error)),
+            instance._revision,
+            dataclasses.replace(
+                instance._revision.input_event.with_data(
+                    revision.InputData(
+                        cognition_input=selected.turn.cognition_input,
+                        cognition_output=selected.turn.cognition_output,
+                        prior_episodes=selected.prior_episodes,
+                        intent=intent,
+                        parent_operation_id=selected.operation_id,
+                        parent_generation=selected.generation,
+                    )
                 ),
-            )
-            return
-        existing = _load_habit(instance._memory, name=intent.name)
-        if existing is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message=f"Reflection change selected unknown habit: {intent.name}."),
-                ),
-            )
-            return
-        operation_id = selected.operation_id
-        Reflection._queue_change(
-            ctx,
-            instance,
-            event,
-            _ChangeRequestedEventData(
-                turn=turn,
-                prior_episodes=prior,
-                intent=intent,
-                existing=existing,
-                operation_id=operation_id,
-                generation=selected.generation,
+                id=selected.operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(instance._revision),
+                metadata=dict(event.metadata),
             ),
-            metadata,
         )
 
     @staticmethod
@@ -1528,228 +1111,6 @@ class Reflection(processing.Processing):
                     habit=applied,
                     operation_id=selected.operation_id,
                     generation=selected.generation,
-                ),
-            ),
-        )
-
-    @staticmethod
-    def _change_write_accepted(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        data = event.data
-        return (
-            isinstance(data, _ChangeWriteCheckedData)
-            and data.habit_instance is not None
-            and Reflection._matches_operation(instance, event)
-        )
-
-    @staticmethod
-    def _change_write_retryable(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        data = event.data
-        if (
-            not isinstance(data, _ChangeWriteCheckedData)
-            or data.habit_instance is not None
-            or not Reflection._matches_operation(instance, event)
-        ):
-            return False
-        messages = _diagnostic_messages(data.report)
-        if not messages:
-            return False
-        return data.attempt < _MAX_REFLECTION_FIX_ATTEMPTS and (
-            data.previous_messages is None or data.previous_messages != messages
-        )
-
-    @staticmethod
-    def _change_write_abandoned(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        del ctx
-        data = event.data
-        if (
-            not isinstance(data, _ChangeWriteCheckedData)
-            or data.habit_instance is not None
-            or not Reflection._matches_operation(instance, event)
-        ):
-            return False
-        messages = _diagnostic_messages(data.report)
-        if not messages:
-            return True
-        return data.attempt >= _MAX_REFLECTION_FIX_ATTEMPTS or (
-            data.previous_messages is not None and data.previous_messages == messages
-        )
-
-    @staticmethod
-    def _emit_change_write_checked(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        """Parse/validate change product; emit ``_ChangeWriteCheckedEvent`` only."""
-
-        completion = event.data
-        assert isinstance(completion, processing.CompletionData)
-        change_input = completion.input.input
-        assert isinstance(change_input, ChangeWriteInput)
-        turn = InputData(
-            cognition_input=change_input.cognition_input,
-            cognition_output=change_input.cognition_output,
-        )
-        prior = change_input.prior_episodes
-        operation_id = change_input.operation_id
-        try:
-            written = _change_data_from_output(completion.output)
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message=f"Reflection change failed: {error}"),
-                ),
-            )
-            return
-        existing = change_input.existing_habit
-        checked = _habit_check_from_write(
-            name=written.name,
-            source=written.source,
-            triggers=written.triggers,
-            description=written.description,
-            cognition_input=turn.cognition_input,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                event,
-                _ChangeWriteCheckedEvent,
-                _ChangeWriteCheckedData(
-                    turn=turn,
-                    prior_episodes=prior,
-                    written=written,
-                    habit_instance=checked.value if checked.ok else None,
-                    report=checked.report,
-                    previous_messages=change_input.previous_messages,
-                    operation_id=operation_id,
-                    generation=change_input.generation,
-                    attempt=change_input.attempt,
-                    intent=change_input.intent,
-                    create_intent=change_input.create_intent,
-                    existing=existing if isinstance(existing, Instance) else None,
-                ),
-            ),
-        )
-
-    @staticmethod
-    def _persist_change_draft(
-        instance: "Reflection",
-        data: _ChangeWriteCheckedData,
-    ) -> Instance | None:
-        """Upsert latest change source as DRAFT when validation failed."""
-
-        draft = _instance_for_inventory(
-            name=data.written.name,
-            source=data.written.source,
-            triggers=data.written.triggers or (data.existing.triggers if data.existing else ()),
-            description=data.written.description or (data.existing.description if data.existing else None),
-            habit_instance=None,
-            existing=data.existing,
-        )
-        if draft is None:
-            return data.existing
-        _store_habit(instance._memory, habit=draft, context_ref=data.turn.cognition_input.focus)
-        return draft
-
-    @staticmethod
-    def _accept_change_write(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _ChangeWriteCheckedData)
-        assert data.habit_instance is not None
-        stored = _instance_for_inventory(
-            name=data.written.name,
-            source=data.written.source,
-            triggers=data.written.triggers,
-            description=data.written.description,
-            habit_instance=data.habit_instance,
-            existing=data.existing,
-        )
-        assert stored is not None
-        written = _store_change_result(
-            data.written,
-            stored,
-            store=instance._memory,
-            context_ref=data.turn.cognition_input.focus,
-        )
-        applied = _applied_habit_from_change(written, create_intent=data.create_intent)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                event,
-                _AppliedEvent,
-                _AppliedEventData(
-                    turn=data.turn,
-                    habit=applied,
-                    operation_id=data.operation_id,
-                    generation=data.generation,
-                ),
-            ),
-        )
-
-    @staticmethod
-    def _retry_change_write(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _ChangeWriteCheckedData)
-        intent = data.intent
-        existing = Reflection._persist_change_draft(instance, data)
-        if existing is None:
-            existing = _load_habit(instance._memory, name=data.written.name)
-        if existing is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message=f"Reflection change fix missing existing habit: {data.written.name}."),
-                ),
-            )
-            return
-        Reflection._queue_change(
-            ctx,
-            instance,
-            event,
-            _ChangeRequestedEventData(
-                turn=data.turn,
-                prior_episodes=data.prior_episodes,
-                intent=intent,
-                existing=existing,
-                operation_id=data.operation_id,
-                generation=data.generation,
-                diagnostics=data.report,
-                failed_source=data.written.source,
-                create_intent=data.create_intent,
-                attempt=data.attempt + 1,
-                previous_messages=_diagnostic_messages(data.report),
-            ),
-            dict(event.metadata),
-        )
-
-    @staticmethod
-    def _abandon_change_write(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _ChangeWriteCheckedData)
-        _ = Reflection._persist_change_draft(instance, data)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                event,
-                _StageFailedEvent,
-                ability.FailureData(
-                    message=(
-                        "Reflection change abandoned: same diagnostic message after fix or retry budget exhausted:\n"
-                        f"{data.report.render()}"
-                    )
                 ),
             ),
         )
@@ -1869,22 +1230,19 @@ class Reflection(processing.Processing):
             hsm.transition(
                 hsm.on(_SelectedEvent),
                 hsm.guard(_selected_is_create),
-                hsm.effect(_on_create_event),
+                hsm.effect(_dispatch_revision),
+                hsm.target("/Reflection/revising"),
             ),
             hsm.transition(
                 hsm.on(_SelectedEvent),
                 hsm.guard(_selected_is_change),
-                hsm.effect(_on_change_event),
+                hsm.effect(_dispatch_revision),
+                hsm.target("/Reflection/revising"),
             ),
             hsm.transition(
                 hsm.on(_SelectedEvent),
                 hsm.guard(_selected_is_break),
                 hsm.effect(_on_break_event),
-            ),
-            hsm.transition(
-                hsm.on(_ChangeRequestedEvent),
-                hsm.guard(_has_change_requested),
-                hsm.target("/Reflection/starting_change"),
             ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
@@ -1910,60 +1268,24 @@ class Reflection(processing.Processing):
             ),
         ),
         hsm.state(
-            "starting_change",
-            hsm.defer(input_event, processing.CancelEvent),
-            hsm.activity(_start_change),
-            hsm.transition(
-                hsm.on(_ChangeStartedEvent),
-                hsm.guard(_has_change_started),
-                hsm.target("/Reflection/change_attempt"),
-            ),
-            hsm.transition(
-                hsm.on(_StageFailedEvent),
-                hsm.guard(_has_stage_failure),
-                hsm.effect(_fail_from_stage),
-                hsm.target("/Reflection/idle"),
-            ),
-        ),
-        hsm.choice(
-            "change_attempt",
-            hsm.transition(hsm.guard(_change_attempt_is_0), hsm.target("/Reflection/changing/attempt_0")),
-            hsm.transition(hsm.guard(_change_attempt_is_1), hsm.target("/Reflection/changing/attempt_1")),
-            hsm.transition(hsm.target("/Reflection/changing/attempt_2")),
-        ),
-        hsm.state(
-            "changing",
+            "revising",
             hsm.defer(input_event),
+            hsm.transition(
+                hsm.on(bot.RebootEvent),
+                hsm.guard(_is_revision_reboot),
+                hsm.effect(_request_reboot),
+                hsm.target("/Reflection/rebooting"),
+            ),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(_is_reflection_cancel_request),
-                hsm.effect(_cancel_change),
+                hsm.effect(_cancel_revision),
                 hsm.target("/Reflection/cancelling"),
             ),
             hsm.transition(
-                hsm.on(processing.OutputEvent),
-                hsm.guard(_matches_change_output),
-                hsm.effect(_emit_change_write_checked),
-            ),
-            hsm.transition(
-                hsm.on(_ChangeWriteCheckedEvent),
-                hsm.guard(_change_write_accepted),
-                hsm.effect(_accept_change_write),
-            ),
-            hsm.transition(
-                hsm.on(_ChangeWriteCheckedEvent),
-                hsm.guard(_change_write_retryable),
-                hsm.effect(_retry_change_write),
-            ),
-            hsm.transition(
-                hsm.on(_ChangeRequestedEvent),
-                hsm.guard(_has_change_requested),
-                hsm.target("/Reflection/starting_change"),
-            ),
-            hsm.transition(
-                hsm.on(_ChangeWriteCheckedEvent),
-                hsm.guard(_change_write_abandoned),
-                hsm.effect(_abandon_change_write),
+                hsm.on(revision.OutputEvent),
+                hsm.guard(_matches_revision_output),
+                hsm.effect(_apply_revision),
             ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
@@ -1972,24 +1294,15 @@ class Reflection(processing.Processing):
             ),
             hsm.transition(
                 hsm.on(ability.FailedEvent),
-                hsm.guard(_matches_change_failure),
-                hsm.effect(_fail_child),
-                hsm.target("/Reflection/idle"),
-            ),
-            hsm.transition(
-                hsm.on(_StageFailedEvent),
-                hsm.guard(_has_stage_failure),
-                hsm.effect(_fail_from_stage),
+                hsm.guard(_matches_revision_failure),
+                hsm.effect(_fail_revision),
                 hsm.target("/Reflection/idle"),
             ),
             hsm.transition(
                 hsm.after(_child_timeout_delay),
-                hsm.effect(_cancel_change_timeout),
+                hsm.effect(_cancel_revision_timeout),
                 hsm.target("/Reflection/timing_out"),
             ),
-            hsm.state("attempt_0"),
-            hsm.state("attempt_1"),
-            hsm.state("attempt_2"),
         ),
         hsm.state(
             "storing",
@@ -2018,6 +1331,12 @@ class Reflection(processing.Processing):
             "cancelling",
             hsm.defer(input_event),
             hsm.transition(
+                hsm.on(bot.RebootEvent),
+                hsm.guard(_is_revision_reboot),
+                hsm.effect(_request_reboot),
+                hsm.target("/Reflection/rebooting"),
+            ),
+            hsm.transition(
                 hsm.on(processing.CancelledEvent),
                 hsm.guard(_matches_cancelled),
                 hsm.effect(_emit_reflection_cancelled),
@@ -2032,6 +1351,12 @@ class Reflection(processing.Processing):
         hsm.state(
             "timing_out",
             hsm.defer(input_event),
+            hsm.transition(
+                hsm.on(bot.RebootEvent),
+                hsm.guard(_is_revision_reboot),
+                hsm.effect(_request_reboot),
+                hsm.target("/Reflection/rebooting"),
+            ),
             hsm.transition(
                 hsm.on(processing.CancelledEvent),
                 hsm.guard(_matches_cancelled),
@@ -2078,14 +1403,14 @@ class Reflection(processing.Processing):
             processor=leaf,
             instructions=type(self).select_instructions,
         )
-        self._change_processing = processing.Processing(
+        self._revision = revision.Revision(
             processor=leaf,
-            instructions=type(self).change_instructions,
+            memory=memory,
         )
         self._memory = memory
         self._attachment_group: attachment.Group = attachment.Group(
             self._select_processing,
-            self._change_processing,
+            self._revision,
             self._memory,
         )
         self._events = habit_events()
