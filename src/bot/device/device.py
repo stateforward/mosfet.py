@@ -1,3 +1,4 @@
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
@@ -27,11 +28,42 @@ _DEFAULT_FIRMWARE = hsm.define(
     hsm.observe(observer),
 )
 _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT = datetime.timedelta(minutes=5)
-_FirmwareInitializingCleanedUpEvent = hsm.Event[str](
+
+
+class _FirmwareInitializingCleanupData(pydantic.BaseModel):
+    """Result details for rollback after firmware initialization fails."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    message: str = pydantic.Field(
+        description="Human-readable reason firmware initialization or its rollback failed.",
+        examples=["Device firmware initialization timed out after 300 seconds."],
+    )
+
+
+_FirmwareInitializingCleanedUpEvent = hsm.Event[_FirmwareInitializingCleanupData](
     name="device.firmware.initializing.cleaned_up",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(str),
+    schema=_FirmwareInitializingCleanupData,
 )
+_FirmwareInitializingCleanupFailedEvent = hsm.Event[_FirmwareInitializingCleanupData](
+    name="device.firmware.initializing.cleanup_failed",
+    kind=hsm.ErrorEventKind,
+    schema=_FirmwareInitializingCleanupData,
+)
+_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY = "bot.device.firmware_lifecycle_operation"
+
+
+@dataclasses.dataclass(slots=True)
+class _FirmwareInitializationOperation:
+    device_id: str
+    active: bool = True
+
+
+@dataclasses.dataclass(slots=True)
+class _FirmwareCleanupOperation:
+    device_id: str
+    active: bool = True
 
 
 def _require_attach_world_scope(world: World, instance: "Device") -> None:
@@ -105,6 +137,44 @@ class Device(hsm.Instance, attachment.Attachment):
         await hsm.Instance.dispatch(self, ctx, event)
 
     @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        await hsm.Instance.stop(self, ctx)
+
+        firmware = self._firmware
+        firmware_id = hsm.id(firmware) if firmware is not None and firmware.state() else ""
+        firmware_instances = None if firmware is None else firmware.context().value(hsm.Keys.Instances)
+        if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
+            await hsm.stop(firmware)
+        if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
+            raise RuntimeError("Device firmware remained started after Device stop.")
+        if (
+            firmware_id
+            and isinstance(firmware_instances, collections.abc.MutableMapping)
+            and firmware_instances.get(firmware_id) is firmware
+        ):
+            _ = firmware_instances.pop(firmware_id, None)
+        if self._firmware is firmware:
+            self._firmware = None
+
+    @typing.override
+    async def restart(self, ctx: hsm.Context, data: typing.Any = None) -> typing.Self | None:
+        restart_ctx = ctx
+        if ctx is self.context():
+            values: dict[typing.Hashable, object] = {}
+            instances = ctx.value(hsm.Keys.Instances)
+            owner = ctx.value(hsm.Keys.Owner)
+            if instances is not None:
+                values[hsm.Keys.Instances] = instances
+            if owner is not None:
+                values[hsm.Keys.HSM] = owner
+            restart_ctx = hsm.Context(values=values)
+        if restart_ctx.is_done():
+            return None
+        await self.stop(restart_ctx)
+        _ = await hsm.Instance.start(self, restart_ctx, data)
+        return self
+
+    @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
         if event.name in self.model.events:
             return super().dispatch(ctx, event)
@@ -154,20 +224,52 @@ class Device(hsm.Instance, attachment.Attachment):
         )
         self._on_firmware_started(ctx, event)
         await self._after_firmware_started(lifetime, event)
-        _ = self.dispatch(
-            ctx,
-            FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData()),
-        )
 
     @staticmethod
     async def _initialize_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
+        device_id = hsm.id(instance)
+        operation = _FirmwareInitializationOperation(device_id=device_id)
         try:
-            await instance._initialize_firmware(ctx, event)
-        except Exception as error:
+            try:
+                await instance._initialize_firmware(ctx, event)
+            except Exception as error:
+                result = FirmwareInitializingFailedEvent.with_data(
+                    FirmwareInitializingFailedEventData(message=str(error))
+                )
+            else:
+                result = FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData())
             _ = instance.dispatch(
                 ctx,
-                FirmwareInitializingFailedEvent.with_data(FirmwareInitializingFailedEventData(message=str(error))),
+                dataclasses.replace(
+                    result,
+                    source=device_id,
+                    target=device_id,
+                    metadata={
+                        **event.metadata,
+                        _FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY: operation,
+                    },
+                ),
             )
+            await asyncio.wrap_future(ctx.done())
+        finally:
+            operation.active = False
+
+    @staticmethod
+    def _is_current_firmware_initialization_result(
+        ctx: hsm.Context,
+        instance: "Device",
+        event: hsm.Event,
+    ) -> bool:
+        del ctx
+        operation = event.metadata.get(_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY)
+        device_id = hsm.id(instance)
+        return (
+            isinstance(operation, _FirmwareInitializationOperation)
+            and operation.active
+            and operation.device_id == device_id
+            and event.source == device_id
+            and event.target == device_id
+        )
 
     @staticmethod
     def _firmware_initializing_timeout_delay(
@@ -180,26 +282,99 @@ class Device(hsm.Instance, attachment.Attachment):
 
     @staticmethod
     async def _cleanup_failed_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        data = event.data
-        if isinstance(data, FirmwareInitializingFailedEventData):
-            failure_message = data.message
-        else:
-            seconds = instance._firmware_initializing_timeout.total_seconds()
-            failure_message = f"Device firmware initialization timed out after {seconds:g} seconds."
-        firmware = instance._firmware
-        instance._firmware = None
-        if firmware is not None and firmware.state():
-            try:
-                # Stop against the firmware's own context so cancel completes hsm.stop's wait.
-                await hsm.stop(firmware)
-            except Exception as error:
-                failure_message = f"Device firmware initialization rollback failed: {error}"
-        _ = hsm.dispatch(ctx, instance, _FirmwareInitializingCleanedUpEvent.with_data(failure_message))
+        device_id = hsm.id(instance)
+        operation = _FirmwareCleanupOperation(device_id=device_id)
+        try:
+            data = event.data
+            if isinstance(data, FirmwareInitializingFailedEventData):
+                failure_message = data.message
+            else:
+                seconds = instance._firmware_initializing_timeout.total_seconds()
+                failure_message = f"Device firmware initialization timed out after {seconds:g} seconds."
+            firmware = instance._firmware
+            if firmware is not None and firmware.state():
+                try:
+                    # Stop against the firmware's own context so cancel completes hsm.stop's wait.
+                    await hsm.stop(firmware)
+                except Exception as error:
+                    result = _FirmwareInitializingCleanupFailedEvent.with_data(
+                        _FirmwareInitializingCleanupData(
+                            message=f"Device firmware initialization rollback failed: {error}"
+                        )
+                    )
+                    _ = hsm.dispatch(
+                        ctx,
+                        instance,
+                        dataclasses.replace(
+                            result,
+                            source=device_id,
+                            target=device_id,
+                            metadata={
+                                **event.metadata,
+                                _FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY: operation,
+                            },
+                        ),
+                    )
+                    return
+            if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
+                result = _FirmwareInitializingCleanupFailedEvent.with_data(
+                    _FirmwareInitializingCleanupData(
+                        message="Device firmware initialization rollback returned before firmware stopped."
+                    )
+                )
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        result,
+                        source=device_id,
+                        target=device_id,
+                        metadata={
+                            **event.metadata,
+                            _FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY: operation,
+                        },
+                    ),
+                )
+                return
+            if instance._firmware is firmware:
+                instance._firmware = None
+            result = _FirmwareInitializingCleanedUpEvent.with_data(
+                _FirmwareInitializingCleanupData(message=failure_message)
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    result,
+                    source=device_id,
+                    target=device_id,
+                    metadata={
+                        **event.metadata,
+                        _FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY: operation,
+                    },
+                ),
+            )
+            await asyncio.wrap_future(ctx.done())
+        finally:
+            operation.active = False
 
     @staticmethod
-    def _clear_failed_firmware_reference(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        del ctx, event
-        instance._firmware = None
+    def _is_current_firmware_cleanup_completion(
+        ctx: hsm.Context,
+        instance: "Device",
+        event: hsm.Event,
+    ) -> bool:
+        del ctx
+        operation = event.metadata.get(_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY)
+        device_id = hsm.id(instance)
+        return (
+            isinstance(operation, _FirmwareCleanupOperation)
+            and operation.active
+            and operation.device_id == device_id
+            and event.source == device_id
+            and event.target == device_id
+            and instance._firmware is None
+        )
 
     @staticmethod
     def _dispatch_failed_firmware_attachment(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
@@ -283,10 +458,12 @@ class Device(hsm.Instance, attachment.Attachment):
             ),
             hsm.transition(
                 hsm.on(FirmwareInitializingDoneEvent),
+                hsm.guard(_is_current_firmware_initialization_result),
                 hsm.target("../detached"),
             ),
             hsm.transition(
                 hsm.on(FirmwareInitializingFailedEvent),
+                hsm.guard(_is_current_firmware_initialization_result),
                 hsm.target("../initialization_failing"),
             ),
         ),
@@ -296,13 +473,10 @@ class Device(hsm.Instance, attachment.Attachment):
             hsm.defer(attachment.AttachEvent, attachment.DetachEvent),
             hsm.transition(
                 hsm.on(_FirmwareInitializingCleanedUpEvent),
+                hsm.guard(_is_current_firmware_cleanup_completion),
                 hsm.target("../failed"),
             ),
-            hsm.transition(
-                hsm.after(_firmware_initializing_timeout_delay),
-                hsm.effect(_clear_failed_firmware_reference),
-                hsm.target("../failed"),
-            ),
+            hsm.transition(hsm.on(_FirmwareInitializingCleanupFailedEvent)),
         ),
         hsm.state(
             "failed",

@@ -23,6 +23,8 @@ from bot.device.events import (
     FirmwareInitializingFailedEvent,
     ActivateEventData,
     DeactivateEventData,
+    FirmwareInitializingDoneEventData,
+    FirmwareInitializingFailedEventData,
 )
 from bot.world import World
 from tests.hsm_instance_state import device_bots, device_firmware, device_peripherals
@@ -307,6 +309,90 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
     assert agents == ()
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData()),
+        FirmwareInitializingFailedEvent.with_data(FirmwareInitializingFailedEventData(message="forged failure")),
+    ],
+)
+def test_device_ignores_uncorrelated_firmware_initialization_results(event: hsm.Event[typing.Any]) -> None:
+    async def run() -> None:
+        release = asyncio.Event()
+        device = SlowInitializingDevice(release)
+        world = await start_device_in_world(device)
+
+        await device.dispatch(world.context, event)
+
+        assert device.state() == "/Device/initializing"
+
+        release.set()
+        await wait_until(lambda: device.state() == "/Device/detached")
+
+    asyncio.run(run())
+
+
+def test_device_ignores_stale_firmware_initialization_result_after_restart() -> None:
+    class RestartingFirmwareResultDevice(Device):
+        def __init__(self, releases: tuple[asyncio.Event, asyncio.Event]) -> None:
+            super().__init__()
+            self.releases = releases
+            self.attempt = 0
+            self.results: list[hsm.Event[typing.Any]] = []
+
+        @override
+        async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
+            release = self.releases[self.attempt]
+            self.attempt += 1
+            _ = await release.wait()
+            await super()._initialize_firmware(ctx, event)
+
+        @override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+            if event.name == FirmwareInitializingDoneEvent.name and event.source:
+                self.results.append(event)
+            return super().dispatch(ctx, event)
+
+    async def run() -> None:
+        first_release = asyncio.Event()
+        second_release = asyncio.Event()
+        first_release.set()
+        device = RestartingFirmwareResultDevice((first_release, second_release))
+        world = await start_device_in_world(device)
+        await wait_until(lambda: device.state() == "/Device/detached")
+
+        assert len(device.results) == 1
+        stale_result = device.results[0]
+        first_firmware = device_firmware(device)
+        assert first_firmware is not None
+        instances = world.context.value(hsm.Keys.Instances)
+        assert isinstance(instances, collections.abc.Mapping)
+        first_firmware_id = hsm.id(first_firmware)
+
+        _ = await device.restart(world.context)
+
+        assert device.state() == "/Device/initializing"
+        assert first_firmware.state() == first_firmware.take_snapshot().QualifiedName
+        assert first_firmware_id not in instances
+
+        await device.dispatch(world.context, stale_result)
+
+        assert device.state() == "/Device/initializing"
+
+        second_release.set()
+        await wait_until(lambda: device.state() == "/Device/detached")
+        second_firmware = device_firmware(device)
+        assert second_firmware is not None
+        second_firmware_id = hsm.id(second_firmware)
+
+        await hsm.stop(device)
+
+        assert second_firmware.state() == second_firmware.take_snapshot().QualifiedName
+        assert second_firmware_id not in instances
+
+    asyncio.run(run())
+
+
 def test_device_attach_result_bridge_is_removed() -> None:
     assert inspect.iscoroutinefunction(Device.attach)
     assert not hasattr(device_module, "_ATTACH_WAITERS")
@@ -438,21 +524,32 @@ def test_device_firmware_initialization_timeout_stops_started_firmware_child() -
     assert firmware_stopped
 
 
-def test_device_firmware_initialization_cleanup_timeout_clears_started_firmware_reference() -> None:
-    async def run() -> tuple[str, bool]:
+def test_device_retains_live_firmware_ownership_when_cleanup_does_not_complete() -> None:
+    async def run() -> None:
         world = World()
         device = StopHangingStartedFirmwareDevice()
 
         _ = await hsm.started(world.context, device, device.model)
         await asyncio.sleep(0.05)
-        await wait_until(lambda: device.state() == "/Device/failed")
+        await wait_until(lambda: device.state() == "/Device/initialization_failing")
+        await asyncio.sleep(0.05)
 
-        return device.state(), device_firmware(device) is None
+        firmware = device.started_firmware
+        assert firmware is not None
+        instances = world.context.value(hsm.Keys.Instances)
 
-    state, firmware_cleared = asyncio.run(run())
+        await device.dispatch(
+            world.context,
+            hsm.Event(name="device.firmware.initializing.cleaned_up", kind=hsm.CompletionEventKind),
+        )
 
-    assert state == "/Device/failed"
-    assert firmware_cleared
+        assert device_firmware(device) is firmware
+        assert device.state() == "/Device/initialization_failing"
+        assert firmware.state() == "/DeviceFirmware/initialized"
+        assert isinstance(instances, collections.abc.Mapping)
+        assert instances[hsm.id(firmware)] is firmware
+
+    asyncio.run(run())
 
 
 def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_times_out() -> None:
@@ -663,7 +760,8 @@ def test_device_model_tracks_initialization_attachment_and_activation_state() ->
     assert "device.firmware.initializing.done" in transitions["/Device/initializing"]
     assert "device.firmware.initializing.failed" in transitions["/Device/initializing"]
     assert "device.firmware.initializing.cleaned_up" in transitions["/Device/initialization_failing"]
-    assert any(
+    assert "device.firmware.initializing.cleanup_failed" in transitions["/Device/initialization_failing"]
+    assert not any(
         "_firmware_initializing_timeout_delay" in event for event in transitions["/Device/initialization_failing"]
     )
     assert "attachment.attach" in deferred_map["/Device/initializing"]
