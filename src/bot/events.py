@@ -46,6 +46,24 @@ class DeactivateEventData(pydantic.BaseModel):
     )
 
 
+RebootReason = typing.Literal[
+    "cognition_child_teardown_failed",
+    "cognition_cancel_teardown_failed",
+    "cognition_detach_rollback_failed",
+]
+
+
+class RebootEventData(pydantic.BaseModel):
+    """Request a full Bot-owned teardown and activation cycle."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    reason: RebootReason = pydantic.Field(
+        description="Stable unrecoverable failure category that requires a clean robot lifecycle restart.",
+        examples=["cognition_child_teardown_failed"],
+    )
+
+
 class InputEventData(pydantic.BaseModel):
     """Interrupt signal observed by an active bot."""
 
@@ -277,6 +295,10 @@ ActivateEvent = hsm.Event[ActivateEventData](
 DeactivateEvent = hsm.Event[DeactivateEventData](
     name="bot.deactivate",
     schema=DeactivateEventData,
+)
+RebootEvent = hsm.Event[RebootEventData](
+    name="bot.reboot",
+    schema=RebootEventData,
 )
 InputEvent = hsm.Event[InputEventData](
     name="bot.input",

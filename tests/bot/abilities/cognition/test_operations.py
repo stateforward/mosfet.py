@@ -1,7 +1,7 @@
 import bot
 from bot.abilities import ability
 from bot.abilities import processing
-from bot.abilities.cognition import dispatch
+from bot.abilities.cognition import operations
 from bot.protocols import attachment
 from bot.device import Device
 
@@ -16,9 +16,9 @@ import pytest
 
 
 class _UncooperativeChild(ability.Ability[dict[str, object], dict[str, object]]):
-    input_event = ability.ability_input_event("test.dispatch.child.input", dict[str, object])
+    input_event = ability.ability_input_event("test.operation.child.input", dict[str, object])
     output_event = hsm.Event[dict[str, object]](
-        name="test.dispatch.child.output",
+        name="test.operation.child.output",
         schema=typing.cast(typing.Any, dict[str, object]),
     )
     submodel = hsm.define(
@@ -33,9 +33,9 @@ class _UncooperativeChild(ability.Ability[dict[str, object], dict[str, object]])
 
 class _OperationOwner(hsm.Instance):
     child: _UncooperativeChild
-    terminals: list[dispatch.TerminalData]
-    resolutions: list[dispatch.CancelResolvedData]
-    unresolved: list[dispatch.ResolveCancelData]
+    terminals: list[operations.TerminalData]
+    resolutions: list[operations.CancelResolvedData]
+    unresolved: list[operations.ResolveCancelData]
     terminal_events: list[hsm.Event[typing.Any]]
     model: typing.ClassVar[hsm.Model]
 
@@ -49,28 +49,28 @@ class _OperationOwner(hsm.Instance):
 
 
 def _forward(ctx: hsm.Context, instance: _OperationOwner, event: hsm.Event[typing.Any]) -> None:
-    dispatch.forward_terminal(ctx, instance, event)
+    operations.forward_terminal(ctx, instance, event)
 
 
 def _record(ctx: hsm.Context, instance: _OperationOwner, event: hsm.Event[typing.Any]) -> None:
     del ctx
-    assert isinstance(event.data, dispatch.TerminalData)
+    assert isinstance(event.data, operations.TerminalData)
     instances = instance.context().value(hsm.Keys.Instances)
     assert isinstance(instances, collections.abc.Mapping)
-    assert isinstance(instances.get(event.source), dispatch.Operation)
+    assert isinstance(instances.get(event.source), operations.Operation)
     instance.terminals.append(event.data)
     instance.terminal_events.append(event)
 
 
 def _record_resolution(ctx: hsm.Context, instance: _OperationOwner, event: hsm.Event[typing.Any]) -> None:
     del ctx
-    assert isinstance(event.data, dispatch.CancelResolvedData)
+    assert isinstance(event.data, operations.CancelResolvedData)
     instance.resolutions.append(event.data)
 
 
 def _record_unresolved(ctx: hsm.Context, instance: _OperationOwner, event: hsm.Event[typing.Any]) -> None:
     del ctx
-    assert isinstance(event.data, dispatch.ResolveCancelData)
+    assert isinstance(event.data, operations.ResolveCancelData)
     instance.unresolved.append(event.data)
 
 
@@ -80,16 +80,16 @@ _OperationOwner.model = hsm.define(
     hsm.state(
         "active",
         hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_forward)),
-        hsm.transition(hsm.on(dispatch.CancelResolvedEvent), hsm.effect(_record_resolution)),
-        hsm.transition(hsm.on(dispatch.CancelUnresolvedEvent), hsm.effect(_record_unresolved)),
+        hsm.transition(hsm.on(operations.CancelResolvedEvent), hsm.effect(_record_resolution)),
+        hsm.transition(hsm.on(operations.CancelUnresolvedEvent), hsm.effect(_record_unresolved)),
         hsm.transition(
-            hsm.on(dispatch.CancelTeardownTimedOutEvent),
-            hsm.guard(dispatch.matches_teardown_timeout),
-            hsm.effect(dispatch.force_cancel_timeout),
+            hsm.on(operations.CancelTeardownTimedOutEvent),
+            hsm.guard(operations.matches_teardown_timeout),
+            hsm.effect(operations.force_cancel_timeout),
         ),
         hsm.transition(
-            hsm.on(dispatch.TerminalEvent),
-            hsm.effect(_record, dispatch.retire_resolution, dispatch.retire_operation),
+            hsm.on(operations.TerminalEvent),
+            hsm.effect(_record, operations.retire_resolution, operations.retire_operation),
         ),
     ),
 )
@@ -109,7 +109,7 @@ def test_focus_metadata_cannot_add_unconfigured_device_candidate() -> None:
             ),
         )
         with pytest.raises(RuntimeError, match="outside available device candidates"):
-            await dispatch.dispatch_selected_events(
+            await operations.dispatch_selected_events(
                 hsm.Context(),
                 input,
                 selection,
@@ -122,13 +122,13 @@ def test_focus_metadata_cannot_add_unconfigured_device_candidate() -> None:
 
 
 def test_child_timeout_waits_for_bounded_cancellation_before_truthful_terminal() -> None:
-    async def run() -> tuple[list[dispatch.TerminalData], list[dispatch.TerminalData], int]:
+    async def run() -> tuple[list[operations.TerminalData], list[operations.TerminalData], int]:
         ctx = hsm.Context()
         child = _UncooperativeChild()
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        await dispatch.Operation.begin(
+        await operations.Operation.begin(
             owner=owner,
             child=child,
             request=child.input_event.with_data_and_id({}, "held-child"),
@@ -141,7 +141,7 @@ def test_child_timeout_waits_for_bounded_cancellation_before_truthful_terminal()
         await asyncio.sleep(0.02)
         instances = owner.context().value(hsm.Keys.Instances)
         operation_count = (
-            sum(isinstance(actor, dispatch.Operation) for actor in instances.values())
+            sum(isinstance(actor, operations.Operation) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -158,20 +158,20 @@ def test_child_timeout_waits_for_bounded_cancellation_before_truthful_terminal()
 
 
 def test_child_terminal_payload_schema_is_complete_and_json_safe() -> None:
-    schema = dispatch.TerminalData.model_json_schema()
+    schema = operations.TerminalData.model_json_schema()
 
     assert "terminal" not in schema.get("properties", {})
     assert {"operation", "outcome", "terminal_name", "output", "failure"} <= set(schema.get("properties", {}))
 
 
 def test_cancel_resolution_reports_no_exact_match_with_unrelated_mediator() -> None:
-    async def run() -> tuple[list[dispatch.ResolveCancelData], str]:
+    async def run() -> tuple[list[operations.ResolveCancelData], str]:
         ctx = hsm.Context()
         child = _UncooperativeChild()
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        unrelated = await dispatch.Operation.begin(
+        unrelated = await operations.Operation.begin(
             owner=owner,
             child=child,
             request=child.input_event.with_data_and_id({}, "unrelated-request"),
@@ -179,11 +179,10 @@ def test_cancel_resolution_reports_no_exact_match_with_unrelated_mediator() -> N
             phase="unrelated",
             timeout=datetime.timedelta(seconds=1),
         )
-        await dispatch.CancelResolution.begin(
+        await operations.CancelResolution.begin(
             owner=owner,
             operation_id="missing-operation",
             token="missing-token",
-            phase="missing-phase",
             metadata={},
             teardown_timeout=datetime.timedelta(seconds=1),
         )
@@ -191,7 +190,7 @@ def test_cancel_resolution_reports_no_exact_match_with_unrelated_mediator() -> N
         instances = owner.context().value(hsm.Keys.Instances)
         assert isinstance(instances, collections.abc.Mapping)
         actor = instances[unrelated.actor_id]
-        assert isinstance(actor, dispatch.Operation)
+        assert isinstance(actor, operations.Operation)
         return owner.unresolved, actor.state()
 
     unresolved, unrelated_state = asyncio.run(run())
@@ -208,7 +207,7 @@ def test_host_cancel_timeout_preserves_exact_resolution_provenance() -> None:
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        operation = await dispatch.Operation.begin(
+        operation = await operations.Operation.begin(
             owner=owner,
             child=child,
             request=child.input_event.with_data_and_id({}, "stubborn-request"),
@@ -216,11 +215,10 @@ def test_host_cancel_timeout_preserves_exact_resolution_provenance() -> None:
             phase="stubborn",
             timeout=datetime.timedelta(milliseconds=10),
         )
-        request = await dispatch.CancelResolution.begin(
+        request = await operations.CancelResolution.begin(
             owner=owner,
             operation_id=operation.operation_id,
             token=operation.token,
-            phase=operation.phase,
             metadata={},
             teardown_timeout=datetime.timedelta(milliseconds=10),
         )
@@ -231,21 +229,21 @@ def test_host_cancel_timeout_preserves_exact_resolution_provenance() -> None:
         assert owner.resolutions
         resolved = owner.resolutions[0]
         resolved_event = dataclasses.replace(
-            dispatch.CancelResolvedEvent.with_data(resolved),
+            operations.CancelResolvedEvent.with_data(resolved),
             id=operation.operation_id,
             source=operation.actor_id,
             target=operation.owner_id,
             metadata={
-                dispatch.OPERATION_METADATA_KEY: operation,
-                dispatch.RESOLVE_CANCEL_METADATA_KEY: request,
+                operations.OPERATION_METADATA_KEY: operation,
+                operations.RESOLVE_CANCEL_METADATA_KEY: request,
             },
         )
-        dispatch.complete_resolution(ctx, owner, resolved_event)
-        dispatch.cancel_resolved_operation(ctx, owner, resolved_event)
+        operations.complete_resolution(ctx, owner, resolved_event)
+        operations.cancel_resolved_operation(ctx, owner, resolved_event)
         await asyncio.sleep(0.03)
         instances = owner.context().value(hsm.Keys.Instances)
         actor_count = (
-            sum(isinstance(actor, dispatch.Operation | dispatch.CancelResolution) for actor in instances.values())
+            sum(isinstance(actor, operations.Operation | operations.CancelResolution) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -253,21 +251,21 @@ def test_host_cancel_timeout_preserves_exact_resolution_provenance() -> None:
 
     terminal, actor_count = asyncio.run(run())
 
-    assert isinstance(terminal.data, dispatch.TerminalData)
+    assert isinstance(terminal.data, operations.TerminalData)
     assert terminal.data.outcome == "cancel_timeout"
-    assert isinstance(terminal.metadata.get(dispatch.CANCEL_METADATA_KEY), dispatch.CancelData)
-    assert isinstance(terminal.metadata.get(dispatch.RESOLVE_CANCEL_METADATA_KEY), dispatch.ResolveCancelData)
+    assert isinstance(terminal.metadata.get(operations.CANCEL_METADATA_KEY), operations.CancelData)
+    assert isinstance(terminal.metadata.get(operations.RESOLVE_CANCEL_METADATA_KEY), operations.ResolveCancelData)
     assert actor_count == 0
 
 
 def test_operation_rejects_host_cancel_with_wrong_capability_token() -> None:
-    async def run() -> tuple[str, list[dispatch.TerminalData]]:
+    async def run() -> tuple[str, list[operations.TerminalData]]:
         ctx = hsm.Context()
         child = _UncooperativeChild()
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        operation = await dispatch.Operation.begin(
+        operation = await operations.Operation.begin(
             owner=owner,
             child=child,
             request=child.input_event.with_data_and_id({}, "reused-request"),
@@ -278,8 +276,8 @@ def test_operation_rejects_host_cancel_with_wrong_capability_token() -> None:
         instances = owner.context().value(hsm.Keys.Instances)
         assert isinstance(instances, collections.abc.Mapping)
         actor = instances[operation.actor_id]
-        assert isinstance(actor, dispatch.Operation)
-        wrong = dispatch.CancelData(
+        assert isinstance(actor, operations.Operation)
+        wrong = operations.CancelData(
             owner_id=operation.owner_id,
             child_id=operation.child_id,
             request_id=operation.request_id,
@@ -291,11 +289,11 @@ def test_operation_rejects_host_cancel_with_wrong_capability_token() -> None:
             ctx,
             actor,
             dataclasses.replace(
-                dispatch.CancelEvent.with_data(wrong),
+                operations.CancelEvent.with_data(wrong),
                 id=operation.operation_id,
                 source=operation.owner_id,
                 target=operation.actor_id,
-                metadata={dispatch.CANCEL_METADATA_KEY: wrong},
+                metadata={operations.CANCEL_METADATA_KEY: wrong},
             ),
         )
         await asyncio.sleep(0)
@@ -308,13 +306,13 @@ def test_operation_rejects_host_cancel_with_wrong_capability_token() -> None:
 
 
 def test_operation_rejects_cancel_resolution_with_wrong_capability_token() -> None:
-    async def run() -> list[dispatch.CancelResolvedData]:
+    async def run() -> list[operations.CancelResolvedData]:
         ctx = hsm.Context()
         child = _UncooperativeChild()
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        operation = await dispatch.Operation.begin(
+        operation = await operations.Operation.begin(
             owner=owner,
             child=child,
             request=child.input_event.with_data_and_id({}, "reused-request"),
@@ -325,23 +323,22 @@ def test_operation_rejects_cancel_resolution_with_wrong_capability_token() -> No
         instances = owner.context().value(hsm.Keys.Instances)
         assert isinstance(instances, collections.abc.Mapping)
         actor = instances[operation.actor_id]
-        assert isinstance(actor, dispatch.Operation)
-        wrong = dispatch.ResolveCancelData(
+        assert isinstance(actor, operations.Operation)
+        wrong = operations.ResolveCancelData(
             owner_id=operation.owner_id,
             operation_id=operation.operation_id,
             token="wrong-token",
-            phase=operation.phase,
             resolver_id="wrong-resolver",
         )
         _ = await hsm.dispatch(
             ctx,
             actor,
             dataclasses.replace(
-                dispatch.ResolveCancelEvent.with_data(wrong),
+                operations.ResolveCancelEvent.with_data(wrong),
                 id=operation.operation_id,
                 source=operation.owner_id,
                 target=operation.actor_id,
-                metadata={dispatch.RESOLVE_CANCEL_METADATA_KEY: wrong},
+                metadata={operations.RESOLVE_CANCEL_METADATA_KEY: wrong},
             ),
         )
         await asyncio.sleep(0)
@@ -357,7 +354,7 @@ def test_operation_prefers_explicit_cancel_token_over_inherited_metadata() -> No
         owner = _OperationOwner(child)
         _ = await hsm.started(ctx, owner, owner.model)
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
-        forged = dispatch.OperationData(
+        forged = operations.OperationData(
             operation_id="current-operation",
             token="forged-token",
             owner_id="forged-owner",
@@ -366,14 +363,14 @@ def test_operation_prefers_explicit_cancel_token_over_inherited_metadata() -> No
             phase="forged-phase",
             actor_id="forged-actor",
         )
-        operation = await dispatch.Operation.begin(
+        operation = await operations.Operation.begin(
             owner=owner,
             child=child,
             request=dataclasses.replace(
                 child.input_event.with_data_and_id({}, "reused-request"),
                 metadata={
-                    dispatch.OPERATION_METADATA_KEY: forged,
-                    dispatch.CANCEL_TOKEN_METADATA_KEY: "legitimate-token",
+                    operations.OPERATION_METADATA_KEY: forged,
+                    operations.CANCEL_TOKEN_METADATA_KEY: "legitimate-token",
                 },
             ),
             operation_id="current-operation",
@@ -408,11 +405,10 @@ def test_cancel_resolution_startup_cancellation_removes_registered_actor(
 
         monkeypatch.setattr(hsm, "dispatch", held_dispatch)
         task = asyncio.create_task(
-            dispatch.CancelResolution.begin(
+            operations.CancelResolution.begin(
                 owner=owner,
                 operation_id="cancelled-resolution",
                 token="exact-token",
-                phase="test",
                 metadata={},
                 teardown_timeout=datetime.timedelta(seconds=1),
             )
@@ -423,7 +419,7 @@ def test_cancel_resolution_startup_cancellation_removes_registered_actor(
             await task
         instances = owner.context().value(hsm.Keys.Instances)
         return (
-            sum(isinstance(actor, dispatch.CancelResolution) for actor in instances.values())
+            sum(isinstance(actor, operations.CancelResolution) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )

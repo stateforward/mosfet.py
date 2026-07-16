@@ -10,7 +10,7 @@ import importlib
 import typing
 
 from . import cognition
-from . import autonomy, dispatch, episodes, input, intuition, reasoning, reflection, types
+from . import autonomy, episodes, input, intuition, operations, reasoning, reflection, types
 
 if typing.TYPE_CHECKING:
     from .autonomy import Autonomy
@@ -72,10 +72,10 @@ __all__ = [
     "is_output",
     "autonomy",
     "cognition",
-    "dispatch",
     "episodes",
     "input",
     "intuition",
+    "operations",
     "reasoning",
     "reflection",
     "types",

@@ -2,6 +2,7 @@ from bot import abilities
 import bot
 from bot.abilities import cognition
 from bot.abilities import listening
+from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import Cognition
 from bot.abilities.hearing import sound as sound_hearing
@@ -353,6 +354,7 @@ class CapturingCognition(cognition.Cognition):
         super().__init__(
             intuition=cognition.Intuition(processor=processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
+            reflection=_reflection_for_test(),
         )
 
     @typing.override
@@ -373,6 +375,10 @@ class _NoopReasoningProcessor(processing.Processor):
         return ()
 
 
+def _reflection_for_test() -> cognition.Reflection:
+    return cognition.Reflection(processor=_NoopReasoningProcessor(), memory=memory.Memory())
+
+
 class InputRecordingCognition(Cognition):
     inputs: list[cognition.InputData]
 
@@ -381,6 +387,7 @@ class InputRecordingCognition(Cognition):
         super().__init__(
             intuition=cognition.Intuition(processor=processing_ability.processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
+            reflection=_reflection_for_test(),
         )
 
     @typing.override
@@ -406,6 +413,7 @@ def as_cognition(
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
+        reflection=_reflection_for_test(),
     )
 
 
@@ -591,6 +599,151 @@ async def start_bot_with_devices(active_bot: Bot) -> World:
     return world
 
 
+def test_cognition_reboot_request_cycles_bot_lifecycle() -> None:
+    async def run() -> tuple[str, str, str, int]:
+        active_bot = basic_agent()
+        world = await start_bot_with_devices(active_bot)
+        assert active_bot.state().startswith("/Bot/active/")
+        cognition_ability = active_bot._cognition
+        _ = await hsm.dispatch(
+            world.context,
+            active_bot,
+            dataclasses.replace(
+                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
+                id="reboot-turn",
+                source=hsm.id(cognition_ability),
+                target=hsm.id(active_bot),
+            ),
+        )
+        reboot_state = active_bot.state()
+        await wait_until(lambda: active_bot.state().startswith("/Bot/active/"))
+        instances = active_bot.context().value(hsm.Keys.Instances)
+        processing_actor_count = (
+            sum(isinstance(actor, bot_module._BotProcessingOperation) for actor in instances.values())
+            if isinstance(instances, collections.abc.Mapping)
+            else 0
+        )
+        return reboot_state, active_bot.state(), cognition_ability.state(), processing_actor_count
+
+    reboot_state, final_state, cognition_state, processing_actor_count = asyncio.run(run())
+
+    assert reboot_state in {"/Bot/reboot_deactivating", "/Bot/reboot_cleanup"}
+    assert final_state == "/Bot/active/unfocused"
+    assert cognition_state.endswith("/idle")
+    assert processing_actor_count == 0
+
+
+def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[str, int]:
+        active_bot = basic_agent()
+        cognition_ability = active_bot._cognition
+        attachment_group = active_bot._attachments
+        original_attach = attachment.Group.attach
+        first_attach_started = asyncio.Event()
+        blocked = asyncio.Event()
+        attach_calls = 0
+
+        async def block_first_bot_attach(
+            group: attachment.Group,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> None:
+            nonlocal attach_calls
+            if isinstance(event.data, attachment.AttachData) and event.data.actor is active_bot:
+                attach_calls += 1
+                if attach_calls == 1:
+                    assert group is attachment_group
+                    first_attach_started.set()
+                    await blocked.wait()
+                    return
+            await original_attach(group, ctx, event)
+
+        monkeypatch.setattr(attachment.Group, "attach", block_first_bot_attach)
+        world = World()
+        _ = await active_bot.attach(world)
+        await first_attach_started.wait()
+        assert active_bot.state() == "/Bot/activating"
+        _ = await hsm.dispatch(
+            world.context,
+            active_bot,
+            dataclasses.replace(
+                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_detach_rollback_failed")),
+                id="activation-reboot",
+                source=hsm.id(cognition_ability),
+                target=hsm.id(active_bot),
+            ),
+        )
+        await wait_until(lambda: active_bot.state().startswith("/Bot/active/"))
+        return active_bot.state(), attach_calls
+
+    state, attach_calls = asyncio.run(run())
+
+    assert state == "/Bot/active/unfocused"
+    assert attach_calls == 2
+
+
+def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart() -> None:
+    class FirstDetachHangsAbility(ProbeAbility):
+        detach_calls: int
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.detach_calls = 0
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+            if event.name == attachment.DetachEvent.name:
+                self.detach_calls += 1
+                if self.detach_calls == 1:
+
+                    async def hang() -> None:
+                        _ = await asyncio.Event().wait()
+
+                    return hang()
+            return super().dispatch(ctx, event)
+
+    class FastRebootAbilityAgent(AbilityAgent):
+        _deactivation_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=10)
+
+    async def run() -> tuple[str, str, int]:
+        stuck = FirstDetachHangsAbility()
+        active_bot = FastRebootAbilityAgent(
+            devices={},
+            cognition=IgnoreAbility(),
+            acquired_abilities=(stuck,),
+        )
+        world = await start_bot_with_devices(active_bot)
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        cognition_ability = active_bot._cognition
+        _ = await hsm.dispatch(
+            world.context,
+            active_bot,
+            dataclasses.replace(
+                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
+                id="timeout-reboot",
+                source=hsm.id(cognition_ability),
+                target=hsm.id(active_bot),
+            ),
+        )
+        for _ in range(100):
+            if not active_bot.state().startswith("/Bot/active/"):
+                break
+            await asyncio.sleep(0.001)
+        for _ in range(100):
+            if active_bot.state() == "/Bot/active/unfocused":
+                break
+            await asyncio.sleep(0.005)
+        return active_bot.state(), active_bot._attachments.state(), stuck.detach_calls
+
+    state, group_state, detach_calls = asyncio.run(run())
+
+    assert state == "/Bot/active/unfocused"
+    assert group_state == "/AttachmentGroup/attached"
+    assert detach_calls == 1
+
+
 def test_bot_attach_rejects_started_agent_from_another_world() -> None:
     async def run() -> None:
         active_bot = basic_agent(devices={})
@@ -662,8 +815,8 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
 
     attach_calls, detach_calls, group_is_private, state = asyncio.run(run())
 
-    assert attach_calls == 2
-    assert detach_calls == 2
+    assert attach_calls == 3
+    assert detach_calls == 3
     assert group_is_private
     assert state == "/Bot/inactive"
 
@@ -1032,6 +1185,7 @@ def test_concrete_agent_can_declare_and_instantiate_innate_ability() -> None:
 def test_bot_events_use_pydantic_schemas() -> None:
     activate_schema = object_dict(bot.ActivateEvent.schema)
     deactivate_schema = object_dict(bot.DeactivateEvent.schema)
+    reboot_schema = object_dict(bot.RebootEvent.schema)
     input_schema = object_dict(bot.InputEvent.schema)
     completed_schema = object_dict(bot.ProcessingCompletedEvent.schema)
     failed_schema = object_dict(bot.ProcessingFailedEvent.schema)
@@ -1049,6 +1203,10 @@ def test_bot_events_use_pydantic_schemas() -> None:
     assert deactivate_schema == bot.DeactivateEventData.model_json_schema()
     assert deactivate_schema["description"]
     assert deactivate_schema["examples"] == [{}]
+    assert bot.RebootEvent.name == "bot.reboot"
+    assert reboot_schema == bot.RebootEventData.model_json_schema()
+    assert reboot_schema["description"]
+    assert reboot_schema["required"] == ["reason"]
     assert bot.InputEvent.name == "bot.input"
     assert input_schema == bot.InputEventData.model_json_schema()
     assert input_schema["required"] == ["target_device", "priority"]
@@ -1116,6 +1274,8 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "/Bot/activation_cleanup" in model.members
     assert "/Bot/deactivating" in model.members
     assert "/Bot/deactivation_cleanup" in model.members
+    assert "/Bot/reboot_deactivating" in model.members
+    assert "/Bot/reboot_cleanup" in model.members
     assert "/Bot/active" in model.members
     assert "/Bot/active/unfocused" in model.members
     assert "/Bot/active/focused" in model.members
@@ -1133,6 +1293,11 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "world.sound" in transitions["/Bot/active"]
     assert "world.visual" in transitions["/Bot/active"]
     assert "bot.deactivate" in transitions["/Bot/active"]
+    assert "bot.reboot" in transitions["/Bot/active"]
+    assert "bot.reboot" in transitions["/Bot/activating"]
+    assert "bot.reboot" in transitions["/Bot/activation_cleanup"]
+    assert "bot.reboot" in transitions["/Bot/deactivating"]
+    assert "bot.reboot" in transitions["/Bot/deactivation_cleanup"]
     assert "bot.input" in transitions["/Bot/active/unfocused"]
     assert "bot.ability.cognition.input" in transitions["/Bot/active/unfocused"]
     assert "*" not in transitions["/Bot/active/unfocused"]

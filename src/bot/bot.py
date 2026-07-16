@@ -30,6 +30,9 @@ _STARTED_DEVICES_METADATA_KEY = "bot.activation.started_devices"
 _STARTED_ABILITIES_METADATA_KEY = "bot.activation.started_abilities"
 _STARTED_ATTACHMENT_GROUP_METADATA_KEY = "bot.activation.started_attachment_group"
 _LIFECYCLE_OPERATION_METADATA_KEY = "bot.lifecycle.operation"
+_REBOOT_CLEANUP_METADATA_KEY = "bot.lifecycle.reboot_cleanup"
+_REBOOT_CLEANUP_PRESERVE = "preserve"
+_REBOOT_CLEANUP_RESET = "reset"
 
 
 class _BotLifecycleOperation(pydantic.BaseModel):
@@ -395,14 +398,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._input = tuple(input)
         self._output = tuple(output)
         self._acquired_abilities = tuple(acquired_abilities)
-        members: list[hsm.Instance] = []
-        seen_members: set[int] = set()
-        for member in (*self._devices.values(), *Bot._lifecycle_abilities(self)):
-            identifier = id(member)
-            if identifier not in seen_members:
-                seen_members.add(identifier)
-                members.append(member)
-        self._attachments = attachment.Group(*members)
+        self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
 
     async def attach(self, world: World) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
@@ -437,6 +433,17 @@ class Bot(hsm.Instance, abc.ABC):
         return tuple(lifecycle)
 
     @staticmethod
+    def _lifecycle_attachment_members(instance: "Bot") -> tuple[hsm.Instance, ...]:
+        members: list[hsm.Instance] = []
+        seen: set[int] = set()
+        for member in (*instance._devices.values(), *Bot._lifecycle_abilities(instance)):
+            identifier = id(member)
+            if identifier not in seen:
+                seen.add(identifier)
+                members.append(member)
+        return tuple(members)
+
+    @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         operation = _BotLifecycleOperation.create(
             ctx,
@@ -457,10 +464,41 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     async def _deactivation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         lifetime = instance.context()
+        cleanup_mode = event.metadata.get(_REBOOT_CLEANUP_METADATA_KEY)
         world = World.from_context(lifetime)
-        await hsm.stop(instance._attachments, world.context)
-        for ability in Bot._lifecycle_abilities(instance):
-            await hsm.stop(ability, lifetime)
+        if cleanup_mode == _REBOOT_CLEANUP_RESET:
+            for member in Bot._lifecycle_attachment_members(instance):
+                await hsm.Instance.dispatch(
+                    member,
+                    lifetime,
+                    dataclasses.replace(
+                        attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+                        id=event.id,
+                        source=hsm.id(instance),
+                        target=hsm.id(member),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+            await hsm.stop(instance._attachments, world.context)
+            instance._attachments = attachment.Group(*Bot._lifecycle_attachment_members(instance))
+        elif cleanup_mode != _REBOOT_CLEANUP_PRESERVE:
+            await hsm.stop(instance._attachments, world.context)
+            for ability in Bot._lifecycle_abilities(instance):
+                # Cognition's required composite tree remains detached under Bot lifetime;
+                # stopping it cancels the child contexts needed by a later activation.
+                if ability is instance._cognition:
+                    continue
+                await hsm.stop(ability, lifetime)
+        instances = lifetime.value(hsm.Keys.Instances)
+        operation_actors = (
+            tuple(actor for actor in instances.values() if isinstance(actor, _BotProcessingOperation))
+            if isinstance(instances, collections.abc.Mapping)
+            else ()
+        )
+        for actor in operation_actors:
+            await actor.stop(lifetime)
+            if isinstance(instances, collections.abc.MutableMapping):
+                _ = instances.pop(hsm.id(actor), None)
         cleanup = _BotCleanupData.create(ctx, request_id=event.id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
@@ -472,6 +510,17 @@ class Bot(hsm.Instance, abc.ABC):
                 target=hsm.id(instance),
             ),
         )
+
+    @staticmethod
+    def _preserve_reboot_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        if event.metadata.get(_REBOOT_CLEANUP_METADATA_KEY) != _REBOOT_CLEANUP_RESET:
+            event.metadata[_REBOOT_CLEANUP_METADATA_KEY] = _REBOOT_CLEANUP_PRESERVE
+
+    @staticmethod
+    def _reset_reboot_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        event.metadata[_REBOOT_CLEANUP_METADATA_KEY] = _REBOOT_CLEANUP_RESET
 
     @staticmethod
     def _device_reference_for_source(instance: "Bot", source: str) -> str | None:
@@ -535,6 +584,19 @@ class Bot(hsm.Instance, abc.ABC):
     def _has_focused_device(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx, event
         return instance._focused_device in instance._devices
+
+    @staticmethod
+    def _reboot_requested_by_cognition(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return (
+            isinstance(event.data, events.RebootEventData)
+            and event.source == hsm.id(instance._cognition)
+            and event.target == hsm.id(instance)
+        )
 
     @staticmethod
     def _has_current_ability_source(instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
@@ -892,8 +954,12 @@ class Bot(hsm.Instance, abc.ABC):
         )
         try:
             group_scope = _ability_attach_context(lifetime)
-            _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
-            group_started = True
+            try:
+                _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
+                group_started = True
+            except hsm.ErrorValidatingModel as error:
+                if "already has a running HSM" not in str(error):
+                    raise
             for device in _device_tree(*instance._devices.values()):
                 require_world_scope(world, device, participant="Device")
                 model = device.model
@@ -910,8 +976,15 @@ class Bot(hsm.Instance, abc.ABC):
                 model = ability.model
                 if model is None:
                     raise RuntimeError(f"{type(ability).__name__} has no lifecycle model.")
-                _ = await hsm.started(ability_scope, ability, model)
-                started_abilities.append(ability)
+                try:
+                    _ = await hsm.started(ability_scope, ability, model)
+                    started_abilities.append(ability)
+                except hsm.ErrorValidatingModel as error:
+                    shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.context.value(
+                        hsm.Keys.Instances
+                    )
+                    if "already has a running HSM" not in str(error) or shares_world_instances:
+                        raise
             await instance._attachments.attach(
                 ctx,
                 dataclasses.replace(
@@ -1050,6 +1123,12 @@ class Bot(hsm.Instance, abc.ABC):
             "activating",
             hsm.activity(_activate_activity),
             hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus, _reset_reboot_cleanup),
+                hsm.target("../reboot_deactivating"),
+            ),
+            hsm.transition(
                 hsm.on(events.DeactivateEvent),
                 hsm.effect(_clear_focus),
                 hsm.target("../activation_cleanup"),
@@ -1074,6 +1153,12 @@ class Bot(hsm.Instance, abc.ABC):
             "activation_cleanup",
             hsm.activity(_activation_cleanup_activity),
             hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus, _reset_reboot_cleanup),
+                hsm.target("../reboot_deactivating"),
+            ),
+            hsm.transition(
                 hsm.on(_BotCleanupDoneEvent),
                 hsm.guard(_matches_activation_cleanup_done),
                 hsm.target("../inactive"),
@@ -1086,6 +1171,12 @@ class Bot(hsm.Instance, abc.ABC):
         hsm.state(
             "deactivating",
             hsm.activity(_deactivate_activity),
+            hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus),
+                hsm.target("../reboot_deactivating"),
+            ),
             hsm.transition(
                 hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
                 hsm.guard(_matches_attachment_group),
@@ -1100,9 +1191,49 @@ class Bot(hsm.Instance, abc.ABC):
             "deactivation_cleanup",
             hsm.activity(_deactivation_cleanup_activity),
             hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus, _reset_reboot_cleanup),
+                hsm.target("../reboot_cleanup"),
+            ),
+            hsm.transition(
                 hsm.on(_BotCleanupDoneEvent),
                 hsm.guard(_matches_deactivation_cleanup_done),
                 hsm.target("../inactive"),
+            ),
+            hsm.transition(
+                hsm.after(_bot_deactivation_timeout),
+                hsm.target("../degraded"),
+            ),
+        ),
+        hsm.state(
+            "reboot_deactivating",
+            hsm.activity(_deactivate_activity),
+            hsm.transition(
+                hsm.on(attachment.DetachedEvent),
+                hsm.guard(_matches_attachment_group),
+                hsm.effect(_preserve_reboot_cleanup),
+                hsm.target("../reboot_cleanup"),
+            ),
+            hsm.transition(
+                hsm.on(attachment.DetachFailedEvent),
+                hsm.guard(_matches_attachment_group),
+                hsm.effect(_reset_reboot_cleanup),
+                hsm.target("../reboot_cleanup"),
+            ),
+            hsm.transition(
+                hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_reset_reboot_cleanup),
+                hsm.target("../reboot_cleanup"),
+            ),
+        ),
+        hsm.state(
+            "reboot_cleanup",
+            hsm.activity(_deactivation_cleanup_activity),
+            hsm.transition(
+                hsm.on(_BotCleanupDoneEvent),
+                hsm.guard(_matches_deactivation_cleanup_done),
+                hsm.target("../activating"),
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
@@ -1113,6 +1244,12 @@ class Bot(hsm.Instance, abc.ABC):
         hsm.state(
             "active",
             hsm.initial(hsm.target("unfocused")),
+            hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus),
+                hsm.target("../reboot_deactivating"),
+            ),
             # Explicit world input events fan out in parallel to input abilities (never cognition).
             hsm.transition(
                 hsm.on(SoundEvent, VisualEvent),

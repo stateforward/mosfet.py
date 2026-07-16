@@ -47,6 +47,9 @@ from bot.events import (
     ProcessingCompletedEventData,
     ProcessingFailedEvent,
     ProcessingFailedEventData,
+    RebootEvent,
+    RebootEventData,
+    RebootReason,
 )
 from bot import abilities, habit, skills
 
@@ -85,6 +88,9 @@ __all__ = [
     "ProcessingCompletedEventData",
     "ProcessingFailedEvent",
     "ProcessingFailedEventData",
+    "RebootEvent",
+    "RebootEventData",
+    "RebootReason",
     "abilities",
     "habit",
     "skills",

@@ -203,6 +203,10 @@ def brain_for_test(
             processor=intuition_processor if intuition_processor is not None else RecordingIntuitionProcessor()
         ),
         reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor()),
+        reflection=cognition.Reflection(
+            processor=RecordingReasoningProcessor(),
+            memory=memory.Memory(),
+        ),
     )
 
 

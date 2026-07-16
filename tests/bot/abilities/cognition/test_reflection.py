@@ -4,7 +4,7 @@ from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import reflection as reflection_module
-from bot.abilities.cognition import dispatch as dispatch_module
+from bot.abilities.cognition import operations
 from bot.protocols import attachment
 
 import asyncio
@@ -51,7 +51,7 @@ class HangingProcessor(processing.Processor):
 
 class AttachmentOwner(hsm.Instance):
     lifecycle: list[hsm.Event[typing.Any]]
-    terminals: list[dispatch_module.TerminalData]
+    terminals: list[operations.TerminalData]
 
     @staticmethod
     def _record(
@@ -68,7 +68,7 @@ class AttachmentOwner(hsm.Instance):
         instance: "AttachmentOwner",
         event: hsm.Event[typing.Any],
     ) -> None:
-        dispatch_module.forward_terminal(ctx, instance, event)
+        operations.forward_terminal(ctx, instance, event)
 
     @staticmethod
     def _record_and_forward(
@@ -77,7 +77,7 @@ class AttachmentOwner(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         AttachmentOwner._record(ctx, instance, event)
-        dispatch_module.forward_terminal(ctx, instance, event)
+        operations.forward_terminal(ctx, instance, event)
 
     @staticmethod
     def _record_terminal(
@@ -86,7 +86,7 @@ class AttachmentOwner(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         del ctx
-        assert isinstance(event.data, dispatch_module.TerminalData)
+        assert isinstance(event.data, operations.TerminalData)
         instance.terminals.append(event.data)
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
@@ -102,8 +102,8 @@ class AttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(cognition.Reflection.output_event), hsm.effect(_forward)),
             hsm.transition(hsm.on(cognition.Reflection.failed_event), hsm.effect(_record_and_forward)),
             hsm.transition(
-                hsm.on(dispatch_module.TerminalEvent),
-                hsm.effect(_record_terminal, dispatch_module.retire_operation),
+                hsm.on(operations.TerminalEvent),
+                hsm.effect(_record_terminal, operations.retire_operation),
             ),
         ),
     )
@@ -273,7 +273,7 @@ def test_reflection_waits_for_child_operation_retirement_before_acknowledging() 
             reflection,
             dataclasses.replace(
                 reflection.input_event.with_data_and_id(reflection_input(), "cancel-reflection"),
-                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "reflection-token"},
+                metadata={operations.CANCEL_TOKEN_METADATA_KEY: "reflection-token"},
             ),
         )
         await wait_until(lambda: reflection.state().endswith("/processing"))
@@ -291,7 +291,7 @@ def test_reflection_waits_for_child_operation_retirement_before_acknowledging() 
         lifecycle, state, cancelled = owner.lifecycle, reflection.state(), processor.cancelled
         instances = reflection.context().value(hsm.Keys.Instances)
         operation_count = (
-            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            sum(isinstance(actor, operations.Operation) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -342,7 +342,7 @@ def test_reflection_change_cancellation_retires_exact_operation_before_acknowled
             reflection,
             dataclasses.replace(
                 reflection.input_event.with_data_and_id(reflection_input(), "cancel-change"),
-                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "change-token"},
+                metadata={operations.CANCEL_TOKEN_METADATA_KEY: "change-token"},
             ),
         )
         await wait_until(lambda: reflection.state().endswith("/changing") and processor.calls == 2)
@@ -356,7 +356,7 @@ def test_reflection_change_cancellation_retires_exact_operation_before_acknowled
         await wait_until(lambda: bool(owner.lifecycle))
         instances = reflection.context().value(hsm.Keys.Instances)
         operation_count = (
-            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            sum(isinstance(actor, operations.Operation) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -394,15 +394,15 @@ def test_reflection_starting_change_cancellation_prevents_late_operation(
         owner = AttachmentOwner()
         change_start_entered = asyncio.Event()
         release_change_start = asyncio.Event()
-        original_begin = dispatch_module.Operation.begin
+        original_begin = operations.Operation.begin
 
-        async def held_begin(**kwargs: typing.Any) -> dispatch_module.OperationData:
+        async def held_begin(**kwargs: typing.Any) -> operations.OperationData:
             if kwargs["phase"] == "reflection-change":
                 change_start_entered.set()
                 await release_change_start.wait()
             return await original_begin(**kwargs)
 
-        monkeypatch.setattr(dispatch_module.Operation, "begin", held_begin)
+        monkeypatch.setattr(operations.Operation, "begin", held_begin)
         _ = await hsm.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
@@ -412,7 +412,7 @@ def test_reflection_starting_change_cancellation_prevents_late_operation(
             reflection,
             dataclasses.replace(
                 reflection.input_event.with_data_and_id(reflection_input(), "cancel-starting-change"),
-                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: "starting-token"},
+                metadata={operations.CANCEL_TOKEN_METADATA_KEY: "starting-token"},
             ),
         )
         await change_start_entered.wait()
@@ -433,7 +433,7 @@ def test_reflection_starting_change_cancellation_prevents_late_operation(
         await asyncio.sleep(0)
         instances = reflection.context().value(hsm.Keys.Instances)
         operation_count = (
-            sum(isinstance(actor, dispatch_module.Operation) for actor in instances.values())
+            sum(isinstance(actor, operations.Operation) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -455,7 +455,7 @@ def test_reflection_starting_change_cancellation_prevents_late_operation(
 
 
 def test_reflection_operation_reports_real_teardown_as_timed_out() -> None:
-    async def run() -> tuple[list[dispatch_module.TerminalData], str, bool]:
+    async def run() -> tuple[list[operations.TerminalData], str, bool]:
         processor = HangingProcessor()
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
@@ -464,7 +464,7 @@ def test_reflection_operation_reports_real_teardown_as_timed_out() -> None:
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
-        await dispatch_module.Operation.begin(
+        await operations.Operation.begin(
             owner=owner,
             child=reflection,
             request=reflection.input_event.with_data_and_id(reflection_input(), "timed-reflection"),
@@ -529,7 +529,7 @@ def test_reflection_stubborn_child_cancel_timeout_degrades_and_retires_all_actor
             reflection,
             dataclasses.replace(
                 reflection.input_event.with_data_and_id(reflection_input(), operation_id),
-                metadata={dispatch_module.CANCEL_TOKEN_METADATA_KEY: token},
+                metadata={operations.CANCEL_TOKEN_METADATA_KEY: token},
             ),
         )
         await wait_until(lambda: reflection.state().endswith("/processing"))
@@ -549,7 +549,7 @@ def test_reflection_stubborn_child_cancel_timeout_degrades_and_retires_all_actor
         instances = reflection.context().value(hsm.Keys.Instances)
         actor_count = (
             sum(
-                isinstance(actor, dispatch_module.Operation | dispatch_module.CancelResolution)
+                isinstance(actor, operations.Operation | operations.CancelResolution)
                 or type(actor).__name__ == "_ReflectionOperation"
                 for actor in instances.values()
             )
@@ -580,7 +580,7 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await child.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=reflection)))
         await wait_until(lambda: reflection.state().endswith("/idle") and child.state().endswith("/idle"))
-        operation = await dispatch_module.Operation.begin(
+        operation = await operations.Operation.begin(
             owner=reflection,
             child=child,
             request=child.input_event.with_data_and_id(reflection_input(), "guard-child"),
@@ -593,16 +593,15 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
             token=operation.token,
             phase="reflection-select",
         )
-        resolution = await dispatch_module.CancelResolution.begin(
+        resolution = await operations.CancelResolution.begin(
             owner=reflection,
             operation_id=operation.operation_id,
             token=operation.token,
-            phase=operation.phase,
             metadata={reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
             teardown_timeout=datetime.timedelta(seconds=1),
         )
         request = resolution.model_copy(update={"resolver_id": "forged-resolver"})
-        cancel = dispatch_module.CancelData(
+        cancel = operations.CancelData(
             owner_id=operation.owner_id,
             child_id=operation.child_id,
             request_id=operation.request_id,
@@ -611,8 +610,8 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
             resolver_id=request.resolver_id,
         )
         terminal = dataclasses.replace(
-            dispatch_module.TerminalEvent.with_data(
-                dispatch_module.TerminalData(
+            operations.TerminalEvent.with_data(
+                operations.TerminalData(
                     operation=operation,
                     outcome="cancelled",
                     terminal_name=processing.CancelledEvent.name,
@@ -622,9 +621,9 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
             source=operation.actor_id,
             target=hsm.id(reflection),
             metadata={
-                dispatch_module.OPERATION_METADATA_KEY: operation,
-                dispatch_module.CANCEL_METADATA_KEY: cancel,
-                dispatch_module.RESOLVE_CANCEL_METADATA_KEY: request,
+                operations.OPERATION_METADATA_KEY: operation,
+                operations.CANCEL_METADATA_KEY: cancel,
+                operations.RESOLVE_CANCEL_METADATA_KEY: request,
                 reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability,
             },
         )
@@ -632,12 +631,12 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
 
         wrong_capability = capability.model_copy(update={"token": "wrong-token"})
         unresolved = dataclasses.replace(
-            dispatch_module.CancelUnresolvedEvent.with_data(resolution),
+            operations.CancelUnresolvedEvent.with_data(resolution),
             id=resolution.operation_id,
             source=resolution.resolver_id,
             target=hsm.id(reflection),
             metadata={
-                dispatch_module.RESOLVE_CANCEL_METADATA_KEY: resolution,
+                operations.RESOLVE_CANCEL_METADATA_KEY: resolution,
                 reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: wrong_capability,
             },
         )

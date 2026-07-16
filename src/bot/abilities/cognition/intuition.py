@@ -11,7 +11,7 @@ import pydantic
 
 from bot.telemetry import observer
 
-from . import dispatch
+from . import operations
 from . import types
 
 # Absolute floor used only during tuner warmup (few samples). After warmup the
@@ -441,7 +441,7 @@ class Intuition(processing.Processing):
                     **metadata,
                     reasoning_ability.HOST_INPUT_METADATA_KEY: input,
                 }
-                await dispatch.dispatch_selected_events(
+                await operations.dispatch_selected_events(
                     ctx,
                     input,
                     _selections_from_output(to_dispatch, current_input=input),

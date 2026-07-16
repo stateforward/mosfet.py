@@ -1,4 +1,4 @@
-"""Build processing inputs and enforce cognition's body-action constraints."""
+"""Own correlated child operations and cognition action dispatch."""
 
 from __future__ import annotations
 
@@ -82,14 +82,18 @@ CancelEvent = hsm.Event[CancelData](
 
 
 class ResolveCancelData(pydantic.BaseModel):
-    """Host request to resolve the exact mediator for one active child phase."""
+    """Host request to resolve the exact active child mediator."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     owner_id: str = pydantic.Field(min_length=1)
     operation_id: str = pydantic.Field(min_length=1)
     token: str = pydantic.Field(min_length=1)
-    phase: str = pydantic.Field(min_length=1)
+    phase: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description="Exact child phase when a composed owner can have more than one mediator for one operation.",
+    )
     resolver_id: str = pydantic.Field(min_length=1)
 
 
@@ -180,7 +184,7 @@ class CancelResolution(hsm.Instance):
                 and data.operation.owner_id == request().owner_id
                 and data.operation.operation_id == request().operation_id
                 and data.operation.token == request().token
-                and data.operation.phase == request().phase
+                and (request().phase is None or data.operation.phase == request().phase)
                 and event.id == request().operation_id
                 and event.source == request().owner_id
                 and event.target == hsm.id(instance)
@@ -307,9 +311,9 @@ class CancelResolution(hsm.Instance):
         owner: hsm.Instance,
         operation_id: str,
         token: str,
-        phase: str,
         metadata: collections.abc.Mapping[str, object],
         teardown_timeout: datetime.timedelta,
+        phase: str | None = None,
     ) -> ResolveCancelData:
         actor = cls()
         request_ref: list[ResolveCancelData] = []
@@ -474,7 +478,7 @@ class Operation(hsm.Instance):
                 and request.owner_id == current.owner_id
                 and request.operation_id == current.operation_id
                 and request.token == current.token
-                and request.phase == current.phase
+                and (request.phase is None or request.phase == current.phase)
                 and event.id == current.operation_id
                 and event.source == current.owner_id
                 and event.target == hsm.id(instance)
@@ -497,7 +501,7 @@ class Operation(hsm.Instance):
                 and request_data.owner_id == current.owner_id
                 and request_data.operation_id == current.operation_id
                 and request_data.token == current.token
-                and request_data.phase == current.phase
+                and (request_data.phase is None or request_data.phase == current.phase)
                 and event.id == current.operation_id
                 and event.source == current.owner_id
                 and event.target == hsm.id(instance)
@@ -518,7 +522,7 @@ class Operation(hsm.Instance):
                 and data.owner_id == current.owner_id
                 and data.operation_id == current.operation_id
                 and data.token == current.token
-                and data.phase == current.phase
+                and (data.phase is None or data.phase == current.phase)
                 and event.id == data.operation_id
                 and event.source == current.owner_id
                 and event.target == hsm.id(instance)
@@ -1037,7 +1041,7 @@ def matches_teardown_timeout(
         and request.owner_id == operation.owner_id
         and request.operation_id == operation.operation_id
         and request.token == operation.token
-        and request.phase == operation.phase
+        and (request.phase is None or request.phase == operation.phase)
         and event.metadata.get(OPERATION_METADATA_KEY) == operation
         and event.metadata.get(RESOLVE_CANCEL_METADATA_KEY) == request
     )

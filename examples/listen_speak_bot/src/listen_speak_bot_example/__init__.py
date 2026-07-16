@@ -34,6 +34,7 @@ import bot
 from bot.abilities import cognition
 from bot.abilities import encoding
 from bot.abilities import listening
+from bot.abilities import memory
 from bot.abilities import speaking
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -299,12 +300,11 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
             provider="gemini_fast_intuition",
         ),
     )
-    reasoning_ability = cognition.Reasoning(
-        processor=Processor(
-            client=_chat_client(config),
-            provider="gemini_slow_reasoning",
-        ),
+    deliberate_processor = Processor(
+        client=_chat_client(config),
+        provider="gemini_slow_reasoning",
     )
+    reasoning_ability = cognition.Reasoning(processor=deliberate_processor)
     _log_ability_terminals(
         intuition_ability,
         name="intuition",
@@ -323,6 +323,10 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
     return cognition.Cognition(
         intuition=intuition_ability,
         reasoning=reasoning_ability,
+        reflection=cognition.Reflection(
+            processor=deliberate_processor,
+            memory=memory.Memory(),
+        ),
     )
 
 
