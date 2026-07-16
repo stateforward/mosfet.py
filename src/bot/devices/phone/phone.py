@@ -100,6 +100,8 @@ _PHONE_OBSERVATION_EVENT_NAMES = frozenset(
         CallTransferFailedEvent.name,
     }
 )
+
+
 def _load_ring_sound_wav() -> bytes:
     """Load the short package-local landline ring clip for world.sound elevation."""
 
@@ -1124,7 +1126,6 @@ class Phone(bot.device.Device):
 
     def __init__(
         self,
-        bots: collections.abc.Iterable[hsm.Instance] = (),
         *,
         microphone: audio.Microphone | None = None,
         speaker: audio.Speaker | None = None,
@@ -1135,7 +1136,7 @@ class Phone(bot.device.Device):
     ) -> None:
         resolved_microphone = microphone if microphone is not None else audio.Microphone()
         resolved_speaker = speaker if speaker is not None else audio.Speaker()
-        super().__init__(bots=bots, peripherals=(resolved_microphone, resolved_speaker, *tuple(peripherals)))
+        super().__init__(peripherals=(resolved_microphone, resolved_speaker, *tuple(peripherals)))
         self._microphone = resolved_microphone
         self._speaker = resolved_speaker
         observation_service = _PhoneObservationService(

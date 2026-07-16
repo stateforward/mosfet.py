@@ -1855,7 +1855,6 @@ class Phone(phone.Phone):
 
     def __init__(
         self,
-        bots: collections.abc.Iterable[hsm.Instance] = (),
         *,
         url: str | None = None,
         token: str | None = None,
@@ -1869,7 +1868,6 @@ class Phone(phone.Phone):
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__(
-            bots=bots,
             microphone=microphone,
             speaker=speaker,
             peripherals=peripherals,

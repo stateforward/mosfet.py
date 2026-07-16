@@ -45,14 +45,13 @@ def _require_attach_world_scope(world: World, instance: "Device") -> None:
 
 
 class Device(hsm.Instance, attachment.Attachment):
-    """Environment interaction surface that records attached HSM bot references."""
+    """Environment interaction surface that records attached external actors."""
 
     firmware_model: typing.ClassVar[hsm.Model] = _DEFAULT_FIRMWARE
     _attachment_limit: typing.ClassVar[int | None] = None
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
     required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
     _peripherals: tuple["Device", ...]
-    _pending_bots: list[hsm.Instance]
     _firmware: hsm.Instance | None
 
     def __init_subclass__(
@@ -65,13 +64,12 @@ class Device(hsm.Instance, attachment.Attachment):
 
     def __init__(
         self,
-        bots: collections.abc.Iterable[hsm.Instance] = (),
+        *,
         peripherals: collections.abc.Iterable["Device"] = (),
     ) -> None:
         super().__init__()
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
-        self._pending_bots = list(bots)
         self._peripherals = tuple(peripherals)
         self._firmware = None
 
@@ -160,10 +158,6 @@ class Device(hsm.Instance, attachment.Attachment):
             ctx,
             FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData()),
         )
-        pending_bots = tuple(self._pending_bots)
-        self._pending_bots.clear()
-        for bot in pending_bots:
-            _ = self.dispatch(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=bot)))
 
     @staticmethod
     async def _initialize_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
@@ -206,49 +200,6 @@ class Device(hsm.Instance, attachment.Attachment):
     def _clear_failed_firmware_reference(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
         del ctx, event
         instance._firmware = None
-
-    @staticmethod
-    def _dispatch_firmware_initializing_failure(
-        ctx: hsm.Context,
-        instance: "Device",
-        event: hsm.Event,
-    ) -> None:
-        data = event.data
-        if isinstance(data, str):
-            message = data
-        elif isinstance(data, FirmwareInitializingFailedEventData):
-            message = data.message
-        else:
-            seconds = instance._firmware_initializing_timeout.total_seconds()
-            message = f"Device firmware initialization timed out after {seconds:g} seconds."
-        failure = FirmwareInitializingFailedEvent.with_data(FirmwareInitializingFailedEventData(message=message))
-        Device._dispatch_pending_firmware_initializing_failure(ctx, instance, failure)
-
-    @staticmethod
-    def _dispatch_pending_firmware_initializing_failure(
-        ctx: hsm.Context,
-        instance: "Device",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        pending_bots = tuple(instance._pending_bots)
-        instance._pending_bots.clear()
-        for bot in pending_bots:
-            _ = hsm.dispatch(
-                ctx,
-                bot,
-                dataclasses.replace(
-                    attachment.AttachFailedEvent.with_data(
-                        attachment.FailedData(
-                            actor=bot,
-                            kind=attachment.FailureKind.INITIALIZATION,
-                            message=typing.cast(FirmwareInitializingFailedEventData, event.data).message,
-                        )
-                    ),
-                    source=hsm.id(instance),
-                    target=attachment.Attachment._actor_id(bot),
-                    metadata=dict(event.metadata),
-                ),
-            )
 
     @staticmethod
     def _dispatch_failed_firmware_attachment(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
@@ -345,12 +296,11 @@ class Device(hsm.Instance, attachment.Attachment):
             hsm.defer(attachment.AttachEvent, attachment.DetachEvent),
             hsm.transition(
                 hsm.on(_FirmwareInitializingCleanedUpEvent),
-                hsm.effect(_dispatch_firmware_initializing_failure),
                 hsm.target("../failed"),
             ),
             hsm.transition(
                 hsm.after(_firmware_initializing_timeout_delay),
-                hsm.effect(_clear_failed_firmware_reference, _dispatch_firmware_initializing_failure),
+                hsm.effect(_clear_failed_firmware_reference),
                 hsm.target("../failed"),
             ),
         ),

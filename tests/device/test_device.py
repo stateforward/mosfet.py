@@ -29,6 +29,7 @@ from tests.hsm_instance_state import device_bots, device_firmware, device_periph
 from tests.hsm_model import transition_map
 from tests.type_helpers import callable_object, object_dict, string_list
 
+
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -37,10 +38,20 @@ async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: 
             raise TimeoutError("Timed out waiting for condition.")
         await asyncio.sleep(0)
 
+
 async def start_device_in_world(device: Device) -> World:
     world = World()
     _ = await hsm.started(world.context, device, device.model)
     return world
+
+
+def attach_event(actor: hsm.Instance) -> hsm.Event[attachment.AttachData]:
+    return attachment.AttachEvent.with_data(attachment.AttachData(actor=actor))
+
+
+def detach_event(actor: hsm.Instance) -> hsm.Event[attachment.DetachData]:
+    return attachment.DetachEvent.with_data(attachment.DetachData(actor=actor))
+
 
 class SlowInitializingDevice(Device):
     release: asyncio.Event
@@ -54,11 +65,13 @@ class SlowInitializingDevice(Device):
         _ = await self.release.wait()
         await super()._initialize_firmware(ctx, event)
 
+
 class FailingInitializingDevice(Device):
     @override
     async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
         del ctx, event
         raise RuntimeError("firmware failed")
+
 
 class HangingInitializingDevice(Device):
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
@@ -67,6 +80,7 @@ class HangingInitializingDevice(Device):
     async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
         del ctx, event
         _ = await asyncio.Event().wait()
+
 
 class HangingAfterFirmwareStartedDevice(Device):
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
@@ -86,17 +100,20 @@ class HangingAfterFirmwareStartedDevice(Device):
         del ctx, event
         _ = await asyncio.Event().wait()
 
+
 class StopHangingFirmware(hsm.Instance):
     @override
     async def stop(self, ctx: hsm.Context) -> None:
         del ctx
         _ = await asyncio.Event().wait()
 
+
 class StopHangingStartedFirmwareDevice(HangingAfterFirmwareStartedDevice):
     @override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
         del ctx, event
         return StopHangingFirmware()
+
 
 class ReleasableFailingInitializingDevice(Device):
     release: asyncio.Event
@@ -110,6 +127,7 @@ class ReleasableFailingInitializingDevice(Device):
         del ctx, event
         _ = await self.release.wait()
         raise RuntimeError("firmware failed")
+
 
 class AttachmentRecorder(hsm.Instance):
     events: list[hsm.Event[typing.Any]]
@@ -133,6 +151,7 @@ class AttachmentRecorder(hsm.Instance):
         ),
     )
 
+
 class _FirmwareProbeData(pydantic.BaseModel):
     """Test payload for a firmware-only event."""
 
@@ -143,10 +162,12 @@ class _FirmwareProbeData(pydantic.BaseModel):
         },
     )
 
+
 FIRMWARE_PROBE_EVENT = hsm.Event[_FirmwareProbeData](
     name="test.firmware.probe",
     schema=_FirmwareProbeData,
 )
+
 
 class FirmwareProbeDevice(Device):
     firmware_model: typing.ClassVar[hsm.Model] = hsm.define(
@@ -162,6 +183,7 @@ class FirmwareProbeDevice(Device):
         hsm.state("forwarded"),
     )
 
+
 def test_device_describes_environment_interaction_surface() -> None:
     device = Device()
 
@@ -173,15 +195,20 @@ def test_device_describes_environment_interaction_surface() -> None:
     assert not hasattr(device, "firmware")
     assert not hasattr(device, "peripherals")
 
-def test_device_accepts_attached_bots_and_peripherals() -> None:
+
+def test_device_constructor_owns_peripherals_but_rejects_external_attachments() -> None:
     bot_instance = hsm.Instance()
     peripheral = Device()
-    device = Device(bots=(bot_instance,), peripherals=(peripheral,))
+    signature = inspect.signature(Device)
+    device = Device(peripherals=(peripheral,))
 
-    assert device_bots(device) == ()
+    assert "bots" not in signature.parameters
     assert device_peripherals(device) == (peripheral,)
-    assert not hasattr(device, "firmware")
-    assert not hasattr(device, "peripherals")
+    with pytest.raises(TypeError):
+        _ = Device(bots=(bot_instance,))
+    with pytest.raises(TypeError):
+        _ = Device((bot_instance,))
+
 
 def test_device_initializes_to_detached_before_accepting_attach_events() -> None:
     async def run() -> None:
@@ -191,12 +218,13 @@ def test_device_initializes_to_detached_before_accepting_attach_events() -> None
         world = await start_device_in_world(device)
         assert device.state() == "/Device/detached"
 
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
+
 
 def test_device_attach_requires_started_device_in_world_scope() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
@@ -205,7 +233,7 @@ def test_device_attach_requires_started_device_in_world_scope() -> None:
         bot_instance = hsm.Instance()
 
         with pytest.raises(RuntimeError, match="Device is not started in this world"):
-            await device.attach(world, bot_instance)
+            await device.attach(world, attach_event(bot_instance))
 
         return device.state(), device_bots(device)
 
@@ -213,6 +241,7 @@ def test_device_attach_requires_started_device_in_world_scope() -> None:
 
     assert state == ""
     assert agents == ()
+
 
 def test_device_attach_rejects_started_device_from_another_world() -> None:
     async def run() -> None:
@@ -224,9 +253,10 @@ def test_device_attach_rejects_started_device_from_another_world() -> None:
         _ = await hsm.started(first_world.context, device, device.model)
 
         with pytest.raises(RuntimeError, match="Device is already started in another world"):
-            await device.attach(second_world, bot_instance)
+            await device.attach(second_world, attach_event(bot_instance))
 
     asyncio.run(run())
+
 
 def test_device_attach_dispatches_deferred_attach_during_firmware_initialization() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
@@ -236,7 +266,7 @@ def test_device_attach_dispatches_deferred_attach_during_firmware_initialization
         bot_instance = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
         assert device_bots(device) == ()
@@ -251,6 +281,7 @@ def test_device_attach_dispatches_deferred_attach_during_firmware_initialization
     assert state == "/Device/attached/inactive"
     assert len(agents) == 1
 
+
 def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
         world = World()
@@ -259,8 +290,8 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
         bot_instance = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, bot_instance)
-        await device.detach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
+        await device.detach(world, detach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
         assert device_bots(device) == ()
@@ -275,6 +306,7 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
     assert state == "/Device/detached"
     assert agents == ()
 
+
 def test_device_attach_result_bridge_is_removed() -> None:
     assert inspect.iscoroutinefunction(Device.attach)
     assert not hasattr(device_module, "_ATTACH_WAITERS")
@@ -282,6 +314,7 @@ def test_device_attach_result_bridge_is_removed() -> None:
     assert not hasattr(device_module, "wrap_instance_async_method")
     assert "device.attach.completed" not in Device.model.events
     assert "device.attach.failed" not in Device.model.events
+
 
 def test_device_attach_does_not_raise_when_firmware_initialization_fails() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool]:
@@ -291,7 +324,7 @@ def test_device_attach_does_not_raise_when_firmware_initialization_fails() -> No
         bot_instance = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
         assert device_bots(device) == ()
@@ -307,6 +340,7 @@ def test_device_attach_does_not_raise_when_firmware_initialization_fails() -> No
     assert agents == ()
     assert firmware_cleared
 
+
 def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
         world = World()
@@ -316,8 +350,8 @@ def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> 
         second_bot = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, first_bot)
-        await device.attach(world, second_bot)
+        await device.attach(world, attach_event(first_bot))
+        await device.attach(world, attach_event(second_bot))
 
         assert device.state() == "/Device/initializing"
         assert device_bots(device) == ()
@@ -330,6 +364,7 @@ def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> 
 
     assert state == "/Device/failed"
     assert agents == ()
+
 
 def test_device_deferred_attach_preserves_completion_correlation() -> None:
     async def run() -> hsm.Event[typing.Any]:
@@ -361,6 +396,7 @@ def test_device_deferred_attach_preserves_completion_correlation() -> None:
     assert event.id == "deferred-attach"
     assert event.metadata == {"traceparent": "deferred-trace"}
 
+
 def test_device_attach_dispatch_returns_before_firmware_initialization_times_out() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
         world = World()
@@ -368,7 +404,7 @@ def test_device_attach_dispatch_returns_before_firmware_initialization_times_out
         bot_instance = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
         assert device_bots(device) == ()
@@ -381,6 +417,7 @@ def test_device_attach_dispatch_returns_before_firmware_initialization_times_out
 
     assert state == "/Device/failed"
     assert agents == ()
+
 
 def test_device_firmware_initialization_timeout_stops_started_firmware_child() -> None:
     async def run() -> tuple[str, bool, bool]:
@@ -400,6 +437,7 @@ def test_device_firmware_initialization_timeout_stops_started_firmware_child() -
     assert firmware_cleared
     assert firmware_stopped
 
+
 def test_device_firmware_initialization_cleanup_timeout_clears_started_firmware_reference() -> None:
     async def run() -> tuple[str, bool]:
         world = World()
@@ -416,6 +454,7 @@ def test_device_firmware_initialization_cleanup_timeout_clears_started_firmware_
     assert state == "/Device/failed"
     assert firmware_cleared
 
+
 def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_times_out() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
         world = World()
@@ -424,8 +463,8 @@ def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_
         second_bot = hsm.Instance()
 
         _ = await hsm.started(world.context, device, device.model)
-        await device.attach(world, first_bot)
-        await device.attach(world, second_bot)
+        await device.attach(world, attach_event(first_bot))
+        await device.attach(world, attach_event(second_bot))
 
         await wait_until(lambda: device.state() == "/Device/failed")
         return device.state(), device_bots(device)
@@ -434,6 +473,7 @@ def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_
 
     assert state == "/Device/failed"
     assert agents == ()
+
 
 def test_device_attach_event_is_ignored_after_firmware_initialization_failed() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...]]:
@@ -445,7 +485,7 @@ def test_device_attach_event_is_ignored_after_firmware_initialization_failed() -
 
         assert device.state() == "/Device/failed"
 
-        await device.attach(world, hsm.Instance())
+        await device.attach(world, attach_event(hsm.Instance()))
 
         return device.state(), device_bots(device)
 
@@ -453,6 +493,7 @@ def test_device_attach_event_is_ignored_after_firmware_initialization_failed() -
 
     assert state == "/Device/failed"
     assert agents == ()
+
 
 def test_device_dispatch_routes_firmware_snapshot_transition_events_to_firmware() -> None:
     async def run() -> None:
@@ -473,40 +514,49 @@ def test_device_dispatch_routes_firmware_snapshot_transition_events_to_firmware(
 
     asyncio.run(run())
 
-def test_device_constructor_bots_are_attached_through_startup_events() -> None:
+
+def test_device_external_actors_attach_only_through_explicit_events() -> None:
     async def run() -> None:
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
-        device = Device(bots=(first_bot, second_bot))
+        device = Device()
 
+        world = await start_device_in_world(device)
+
+        assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
 
-        _ = await start_device_in_world(device)
+        await device.attach(world, attach_event(first_bot))
+        await device.attach(world, attach_event(second_bot))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (first_bot, second_bot)
 
     asyncio.run(run())
 
+
 def test_device_detaching_one_of_multiple_bots_stays_attached() -> None:
     async def run() -> None:
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
-        device = Device(bots=(first_bot, second_bot))
+        device = Device()
 
-        _ = await start_device_in_world(device)
+        world = await start_device_in_world(device)
+        await device.attach(world, attach_event(first_bot))
+        await device.attach(world, attach_event(second_bot))
 
-        await device.dispatch(device.context(), attachment.DetachEvent.with_data(attachment.DetachData(actor=first_bot)))
+        await device.dispatch(device.context(), detach_event(first_bot))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (second_bot,)
 
-        await device.dispatch(device.context(), attachment.DetachEvent.with_data(attachment.DetachData(actor=second_bot)))
+        await device.dispatch(device.context(), detach_event(second_bot))
 
         assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
 
     asyncio.run(run())
+
 
 def test_device_duplicate_attach_event_keeps_single_agent_attachment() -> None:
     async def run() -> None:
@@ -514,13 +564,14 @@ def test_device_duplicate_attach_event_keeps_single_agent_attachment() -> None:
         device = Device()
 
         world = await start_device_in_world(device)
-        await device.attach(world, bot_instance)
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
+        await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
+
 
 def test_device_malformed_attach_event_is_ineligible() -> None:
     async def run() -> None:
@@ -534,18 +585,21 @@ def test_device_malformed_attach_event_is_ineligible() -> None:
 
     asyncio.run(run())
 
+
 def test_device_malformed_detach_event_is_ineligible() -> None:
     async def run() -> None:
         bot_instance = hsm.Instance()
-        device = Device(bots=(bot_instance,))
+        device = Device()
 
-        _ = await start_device_in_world(device)
+        world = await start_device_in_world(device)
+        await device.attach(world, attach_event(bot_instance))
         await device.dispatch(device.context(), attachment.DetachEvent.with_data({"actor": {"id": "bot-device-owner"}}))
 
         assert device.state() == "/Device/attached/inactive"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
+
 
 def test_device_declares_required_bot_abilities_on_subclasses() -> None:
     class VoiceDevice(Device, required_bot_abilities=(voice.VoiceDetection,)):
@@ -555,6 +609,7 @@ def test_device_declares_required_bot_abilities_on_subclasses() -> None:
 
     assert VoiceDevice.required_bot_abilities == (voice.VoiceDetection,)
     assert device.required_bot_abilities == (voice.VoiceDetection,)
+
 
 def test_device_event_schemas_describe_attachment_and_activation() -> None:
     attach_schema = object_dict(attachment.AttachEvent.schema)
@@ -586,6 +641,7 @@ def test_device_event_schemas_describe_attachment_and_activation() -> None:
     assert DeactivateEvent.name == "device.deactivate"
     assert deactivate_schema == DeactivateEventData.model_json_schema()
     assert "required" not in deactivate_schema
+
 
 def test_device_model_tracks_initialization_attachment_and_activation_state() -> None:
     model = Device.model
@@ -625,6 +681,7 @@ def test_device_model_tracks_initialization_attachment_and_activation_state() ->
     assert "device.activate" in transitions["/Device/attached/inactive"]
     assert "device.deactivate" in transitions["/Device/attached/active"]
 
+
 def test_device_activate_transition_has_device_owned_guard_hook() -> None:
     activate_transitions = transition_map(Device.model)["/Device/attached/inactive"]["device.activate"]
     guard_path = activate_transitions[0].guard
@@ -633,6 +690,7 @@ def test_device_activate_transition_has_device_owned_guard_hook() -> None:
     assert guard_path is not None
     assert guard_path in Device.model.members
     assert getattr(Device.model.members[guard_path], "expression")
+
 
 def test_device_active_and_inactive_states_have_lifecycle_hooks() -> None:
     inactive_state = Device.model.members["/Device/attached/inactive"]
@@ -644,6 +702,7 @@ def test_device_active_and_inactive_states_have_lifecycle_hooks() -> None:
     assert getattr(active_state, "entry")
     assert getattr(active_state, "exit")
     assert getattr(active_state, "activity")
+
 
 def test_device_lifecycle_hooks_delegate_to_subclass_overrides() -> None:
     class LifecycleDevice(Device):
@@ -711,10 +770,11 @@ def test_device_lifecycle_hooks_delegate_to_subclass_overrides() -> None:
 
     asyncio.run(exercise_hooks())
 
-def test_device_firmware_started_hook_delegates_to_subclass_before_initial_attachments() -> None:
+
+def test_device_firmware_started_hook_runs_before_later_explicit_attachments() -> None:
     class FirmwareHookDevice(Device):
-        def __init__(self, bot: hsm.Instance) -> None:
-            super().__init__(bots=(bot,))
+        def __init__(self) -> None:
+            super().__init__()
             self.calls: list[str] = []
 
         @override
@@ -724,14 +784,19 @@ def test_device_firmware_started_hook_delegates_to_subclass_before_initial_attac
 
     async def run() -> None:
         bot_instance = hsm.Instance()
-        device = FirmwareHookDevice(bot_instance)
+        device = FirmwareHookDevice()
 
-        _ = await start_device_in_world(device)
+        world = await start_device_in_world(device)
 
         assert device.calls == ["firmware_started:True:0"]
+        assert device_bots(device) == ()
+
+        await device.attach(world, attach_event(bot_instance))
+
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
+
 
 def test_device_attach_and_detach_effects_update_attached_bots() -> None:
     device = Device()
@@ -758,6 +823,7 @@ def test_device_attach_and_detach_effects_update_attached_bots() -> None:
 
     _ = detach_operation(hsm.Context(), device, detach_event)
     assert device_bots(device) == ()
+
 
 def test_device_attach_transition_is_guarded_by_valid_new_agent() -> None:
     device = Device()
@@ -804,11 +870,13 @@ def test_device_attach_transition_is_guarded_by_valid_new_agent() -> None:
     assert not attached_new_guard(hsm.Context(), device, attach_event)
     assert attached_duplicate_guard(hsm.Context(), device, attach_event)
 
+
 def test_device_attached_bots_have_no_public_accessor() -> None:
     device = Device()
 
     assert "bots" not in vars(type(device))
     assert not hasattr(device, "bots")
+
 
 def test_device_detach_transition_is_guarded_by_attached_bot() -> None:
     bot_instance = hsm.Instance()
@@ -846,18 +914,23 @@ def test_device_detach_transition_is_guarded_by_attached_bot() -> None:
         typing.cast(object, getattr(Device.model.members[attach_effect_path], "operation"))
     )
 
-    _ = attach_operation(hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=bot_instance)))
+    _ = attach_operation(
+        hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=bot_instance))
+    )
 
     assert not detach_would_leave_attachments(hsm.Context(), device, detach_event)
     assert detach_last_attachment(hsm.Context(), device, detach_event)
     assert not detach_would_leave_attachments(hsm.Context(), device, missing_detach_event)
     assert not detach_last_attachment(hsm.Context(), device, missing_detach_event)
 
-    _ = attach_operation(hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=other_bot)))
+    _ = attach_operation(
+        hsm.Context(), device, attachment.AttachEvent.with_data(attachment.AttachData(actor=other_bot))
+    )
 
     assert detach_would_leave_attachments(hsm.Context(), device, detach_event)
     assert not detach_last_attachment(hsm.Context(), device, detach_event)
     assert detach_would_leave_attachments(hsm.Context(), device, other_detach_event)
+
 
 def test_device_detaches_json_bots_by_stable_id() -> None:
     async def run() -> None:
@@ -866,17 +939,22 @@ def test_device_detaches_json_bots_by_stable_id() -> None:
         _ = await start_device_in_world(device)
         await device.dispatch(
             device.context(),
-            attachment.AttachEvent.with_data(attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})),
+            attachment.AttachEvent.with_data(
+                attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})
+            ),
         )
         await device.dispatch(
             device.context(),
-            attachment.DetachEvent.with_data(attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})),
+            attachment.DetachEvent.with_data(
+                attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})
+            ),
         )
 
         assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
 
     asyncio.run(run())
+
 
 def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
     async def run() -> None:
@@ -890,20 +968,25 @@ def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
 
         world = await start_device_in_world(device)
         _ = await hsm.started(world.context, bot_instance, agent_model, hsm.Config(id="bot-device-owner"))
-        await device.attach(world, bot_instance)
+        await device.attach(world, attach_event(bot_instance))
         await device.dispatch(
             device.context(),
-            attachment.AttachEvent.with_data(attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})),
+            attachment.AttachEvent.with_data(
+                attachment.AttachData.model_validate({"actor": {"id": "bot-device-owner"}})
+            ),
         )
         await device.dispatch(
             device.context(),
-            attachment.DetachEvent.with_data(attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})),
+            attachment.DetachEvent.with_data(
+                attachment.DetachData.model_validate({"actor": {"id": "bot-device-owner"}})
+            ),
         )
 
         assert device.state() == "/Device/detached"
         assert device_bots(device) == ()
 
     asyncio.run(run())
+
 
 def test_device_activate_guard_delegates_to_device_policy() -> None:
     class ActivatingDevice(Device):
@@ -923,6 +1006,7 @@ def test_device_activate_guard_delegates_to_device_policy() -> None:
 
     assert guard(hsm.Context(), ActivatingDevice(True), event)
     assert not guard(hsm.Context(), ActivatingDevice(False), event)
+
 
 def test_device_firmware_initializing_event_uses_completion_kind() -> None:
     assert FirmwareInitializingDoneEvent.name == "device.firmware.initializing.done"
