@@ -29,7 +29,6 @@ from bot.habit.instance import Instance
 from bot.habit import storage as habit_storage
 from bot.telemetry import observer
 
-from . import operations
 from . import episodes
 from . import input
 from . import types
@@ -1261,14 +1260,14 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             output = result.output
             if output is None:
                 raise TypeError("Autonomy habit output is unhandled.")
-            input = operations.build_processing_input(cognition_input)
-            if input.actors and output:
+            processing_input = input.build_processing_input(cognition_input)
+            if processing_input.actors and output:
                 selections = processing.coerce_event_selections(output)
                 if selections is None:
                     raise TypeError("Autonomy habit output does not match event selections.")
-                await operations.dispatch_selected_events(
+                await types.dispatch_selected_events(
                     ctx,
-                    input,
+                    processing_input,
                     selections,
                     operation_id=parent_id,
                     source=instance,

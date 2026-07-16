@@ -1,5 +1,9 @@
+from .. import processing
+
+import collections.abc
 import typing
 
+import hsm
 import pydantic
 
 _Reference = typing.Annotated[
@@ -90,6 +94,52 @@ def is_output(value: object) -> typing.TypeGuard[OutputData]:
     return all(isinstance(item, EventData) for item in value)
 
 
+async def dispatch_selected_events(
+    ctx: hsm.Context,
+    input: processing.InputData,
+    selections: processing.Events,
+    *,
+    operation_id: str,
+    source: hsm.Instance,
+    metadata: collections.abc.Mapping[str, object] | None = None,
+) -> None:
+    """Validate body-action constraints, then dispatch selected modeled events."""
+
+    import bot
+    from bot import device
+
+    event_metadata = dict(metadata or {})
+    event_metadata["bot.cognition.action_source"] = source
+    configured_candidates = tuple(
+        name for name, actor in input.actors.items() if name != "bot" and isinstance(actor, device.Device)
+    )
+    candidates = configured_candidates
+    restricted = event_metadata.get("bot.focus_candidates")
+    if isinstance(restricted, collections.abc.Sequence) and not isinstance(restricted, str | bytes | bytearray):
+        allowed = {item for item in restricted if isinstance(item, str) and item}
+        candidates = tuple(item for item in candidates if item in allowed)
+
+    for selection in selections:
+        if selection.event == bot.FocusDeviceEvent.name:
+            if selection.target is not None and selection.target != "bot":
+                raise RuntimeError("Processing selected focus_device outside available device candidates.")
+            data = bot.FocusDeviceEventData.model_validate(selection.data or {})
+            bot_actor = input.actors.get("bot")
+            if data.device not in candidates and (configured_candidates or isinstance(bot_actor, bot.Bot)):
+                raise RuntimeError("Processing selected focus_device outside available device candidates.")
+        elif selection.event == bot.ClearFocusEvent.name and selection.target not in (None, "bot"):
+            raise RuntimeError("Processing selected clear_focus for a non-bot target.")
+
+    await processing.dispatch_selected_events(
+        ctx,
+        input,
+        selections,
+        operation_id=operation_id,
+        source=source,
+        metadata=event_metadata,
+    )
+
+
 __all__ = [
     "OUTPUT_SCHEMA",
     "OUTPUT_SCHEMA_CONTRACT",
@@ -98,5 +148,6 @@ __all__ = [
     "OutputData",
     "OPTIONAL_OUTPUT_SCHEMA",
     "OPTIONAL_OUTPUT_SCHEMA_CONTRACT",
+    "dispatch_selected_events",
     "is_output",
 ]

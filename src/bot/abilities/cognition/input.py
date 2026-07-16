@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bot
 from .. import ability
+from .. import processing
 
 import collections.abc
 import typing
@@ -80,7 +81,33 @@ def is_input(value: object) -> typing.TypeGuard[InputData]:
     return isinstance(value, InputData)
 
 
+def build_processing_input(
+    cognition_input: InputData,
+    *,
+    extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
+) -> processing.InputData:
+    """Build the deliberative input and callable schemas for one cognition turn."""
+
+    actors: dict[str, hsm.Instance] = dict(cognition_input.actors)
+    if extra_actors:
+        actors.update(extra_actors)
+    schemas: list[processing.Event[typing.Any]] = []
+    seen: set[str] = set()
+    for instance in actors.values():
+        for event in processing.enabled_call_events(instance):
+            if event.name not in seen:
+                seen.add(event.name)
+                schemas.append(event)
+    if "bot" in actors:
+        for event in (bot.FocusDeviceEvent, bot.ClearFocusEvent):
+            if event.name not in seen:
+                seen.add(event.name)
+                schemas.append(event)
+    return processing.InputData(input=cognition_input.stimulus, schemas=tuple(schemas), actors=actors)
+
+
 __all__ = [
     "InputData",
+    "build_processing_input",
     "is_input",
 ]

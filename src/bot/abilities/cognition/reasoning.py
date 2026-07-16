@@ -15,7 +15,6 @@ import pydantic
 from bot.telemetry import observer
 
 from bot.habit import BreakData, ChangeData, CreateData
-from . import operations
 from . import episodes
 from . import types
 
@@ -632,7 +631,7 @@ class Reasoning(processing.Processing):
             return
         if data.host_input.actors and reasoned.result:
             try:
-                await operations.dispatch_selected_events(
+                await types.dispatch_selected_events(
                     ctx,
                     data.host_input,
                     _selections_from_output(reasoned.result),
