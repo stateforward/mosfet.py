@@ -114,9 +114,7 @@ class _DispatchHost:
         eventspec = self._eventspec(event)
         target_id = _optional_target_id(target)
         if current.queue_dispatches:
-            current.dispatches.append(
-                _EventDispatch(eventspec=eventspec, data=_json_like(data), target=target_id)
-            )
+            current.dispatches.append(_EventDispatch(eventspec=eventspec, data=_json_like(data), target=target_id))
             return
         self._dispatch_event(current, eventspec, data, target=target_id)
 
@@ -437,9 +435,14 @@ def _habit_event(
     """Stamp operation correlation and the habit's addressable id as event source."""
 
     habit_id = _habit_id(current.instance)
+    from bot.abilities import processing
+
+    operation_id = (
+        processing.active_operation_id(current.instance) if isinstance(current.instance, hsm.Instance) else None
+    )
     return dataclasses.replace(
         event,
-        id=current.event.id or event.id,
+        id=operation_id or current.event.id or event.id,
         metadata={**current.event.metadata, **event.metadata},
         source=habit_id,
         target=target or "",
@@ -447,10 +450,11 @@ def _habit_event(
 
 
 def _event_facade(event: hsm.Event[object]) -> dict[str, object]:
+    """Expose modeled event fields to behavior without exposing telemetry metadata."""
+
     return {
         "name": event.name,
         "data": _json_like(event.data),
-        "metadata": _json_like(dict(event.metadata)),
         "id": event.id,
         "source": event.source,
         "target": event.target,

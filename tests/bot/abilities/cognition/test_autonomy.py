@@ -16,6 +16,11 @@ import pytest
 from bot import habit
 from bot.world import SoundData, SoundEvent
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
+
+
+def test_autonomy_never_uses_metadata_for_coordination() -> None:
+    assert_metadata_is_not_coordination(autonomy_module)
 
 
 _DELAYED_HABIT_SOURCE = """
@@ -86,6 +91,20 @@ async def _wait_until(predicate: typing.Callable[[], bool], *, timeout: float = 
             await asyncio.sleep(0)
 
 
+def _turn(operation_id: str = "autonomy-turn") -> cognition.types.TurnData:
+    return cognition.types.TurnData(
+        input=cognition.InputData(
+            stimulus=SoundEvent.with_data(SoundData(audio=b"ring", kind="ring")),
+            abilities=(),
+            actors={},
+            focus=None,
+            focus_candidates=(),
+        ),
+        operation_id=operation_id,
+        generation="operation-token",
+    )
+
+
 def test_autonomy_waits_for_asynchronous_habit_terminal() -> None:
     async def run() -> tuple[object, str, int]:
         store = memory.Memory()
@@ -104,13 +123,7 @@ def test_autonomy_waits_for_asynchronous_habit_terminal() -> None:
         output = await dispatch_ability_for_test(
             autonomy,
             ctx,
-            cognition.InputData(
-                stimulus=SoundEvent.with_data(SoundData(audio=b"ring", kind="ring")),
-                abilities=(),
-                actors={},
-                focus=None,
-                focus_candidates=(),
-            ),
+            _turn(),
             timeout=0.2,
         )
         instances = autonomy.context().value(hsm.Keys.Instances)
@@ -123,10 +136,13 @@ def test_autonomy_waits_for_asynchronous_habit_terminal() -> None:
 
     output, state, candidate_count = asyncio.run(run())
 
-    assert output == (
-        cognition.types.EventData(
-            event="bot.clear_focus",
-            reason="delayed habit",
+    assert output == cognition.types.CompletionData(
+        turn=_turn(),
+        output=(
+            cognition.types.EventData(
+                event="bot.clear_focus",
+                reason="delayed habit",
+            ),
         ),
     )
     assert state == "/AutonomyLifecycle/attached/behavior/idle"
@@ -158,13 +174,7 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
             ctx,
             autonomy,
             autonomy.input_event.with_data_and_id(
-                cognition.InputData(
-                    stimulus=SoundEvent.with_data(SoundData(audio=b"ring", kind="ring")),
-                    abilities=(),
-                    actors={},
-                    focus=None,
-                    focus_candidates=(),
-                ),
+                _turn(operation_id),
                 operation_id,
             ),
         )

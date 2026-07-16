@@ -495,6 +495,11 @@ class CancelData(pydantic.BaseModel):
         description="Opaque cancellation capability created by the owning operation actor.",
         examples=["8d72b83f17654f1788c012ab132b4afd"],
     )
+    parent_operation_id: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description="Optional owning operation identifier echoed by the cancellation completion.",
+    )
 
 
 class CancelledData(pydantic.BaseModel):
@@ -512,6 +517,11 @@ class CancelledData(pydantic.BaseModel):
         description="Exact cancellation capability accepted by this processing actor.",
         examples=["8d72b83f17654f1788c012ab132b4afd"],
     )
+    parent_operation_id: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description="Owning operation identifier echoed from the cancellation request, when supplied.",
+    )
 
 
 CancelEvent = hsm.Event[CancelData](
@@ -523,6 +533,146 @@ CancelledEvent = hsm.Event[CancelledData](
     kind=hsm.CompletionEventKind,
     schema=CancelledData,
 )
+
+
+class Operation(hsm.Instance):
+    """Operation-scoped actor used as the live capability for one request ID."""
+
+
+class _OperationData(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(min_length=1)
+
+
+_OperationFinishedEvent = hsm.Event[_OperationData](
+    name="bot.ability.processing.operation.finished",
+    kind=hsm.CompletionEventKind,
+    schema=_OperationData,
+)
+
+
+def _operation_key(owner: hsm.Instance, operation_id: str) -> str:
+    return f"processing.operation:{hsm.id(owner)}:{operation_id}"
+
+
+def cancellation_operation_id(
+    parent_operation_id: str,
+    child_operation_id: str,
+    token: str,
+    child_id: str,
+) -> str:
+    """Build the typed live-capability identity for one exact child cancellation."""
+
+    return f"cancel:{parent_operation_id}:{child_operation_id}:{token}:{child_id}"
+
+
+async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
+    """Start and register the live capability for an operation."""
+
+    async def hold(
+        ctx: hsm.Context,
+        instance: hsm.Instance,
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx, event
+        await asyncio.Future[None]()
+        _ = instance
+
+    operation = Operation()
+    await hsm.started(
+        owner.context(),
+        operation,
+        hsm.define(
+            "ProcessingOperation",
+            hsm.initial(hsm.target("active")),
+            hsm.state(
+                "active",
+                hsm.activity(hold),
+                hsm.transition(
+                    hsm.on(_OperationFinishedEvent),
+                    hsm.target("/ProcessingOperation/done"),
+                ),
+            ),
+            hsm.final("done"),
+        ),
+    )
+    instances = owner.context().value(hsm.Keys.Instances)
+    if isinstance(instances, collections.abc.MutableMapping):
+        _ = instances.pop(hsm.id(operation), None)
+        instances[_operation_key(owner, operation_id)] = operation
+    return operation
+
+
+def active_operation(owner: hsm.Instance, operation_id: str) -> Operation | None:
+    """Resolve the exact live operation capability owned by a machine."""
+
+    instances = owner.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.Mapping):
+        return None
+    operation = instances.get(_operation_key(owner, operation_id))
+    return operation if isinstance(operation, Operation) and operation.state().endswith("/active") else None
+
+
+def active_operation_id(owner: hsm.Instance) -> str | None:
+    """Return the sole active operation ID owned by an operation-scoped actor."""
+
+    instances = owner.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.Mapping):
+        return None
+    prefix = f"processing.operation:{hsm.id(owner)}:"
+    active = [
+        key.removeprefix(prefix)
+        for key, operation in instances.items()
+        if isinstance(key, str)
+        and key.startswith(prefix)
+        and isinstance(operation, Operation)
+        and operation.state().endswith("/active")
+    ]
+    return active[0] if len(active) == 1 else None
+
+
+def matches_operation(owner: hsm.Instance, operation_id: str, actor_id: str) -> bool:
+    """Return whether typed correlation names the exact live operation actor."""
+
+    operation = active_operation(owner, operation_id)
+    return operation is not None and hsm.id(operation) == actor_id
+
+
+def finish_operation(ctx: hsm.Context, owner: hsm.Instance, operation_id: str) -> None:
+    """Retire an operation capability so delayed terminals and cancels cannot match it."""
+
+    instances = owner.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.MutableMapping):
+        return
+    operation = instances.pop(_operation_key(owner, operation_id), None)
+    if isinstance(operation, Operation):
+        _ = hsm.dispatch(
+            ctx,
+            operation,
+            dataclasses.replace(
+                _OperationFinishedEvent.with_data(_OperationData(operation_id=operation_id)),
+                id=operation_id,
+                source=hsm.id(owner),
+                target=hsm.id(operation),
+            ),
+        )
+
+
+def finish_operations(ctx: hsm.Context, owner: hsm.Instance) -> None:
+    """Retire every live operation capability owned by a machine abandoning its work."""
+
+    instances = owner.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.Mapping):
+        return
+    prefix = f"processing.operation:{hsm.id(owner)}:"
+    operation_ids = tuple(
+        key.removeprefix(prefix)
+        for key, operation in instances.items()
+        if isinstance(key, str) and key.startswith(prefix) and isinstance(operation, Operation)
+    )
+    for operation_id in operation_ids:
+        finish_operation(ctx, owner, operation_id)
 
 
 class InputData(pydantic.BaseModel):
@@ -556,6 +706,12 @@ class InputData(pydantic.BaseModel):
         exclude=True,
         repr=False,
         description="Named instances used only to dispatch selected events (not model-facing).",
+    )
+    authority: SkipJsonSchema[hsm.Instance | None] = pydantic.Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Runtime actor that authorizes selected-event dispatch for this processing turn.",
     )
     instructions: str | None = pydantic.Field(
         default=None,
@@ -591,6 +747,32 @@ class InputData(pydantic.BaseModel):
             projected.append(item)
         # Stimulus + tools only; instructions are system policy for the provider, not user content.
         return {"input": self.input, "schemas": projected}
+
+
+class CompletionData(pydantic.BaseModel):
+    """Typed processing terminal carrying both the request and its product."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "input": {"input": "incoming stimulus"},
+                    "output": {"handled": True, "events": []},
+                }
+            ]
+        },
+    )
+
+    input: InputData = pydantic.Field(description="Exact typed processing request that produced this terminal.")
+    output: OutputData = pydantic.Field(description="Validated processing result for the correlated request.")
+
+
+class FailureData(ability.FailureData):
+    """Typed processing failure carrying the request that failed."""
+
+    input: InputData = pydantic.Field(description="Exact typed processing request that failed.")
 
 
 _MISSING = object()
@@ -832,7 +1014,7 @@ async def dispatch_selected_events(
                 dataclasses.replace(
                     dispatch_event,
                     id=operation_id,
-                    source=hsm.id(source),
+                    source=hsm.id(input.authority or source),
                     target=hsm.id(target),
                     metadata=event_metadata,
                 ),
@@ -873,15 +1055,15 @@ _AppliedEvent = hsm.Event[_AppliedEventData](
     kind=hsm.CompletionEventKind,
     schema=_AppliedEventData,
 )
-_DispatchedEvent = hsm.Event[OutputData](
+_DispatchedEvent = hsm.Event[_AppliedEventData](
     name="bot.ability.processing.dispatched",
     kind=hsm.CompletionEventKind,
-    schema=OutputData,
+    schema=_AppliedEventData,
 )
-_FailedEvent = hsm.Event[ability.FailureData](
+_FailedEvent = hsm.Event[FailureData](
     name="bot.ability.processing.failed",
     kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
+    schema=FailureData,
 )
 
 
@@ -894,7 +1076,7 @@ class Processor(abc.ABC):
         ...
 
 
-class Processing(ability.Ability[InputData, typing.Any]):
+class Processing(ability.Ability[InputData, CompletionData]):
     """Leaf ability: apply an injected ``Processor``, then dispatch selected events if any.
 
     Model-facing system policy lives here (``instructions``), not on the provider Processor.
@@ -905,14 +1087,19 @@ class Processing(ability.Ability[InputData, typing.Any]):
     instructions: typing.ClassVar[str] = ""
     _instructions: str
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = CompletionData
     input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
         name="bot.ability.processing.input",
         data_type=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
         name="bot.ability.processing.output",
-        data_type=OutputData,
+        data_type=CompletionData,
+    )
+    failed_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[FailureData](
+        name=ability.FailedEvent.name,
+        kind=hsm.ErrorEventKind,
+        schema=FailureData,
     )
 
     @staticmethod
@@ -940,7 +1127,7 @@ class Processing(ability.Ability[InputData, typing.Any]):
     @staticmethod
     def _has_failure(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, ability.FailureData)
+        return isinstance(event.data, FailureData)
 
     @staticmethod
     def _is_cancel_request(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:
@@ -951,7 +1138,11 @@ class Processing(ability.Ability[InputData, typing.Any]):
             or event.target != hsm.id(instance)
         ):
             return False
-        return bool(instance._attachments) and event.source == hsm.id(instance._attachments[0])
+        return (
+            bool(instance._attachments)
+            and event.source == hsm.id(instance._attachments[0])
+            and active_operation(instance, event.data.operation_id) is not None
+        )
 
     @staticmethod
     def _emit_cancelled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
@@ -962,20 +1153,27 @@ class Processing(ability.Ability[InputData, typing.Any]):
             ctx,
             owner,
             dataclasses.replace(
-                CancelledEvent.with_data(CancelledData(operation_id=data.operation_id, token=data.token)),
+                CancelledEvent.with_data(
+                    CancelledData(
+                        operation_id=data.operation_id,
+                        token=data.token,
+                        parent_operation_id=data.parent_operation_id,
+                    )
+                ),
                 id=event.id,
                 source=hsm.id(instance),
                 target=hsm.id(owner),
                 metadata=dict(event.metadata),
             ),
         )
+        finish_operation(ctx, instance, data.operation_id)
 
     @staticmethod
     def _emit_output(
         ctx: hsm.Context,
         instance: "Processing",
         event: hsm.Event[typing.Any],
-        output: OutputData,
+        output: CompletionData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -984,11 +1182,12 @@ class Processing(ability.Ability[InputData, typing.Any]):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        finish_operation(ctx, instance, event.id)
 
     @staticmethod
     def _emit_failure(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
         data = event.data
-        assert isinstance(data, ability.FailureData)
+        assert isinstance(data, FailureData)
         terminal = dataclasses.replace(
             instance.failed_event.with_data(data),
             id=event.id or None,
@@ -996,24 +1195,44 @@ class Processing(ability.Ability[InputData, typing.Any]):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        finish_operation(ctx, instance, event.id)
 
     @staticmethod
     def _complete_empty(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
         """No events selected: terminal empty product, skip dispatching."""
 
-        Processing._emit_output(ctx, instance, event, OutputData())
+        data = event.data
+        assert isinstance(data, _AppliedEventData)
+        Processing._emit_output(
+            ctx,
+            instance,
+            event,
+            CompletionData(input=data.input, output=OutputData()),
+        )
 
     @staticmethod
     def _complete_unhandled(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
         """Processor declined the input (composition)."""
 
-        Processing._emit_output(ctx, instance, event, OutputData(handled=False))
+        data = event.data
+        assert isinstance(data, _AppliedEventData)
+        Processing._emit_output(
+            ctx,
+            instance,
+            event,
+            CompletionData(input=data.input, output=OutputData(handled=False)),
+        )
 
     @staticmethod
     def _complete_dispatched(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> None:
-        output = event.data
-        assert isinstance(output, OutputData)
-        Processing._emit_output(ctx, instance, event, output)
+        data = event.data
+        assert isinstance(data, _AppliedEventData)
+        Processing._emit_output(
+            ctx,
+            instance,
+            event,
+            CompletionData(input=data.input, output=data.output),
+        )
 
     @staticmethod
     def _input_for_processor(instance: "Processing", input: InputData) -> InputData:
@@ -1035,6 +1254,8 @@ class Processing(ability.Ability[InputData, typing.Any]):
         """applying: run process (via ``_apply`` so subclasses may override)."""
 
         input = Processing._input_for_processor(instance, typing.cast(InputData, event.data))
+        if active_operation(instance, event.id) is None:
+            await start_operation(instance, event.id)
         try:
             raw = await instance.processor.process(input)
             if isinstance(raw, Result) and not raw.is_handled:
@@ -1051,7 +1272,7 @@ class Processing(ability.Ability[InputData, typing.Any]):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _FailedEvent.with_data(ability.FailureData(message=str(error))),
+                    _FailedEvent.with_data(FailureData(message=str(error), input=input)),
                     id=event.id or None,
                     metadata=dict(event.metadata),
                 ),
@@ -1093,7 +1314,7 @@ class Processing(ability.Ability[InputData, typing.Any]):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _FailedEvent.with_data(ability.FailureData(message=str(error))),
+                    _FailedEvent.with_data(FailureData(message=str(error), input=data.input)),
                     id=event.id or None,
                     metadata=dict(event.metadata),
                 ),
@@ -1103,7 +1324,7 @@ class Processing(ability.Ability[InputData, typing.Any]):
             ctx,
             instance,
             dataclasses.replace(
-                _DispatchedEvent.with_data(data.output),
+                _DispatchedEvent.with_data(data),
                 id=event.id or None,
                 metadata=dict(event.metadata),
             ),
@@ -1204,27 +1425,37 @@ OutputEvent = Processing.output_event
 __all__ = [
     "CONFIDENCE_MAX",
     "CONFIDENCE_MIN",
+    "CompletionData",
+    "FailureData",
     "DISPATCH_TOOL_NAME",
     "Event",
     "Events",
     "InputEvent",
     "OutputEvent",
     "OutputData",
+    "Operation",
     "InputData",
     "Processor",
     "Processing",
     "Result",
     "SchemaPatch",
     "SelectedEvent",
+    "active_operation",
+    "active_operation_id",
+    "cancellation_operation_id",
     "coerce_event_selections",
     "dispatch_selected_events",
     "dispatch_tool",
     "enabled_call_events",
     "events_from_dispatch_args",
+    "finish_operation",
+    "finish_operations",
     "model_facing_event_json_schema",
+    "matches_operation",
     "normalize_confidence",
     "patch_field_names",
     "patched_event_data_model",
     "selection_confidence",
+    "start_operation",
     "unpatch_event_data",
 ]

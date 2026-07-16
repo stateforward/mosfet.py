@@ -3,7 +3,6 @@ from .. import ability
 from .. import memory
 from .. import processing
 
-import collections.abc
 import dataclasses
 import typing
 import uuid
@@ -18,10 +17,6 @@ from bot.habit import BreakData, ChangeData, CreateData
 from . import episodes
 from . import types
 
-_REASONING_INPUT_METADATA_KEY = "bot.reasoning.input"
-_REASONING_CAPABILITY_METADATA_KEY = "bot.reasoning.capability"
-# Host frame when CallData is used as the model-facing invoke (multi-select or cascade).
-HOST_INPUT_METADATA_KEY = "bot.reasoning.host_input"
 DEFAULT_INSTRUCTIONS = (
     "Return the best typed result for the input; use prior_episodes when present; "
     "set create/change/break only for clear repeated habit patterns; else omit them."
@@ -59,6 +54,18 @@ class CallData(pydantic.BaseModel):
 
 
 class InputData(pydantic.BaseModel):
+    """Typed Cognition request for one deliberate reasoning stage."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    turn: types.TurnData
+    processing_input: processing.InputData
+
+
+class ProcessorInput(pydantic.BaseModel):
     """Deliberative reasoning input: host input plus memory-recalled prior episodes."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -184,6 +191,16 @@ class OutputData(pydantic.BaseModel):
         return None
 
 
+class _ReasoningCapability(pydantic.BaseModel):
+    """JSON-safe authority minted for exactly one live reasoning operation."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str
+    actor_id: str
+    token: str
+
+
 class _RecalledEventData(pydantic.BaseModel):
     """Private completion: memory recall finished; ready to dispatch the processor."""
 
@@ -192,6 +209,8 @@ class _RecalledEventData(pydantic.BaseModel):
         frozen=True,
     )
 
+    turn: types.TurnData
+    capability: _ReasoningCapability
     host_input: processing.InputData
     prior_episodes: tuple[episodes.CognitiveEpisode, ...] = ()
     memory_consulted: bool = False
@@ -205,6 +224,8 @@ class _ReasonedEventData(pydantic.BaseModel):
         frozen=True,
     )
 
+    turn: types.TurnData
+    capability: _ReasoningCapability
     host_input: processing.InputData
     reasoned: OutputData
     memory_consulted: bool = False
@@ -215,6 +236,8 @@ class _RetainedEventData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
+    turn: types.TurnData
+    capability: _ReasoningCapability
     result: types.OutputData
     memory_consulted: bool = False
     memory_written: bool = False
@@ -235,42 +258,28 @@ _RetainedEvent = hsm.Event[_RetainedEventData](
     kind=hsm.CompletionEventKind,
     schema=_RetainedEventData,
 )
-_ReasoningStageFailedEvent = hsm.Event[ability.FailureData](
-    name="bot.ability.reasoning.stage.failed",
-    kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
-)
 
 
-class _ReasoningCapability(pydantic.BaseModel):
-    """JSON-safe authority minted for exactly one live reasoning operation."""
-
+class _ReasoningStageFailedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    operation_id: str
-    actor_id: str
-    token: str
+    failure: ability.FailureData
+    turn: types.TurnData
+    capability: _ReasoningCapability
 
 
-class _ReasoningOperation(hsm.Instance):
-    """Scoped identity actor for a reasoning stage chain."""
-
-    model: typing.ClassVar[hsm.Model] = hsm.define(
-        "ReasoningOperation",
-        hsm.initial(hsm.target("/ReasoningOperation/active")),
-        hsm.state("active"),
-    )
+_ReasoningStageFailedEvent = hsm.Event[_ReasoningStageFailedData](
+    name="bot.ability.reasoning.stage.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_ReasoningStageFailedData,
+)
 
 
 ReasoningProcessor: typing.TypeAlias = processing.Processor
 
 
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key not in {_REASONING_INPUT_METADATA_KEY, _REASONING_CAPABILITY_METADATA_KEY}
-    }
+    return dict(metadata)
 
 
 def _selections_from_output(output: types.OutputData) -> processing.Events:
@@ -326,23 +335,25 @@ class Reasoning(processing.Processing):
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = (
-        processing.InputData,
+        InputData,
         CallData,
     )
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.OutputData
-    # CallEventKind so intuition can multi-select reasoning as a normal actor tool.
-    # CallData is the model-facing schema (empty invoke); hosts may also dispatch a full
-    # processing.InputData frame (cascade / internal).
-    input_event: typing.ClassVar[hsm.Event[CallData | processing.InputData]] = hsm.Event[
-        CallData | processing.InputData
-    ](
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
+    # CallData remains the model-facing schema; Cognition dispatches the full InputData frame
+    # only after autonomy and intuition leave the turn unhandled.
+    input_event: typing.ClassVar[hsm.Event[CallData | InputData]] = hsm.Event[CallData | InputData](
         name="bot.ability.reasoning.input",
         kind=hsm.CallEventKind,
         schema=CallData,
     )
-    output_event: typing.ClassVar[hsm.Event[types.OutputData]] = hsm.Event[types.OutputData](
+    output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
         name="bot.ability.reasoning.output",
-        schema=types.OUTPUT_SCHEMA_CONTRACT,
+        schema=types.CompletionData,
+    )
+    failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
+        name=ability.FailedEvent.name,
+        kind=hsm.ErrorEventKind,
+        schema=types.FailureData,
     )
     instructions: typing.ClassVar[str] = DEFAULT_INSTRUCTIONS
     _processor: processing.Processor
@@ -359,40 +370,37 @@ class Reasoning(processing.Processing):
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
-    def _host_input_from_event(event: hsm.Event[typing.Any]) -> processing.InputData:
-        """Resolve the deliberative frame from a call payload or host-stamped metadata."""
+    def _input_from_event(event: hsm.Event[typing.Any]) -> InputData:
+        """Resolve the typed deliberative frame supplied by its cognition host."""
 
         data = event.data
-        if isinstance(data, processing.InputData):
+        if isinstance(data, InputData):
             return data
-        if isinstance(data, CallData):
-            host = event.metadata.get(HOST_INPUT_METADATA_KEY)
-            if isinstance(host, processing.InputData):
-                return host
-            raise TypeError("Reasoning CallData requires bot.reasoning.host_input metadata with processing.InputData.")
-        raise TypeError(f"Reasoning input must be processing.InputData or CallData, got {type(data)!r}.")
+        raise TypeError(f"Reasoning input must be InputData, got {type(data)!r}.")
 
     @staticmethod
     def _has_reasoning_input(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        if isinstance(event.data, processing.InputData):
-            return True
-        if isinstance(event.data, CallData):
-            return isinstance(event.metadata.get(HOST_INPUT_METADATA_KEY), processing.InputData)
-        return False
+        return isinstance(event.data, InputData)
 
     @staticmethod
     def _matches_operation(instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
-        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
+        data = event.data
+        capability = (
+            data.capability
+            if isinstance(
+                data,
+                _RecalledEventData | _ReasonedEventData | _RetainedEventData | _ReasoningStageFailedData,
+            )
+            else None
+        )
         if not isinstance(capability, _ReasoningCapability):
             return False
-        instances = instance.context().value(hsm.Keys.Instances)
-        actor = instances.get(event.source) if isinstance(instances, collections.abc.Mapping) else None
         return (
             event.id == capability.operation_id
             and event.source == capability.actor_id
             and event.target == hsm.id(instance)
-            and isinstance(actor, _ReasoningOperation)
+            and processing.matches_operation(instance, capability.operation_id, capability.actor_id)
         )
 
     @staticmethod
@@ -413,42 +421,21 @@ class Reasoning(processing.Processing):
     @staticmethod
     def _has_stage_failure(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        return isinstance(event.data, ability.FailureData) and Reasoning._matches_operation(instance, event)
+        return isinstance(event.data, _ReasoningStageFailedData) and Reasoning._matches_operation(instance, event)
 
     @staticmethod
     async def _start_operation(instance: "Reasoning", operation_id: str) -> _ReasoningCapability:
-        operation = _ReasoningOperation()
-        private = hsm.Context(parent=instance.context(), values={hsm.Keys.Instances: {}})
-        started = await hsm.started(private, operation, operation.model)
-        actor_id = hsm.id(started)
-        instances = instance.context().value(hsm.Keys.Instances)
-        if isinstance(instances, collections.abc.MutableMapping):
-            instances[actor_id] = started
+        operation = processing.active_operation(instance, operation_id)
+        if operation is None:
+            operation = await processing.start_operation(instance, operation_id)
         return _ReasoningCapability(
             operation_id=operation_id,
-            actor_id=actor_id,
+            actor_id=hsm.id(operation),
             token=uuid.uuid4().hex,
         )
 
     @staticmethod
-    def _finish_operation(instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
-        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
-        instances = instance.context().value(hsm.Keys.Instances)
-        if isinstance(capability, _ReasoningCapability) and isinstance(instances, collections.abc.MutableMapping):
-            _ = instances.pop(capability.actor_id, None)
-
-    @staticmethod
-    def _cancel_operations(instance: "Reasoning") -> None:
-        instances = instance.context().value(hsm.Keys.Instances)
-        if not isinstance(instances, collections.abc.MutableMapping):
-            return
-        for actor_id, actor in tuple(instances.items()):
-            if isinstance(actor_id, str) and isinstance(actor, _ReasoningOperation):
-                _ = instances.pop(actor_id, None)
-
-    @staticmethod
     def _cancel(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
-        Reasoning._cancel_operations(instance)
         processing.Processing._emit_cancelled(ctx, instance, event)
 
     @staticmethod
@@ -465,7 +452,7 @@ class Reasoning(processing.Processing):
             id=capability.operation_id,
             source=capability.actor_id,
             target=hsm.id(target),
-            metadata={**metadata, _REASONING_CAPABILITY_METADATA_KEY: capability},
+            metadata=dict(metadata),
         )
 
     @staticmethod
@@ -475,7 +462,7 @@ class Reasoning(processing.Processing):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        failure: ability.FailureData,
+        failure: types.FailureData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
@@ -484,6 +471,8 @@ class Reasoning(processing.Processing):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _dispatch_output(
@@ -492,7 +481,7 @@ class Reasoning(processing.Processing):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        output: types.OutputData,
+        output: types.CompletionData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -501,18 +490,19 @@ class Reasoning(processing.Processing):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _fail_from_stage(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
-        assert isinstance(data, ability.FailureData)
-        Reasoning._finish_operation(instance, event)
+        assert isinstance(data, _ReasoningStageFailedData)
         Reasoning._dispatch_failure(
             ctx,
             instance,
             operation_id=event.id or None,
             metadata=dict(event.metadata),
-            failure=data,
+            failure=types.FailureData(message=data.failure.message, turn=data.turn),
         )
 
     @staticmethod
@@ -539,15 +529,34 @@ class Reasoning(processing.Processing):
             )
 
         try:
-            input = Reasoning._host_input_from_event(event)
+            request = Reasoning._input_from_event(event)
+            input = request.processing_input
         except TypeError as error:
-            dispatch_stage(_ReasoningStageFailedEvent, ability.FailureData(message=str(error)))
+            fallback_turn = types.TurnData(
+                input=typing.cast(InputData, event.data).turn.input,
+                operation_id=operation_id,
+                generation=typing.cast(InputData, event.data).turn.generation,
+            )
+            dispatch_stage(
+                _ReasoningStageFailedEvent,
+                _ReasoningStageFailedData(
+                    failure=ability.FailureData(message=str(error)),
+                    turn=fallback_turn,
+                    capability=capability,
+                ),
+            )
             return
         store = instance._memory
         if store is None:
             dispatch_stage(
                 _RecalledEvent,
-                _RecalledEventData(host_input=input, prior_episodes=(), memory_consulted=False),
+                _RecalledEventData(
+                    turn=request.turn,
+                    capability=capability,
+                    host_input=input,
+                    prior_episodes=(),
+                    memory_consulted=False,
+                ),
             )
             return
         try:
@@ -557,12 +566,22 @@ class Reasoning(processing.Processing):
         except Exception as error:
             dispatch_stage(
                 _ReasoningStageFailedEvent,
-                ability.FailureData(message=f"Reasoning memory recall failed: {error}"),
+                _ReasoningStageFailedData(
+                    failure=ability.FailureData(message=f"Reasoning memory recall failed: {error}"),
+                    turn=request.turn,
+                    capability=capability,
+                ),
             )
             return
         dispatch_stage(
             _RecalledEvent,
-            _RecalledEventData(host_input=input, prior_episodes=prior, memory_consulted=True),
+            _RecalledEventData(
+                turn=request.turn,
+                capability=capability,
+                host_input=input,
+                prior_episodes=prior,
+                memory_consulted=True,
+            ),
         )
 
     @staticmethod
@@ -594,13 +613,13 @@ class Reasoning(processing.Processing):
     async def _reason_activity(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RecalledEventData)
-        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
-        assert isinstance(capability, _ReasoningCapability)
+        capability = data.capability
         operation_id = capability.operation_id
-        metadata = dict(event.metadata)
-        metadata[_REASONING_INPUT_METADATA_KEY] = data.host_input
-        metadata["bot.reasoning.memory_consulted"] = data.memory_consulted
-        reasoning_input = InputData(
+        metadata = {
+            **dict(event.metadata),
+            "bot.reasoning.memory_consulted": data.memory_consulted,
+        }
+        reasoning_input = ProcessorInput(
             host_input=data.host_input,
             prior_episodes=data.prior_episodes,
         )
@@ -622,7 +641,11 @@ class Reasoning(processing.Processing):
                 instance,
                 Reasoning._stage_event(
                     _ReasoningStageFailedEvent,
-                    ability.FailureData(message=str(error)),
+                    _ReasoningStageFailedData(
+                        failure=ability.FailureData(message=str(error)),
+                        turn=data.turn,
+                        capability=capability,
+                    ),
                     capability=capability,
                     metadata=metadata,
                     target=instance,
@@ -637,6 +660,7 @@ class Reasoning(processing.Processing):
                     _selections_from_output(reasoned.result),
                     operation_id=operation_id,
                     source=instance,
+                    focus_candidates=data.turn.input.focus_candidates,
                     metadata=_public_metadata(metadata),
                 )
             except Exception as error:
@@ -645,7 +669,11 @@ class Reasoning(processing.Processing):
                     instance,
                     Reasoning._stage_event(
                         _ReasoningStageFailedEvent,
-                        ability.FailureData(message=str(error)),
+                        _ReasoningStageFailedData(
+                            failure=ability.FailureData(message=str(error)),
+                            turn=data.turn,
+                            capability=capability,
+                        ),
                         capability=capability,
                         metadata=metadata,
                         target=instance,
@@ -658,6 +686,8 @@ class Reasoning(processing.Processing):
             Reasoning._stage_event(
                 _ReasonedEvent,
                 _ReasonedEventData(
+                    turn=data.turn,
+                    capability=capability,
                     host_input=data.host_input,
                     reasoned=reasoned,
                     memory_consulted=data.memory_consulted,
@@ -686,26 +716,24 @@ class Reasoning(processing.Processing):
     def _complete_from_reasoned(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _ReasonedEventData)
-        Reasoning._finish_operation(instance, event)
         Reasoning._dispatch_output(
             ctx,
             instance,
             operation_id=event.id or None,
             metadata=dict(event.metadata),
-            output=data.reasoned.result,
+            output=types.CompletionData(turn=data.turn, output=data.reasoned.result),
         )
 
     @staticmethod
     def _complete_from_retained(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RetainedEventData)
-        Reasoning._finish_operation(instance, event)
         Reasoning._dispatch_output(
             ctx,
             instance,
             operation_id=event.id or None,
             metadata=dict(event.metadata),
-            output=data.result,
+            output=types.CompletionData(turn=data.turn, output=data.result),
         )
 
     @staticmethod
@@ -716,8 +744,7 @@ class Reasoning(processing.Processing):
     ) -> None:
         data = event.data
         assert isinstance(data, _ReasonedEventData)
-        capability = event.metadata.get(_REASONING_CAPABILITY_METADATA_KEY)
-        assert isinstance(capability, _ReasoningCapability)
+        capability = data.capability
         metadata = dict(event.metadata)
         store = instance._memory
         if store is None:
@@ -727,6 +754,8 @@ class Reasoning(processing.Processing):
                 Reasoning._stage_event(
                     _RetainedEvent,
                     _RetainedEventData(
+                        turn=data.turn,
+                        capability=capability,
                         result=data.reasoned.result,
                         memory_consulted=data.memory_consulted,
                         memory_written=False,
@@ -751,7 +780,11 @@ class Reasoning(processing.Processing):
                 instance,
                 Reasoning._stage_event(
                     _ReasoningStageFailedEvent,
-                    ability.FailureData(message=f"Reasoning memory retain failed: {error}"),
+                    _ReasoningStageFailedData(
+                        failure=ability.FailureData(message=f"Reasoning memory retain failed: {error}"),
+                        turn=data.turn,
+                        capability=capability,
+                    ),
                     capability=capability,
                     metadata=metadata,
                     target=instance,
@@ -764,6 +797,8 @@ class Reasoning(processing.Processing):
             Reasoning._stage_event(
                 _RetainedEvent,
                 _RetainedEventData(
+                    turn=data.turn,
+                    capability=capability,
                     result=data.reasoned.result,
                     memory_consulted=data.memory_consulted,
                     memory_written=True,
@@ -898,7 +933,6 @@ OutputEvent = Reasoning.output_event
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
     "CallData",
-    "HOST_INPUT_METADATA_KEY",
     "InputEvent",
     "OutputEvent",
     "Reasoning",

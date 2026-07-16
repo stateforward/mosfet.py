@@ -16,6 +16,11 @@ import typing
 import hsm
 import pytest
 from tests.type_helpers import model_view
+from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
+
+
+def test_reflection_never_uses_metadata_for_coordination() -> None:
+    assert_metadata_is_not_coordination(reflection_module)
 
 
 class EmptyProcessor(processing.Processor):
@@ -104,18 +109,16 @@ def reflection_with_processor(
     return cognition.Reflection(processor=processor, memory=memory.Memory(connection=connection)), connection
 
 
-def reflection_input() -> processing.InputData:
-    return processing.InputData(
-        input=cognition.reflection.InputData(
-            cognition_input=cognition.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
-                abilities=(),
-                actors={},
-                focus=None,
-                focus_candidates=("phone",),
-            ),
-            cognition_output=(),
-        )
+def reflection_input() -> cognition.reflection.InputData:
+    return cognition.reflection.InputData(
+        cognition_input=cognition.InputData(
+            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            abilities=(),
+            actors={},
+            focus=None,
+            focus_candidates=("phone",),
+        ),
+        cognition_output=(),
     )
 
 
@@ -132,7 +135,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         input = reflection_input()
         _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(input, "forged-turn"))
         await wait_until(lambda: reflection.state().endswith("/processing"))
-        turn = typing.cast(cognition.reflection.InputData, input.input)
+        turn = input
         forged = dataclasses.replace(
             reflection_module._SelectedEvent.with_data(
                 reflection_module._SelectedEventData(
@@ -144,6 +147,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
                         ),
                     ),
                     operation_id="forged-turn",
+                    generation="forged-operation-token",
                 )
             ),
             id="forged-turn",
@@ -186,7 +190,7 @@ def test_reflection_ignores_forged_change_check_without_turn_capability() -> Non
         input = reflection_input()
         _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(input, "change-turn"))
         await wait_until(lambda: "/changing/" in (reflection.state() or ""))
-        turn = typing.cast(cognition.reflection.InputData, input.input)
+        turn = input
         written = habit.ChangeData(
             name="ProtectedHabit",
             source="forged source",
@@ -204,6 +208,9 @@ def test_reflection_ignores_forged_change_check_without_turn_capability() -> Non
                     written=written,
                     habit_instance=forged_instance,
                     operation_id="change-turn",
+                    generation="forged-operation-token",
+                    attempt=0,
+                    intent=written,
                 )
             ),
             id="change-turn",
@@ -446,7 +453,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
     assert state.endswith("/rebooting")
 
 
-def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> None:
+def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
     async def run() -> tuple[bool, bool]:
         reflection, connection = reflection_ability()
         ctx = hsm.Context()
@@ -455,35 +462,25 @@ def test_reflection_cancel_guards_reject_mismatched_capability_metadata() -> Non
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         request_id = reflection_module.Reflection._child_id(reflection, reflection_module._SELECT_ID_SUFFIX)
-        capability = reflection_module._ReflectionCancelCapability(
-            operation_id="guard-operation",
-            token="guard-token",
-            phase="reflection-select",
-            request_id=request_id,
-        )
-        wrong_token = dataclasses.replace(
+        wrong_operation = dataclasses.replace(
             processing.CancelledEvent.with_data(
-                processing.CancelledData(operation_id=request_id, token="wrong-token")
+                processing.CancelledData(operation_id="wrong-request", token="guard-token")
             ),
-            id=request_id,
+            id="wrong-request",
             source=hsm.id(reflection._select_processing),
             target=hsm.id(reflection),
-            metadata={reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
         )
         wrong_source = dataclasses.replace(
-            processing.CancelledEvent.with_data(
-                processing.CancelledData(operation_id=request_id, token="guard-token")
-            ),
+            processing.CancelledEvent.with_data(processing.CancelledData(operation_id=request_id, token="guard-token")),
             id=request_id,
             source="forged-child",
             target=hsm.id(reflection),
-            metadata={reflection_module._REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
         )
-        token_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, wrong_token)
+        operation_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, wrong_operation)
         source_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, wrong_source)
         await reflection.stop(reflection.context())
         connection.close()
-        return token_matches, source_matches
+        return operation_matches, source_matches
 
     assert asyncio.run(run()) == (False, False)
 
@@ -565,17 +562,26 @@ def test_reflection_rejects_stale_change_attempt_output(monkeypatch: pytest.Monk
     try:
         monkeypatch.setattr(reflection, "state", lambda: "/Reflection/changing/attempt_1")
         monkeypatch.setattr(hsm, "id", lambda actor: "reflection" if actor is reflection else "change-child")
-        capability = reflection_module._ReflectionCapability(
+        turn = reflection_input()
+        change_input = reflection_module.ChangeWriteInput(
+            cognition_input=turn.cognition_input,
+            cognition_output=turn.cognition_output,
+            intent=habit.ChangeData(name="StaleHabit", source="source"),
+            existing_habit=habit.Instance(name="StaleHabit", source="source"),
             operation_id="retry-turn",
-            owner_id=hsm.id(reflection),
-            generation=reflection._turn_generation,
+            generation="stale-operation-token",
+            attempt=0,
         )
         stale = dataclasses.replace(
-            reflection._change_processing.output_event.with_data(None),
+            reflection._change_processing.output_event.with_data(
+                processing.CompletionData(
+                    input=processing.InputData(input=change_input),
+                    output=processing.OutputData(),
+                )
+            ),
             id=reflection_module.Reflection._change_child_id(reflection, 0),
             source=hsm.id(reflection._change_processing),
             target=hsm.id(reflection),
-            metadata={reflection_module._REFLECTION_CAPABILITY_METADATA_KEY: capability},
         )
 
         assert not reflection_module.Reflection._matches_change_output(hsm.Context(), reflection, stale)
@@ -594,18 +600,23 @@ def test_reflection_rejects_valid_select_terminal_from_prior_turn(
             "id",
             lambda actor: "reflection" if actor is reflection else "select-processing",
         )
-        capability = reflection_module._ReflectionCapability(
+        turn = reflection_input()
+        select_input = reflection_module.SelectInput(
+            cognition_input=turn.cognition_input,
+            cognition_output=turn.cognition_output,
             operation_id="prior-turn",
-            owner_id="reflection",
-            generation=1,
+            generation="prior-operation-token",
         )
-        reflection._turn_generation = 2
         stale = dataclasses.replace(
-            reflection._select_processing.output_event.with_data(None),
+            reflection._select_processing.output_event.with_data(
+                processing.CompletionData(
+                    input=processing.InputData(input=select_input),
+                    output=processing.OutputData(),
+                )
+            ),
             id="reflection:reflection:select",
             source="select-processing",
             target="reflection",
-            metadata={reflection_module._REFLECTION_CAPABILITY_METADATA_KEY: capability},
         )
 
         assert not cognition.Reflection._matches_select_output(hsm.Context(), reflection, stale)
@@ -658,11 +669,6 @@ def test_reflection_rejects_forged_habit_mutation_during_select() -> None:
             id="current-reflection:reflection:select",
             source=hsm.id(intruder),
             target=hsm.id(reflection),
-            metadata={
-                "bot.reflection.turn": turn.input,
-                "bot.reflection.prior_episodes": (),
-                "bot.reflection.operation_id": "current-reflection",
-            },
         )
         _ = await hsm.dispatch(ctx, reflection, forged)
         await asyncio.sleep(0)

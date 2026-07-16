@@ -71,6 +71,8 @@ Short-lived results, classifications, parse outputs, lookup results, activity ou
 
 Machine instance fields, extended state, and caller context values MUST NOT store transient phase data solely to bridge one step to another.
 
+`hsm.Event.metadata` is a telemetry carrier, not behavioral state. Guards, effects, activities, and progression logic MUST NOT read coordination, correlation, capability, retry, result, actor, focus, or policy values from metadata. Put those values in typed event data and use the modeled event `id`, `source`, and `target` for envelope correlation. The repository architecture test freezes pre-existing violations by module, symbol, and maximum reference count; the allowlist may only shrink.
+
 # HSM-CORRELATION-001 MUST Correlate Delayed Results Before Effects
 
 See:

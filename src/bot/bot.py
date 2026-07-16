@@ -1,4 +1,5 @@
 from bot.abilities import cognition
+from bot.abilities import processing
 
 import abc
 import asyncio
@@ -22,10 +23,8 @@ from bot.world import SoundEvent, VisualEvent, World, require_world_scope
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
-_FOCUS_CANDIDATES_METADATA_KEY = "bot.focus_candidates"
-_PROCESSING_OPERATION_METADATA_KEY = "bot.processing.operation"
-_PROCESSING_ACTOR_METADATA_KEY = "bot.processing.actor"
-_ACTION_SOURCE_METADATA_KEY = "bot.cognition.action_source"
+_MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
+_MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
 _STARTED_DEVICES_METADATA_KEY = "bot.activation.started_devices"
 _STARTED_ABILITIES_METADATA_KEY = "bot.activation.started_abilities"
 _STARTED_ATTACHMENT_GROUP_METADATA_KEY = "bot.activation.started_attachment_group"
@@ -128,76 +127,68 @@ _BotProcessingFinishedEvent = hsm.Event[_BotProcessingOperationData](
 class _BotProcessingOperation(hsm.Instance):
     """Operation-scoped HSM actor that owns timeout progression."""
 
-    _owner: "Bot"
-    _data: _BotProcessingOperationData | None
-    _metadata: dict[str, object]
-    _timeout: datetime.timedelta
-    _token: str
-    _request_id: str
-
-    def __init__(
-        self,
-        owner: "Bot",
-        *,
-        request_id: str,
-        metadata: dict[str, object],
-        timeout: datetime.timedelta,
-    ) -> None:
-        super().__init__()
-        self._owner = owner
-        self._metadata = metadata
-        self._timeout = timeout
-        self._data = None
-        self._token = uuid.uuid4().hex
-        self._request_id = request_id
-
     @classmethod
-    def create(
+    def _model(
         cls,
-        owner: "Bot",
-        *,
-        request_id: str,
-        metadata: dict[str, object],
         timeout: datetime.timedelta,
-    ) -> "_BotProcessingOperation":
-        operation = cls(
-            owner,
-            request_id=request_id,
-            metadata=metadata,
-            timeout=timeout,
-        )
-        return operation
-
-    @classmethod
-    def _model(cls) -> hsm.Model:
+        cancellation_timeout: datetime.timedelta,
+    ) -> hsm.Model:
         def timeout_delay(
             ctx: hsm.Context,
             instance: _BotProcessingOperation,
             event: hsm.Event[typing.Any],
         ) -> datetime.timedelta:
-            del ctx, event
-            return instance._timeout
+            del ctx, instance, event
+            return timeout
+
+        def cancellation_timeout_delay(
+            ctx: hsm.Context,
+            instance: _BotProcessingOperation,
+            event: hsm.Event[typing.Any],
+        ) -> datetime.timedelta:
+            del ctx, instance, event
+            return cancellation_timeout
+
+        def is_finished(
+            ctx: hsm.Context,
+            instance: _BotProcessingOperation,
+            event: hsm.Event[typing.Any],
+        ) -> bool:
+            del ctx
+            identity = _processing_operation_identity(instance)
+            return (
+                isinstance(event.data, _BotProcessingOperationData)
+                and identity is not None
+                and event.id == event.data.request_id
+                and event.source == identity[0]
+                and event.target == hsm.id(instance)
+                and event.data.actor_id == hsm.id(instance)
+                and event.data.request_id == identity[1]
+            )
 
         def dispatch_timeout(
             ctx: hsm.Context,
             instance: _BotProcessingOperation,
             event: hsm.Event[typing.Any],
         ) -> None:
-            assert instance._data is not None
-            _ = hsm.dispatch(
+            del event
+            identity = _processing_operation_identity(instance)
+            assert identity is not None
+            owner_id, request_id = identity
+            capability = _BotProcessingOperationData(
+                token=hsm.id(instance),
+                request_id=request_id,
+                actor_id=hsm.id(instance),
+            )
+            _ = hsm.dispatch_to(
                 ctx,
-                instance._owner,
                 dataclasses.replace(
-                    _BotProcessingTimedOutEvent.with_data(instance._data),
-                    id=instance._data.request_id,
+                    _BotProcessingTimedOutEvent.with_data(capability),
+                    id=request_id,
                     source=hsm.id(instance),
-                    target=hsm.id(instance._owner),
-                    metadata={
-                        **instance._metadata,
-                        _PROCESSING_OPERATION_METADATA_KEY: instance._data,
-                        _PROCESSING_ACTOR_METADATA_KEY: instance,
-                    },
+                    target=owner_id,
                 ),
+                owner_id,
             )
 
         def dispatch_cancel_timeout(
@@ -205,35 +196,24 @@ class _BotProcessingOperation(hsm.Instance):
             instance: _BotProcessingOperation,
             event: hsm.Event[typing.Any],
         ) -> None:
-            assert instance._data is not None
-            _ = hsm.dispatch(
-                ctx,
-                instance._owner,
-                dataclasses.replace(
-                    _BotProcessingCancelTimedOutEvent.with_data(instance._data),
-                    id=instance._data.request_id,
-                    source=hsm.id(instance),
-                    target=hsm.id(instance._owner),
-                    metadata={
-                        **instance._metadata,
-                        _PROCESSING_OPERATION_METADATA_KEY: instance._data,
-                        _PROCESSING_ACTOR_METADATA_KEY: instance,
-                    },
-                ),
+            del event
+            identity = _processing_operation_identity(instance)
+            assert identity is not None
+            owner_id, request_id = identity
+            capability = _BotProcessingOperationData(
+                token=hsm.id(instance),
+                request_id=request_id,
+                actor_id=hsm.id(instance),
             )
-
-        def is_operation(
-            ctx: hsm.Context,
-            instance: _BotProcessingOperation,
-            event: hsm.Event[typing.Any],
-        ) -> bool:
-            del ctx
-            assert instance._data is not None
-            return (
-                event.data == instance._data
-                and event.id == instance._data.request_id
-                and event.source == hsm.id(instance._owner)
-                and event.target == hsm.id(instance)
+            _ = hsm.dispatch_to(
+                ctx,
+                dataclasses.replace(
+                    _BotProcessingCancelTimedOutEvent.with_data(capability),
+                    id=request_id,
+                    source=hsm.id(instance),
+                    target=owner_id,
+                ),
+                owner_id,
             )
 
         return hsm.define(
@@ -243,7 +223,7 @@ class _BotProcessingOperation(hsm.Instance):
                 "waiting",
                 hsm.transition(
                     hsm.on(_BotProcessingFinishedEvent),
-                    hsm.guard(is_operation),
+                    hsm.guard(is_finished),
                     hsm.target("/BotProcessingTimer/done"),
                 ),
                 hsm.transition(
@@ -256,11 +236,11 @@ class _BotProcessingOperation(hsm.Instance):
                 "cancelling",
                 hsm.transition(
                     hsm.on(_BotProcessingFinishedEvent),
-                    hsm.guard(is_operation),
+                    hsm.guard(is_finished),
                     hsm.target("/BotProcessingTimer/done"),
                 ),
                 hsm.transition(
-                    hsm.after(timeout_delay),
+                    hsm.after(cancellation_timeout_delay),
                     hsm.effect(dispatch_cancel_timeout),
                     hsm.target("/BotProcessingTimer/done"),
                 ),
@@ -270,28 +250,50 @@ class _BotProcessingOperation(hsm.Instance):
 
     @classmethod
     async def started(
-        cls, ctx: hsm.Context, operation: "_BotProcessingOperation"
+        cls,
+        ctx: hsm.Context,
+        operation: "_BotProcessingOperation",
+        *,
+        owner: "Bot",
+        request_id: str,
+        timeout: datetime.timedelta,
     ) -> tuple["_BotProcessingOperation", _BotProcessingOperationData]:
-        private = hsm.Context(
-            parent=ctx,
-            values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
-        )
         try:
-            started = await hsm.started(private, operation, cls._model())
-            operation._data = _BotProcessingOperationData(
+            cancellation_timeout = min(
+                max(timeout, _MIN_BOT_CANCELLATION_TIMEOUT),
+                _MAX_BOT_CANCELLATION_TIMEOUT,
+            )
+            started = await hsm.started(ctx, operation, cls._model(timeout, cancellation_timeout))
+            capability = _BotProcessingOperationData(
                 token=hsm.id(operation),
-                request_id=operation._request_id,
+                request_id=request_id,
                 actor_id=hsm.id(operation),
             )
-            return started, operation._data
+            instances = ctx.value(hsm.Keys.Instances)
+            if isinstance(instances, collections.abc.MutableMapping):
+                _ = instances.pop(hsm.id(operation), None)
+                instances[_processing_operation_key(owner, request_id)] = operation
+            return started, capability
         except asyncio.CancelledError:
             await hsm.stop(operation, hsm.Context())
             raise
 
 
-def _processing_operation(event: hsm.Event[typing.Any]) -> _BotProcessingOperationData | None:
-    operation = event.metadata.get(_PROCESSING_OPERATION_METADATA_KEY)
-    return operation if isinstance(operation, _BotProcessingOperationData) else None
+def _processing_operation_key(owner: "Bot", request_id: str) -> str:
+    return f"bot.processing:{hsm.id(owner)}:{request_id}"
+
+
+def _processing_operation_identity(operation: _BotProcessingOperation) -> tuple[str, str] | None:
+    instances = operation.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.Mapping):
+        return None
+    prefix = "bot.processing:"
+    for key, actor in instances.items():
+        if isinstance(key, str) and key.startswith(prefix) and actor is operation:
+            owner_id, separator, request_id = key.removeprefix(prefix).partition(":")
+            if owner_id and separator and request_id:
+                return owner_id, request_id
+    return None
 
 
 def _event_belongs_to_processing(event: hsm.Event[typing.Any], operation: _BotProcessingOperationData) -> bool:
@@ -299,23 +301,29 @@ def _event_belongs_to_processing(event: hsm.Event[typing.Any], operation: _BotPr
 
 
 def _active_processing_operation(
+    instance: "Bot",
     event: hsm.Event[typing.Any],
     *,
     phases: tuple[str, ...] = ("/BotProcessingTimer/waiting", "/BotProcessingTimer/cancelling"),
 ) -> _BotProcessingOperationData | None:
     """Return the capability only while its exact operation actor owns an active phase."""
 
-    operation = _processing_operation(event)
-    actor = event.metadata.get(_PROCESSING_ACTOR_METADATA_KEY)
-    if (
-        operation is None
-        or not isinstance(actor, _BotProcessingOperation)
-        or hsm.id(actor) != operation.actor_id
-        or operation.token != operation.actor_id
-        or actor.state() not in phases
-    ):
+    instances = instance.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.Mapping):
         return None
-    return operation
+    prefix = f"bot.processing:{hsm.id(instance)}:"
+    for key, actor in instances.items():
+        if (
+            isinstance(key, str)
+            and key.startswith(prefix)
+            and isinstance(actor, _BotProcessingOperation)
+            and actor.state() in phases
+        ):
+            request_id = key.removeprefix(prefix)
+            operation = _BotProcessingOperationData(token=hsm.id(actor), request_id=request_id, actor_id=hsm.id(actor))
+            if _event_belongs_to_processing(event, operation):
+                return operation
+    return None
 
 
 def _device_tree(*roots: Device) -> tuple[Device, ...]:
@@ -352,13 +360,6 @@ def _device_event_map(device: Device) -> dict[str, hsm.Event[typing.Any]]:
     event_map = _event_map_for_model(getattr(device, "model", None))
     event_map.update(_event_map_for_model(getattr(device, "firmware_model", None)))
     return event_map
-
-
-def _focus_candidates_for_event(event: hsm.Event[typing.Any]) -> tuple[str, ...]:
-    value = event.metadata.get(_FOCUS_CANDIDATES_METADATA_KEY)
-    if not isinstance(value, collections.abc.Sequence) or isinstance(value, str | bytes | bytearray):
-        return ()
-    return tuple(item for item in value if isinstance(item, str) and item)
 
 
 class Bot(hsm.Instance, abc.ABC):
@@ -491,14 +492,14 @@ class Bot(hsm.Instance, abc.ABC):
                 await hsm.stop(ability, lifetime)
         instances = lifetime.value(hsm.Keys.Instances)
         operation_actors = (
-            tuple(actor for actor in instances.values() if isinstance(actor, _BotProcessingOperation))
+            tuple((key, actor) for key, actor in instances.items() if isinstance(actor, _BotProcessingOperation))
             if isinstance(instances, collections.abc.Mapping)
             else ()
         )
-        for actor in operation_actors:
+        for key, actor in operation_actors:
             await actor.stop(lifetime)
             if isinstance(instances, collections.abc.MutableMapping):
-                _ = instances.pop(hsm.id(actor), None)
+                _ = instances.pop(key, None)
         cleanup = _BotCleanupData.create(ctx, request_id=event.id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
@@ -599,14 +600,6 @@ class Bot(hsm.Instance, abc.ABC):
         )
 
     @staticmethod
-    def _has_current_ability_source(instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        """Require action provenance from the live cognition actor that selected it."""
-
-        del instance
-        source = event.metadata.get(_ACTION_SOURCE_METADATA_KEY)
-        return isinstance(source, abilities.Ability) and event.source == hsm.id(source) and bool(source.state())
-
-    @staticmethod
     def _ability_selected_configured_focus_device(
         ctx: hsm.Context,
         instance: "Bot",
@@ -615,14 +608,13 @@ class Bot(hsm.Instance, abc.ABC):
         del ctx
         if not isinstance(event.data, events.FocusDeviceEventData):
             return False
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             operation is not None
             and _event_belongs_to_processing(event, operation)
+            and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
-            and Bot._has_current_ability_source(instance, event)
             and event.data.device in instance._devices
-            and event.data.device in _focus_candidates_for_event(event)
         )
 
     @staticmethod
@@ -632,20 +624,20 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ClearFocusEventData)
             and operation is not None
             and _event_belongs_to_processing(event, operation)
+            and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
-            and Bot._has_current_ability_source(instance, event)
-            and bool(_focus_candidates_for_event(event))
+            and instance._focused_device is not None
         )
 
     @staticmethod
     def _processing_completed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ProcessingCompletedEventData)
             and operation is not None
@@ -657,7 +649,7 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _processing_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ProcessingFailedEventData)
             and operation is not None
@@ -730,40 +722,42 @@ class Bot(hsm.Instance, abc.ABC):
             focus=instance._focused_device if instance._focused_device in instance._devices else None,
             focus_candidates=focus_candidates,
         )
-        operation_actor = _BotProcessingOperation.create(
-            instance,
+        operation_actor = _BotProcessingOperation()
+        await _BotProcessingOperation.started(
+            instance.context(),
+            operation_actor,
+            owner=instance,
             request_id=event.id,
-            metadata=dict(event.metadata),
             timeout=instance._processing_timeout,
         )
-        _, operation = await _BotProcessingOperation.started(instance.context(), operation_actor)
         input_event = dataclasses.replace(
             cognition.InputEvent.with_data(cognition_input),
             id=event.id,
-            metadata={
-                **event.metadata,
-                _FOCUS_CANDIDATES_METADATA_KEY: focus_candidates,
-                _PROCESSING_OPERATION_METADATA_KEY: operation,
-                _PROCESSING_ACTOR_METADATA_KEY: operation_actor,
-            },
+            metadata=dict(event.metadata),
         )
         _ = hsm.dispatch(ctx, instance._cognition, input_event)
 
     @staticmethod
     def _cancel_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _active_processing_operation(event)
+        operation = _active_processing_operation(instance, event)
         assert operation is not None
+        if isinstance(instance._cognition, cognition.Cognition):
+            cancel_event: hsm.Event[typing.Any] = cognition.CancelEvent.with_data(
+                cognition.CancelData(operation_id=operation.request_id, token=operation.token)
+            )
+        else:
+            cancel_event = processing.CancelEvent.with_data(
+                processing.CancelData(operation_id=operation.request_id, token=operation.token)
+            )
         _ = hsm.dispatch(
             ctx,
             instance._cognition,
             dataclasses.replace(
-                cognition.CancelEvent.with_data(
-                    cognition.CancelData(operation_id=operation.request_id, token=operation.token)
-                ),
+                cancel_event,
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(instance._cognition),
-                metadata={**event.metadata, _PROCESSING_OPERATION_METADATA_KEY: operation},
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -771,7 +765,7 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_bot_processing_output(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             event.name == ability.output_event.name
             and event.target == hsm.id(instance)
@@ -784,7 +778,7 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_bot_processing_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/waiting",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             event.name == ability.failed_event.name
             and event.target == hsm.id(instance)
@@ -795,7 +789,12 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _complete_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        focus_candidates = _focus_candidates_for_event(event)
+        selected_focus: list[str] = []
+        if cognition.is_output(event.data):
+            for item in event.data:
+                if item.event == events.FocusDeviceEvent.name:
+                    selected_focus.append(events.FocusDeviceEventData.model_validate(item.data or {}).device)
+        focus_candidates = tuple(selected_focus)
         if not focus_candidates:
             if instance._focused_device is not None:
                 focus_candidates = (instance._focused_device,)
@@ -815,7 +814,7 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _dispatch_processing_timeout_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/cancelling",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/cancelling",))
         assert operation is not None
         seconds = instance._processing_timeout.total_seconds()
         failure = events.ProcessingFailedEventData(message=f"Bot processing timed out after {seconds:g} seconds.")
@@ -826,7 +825,7 @@ class Bot(hsm.Instance, abc.ABC):
                 id=operation.request_id,
                 source=hsm.id(instance._cognition),
                 target=hsm.id(instance),
-                metadata={**event.metadata, _PROCESSING_OPERATION_METADATA_KEY: operation},
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -848,7 +847,7 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _matches_processing_timeout(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(event)
+        operation = _active_processing_operation(instance, event)
         return (
             isinstance(event.data, _BotProcessingOperationData)
             and operation is not None
@@ -861,10 +860,10 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _matches_cognition_cancelled(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(event, phases=("/BotProcessingTimer/cancelling",))
+        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/cancelling",))
         data = event.data
         return (
-            isinstance(data, cognition.CancelledData)
+            isinstance(data, cognition.CancelledData | processing.CancelledData)
             and operation is not None
             and data.operation_id == operation.request_id
             and data.token == operation.token
@@ -875,9 +874,11 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _consume_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _processing_operation(event)
-        actor = event.metadata.get(_PROCESSING_ACTOR_METADATA_KEY)
+        operation = _active_processing_operation(instance, event)
         assert operation is not None
+        instances = instance.context().value(hsm.Keys.Instances)
+        assert isinstance(instances, collections.abc.Mapping)
+        actor = instances.get(_processing_operation_key(instance, operation.request_id))
         assert isinstance(actor, _BotProcessingOperation)
         _ = hsm.dispatch(
             ctx,
@@ -889,6 +890,8 @@ class Bot(hsm.Instance, abc.ABC):
                 target=hsm.id(actor),
             ),
         )
+        if isinstance(instances, collections.abc.MutableMapping):
+            _ = instances.pop(_processing_operation_key(instance, operation.request_id), None)
 
     @staticmethod
     def _clear_focus(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:

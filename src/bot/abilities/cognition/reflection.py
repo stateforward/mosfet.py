@@ -88,7 +88,7 @@ CHANGE_INSTRUCTIONS = (
     "or a list of such objects, matching the shape of prior episode / this-turn outputs. "
     "output_event JSON schema root must be type object. "
     "Derive input fields, guards, and selection field names from the observed pattern. "
-    "At runtime, fill selection data from the live event (event['data'] / event['metadata']) — "
+    "At runtime, fill selection data from the live event data — "
     "never hardcode identifier values copied from episode examples. "
     "Set triggers to the stimulus names that should propose the habit. "
     "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
@@ -101,18 +101,6 @@ CHANGE_INSTRUCTIONS = (
 
 INSTRUCTIONS = SELECT_INSTRUCTIONS
 
-_REFLECTION_TURN_METADATA_KEY = "bot.reflection.turn"
-_REFLECTION_PRIOR_METADATA_KEY = "bot.reflection.prior_episodes"
-_REFLECTION_ABILITIES_METADATA_KEY = "bot.reflection.abilities"
-_REFLECTION_SKILLS_METADATA_KEY = "bot.reflection.skills"
-_REFLECTION_OPERATION_ID_METADATA_KEY = "bot.reflection.operation_id"
-_REFLECTION_FIX_ATTEMPTS_METADATA_KEY = "bot.reflection.fix_attempts"
-_REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY = "bot.reflection.last_diagnostic_messages"
-_REFLECTION_CREATE_INTENT_METADATA_KEY = "bot.reflection.create_intent"
-_REFLECTION_CHANGE_INTENT_METADATA_KEY = "bot.reflection.change_intent"
-_REFLECTION_EXISTING_HABIT_METADATA_KEY = "bot.reflection.existing_habit"
-_REFLECTION_CAPABILITY_METADATA_KEY = "bot.reflection.capability"
-_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY = "bot.reflection.cancel_capability"
 _SELECT_ID_SUFFIX = ":reflection:select"
 _CHANGE_ID_SUFFIX = ":reflection:change"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
@@ -176,6 +164,8 @@ class SelectInput(pydantic.BaseModel):
             "used_count, last_used_at, failed_count, and last_failed_at."
         ),
     )
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
 
 
 class ChangeWriteInput(pydantic.BaseModel):
@@ -221,6 +211,11 @@ class ChangeWriteInput(pydantic.BaseModel):
         min_length=1,
         description="Rejected Starlark source from the prior change attempt, when diagnostics is set.",
     )
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
+    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
+    create_intent: CreateData | None = None
+    previous_messages: tuple[str, ...] | None = None
 
 
 ProcessorInput = SelectInput
@@ -242,8 +237,10 @@ class _RecalledEventData(pydantic.BaseModel):
         frozen=True,
     )
 
-    host_input: processing.InputData
+    turn: InputData
     prior_episodes: tuple[CognitiveEpisode, ...] = ()
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
 
 
 class _AppliedEventData(pydantic.BaseModel):
@@ -256,10 +253,15 @@ class _AppliedEventData(pydantic.BaseModel):
 
     turn: InputData
     habit: CreateData | ChangeData | BreakData | None = None
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
 
 
 class _StoredEventData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
 
 
 class _ChangeWriteCheckedData(pydantic.BaseModel):
@@ -277,6 +279,10 @@ class _ChangeWriteCheckedData(pydantic.BaseModel):
     report: habit_diagnostic.Report = pydantic.Field(default_factory=habit_diagnostic.Report)
     previous_messages: tuple[str, ...] | None = None
     operation_id: str
+    generation: str = pydantic.Field(min_length=1)
+    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
+    intent: ChangeData
+    create_intent: CreateData | None = None
     existing: Instance | None = None
 
 
@@ -292,6 +298,7 @@ class _SelectedEventData(pydantic.BaseModel):
     prior_episodes: tuple[CognitiveEpisode, ...] = ()
     selection: types.EventData
     operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
 
 
 class _ChangeRequestedEventData(pydantic.BaseModel):
@@ -307,9 +314,12 @@ class _ChangeRequestedEventData(pydantic.BaseModel):
     intent: ChangeData
     existing: Instance
     operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
     diagnostics: habit_diagnostic.Report | None = None
     failed_source: str | None = None
     create_intent: CreateData | None = None
+    attempt: int = pydantic.Field(default=0, ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
+    previous_messages: tuple[str, ...] | None = None
 
 
 _RecalledEvent = hsm.Event[_RecalledEventData](
@@ -341,37 +351,36 @@ _ChangeRequestedEvent = hsm.Event[_ChangeRequestedEventData](
     name="bot.ability.reflection.change.requested",
     schema=_ChangeRequestedEventData,
 )
-_ChangeStartedEvent = hsm.Event[str](
+
+
+class _ChangeStartedData(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
+    attempt: int = pydantic.Field(ge=0, le=_MAX_REFLECTION_FIX_ATTEMPTS)
+
+
+_ChangeStartedEvent = hsm.Event[_ChangeStartedData](
     name="bot.ability.reflection.change.started",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(str),
+    schema=_ChangeStartedData,
 )
-_StageFailedEvent = hsm.Event[ability.FailureData](
+
+
+class _StageFailedData(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    failure: ability.FailureData
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(min_length=1)
+
+
+_StageFailedEvent = hsm.Event[_StageFailedData](
     name="bot.ability.reflection.stage.failed",
     kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
+    schema=_StageFailedData,
 )
-
-
-class _ReflectionCapability(pydantic.BaseModel):
-    """Immutable authority for one complete Reflection turn."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    operation_id: str
-    owner_id: str
-    generation: int
-
-
-class _ReflectionCancelCapability(pydantic.BaseModel):
-    """Immutable host cancellation authority carried through direct child teardown."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    operation_id: str
-    token: str
-    phase: typing.Literal["reflection-select", "reflection-change"]
-    request_id: str
 
 
 def habit_events() -> tuple[processing.Event[typing.Any], ...]:
@@ -397,23 +406,7 @@ def episode_from_turn(
 
 
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key
-        not in {
-            _REFLECTION_TURN_METADATA_KEY,
-            _REFLECTION_PRIOR_METADATA_KEY,
-            _REFLECTION_ABILITIES_METADATA_KEY,
-            _REFLECTION_SKILLS_METADATA_KEY,
-            _REFLECTION_OPERATION_ID_METADATA_KEY,
-        }
-    }
-
-
-def _operation_id_from_metadata(metadata: dict[str, object]) -> str | None:
-    value = metadata.get(_REFLECTION_OPERATION_ID_METADATA_KEY)
-    return value if isinstance(value, str) and value else None
+    return dict(metadata)
 
 
 def _coerce_output_data(value: object) -> types.OutputData:
@@ -458,20 +451,12 @@ def _change_data_from_output(value: object) -> ChangeData:
 
 
 def _habit_sample_input(cognition_input: input.InputData) -> tuple[object, dict[str, object]]:
-    """Build dry-run payload/metadata matching Autonomy's live habit input."""
+    """Build dry-run payload matching Autonomy's live typed habit input."""
 
     from . import autonomy
 
     payload = autonomy.habit_input_payload(cognition_input)
-    metadata: dict[str, object] = {}
-    stimulus = cognition_input.stimulus
-    if isinstance(stimulus, hsm.Event):
-        metadata.update(dict(stimulus.metadata))
-    if cognition_input.focus_candidates:
-        _ = metadata.setdefault("bot.focus_candidates", cognition_input.focus_candidates)
-    if cognition_input.focus is not None:
-        _ = metadata.setdefault("bot.bot.focus", cognition_input.focus)
-    return payload, metadata
+    return payload, {}
 
 
 def _habit_check_from_write(
@@ -516,25 +501,8 @@ def _habit_check_from_write(
     )
 
 
-def _fix_attempts_from_metadata(metadata: dict[str, object]) -> int:
-    value = metadata.get(_REFLECTION_FIX_ATTEMPTS_METADATA_KEY, 0)
-    if isinstance(value, int) and value >= 0:
-        return value
-    return 0
-
-
 def _diagnostic_messages(report: habit_diagnostic.Report) -> tuple[str, ...]:
     return tuple(item.message for item in report.errors)
-
-
-def _last_diagnostic_messages(metadata: dict[str, object]) -> tuple[str, ...] | None:
-    value = metadata.get(_REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY)
-    if isinstance(value, (tuple, list)):
-        values = typing.cast(tuple[object, ...] | list[object], value)
-        messages = tuple(item for item in values if isinstance(item, str))
-        if len(messages) == len(values):
-            return messages
-    return None
 
 
 def _compile_habit_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
@@ -659,11 +627,10 @@ def _store_change_result(
 def _applied_habit_from_change(
     written: ChangeData,
     *,
-    metadata: dict[str, object],
+    create_intent: CreateData | None,
 ) -> CreateData | ChangeData:
     """Episode habit: CreateData when select was create, else ChangeData."""
 
-    create_intent = metadata.get(_REFLECTION_CREATE_INTENT_METADATA_KEY)
     if isinstance(create_intent, CreateData):
         return CreateData(
             name=written.name,
@@ -695,9 +662,9 @@ class Reflection(processing.Processing):
     change_instructions: typing.ClassVar[str] = CHANGE_INSTRUCTIONS
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = type(None)
-    input_event: typing.ClassVar[hsm.Event[processing.InputData]] = ability.ability_input_event(
+    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
         "bot.ability.reflection.input",
-        processing.InputData,
+        InputData,
         description="Post-output reflection input after cognition handled a turn.",
     )
     output_event: typing.ClassVar[hsm.Event[None]] = ability.ability_output_event(
@@ -711,7 +678,6 @@ class Reflection(processing.Processing):
     _change_processing: processing.Processing
     _memory: memory.Memory
     _events: tuple[processing.Event[typing.Any], ...]
-    _turn_generation: int
 
     @staticmethod
     def _child_id(instance: "Reflection", suffix: str) -> str:
@@ -730,40 +696,42 @@ class Reflection(processing.Processing):
         return None
 
     @staticmethod
-    def _turn_from_metadata(metadata: dict[str, object]) -> InputData | None:
-        turn = metadata.get(_REFLECTION_TURN_METADATA_KEY)
-        return turn if isinstance(turn, InputData) else None
-
-    @staticmethod
-    def _prior_from_metadata(metadata: dict[str, object]) -> tuple[CognitiveEpisode, ...]:
-        prior = metadata.get(_REFLECTION_PRIOR_METADATA_KEY)
-        if isinstance(prior, tuple):
-            return typing.cast(tuple[CognitiveEpisode, ...], prior)
-        return ()
-
-    @staticmethod
     def _has_reflection_input(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, processing.InputData)
+        return isinstance(event.data, InputData)
 
     @staticmethod
-    def _start_turn(instance: "Reflection", operation_id: str) -> _ReflectionCapability:
-        instance._turn_generation += 1
-        return _ReflectionCapability(
-            operation_id=operation_id,
-            owner_id=hsm.id(instance),
-            generation=instance._turn_generation,
-        )
+    def _operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | None:
+        data = event.data
+        if isinstance(data, processing.CompletionData):
+            nested = data.input.input
+            if isinstance(nested, SelectInput | ChangeWriteInput):
+                return nested.operation_id, nested.generation
+        if isinstance(
+            data,
+            _RecalledEventData
+            | _AppliedEventData
+            | _StoredEventData
+            | _ChangeWriteCheckedData
+            | _SelectedEventData
+            | _ChangeRequestedEventData
+            | _ChangeStartedData
+            | _StageFailedData,
+        ):
+            return data.operation_id, data.generation
+        return None
 
     @staticmethod
     def _matches_operation(instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
-        if not isinstance(capability, _ReflectionCapability):
+        operation = Reflection._operation(event)
+        if operation is None:
             return False
+        operation_id, generation = operation
+        active = processing.active_operation(instance, operation_id)
         return (
-            capability.owner_id == hsm.id(instance)
-            and capability.generation == instance._turn_generation
-            and event.id == capability.operation_id
+            active is not None
+            and generation == hsm.id(active)
+            and event.id == operation_id
             and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
         )
@@ -775,11 +743,18 @@ class Reflection(processing.Processing):
         event_type: hsm.Event[typing.Any],
         data: object,
     ) -> hsm.Event[typing.Any]:
-        capability = source_event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
-        assert isinstance(capability, _ReflectionCapability)
+        operation = Reflection._operation(source_event)
+        assert operation is not None
+        operation_id, generation = operation
+        if event_type.name == _StageFailedEvent.name and isinstance(data, ability.FailureData):
+            data = _StageFailedData(
+                failure=data,
+                operation_id=operation_id,
+                generation=generation,
+            )
         return dataclasses.replace(
             event_type.with_data(data),
-            id=capability.operation_id,
+            id=operation_id,
             source=hsm.id(instance),
             target=hsm.id(instance),
             metadata=dict(source_event.metadata),
@@ -796,25 +771,24 @@ class Reflection(processing.Processing):
         event: hsm.Event[typing.Any],
         child: processing.Processing,
         request_id: str,
-        phase: typing.Literal["reflection-select", "reflection-change"],
     ) -> None:
         data = event.data
         assert isinstance(data, processing.CancelData)
-        capability = _ReflectionCancelCapability(
-            operation_id=data.operation_id,
-            token=data.token,
-            phase=phase,
-            request_id=request_id,
-        )
         _ = hsm.dispatch(
             ctx,
             child,
             dataclasses.replace(
-                processing.CancelEvent.with_data(processing.CancelData(operation_id=request_id, token=data.token)),
+                processing.CancelEvent.with_data(
+                    processing.CancelData(
+                        operation_id=request_id,
+                        token=data.token,
+                        parent_operation_id=data.operation_id,
+                    )
+                ),
                 id=request_id,
                 source=hsm.id(instance),
                 target=hsm.id(child),
-                metadata={**event.metadata, _REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -826,7 +800,6 @@ class Reflection(processing.Processing):
             event,
             instance._select_processing,
             Reflection._child_id(instance, _SELECT_ID_SUFFIX),
-            "reflection-select",
         )
 
     @staticmethod
@@ -839,7 +812,6 @@ class Reflection(processing.Processing):
             event,
             instance._change_processing,
             request_id,
-            "reflection-change",
         )
 
     @staticmethod
@@ -849,24 +821,23 @@ class Reflection(processing.Processing):
         event: hsm.Event[typing.Any],
         child: processing.Processing,
         request_id: str,
-        phase: typing.Literal["reflection-select", "reflection-change"],
     ) -> None:
         token = uuid.uuid4().hex
-        capability = _ReflectionCancelCapability(
-            operation_id=event.id or uuid.uuid4().hex,
-            token=token,
-            phase=phase,
-            request_id=request_id,
-        )
         _ = hsm.dispatch(
             ctx,
             child,
             dataclasses.replace(
-                processing.CancelEvent.with_data(processing.CancelData(operation_id=request_id, token=token)),
+                processing.CancelEvent.with_data(
+                    processing.CancelData(
+                        operation_id=request_id,
+                        token=token,
+                        parent_operation_id=event.id or request_id,
+                    )
+                ),
                 id=request_id,
                 source=hsm.id(instance),
                 target=hsm.id(child),
-                metadata={_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY: capability},
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -878,7 +849,6 @@ class Reflection(processing.Processing):
             event,
             instance._select_processing,
             Reflection._child_id(instance, _SELECT_ID_SUFFIX),
-            "reflection-select",
         )
 
     @staticmethod
@@ -891,7 +861,6 @@ class Reflection(processing.Processing):
             event,
             instance._change_processing,
             request_id,
-            "reflection-change",
         )
 
     @staticmethod
@@ -907,20 +876,14 @@ class Reflection(processing.Processing):
     def _matches_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         data = event.data
-        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
-        if (
-            not isinstance(data, processing.CancelledData)
-            or not isinstance(capability, _ReflectionCancelCapability)
-        ):
+        if not isinstance(data, processing.CancelledData):
             return False
-        child = instance._select_processing if capability.phase == "reflection-select" else instance._change_processing
-        return (
-            data.operation_id == capability.request_id
-            and data.token == capability.token
-            and event.id == capability.request_id
-            and event.source == hsm.id(child)
-            and event.target == hsm.id(instance)
+        select_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
+        change_id = Reflection._child_id(instance, _CHANGE_ID_SUFFIX)
+        source_matches = (event.source == hsm.id(instance._select_processing) and data.operation_id == select_id) or (
+            event.source == hsm.id(instance._change_processing) and data.operation_id.startswith(f"{change_id}:fix")
         )
+        return source_matches and event.id == data.operation_id and event.target == hsm.id(instance)
 
     @staticmethod
     def _cancel_timeout_delay(
@@ -933,15 +896,10 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _emit_reflection_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        capability = event.metadata.get(_REFLECTION_CANCEL_CAPABILITY_METADATA_KEY)
-        if isinstance(capability, _ReflectionCancelCapability):
-            operation_id = capability.operation_id
-            token = capability.token
-        else:
-            data = event.data
-            assert isinstance(data, processing.CancelData)
-            operation_id = data.operation_id
-            token = data.token
+        data = event.data
+        assert isinstance(data, processing.CancelledData)
+        operation_id = data.parent_operation_id or data.operation_id
+        token = data.token
         owner = instance._attachments[0]
         _ = hsm.dispatch(
             ctx,
@@ -959,6 +917,7 @@ class Reflection(processing.Processing):
                 metadata=dict(event.metadata),
             ),
         )
+        processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _has_recalled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -978,7 +937,7 @@ class Reflection(processing.Processing):
     @staticmethod
     def _has_stage_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        return isinstance(event.data, ability.FailureData) and Reflection._matches_operation(instance, event)
+        return isinstance(event.data, _StageFailedData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
     def _dispatch_failure(
@@ -992,14 +951,12 @@ class Reflection(processing.Processing):
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=operation_id,
-            metadata={
-                key: value
-                for key, value in _public_metadata(metadata).items()
-                if key != _REFLECTION_CAPABILITY_METADATA_KEY
-            },
+            metadata=_public_metadata(metadata),
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _dispatch_output(
@@ -1012,37 +969,37 @@ class Reflection(processing.Processing):
         terminal = dataclasses.replace(
             instance.output_event.with_data(None),
             id=operation_id,
-            metadata={
-                key: value
-                for key, value in _public_metadata(metadata).items()
-                if key != _REFLECTION_CAPABILITY_METADATA_KEY
-            },
+            metadata=_public_metadata(metadata),
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _fail_from_stage(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
-        assert isinstance(data, ability.FailureData)
+        assert isinstance(data, _StageFailedData)
         Reflection._dispatch_failure(
             ctx,
             instance,
             operation_id=event.id or None,
             metadata=dict(event.metadata),
-            failure=data,
+            failure=data.failure,
         )
 
     @staticmethod
     def _fail_child(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
-        assert isinstance(data, ability.FailureData)
+        assert isinstance(data, processing.FailureData)
+        child_input = data.input.input
+        assert isinstance(child_input, SelectInput | ChangeWriteInput)
         Reflection._dispatch_failure(
             ctx,
             instance,
-            operation_id=_operation_id_from_metadata(dict(event.metadata)),
+            operation_id=child_input.operation_id,
             metadata=dict(event.metadata),
-            failure=data,
+            failure=ability.FailureData(message=data.message),
         )
 
     @staticmethod
@@ -1083,16 +1040,15 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, processing.InputData)
-        input = data
+        turn = event.data
+        assert isinstance(turn, InputData)
         operation_id = event.id if event.id else uuid.uuid4().hex
-        capability = Reflection._start_turn(instance, operation_id)
-        metadata = dict(event.metadata)
-        metadata[_REFLECTION_CAPABILITY_METADATA_KEY] = capability
-        correlated = dataclasses.replace(event, id=operation_id, metadata=metadata)
+        if processing.active_operation(instance, operation_id) is None:
+            _ = await processing.start_operation(instance, operation_id)
+        active = processing.active_operation(instance, operation_id)
+        assert active is not None
+        generation = hsm.id(active)
         try:
-            turn = typing.cast(InputData, input.input)
             select_input = episodes.episode_select_input(context_ref=turn.cognition_input.focus)
             recalled = instance._memory.execute(select_input)
             prior = episodes.episodes_from_output(recalled)
@@ -1100,22 +1056,37 @@ class Reflection(processing.Processing):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                Reflection._private_event(
-                    instance,
-                    correlated,
-                    _StageFailedEvent,
-                    ability.FailureData(message=f"Reflection memory recall failed: {error}"),
+                dataclasses.replace(
+                    _StageFailedEvent.with_data(
+                        _StageFailedData(
+                            failure=ability.FailureData(message=f"Reflection memory recall failed: {error}"),
+                            operation_id=operation_id,
+                            generation=generation,
+                        )
+                    ),
+                    id=operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
                 ),
             )
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            Reflection._private_event(
-                instance,
-                correlated,
-                _RecalledEvent,
-                _RecalledEventData(host_input=input, prior_episodes=prior),
+            dataclasses.replace(
+                _RecalledEvent.with_data(
+                    _RecalledEventData(
+                        turn=turn,
+                        prior_episodes=prior,
+                        operation_id=operation_id,
+                        generation=generation,
+                    )
+                ),
+                id=operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -1123,11 +1094,8 @@ class Reflection(processing.Processing):
     async def _dispatch_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _RecalledEventData)
-        turn = typing.cast(InputData, data.host_input.input)
-        child_metadata = _public_metadata(dict(event.metadata))
-        child_metadata[_REFLECTION_TURN_METADATA_KEY] = turn
-        child_metadata[_REFLECTION_PRIOR_METADATA_KEY] = data.prior_episodes
-        child_metadata[_REFLECTION_OPERATION_ID_METADATA_KEY] = event.id if event.id else uuid.uuid4().hex
+        turn = data.turn
+        operation_id = data.operation_id
         try:
             habits = _load_all_habits(instance._memory)
         except Exception:
@@ -1138,6 +1106,8 @@ class Reflection(processing.Processing):
                 cognition_output=turn.cognition_output,
                 prior_episodes=data.prior_episodes,
                 habits=habits,
+                operation_id=operation_id,
+                generation=data.generation,
             ),
             schemas=habit_events(),
             actors={},
@@ -1147,20 +1117,19 @@ class Reflection(processing.Processing):
                 select_input,
                 Reflection._child_id(instance, _SELECT_ID_SUFFIX),
             ),
-            metadata=child_metadata,
+            metadata=dict(event.metadata),
         )
-        operation_id = _operation_id_from_metadata(child_metadata)
-        assert operation_id is not None
         await hsm.dispatch(ctx, instance._select_processing, input_event)
 
     @staticmethod
     def _matches_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         child = instance._select_processing
-        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        completion = event.data
+        select_input = completion.input.input if isinstance(completion, processing.CompletionData) else None
         return (
-            isinstance(capability, _ReflectionCapability)
-            and capability.generation == instance._turn_generation
+            isinstance(select_input, SelectInput)
+            and processing.matches_operation(instance, select_input.operation_id, select_input.generation)
             and event.name == child.output_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(child)
@@ -1170,10 +1139,11 @@ class Reflection(processing.Processing):
     @staticmethod
     def _matches_select_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        failure = event.data
+        select_input = failure.input.input if isinstance(failure, processing.FailureData) else None
         return (
-            isinstance(capability, _ReflectionCapability)
-            and capability.generation == instance._turn_generation
+            isinstance(select_input, SelectInput)
+            and processing.matches_operation(instance, select_input.operation_id, select_input.generation)
             and event.name == instance._select_processing.failed_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(instance._select_processing)
@@ -1184,10 +1154,11 @@ class Reflection(processing.Processing):
     def _matches_change_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         child = instance._change_processing
-        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        completion = event.data
+        change_input = completion.input.input if isinstance(completion, processing.CompletionData) else None
         return (
-            isinstance(capability, _ReflectionCapability)
-            and capability.generation == instance._turn_generation
+            isinstance(change_input, ChangeWriteInput)
+            and processing.matches_operation(instance, change_input.operation_id, change_input.generation)
             and event.name == child.output_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(child)
@@ -1197,10 +1168,11 @@ class Reflection(processing.Processing):
     @staticmethod
     def _matches_change_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        capability = event.metadata.get(_REFLECTION_CAPABILITY_METADATA_KEY)
+        failure = event.data
+        change_input = failure.input.input if isinstance(failure, processing.FailureData) else None
         return (
-            isinstance(capability, _ReflectionCapability)
-            and capability.generation == instance._turn_generation
+            isinstance(change_input, ChangeWriteInput)
+            and processing.matches_operation(instance, change_input.operation_id, change_input.generation)
             and event.name == instance._change_processing.failed_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(instance._change_processing)
@@ -1211,24 +1183,17 @@ class Reflection(processing.Processing):
     def _on_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """Route select terminal: empty → store; create/change/break → seed/write/break."""
 
-        metadata = dict(event.metadata)
-        turn = Reflection._turn_from_metadata(metadata)
-        operation_id = _operation_id_from_metadata(dict(event.metadata))
-        assert operation_id is not None
-        if turn is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message="Reflection select output is missing turn correlation."),
-                ),
-            )
-            return
+        completion = event.data
+        assert isinstance(completion, processing.CompletionData)
+        select_input = completion.input.input
+        assert isinstance(select_input, SelectInput)
+        turn = InputData(
+            cognition_input=select_input.cognition_input,
+            cognition_output=select_input.cognition_output,
+        )
+        operation_id = select_input.operation_id
         try:
-            selection = _coerce_output_data(event.data)
+            selection = _coerce_output_data(completion.output)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1249,7 +1214,12 @@ class Reflection(processing.Processing):
                     instance,
                     event,
                     _AppliedEvent,
-                    _AppliedEventData(turn=turn, habit=None),
+                    _AppliedEventData(
+                        turn=turn,
+                        habit=None,
+                        operation_id=operation_id,
+                        generation=select_input.generation,
+                    ),
                 ),
             )
             return
@@ -1275,9 +1245,10 @@ class Reflection(processing.Processing):
                 _SelectedEvent,
                 _SelectedEventData(
                     turn=turn,
-                    prior_episodes=Reflection._prior_from_metadata(metadata),
+                    prior_episodes=select_input.prior_episodes,
                     selection=chosen,
                     operation_id=operation_id,
+                    generation=select_input.generation,
                 ),
             ),
         )
@@ -1322,16 +1293,6 @@ class Reflection(processing.Processing):
     ) -> None:
         data = event.data
         assert isinstance(data, _ChangeRequestedEventData)
-        child_metadata = dict(event.metadata)
-        child_metadata[_REFLECTION_TURN_METADATA_KEY] = data.turn
-        child_metadata[_REFLECTION_PRIOR_METADATA_KEY] = data.prior_episodes
-        child_metadata[_REFLECTION_OPERATION_ID_METADATA_KEY] = data.operation_id
-        child_metadata[_REFLECTION_CHANGE_INTENT_METADATA_KEY] = data.intent
-        child_metadata[_REFLECTION_EXISTING_HABIT_METADATA_KEY] = data.existing
-        if data.create_intent is not None:
-            child_metadata[_REFLECTION_CREATE_INTENT_METADATA_KEY] = data.create_intent
-        if _REFLECTION_FIX_ATTEMPTS_METADATA_KEY not in child_metadata:
-            child_metadata[_REFLECTION_FIX_ATTEMPTS_METADATA_KEY] = 0
         write_input = processing.InputData(
             input=ChangeWriteInput(
                 cognition_input=data.turn.cognition_input,
@@ -1341,6 +1302,11 @@ class Reflection(processing.Processing):
                 existing_habit=data.existing,
                 diagnostics=data.diagnostics,
                 failed_source=data.failed_source,
+                operation_id=data.operation_id,
+                generation=data.generation,
+                attempt=data.attempt,
+                create_intent=data.create_intent,
+                previous_messages=data.previous_messages,
             ),
             schemas=(ChangeEvent,),
             actors={},
@@ -1348,9 +1314,9 @@ class Reflection(processing.Processing):
         input_event = dataclasses.replace(
             instance._change_processing.input_event.with_data_and_id(
                 write_input,
-                Reflection._change_child_id(instance, _fix_attempts_from_metadata(child_metadata)),
+                Reflection._change_child_id(instance, data.attempt),
             ),
-            metadata=child_metadata,
+            metadata=dict(event.metadata),
         )
         await hsm.dispatch(ctx, instance._change_processing, input_event)
         _ = hsm.dispatch(
@@ -1358,9 +1324,13 @@ class Reflection(processing.Processing):
             instance,
             Reflection._private_event(
                 instance,
-                dataclasses.replace(event, metadata=child_metadata),
+                event,
                 _ChangeStartedEvent,
-                data.operation_id,
+                _ChangeStartedData(
+                    operation_id=data.operation_id,
+                    generation=data.generation,
+                    attempt=data.attempt,
+                ),
             ),
         )
 
@@ -1393,9 +1363,9 @@ class Reflection(processing.Processing):
         del ctx
         data = event.data
         return (
-            isinstance(data, str)
+            isinstance(data, _ChangeStartedData)
             and Reflection._matches_operation(instance, event)
-            and data == event.id
+            and data.operation_id == event.id
         )
 
     @staticmethod
@@ -1406,7 +1376,7 @@ class Reflection(processing.Processing):
         attempt: int,
     ) -> bool:
         del ctx, instance
-        return _fix_attempts_from_metadata(dict(event.metadata)) == attempt
+        return isinstance(event.data, _ChangeStartedData) and event.data.attempt == attempt
 
     @staticmethod
     def _change_attempt_is_0(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -1464,6 +1434,7 @@ class Reflection(processing.Processing):
                 intent=change_intent,
                 existing=existing,
                 operation_id=operation_id,
+                generation=selected.generation,
                 create_intent=create_intent,
             ),
             metadata,
@@ -1517,6 +1488,7 @@ class Reflection(processing.Processing):
                 intent=intent,
                 existing=existing,
                 operation_id=operation_id,
+                generation=selected.generation,
             ),
             metadata,
         )
@@ -1551,7 +1523,12 @@ class Reflection(processing.Processing):
                 instance,
                 event,
                 _AppliedEvent,
-                _AppliedEventData(turn=turn, habit=applied),
+                _AppliedEventData(
+                    turn=turn,
+                    habit=applied,
+                    operation_id=selected.operation_id,
+                    generation=selected.generation,
+                ),
             ),
         )
 
@@ -1578,7 +1555,7 @@ class Reflection(processing.Processing):
         messages = _diagnostic_messages(data.report)
         if not messages:
             return False
-        return _fix_attempts_from_metadata(dict(event.metadata)) < _MAX_REFLECTION_FIX_ATTEMPTS and (
+        return data.attempt < _MAX_REFLECTION_FIX_ATTEMPTS and (
             data.previous_messages is None or data.previous_messages != messages
         )
 
@@ -1595,7 +1572,7 @@ class Reflection(processing.Processing):
         messages = _diagnostic_messages(data.report)
         if not messages:
             return True
-        return _fix_attempts_from_metadata(dict(event.metadata)) >= _MAX_REFLECTION_FIX_ATTEMPTS or (
+        return data.attempt >= _MAX_REFLECTION_FIX_ATTEMPTS or (
             data.previous_messages is not None and data.previous_messages == messages
         )
 
@@ -1603,25 +1580,18 @@ class Reflection(processing.Processing):
     def _emit_change_write_checked(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         """Parse/validate change product; emit ``_ChangeWriteCheckedEvent`` only."""
 
-        metadata = dict(event.metadata)
-        turn = Reflection._turn_from_metadata(metadata)
-        prior = Reflection._prior_from_metadata(metadata)
-        operation_id = _operation_id_from_metadata(dict(event.metadata))
-        assert operation_id is not None
-        if turn is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message="Reflection change output is missing turn correlation."),
-                ),
-            )
-            return
+        completion = event.data
+        assert isinstance(completion, processing.CompletionData)
+        change_input = completion.input.input
+        assert isinstance(change_input, ChangeWriteInput)
+        turn = InputData(
+            cognition_input=change_input.cognition_input,
+            cognition_output=change_input.cognition_output,
+        )
+        prior = change_input.prior_episodes
+        operation_id = change_input.operation_id
         try:
-            written = _change_data_from_output(event.data)
+            written = _change_data_from_output(completion.output)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1634,9 +1604,7 @@ class Reflection(processing.Processing):
                 ),
             )
             return
-        existing = metadata.get(_REFLECTION_EXISTING_HABIT_METADATA_KEY)
-        if not isinstance(existing, Instance):
-            existing = _load_habit(instance._memory, name=written.name)
+        existing = change_input.existing_habit
         checked = _habit_check_from_write(
             name=written.name,
             source=written.source,
@@ -1657,8 +1625,12 @@ class Reflection(processing.Processing):
                     written=written,
                     habit_instance=checked.value if checked.ok else None,
                     report=checked.report,
-                    previous_messages=_last_diagnostic_messages(metadata),
+                    previous_messages=change_input.previous_messages,
                     operation_id=operation_id,
+                    generation=change_input.generation,
+                    attempt=change_input.attempt,
+                    intent=change_input.intent,
+                    create_intent=change_input.create_intent,
                     existing=existing if isinstance(existing, Instance) else None,
                 ),
             ),
@@ -1704,8 +1676,7 @@ class Reflection(processing.Processing):
             store=instance._memory,
             context_ref=data.turn.cognition_input.focus,
         )
-        metadata = dict(event.metadata)
-        applied = _applied_habit_from_change(written, metadata=metadata)
+        applied = _applied_habit_from_change(written, create_intent=data.create_intent)
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1713,7 +1684,12 @@ class Reflection(processing.Processing):
                 instance,
                 event,
                 _AppliedEvent,
-                _AppliedEventData(turn=data.turn, habit=applied),
+                _AppliedEventData(
+                    turn=data.turn,
+                    habit=applied,
+                    operation_id=data.operation_id,
+                    generation=data.generation,
+                ),
             ),
         )
 
@@ -1721,10 +1697,7 @@ class Reflection(processing.Processing):
     def _retry_change_write(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _ChangeWriteCheckedData)
-        metadata = dict(event.metadata)
-        intent = metadata.get(_REFLECTION_CHANGE_INTENT_METADATA_KEY)
-        if not isinstance(intent, ChangeData):
-            intent = data.written
+        intent = data.intent
         existing = Reflection._persist_change_draft(instance, data)
         if existing is None:
             existing = _load_habit(instance._memory, name=data.written.name)
@@ -1740,10 +1713,6 @@ class Reflection(processing.Processing):
                 ),
             )
             return
-        fix_metadata = dict(metadata)
-        fix_metadata[_REFLECTION_FIX_ATTEMPTS_METADATA_KEY] = _fix_attempts_from_metadata(metadata) + 1
-        fix_metadata[_REFLECTION_LAST_DIAGNOSTIC_MESSAGES_KEY] = _diagnostic_messages(data.report)
-        create_intent = metadata.get(_REFLECTION_CREATE_INTENT_METADATA_KEY)
         Reflection._queue_change(
             ctx,
             instance,
@@ -1754,11 +1723,14 @@ class Reflection(processing.Processing):
                 intent=intent,
                 existing=existing,
                 operation_id=data.operation_id,
+                generation=data.generation,
                 diagnostics=data.report,
                 failed_source=data.written.source,
-                create_intent=create_intent if isinstance(create_intent, CreateData) else None,
+                create_intent=data.create_intent,
+                attempt=data.attempt + 1,
+                previous_messages=_diagnostic_messages(data.report),
             ),
-            fix_metadata,
+            dict(event.metadata),
         )
 
     @staticmethod
@@ -1812,18 +1784,22 @@ class Reflection(processing.Processing):
                 instance,
                 event,
                 _StoredEvent,
-                _StoredEventData(),
+                _StoredEventData(
+                    operation_id=data.operation_id,
+                    generation=data.generation,
+                ),
             ),
         )
 
     @staticmethod
     def _complete_from_stored(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        metadata = dict(event.metadata)
+        data = event.data
+        assert isinstance(data, _StoredEventData)
         Reflection._dispatch_output(
             ctx,
             instance,
-            operation_id=_operation_id_from_metadata(metadata) or (event.id if event.id else None),
-            metadata=metadata,
+            operation_id=data.operation_id,
+            metadata=dict(event.metadata),
         )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
@@ -2107,7 +2083,6 @@ class Reflection(processing.Processing):
             instructions=type(self).change_instructions,
         )
         self._memory = memory
-        self._turn_generation = 0
         self._attachment_group: attachment.Group = attachment.Group(
             self._select_processing,
             self._change_processing,

@@ -165,7 +165,16 @@ async def dispatch_ability_for_test(
             shared_ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
         )
-    operation_id = uuid.uuid4().hex
+    direct_operation_id = getattr(input, "operation_id", None)
+    turn = getattr(input, "turn", None)
+    turn_operation_id = getattr(turn, "operation_id", None)
+    operation_id = (
+        direct_operation_id
+        if isinstance(direct_operation_id, str) and direct_operation_id
+        else turn_operation_id
+        if isinstance(turn_operation_id, str) and turn_operation_id
+        else uuid.uuid4().hex
+    )
     result = recorder.result_for(operation_id)
     _ = await hsm.dispatch(shared_ctx, ability, ability.input_event.with_data_and_id(input, operation_id))
     return typing.cast(_TAbilityOutput, await asyncio.wait_for(result, timeout=timeout))

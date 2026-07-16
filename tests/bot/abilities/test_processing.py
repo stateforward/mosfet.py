@@ -378,7 +378,7 @@ def test_processing_uses_generic_input_and_output_event_schemas() -> None:
     assert input_schema["description"]
 
     assert processing.OutputEvent.name == "bot.ability.processing.output"
-    assert output_schema == processing.OutputData.model_json_schema()
+    assert output_schema == processing.CompletionData.model_json_schema()
     assert output_schema["description"]
     assert "examples" in output_schema
 
@@ -392,7 +392,10 @@ def test_processing_delegates_to_injected_ability() -> None:
 
     output = asyncio.run(run())
 
-    assert output == processing.OutputData()
+    assert output == processing.CompletionData(
+        input=processing.InputData(input="focus"),
+        output=processing.OutputData(),
+    )
 
 
 def test_processing_does_not_add_public_result_methods() -> None:
@@ -562,7 +565,14 @@ def test_processing_does_not_complete_before_actor_dispatch() -> None:
         assert not operation.done()
 
         actor.result.set_result(None)
-        assert await operation == processing.OutputData(events=(selection,))
+        assert await operation == processing.CompletionData(
+            input=processing.InputData(
+                input="speak",
+                schemas=(_SPEAK_EVENT,),
+                actors={"speaker": actor},
+            ),
+            output=processing.OutputData(events=(selection,)),
+        )
 
     asyncio.run(run())
 
@@ -763,9 +773,10 @@ def test_processing_cancellation_requires_owner_and_preserves_exact_token(active
     acknowledgements = [event for event in terminals if event.name == processing.CancelledEvent.name]
     assert state.endswith("/idle")
     assert cancelled is active
-    assert len(acknowledgements) == 1
-    data = acknowledgements[0].data
-    assert isinstance(data, processing.CancelledData)
-    assert data.token == "exact-operation-token"
-    assert acknowledgements[0].source
-    assert acknowledgements[0].target
+    assert len(acknowledgements) == (1 if active else 0)
+    if active:
+        data = acknowledgements[0].data
+        assert isinstance(data, processing.CancelledData)
+        assert data.token == "exact-operation-token"
+        assert acknowledgements[0].source
+        assert acknowledgements[0].target

@@ -33,10 +33,6 @@ from . import episodes
 from . import input
 from . import types
 
-_AUTONOMY_INPUT_METADATA_KEY = "bot.autonomy.input"
-_AUTONOMY_CANDIDATES_METADATA_KEY = "bot.autonomy.candidates"
-_AUTONOMY_INDEX_METADATA_KEY = "bot.autonomy.candidate_index"
-_AUTONOMY_RESULT_METADATA_KEY = "bot.autonomy.candidate_result"
 _AUTONOMY_ID_MARKER = ":autonomy:"
 _HABIT_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
 _HABIT_ATTACH_TIMEOUT = datetime.timedelta(seconds=1)
@@ -66,9 +62,8 @@ class _MatchedEventData(pydantic.BaseModel):
         frozen=True,
     )
 
-    cognition_input: input.InputData
+    turn: types.TurnData
     candidates: tuple[Instance, ...]
-    operation_id: str
 
 
 _MatchedEvent = hsm.Event[_MatchedEventData](
@@ -86,10 +81,9 @@ class _StartCandidateEventData(pydantic.BaseModel):
         frozen=True,
     )
 
-    cognition_input: input.InputData
+    turn: types.TurnData
     candidates: tuple[Instance, ...]
     index: int
-    operation_id: str
 
 
 _StartCandidateEvent = hsm.Event[_StartCandidateEventData](
@@ -108,6 +102,7 @@ class _ApplyCompletedEventData(pydantic.BaseModel):
     )
 
     output: types.OutputData | None
+    turn: types.TurnData
     operation_id: str | None = None
 
 
@@ -116,10 +111,10 @@ _ApplyCompletedEvent = hsm.Event[_ApplyCompletedEventData](
     kind=hsm.CompletionEventKind,
     schema=_ApplyCompletedEventData,
 )
-_ApplyFailedEvent = hsm.Event[ability.FailureData](
+_ApplyFailedEvent = hsm.Event[types.FailureData](
     name="bot.ability.autonomy.apply.failed",
     kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
+    schema=types.FailureData,
 )
 
 
@@ -129,6 +124,7 @@ class _CandidateCapability(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str
+    generation: str
     index: int
     token: str
 
@@ -139,6 +135,8 @@ class _CandidateResultData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     capability: _CandidateCapability
+    turn: types.TurnData
+    candidates: tuple[Instance, ...]
     outcome: typing.Literal[
         "handled",
         "unhandled",
@@ -152,6 +150,7 @@ class _CandidateResultData(pydantic.BaseModel):
     output: types.OutputData | None = None
     message: str | None = None
     cancel_operation_id: str | None = None
+    cancel_parent_operation_id: str | None = None
     cancel_request_id: str | None = None
     cancel_token: str | None = None
 
@@ -162,6 +161,7 @@ class _CandidateCancelData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str
+    parent_operation_id: str | None = None
     request_id: str
     token: str
     reason: str
@@ -169,6 +169,11 @@ class _CandidateCancelData(pydantic.BaseModel):
 
 _CandidateResultEvent = hsm.Event[_CandidateResultData](
     name="bot.ability.autonomy.candidate.result",
+    kind=hsm.CompletionEventKind,
+    schema=_CandidateResultData,
+)
+_CandidatePendingResultEvent = hsm.Event[_CandidateResultData](
+    name="bot.ability.autonomy.candidate.result.pending",
     kind=hsm.CompletionEventKind,
     schema=_CandidateResultData,
 )
@@ -193,11 +198,44 @@ class _CandidateRun(hsm.Instance):
         owner: "Autonomy",
         behavior: ability.Ability[typing.Any, typing.Any],
         capability: _CandidateCapability,
-        cognition_input: input.InputData,
+        turn: types.TurnData,
         candidates: tuple[Instance, ...],
         metadata: dict[str, object],
     ) -> hsm.Model:
         child_id = _child_operation_id(capability.operation_id, capability.index)
+        cognition_input = turn.input
+
+        def candidate_result(
+            outcome: typing.Literal[
+                "handled",
+                "unhandled",
+                "failed",
+                "silent",
+                "cancelled",
+                "attach_timeout",
+                "detach_failed",
+                "detach_timeout",
+            ],
+            *,
+            output: types.OutputData | None = None,
+            message: str | None = None,
+            cancel_operation_id: str | None = None,
+            cancel_parent_operation_id: str | None = None,
+            cancel_request_id: str | None = None,
+            cancel_token: str | None = None,
+        ) -> _CandidateResultData:
+            return _CandidateResultData(
+                capability=capability,
+                turn=turn,
+                candidates=candidates,
+                outcome=outcome,
+                output=output,
+                message=message,
+                cancel_operation_id=cancel_operation_id,
+                cancel_parent_operation_id=cancel_parent_operation_id,
+                cancel_request_id=cancel_request_id,
+                cancel_token=cancel_token,
+            )
 
         def silence_delay(
             ctx: hsm.Context,
@@ -207,14 +245,6 @@ class _CandidateRun(hsm.Instance):
             del ctx, instance, event
             return _HABIT_SILENCE_TIMEOUT
 
-        def attach_delay(
-            ctx: hsm.Context,
-            instance: _CandidateRun,
-            event: hsm.Event[typing.Any],
-        ) -> datetime.timedelta:
-            del ctx, instance, event
-            return _HABIT_ATTACH_TIMEOUT
-
         def detach_delay(
             ctx: hsm.Context,
             instance: _CandidateRun,
@@ -222,6 +252,14 @@ class _CandidateRun(hsm.Instance):
         ) -> datetime.timedelta:
             del ctx, instance, event
             return _HABIT_DETACH_TIMEOUT
+
+        def attach_delay(
+            ctx: hsm.Context,
+            instance: _CandidateRun,
+            event: hsm.Event[typing.Any],
+        ) -> datetime.timedelta:
+            del ctx, instance, event
+            return _HABIT_ATTACH_TIMEOUT
 
         def attach_behavior(
             ctx: hsm.Context,
@@ -249,19 +287,20 @@ class _CandidateRun(hsm.Instance):
             return (
                 isinstance(data, (attachment.AttachCompleteData, attachment.FailedData))
                 and data.actor is instance
-                and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
             )
 
-        def dispatch_behavior_input(
+        async def dispatch_behavior_input(
             ctx: hsm.Context,
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
             del ctx, event
             payload = habit_input_payload(cognition_input)
-            _ = hsm.dispatch(
+            if processing.active_operation(behavior, child_id) is None:
+                _ = await processing.start_operation(behavior, child_id)
+            await hsm.dispatch(
                 instance.context(),
                 behavior,
                 dataclasses.replace(
@@ -280,6 +319,7 @@ class _CandidateRun(hsm.Instance):
             del ctx
             return (
                 event.name == behavior.output_event.name
+                and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
             )
@@ -292,6 +332,7 @@ class _CandidateRun(hsm.Instance):
             del ctx
             return (
                 event.name == behavior.failed_event.name
+                and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
             )
@@ -311,37 +352,34 @@ class _CandidateRun(hsm.Instance):
         def result_for(instance: _CandidateRun, event: hsm.Event[typing.Any]) -> _CandidateResultData:
             if is_behavior_output(hsm.Context(), instance, event):
                 output = _coerce_habit_output(event.data)
-                return _CandidateResultData(
-                    capability=capability,
-                    outcome="handled" if output is not None else "unhandled",
+                return candidate_result(
+                    "handled" if output is not None else "unhandled",
                     output=output,
                 )
             if is_behavior_failure(hsm.Context(), instance, event):
-                return _CandidateResultData(
-                    capability=capability,
-                    outcome="failed",
+                return candidate_result(
+                    "failed",
                     message=getattr(event.data, "message", "Autonomy habit failed."),
                 )
             if isinstance(event.data, _CandidateCancelData):
-                return _CandidateResultData(
-                    capability=capability,
-                    outcome="cancelled",
+                return candidate_result(
+                    "cancelled",
                     message=event.data.reason,
                     cancel_operation_id=event.data.operation_id,
+                    cancel_parent_operation_id=event.data.parent_operation_id,
                     cancel_request_id=event.data.request_id,
                     cancel_token=event.data.token,
                 )
-            return _CandidateResultData(capability=capability, outcome="silent")
+            return candidate_result("silent")
 
         def begin_attach_timeout_detach(
             ctx: hsm.Context,
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
-            del ctx, event
-            result = _CandidateResultData(
-                capability=capability,
-                outcome="attach_timeout",
+            del event
+            result = candidate_result(
+                "attach_timeout",
                 message=(f"Autonomy habit attach timed out after {_HABIT_ATTACH_TIMEOUT.total_seconds():g} seconds."),
             )
             _ = behavior.detach(
@@ -357,7 +395,18 @@ class _CandidateRun(hsm.Instance):
                     id=child_id,
                     source=hsm.id(instance),
                     target=hsm.id(behavior),
-                    metadata={**metadata, _AUTONOMY_RESULT_METADATA_KEY: result},
+                    metadata=dict(metadata),
+                ),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _CandidatePendingResultEvent.with_data(result),
+                    id=capability.operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(metadata),
                 ),
             )
 
@@ -366,8 +415,8 @@ class _CandidateRun(hsm.Instance):
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
-            del ctx
             result = result_for(instance, event)
+            processing.finish_operation(ctx, behavior, child_id)
             _ = behavior.detach(
                 instance.context(),
                 dataclasses.replace(
@@ -381,7 +430,18 @@ class _CandidateRun(hsm.Instance):
                     id=child_id,
                     source=hsm.id(instance),
                     target=hsm.id(behavior),
-                    metadata={**metadata, _AUTONOMY_RESULT_METADATA_KEY: result},
+                    metadata=dict(metadata),
+                ),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _CandidatePendingResultEvent.with_data(result),
+                    id=capability.operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(metadata),
                 ),
             )
 
@@ -391,41 +451,34 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> bool:
             del ctx
-            data = event.data
             return (
-                isinstance(data, (attachment.DetachedData, attachment.FailedData))
-                and data.actor is instance
+                isinstance(event.data, attachment.DetachedData | attachment.FailedData)
+                and event.data.actor is instance
                 and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
-                and isinstance(event.metadata.get(_AUTONOMY_RESULT_METADATA_KEY), _CandidateResultData)
             )
 
-        def is_cancel_detach_terminal(
+        def is_pending_result(
             ctx: hsm.Context,
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> bool:
-            result = event.metadata.get(_AUTONOMY_RESULT_METADATA_KEY)
+            del ctx
             return (
-                is_detach_terminal(ctx, instance, event)
-                and isinstance(result, _CandidateResultData)
-                and result.outcome == "cancelled"
+                isinstance(event.data, _CandidateResultData)
+                and event.id == capability.operation_id
+                and event.source == hsm.id(instance)
+                and event.target == hsm.id(instance)
             )
 
-        def forward_result(
+        def forward_pending_result(
             ctx: hsm.Context,
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
-            result = event.metadata.get(_AUTONOMY_RESULT_METADATA_KEY)
+            result = event.data
             assert isinstance(result, _CandidateResultData)
-            if event.name == attachment.DetachFailedEvent.name:
-                result = _CandidateResultData(
-                    capability=capability,
-                    outcome="detach_failed",
-                    message=getattr(event.data, "message", "Autonomy habit detach failed."),
-                )
             _ = hsm.dispatch(
                 ctx,
                 owner,
@@ -434,39 +487,33 @@ class _CandidateRun(hsm.Instance):
                     id=capability.operation_id,
                     source=hsm.id(instance),
                     target=hsm.id(owner),
-                    metadata={
-                        **metadata,
-                        _AUTONOMY_INPUT_METADATA_KEY: cognition_input,
-                        _AUTONOMY_CANDIDATES_METADATA_KEY: candidates,
-                        _AUTONOMY_INDEX_METADATA_KEY: capability.index,
-                    },
+                    metadata=dict(metadata),
                 ),
             )
 
-        def forward_attach_failure(
+        def forward_detach_failure(
             ctx: hsm.Context,
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
-            result = _CandidateResultData(
-                capability=capability,
-                outcome="failed",
-                message=getattr(event.data, "message", "Autonomy habit attach failed."),
-            )
+            result = event.data
+            assert isinstance(result, _CandidateResultData)
             _ = hsm.dispatch(
                 ctx,
                 owner,
                 dataclasses.replace(
-                    _CandidateResultEvent.with_data(result),
+                    _CandidateResultEvent.with_data(
+                        result.model_copy(
+                            update={
+                                "outcome": "detach_failed",
+                                "message": "Autonomy habit detach failed.",
+                            }
+                        )
+                    ),
                     id=capability.operation_id,
                     source=hsm.id(instance),
                     target=hsm.id(owner),
-                    metadata={
-                        **metadata,
-                        _AUTONOMY_INPUT_METADATA_KEY: cognition_input,
-                        _AUTONOMY_CANDIDATES_METADATA_KEY: candidates,
-                        _AUTONOMY_INDEX_METADATA_KEY: capability.index,
-                    },
+                    metadata=dict(metadata),
                 ),
             )
 
@@ -475,26 +522,48 @@ class _CandidateRun(hsm.Instance):
             instance: _CandidateRun,
             event: hsm.Event[typing.Any],
         ) -> None:
-            del event
-            result = _CandidateResultData(
-                capability=capability,
-                outcome="detach_timeout",
-                message=(f"Autonomy habit detach timed out after {_HABIT_DETACH_TIMEOUT.total_seconds():g} seconds."),
-            )
+            result = event.data
+            assert isinstance(result, _CandidateResultData)
             _ = hsm.dispatch(
                 ctx,
                 owner,
                 dataclasses.replace(
-                    _CandidateResultEvent.with_data(result),
+                    _CandidateResultEvent.with_data(
+                        result.model_copy(
+                            update={
+                                "outcome": "detach_timeout",
+                                "message": (
+                                    "Autonomy habit detach timed out after "
+                                    f"{_HABIT_DETACH_TIMEOUT.total_seconds():g} seconds."
+                                ),
+                            }
+                        )
+                    ),
                     id=capability.operation_id,
                     source=hsm.id(instance),
                     target=hsm.id(owner),
-                    metadata={
-                        **metadata,
-                        _AUTONOMY_INPUT_METADATA_KEY: cognition_input,
-                        _AUTONOMY_CANDIDATES_METADATA_KEY: candidates,
-                        _AUTONOMY_INDEX_METADATA_KEY: capability.index,
-                    },
+                    metadata=dict(metadata),
+                ),
+            )
+
+        def forward_attach_failure(
+            ctx: hsm.Context,
+            instance: _CandidateRun,
+            event: hsm.Event[typing.Any],
+        ) -> None:
+            result = candidate_result(
+                "failed",
+                message=getattr(event.data, "message", "Autonomy habit attach failed."),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _CandidatePendingResultEvent.with_data(result),
+                    id=capability.operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(metadata),
                 ),
             )
 
@@ -508,19 +577,18 @@ class _CandidateRun(hsm.Instance):
                     hsm.on(_CandidateCancelEvent),
                     hsm.guard(is_cancel),
                     hsm.effect(begin_detach),
-                    hsm.target("/AutonomyCandidateRun/cancelling"),
+                    hsm.target("/AutonomyCandidateRun/detaching"),
                 ),
                 hsm.transition(
                     hsm.on(attachment.AttachCompleteEvent),
                     hsm.guard(is_attach_terminal),
-                    hsm.effect(dispatch_behavior_input),
                     hsm.target("/AutonomyCandidateRun/running"),
                 ),
                 hsm.transition(
                     hsm.on(attachment.AttachFailedEvent),
                     hsm.guard(is_attach_terminal),
                     hsm.effect(forward_attach_failure),
-                    hsm.target("/AutonomyCandidateRun/done"),
+                    hsm.target("/AutonomyCandidateRun/reporting"),
                 ),
                 hsm.transition(
                     hsm.after(attach_delay),
@@ -530,6 +598,7 @@ class _CandidateRun(hsm.Instance):
             ),
             hsm.state(
                 "running",
+                hsm.activity(dispatch_behavior_input),
                 hsm.transition(
                     hsm.on(behavior.output_event),
                     hsm.guard(is_behavior_output),
@@ -546,7 +615,7 @@ class _CandidateRun(hsm.Instance):
                     hsm.on(_CandidateCancelEvent),
                     hsm.guard(is_cancel),
                     hsm.effect(begin_detach),
-                    hsm.target("/AutonomyCandidateRun/cancelling"),
+                    hsm.target("/AutonomyCandidateRun/detaching"),
                 ),
                 hsm.transition(
                     hsm.after(silence_delay),
@@ -556,34 +625,45 @@ class _CandidateRun(hsm.Instance):
             ),
             hsm.state(
                 "detaching",
+                hsm.defer(_CandidatePendingResultEvent),
                 hsm.transition(
-                    hsm.on(_CandidateCancelEvent),
-                    hsm.guard(is_cancel),
-                    hsm.effect(begin_detach),
-                    hsm.target("/AutonomyCandidateRun/cancelling"),
+                    hsm.on(attachment.DetachedEvent),
+                    hsm.guard(is_detach_terminal),
+                    hsm.target("/AutonomyCandidateRun/reporting"),
                 ),
                 hsm.transition(
-                    hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
+                    hsm.on(attachment.DetachFailedEvent),
                     hsm.guard(is_detach_terminal),
-                    hsm.effect(forward_result),
-                    hsm.target("/AutonomyCandidateRun/done"),
+                    hsm.target("/AutonomyCandidateRun/reporting_failure"),
                 ),
                 hsm.transition(
                     hsm.after(detach_delay),
-                    hsm.effect(forward_detach_timeout),
+                    hsm.target("/AutonomyCandidateRun/reporting_timeout"),
+                ),
+            ),
+            hsm.state(
+                "reporting",
+                hsm.transition(
+                    hsm.on(_CandidatePendingResultEvent),
+                    hsm.guard(is_pending_result),
+                    hsm.effect(forward_pending_result),
                     hsm.target("/AutonomyCandidateRun/done"),
                 ),
             ),
             hsm.state(
-                "cancelling",
+                "reporting_failure",
                 hsm.transition(
-                    hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
-                    hsm.guard(is_cancel_detach_terminal),
-                    hsm.effect(forward_result),
+                    hsm.on(_CandidatePendingResultEvent),
+                    hsm.guard(is_pending_result),
+                    hsm.effect(forward_detach_failure),
                     hsm.target("/AutonomyCandidateRun/done"),
                 ),
+            ),
+            hsm.state(
+                "reporting_timeout",
                 hsm.transition(
-                    hsm.after(detach_delay),
+                    hsm.on(_CandidatePendingResultEvent),
+                    hsm.guard(is_pending_result),
                     hsm.effect(forward_detach_timeout),
                     hsm.target("/AutonomyCandidateRun/done"),
                 ),
@@ -593,32 +673,7 @@ class _CandidateRun(hsm.Instance):
 
 
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key
-        not in {
-            _AUTONOMY_INPUT_METADATA_KEY,
-            _AUTONOMY_CANDIDATES_METADATA_KEY,
-            _AUTONOMY_INDEX_METADATA_KEY,
-            _AUTONOMY_RESULT_METADATA_KEY,
-        }
-    }
-
-
-def _cognition_input_from_event(event: hsm.Event[typing.Any]) -> input.InputData | None:
-    value = event.metadata.get(_AUTONOMY_INPUT_METADATA_KEY)
-    if input.is_input(value):
-        return value
-    return None
-
-
-def _candidates_from_event(event: hsm.Event[typing.Any]) -> tuple[Instance, ...] | None:
-    value = event.metadata.get(_AUTONOMY_CANDIDATES_METADATA_KEY)
-    items = typing.cast(tuple[object, ...], value) if isinstance(value, tuple) else None
-    if items is not None and all(isinstance(item, Instance) for item in items):
-        return typing.cast(tuple[Instance, ...], value)
-    return None
+    return dict(metadata)
 
 
 def _child_operation_id(parent_operation_id: str, index: int) -> str:
@@ -654,14 +709,10 @@ def _replace_habit_in_tuple(habits: tuple[Instance, ...], updated: Instance) -> 
 
 
 def _stimulus_payload(stimulus: object) -> object:
-    """JSON-like payload for habit input, including call_id from stimulus metadata when present."""
+    """Build the JSON-like habit input payload from typed stimulus data."""
 
     if isinstance(stimulus, hsm.Event):
         payload = _json_like(stimulus.data)
-        call_id = stimulus.metadata.get("bot.phone.call_id")
-        if isinstance(call_id, str) and call_id and isinstance(payload, dict):
-            payload = dict(typing.cast(dict[str, object], payload))
-            payload.setdefault("call_id", call_id)
         return payload
     if isinstance(stimulus, pydantic.BaseModel):
         return stimulus.model_dump(mode="json")
@@ -741,7 +792,7 @@ def _coerce_habit_output(data: object) -> types.OutputData | None:
     )
 
 
-class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
+class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     """Practiced automatic habit use: load on attach, then match → run Behavior.
 
     Chart states are lifecycle phases only. Turn product rides the event chain
@@ -750,15 +801,20 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
     Candidate identity remains on the scoped operation actor and typed capability events.
     """
 
-    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = input.InputData
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
-    input_event: typing.ClassVar[hsm.Event[input.InputData]] = ability.ability_input_event(
+    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.TurnData
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
+    input_event: typing.ClassVar[hsm.Event[types.TurnData]] = ability.ability_input_event(
         "bot.ability.autonomy.input",
-        input.InputData,
+        types.TurnData,
     )
-    output_event: typing.ClassVar[hsm.Event[types.OutputData | None]] = hsm.Event[types.OutputData | None](
+    output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
         name="bot.ability.autonomy.output",
-        schema=types.OPTIONAL_OUTPUT_SCHEMA_CONTRACT,
+        schema=types.CompletionData,
+    )
+    failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
+        name=ability.FailedEvent.name,
+        kind=hsm.ErrorEventKind,
+        schema=types.FailureData,
     )
     _memory: memory.Memory | None
     _habits: tuple[Instance, ...]
@@ -855,6 +911,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         *,
         reason: str,
         operation_id: str = "detach",
+        parent_operation_id: str | None = None,
         request_id: str = "detach",
         token: str = "detach",
     ) -> None:
@@ -870,6 +927,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                         _CandidateCancelEvent.with_data(
                             _CandidateCancelData(
                                 operation_id=operation_id,
+                                parent_operation_id=parent_operation_id,
                                 request_id=request_id,
                                 token=token,
                                 reason=reason,
@@ -884,7 +942,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
     @staticmethod
     def _has_autonomy_input(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return input.is_input(event.data)
+        return isinstance(event.data, types.TurnData)
 
     @staticmethod
     def _has_matched(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
@@ -904,7 +962,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
     @staticmethod
     def _has_apply_failure(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, ability.FailureData)
+        return isinstance(event.data, types.FailureData)
 
     @staticmethod
     async def _match_activity(
@@ -913,24 +971,23 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert input.is_input(data)
-        operation_id = event.id if event.id else uuid.uuid4().hex
-        stimulus = episodes.stimulus_name(data.stimulus)
+        assert isinstance(data, types.TurnData)
+        if processing.active_operation(instance, event.id) is None:
+            await processing.start_operation(instance, event.id)
+        cognition_input = data.input
+        stimulus = episodes.stimulus_name(cognition_input.stimulus)
         candidates = tuple(item for item in instance._habits if _matches_trigger(item, stimulus))
         matched = _MatchedEventData(
-            cognition_input=data,
+            turn=data,
             candidates=candidates,
-            operation_id=operation_id,
         )
-        child_metadata = dict(event.metadata)
-        child_metadata[_AUTONOMY_INPUT_METADATA_KEY] = data
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
                 _MatchedEvent.with_data(matched),
-                id=operation_id,
-                metadata=child_metadata,
+                id=event.id,
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -941,7 +998,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        output: types.OutputData | None,
+        output: types.CompletionData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -950,6 +1007,8 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _dispatch_failure_terminal(
@@ -958,7 +1017,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        failure: ability.FailureData,
+        failure: types.FailureData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
@@ -967,6 +1026,8 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _complete_apply(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
@@ -977,16 +1038,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance,
             operation_id=data.operation_id if data.operation_id is not None else (event.id or None),
             metadata=dict(event.metadata),
-            output=data.output,
+            output=types.CompletionData(turn=data.turn, output=data.output),
         )
 
     @staticmethod
     def _fail_apply(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
-        failure = (
-            event.data
-            if isinstance(event.data, ability.FailureData)
-            else ability.FailureData(message="Autonomy failed.")
-        )
+        failure = event.data
+        assert isinstance(failure, types.FailureData)
         Autonomy._dispatch_failure_terminal(
             ctx,
             instance,
@@ -1005,9 +1063,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 instance,
                 dataclasses.replace(
                     _ApplyCompletedEvent.with_data(
-                        _ApplyCompletedEventData(output=None, operation_id=matched.operation_id)
+                        _ApplyCompletedEventData(
+                            output=None,
+                            turn=matched.turn,
+                            operation_id=event.id or matched.turn.operation_id,
+                        )
                     ),
-                    id=matched.operation_id,
+                    id=event.id,
                     metadata=_public_metadata(dict(event.metadata)),
                 ),
             )
@@ -1018,13 +1080,12 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             dataclasses.replace(
                 _StartCandidateEvent.with_data(
                     _StartCandidateEventData(
-                        cognition_input=matched.cognition_input,
+                        turn=matched.turn,
                         candidates=matched.candidates,
                         index=0,
-                        operation_id=matched.operation_id,
                     )
                 ),
-                id=matched.operation_id,
+                id=event.id,
                 metadata=dict(event.metadata),
             ),
         )
@@ -1043,9 +1104,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 instance,
                 dataclasses.replace(
                     _ApplyCompletedEvent.with_data(
-                        _ApplyCompletedEventData(output=None, operation_id=data.operation_id)
+                        _ApplyCompletedEventData(
+                            output=None,
+                            turn=data.turn,
+                            operation_id=event.id or data.turn.operation_id,
+                        )
                     ),
-                    id=data.operation_id,
+                    id=event.id,
                     metadata=_public_metadata(dict(event.metadata)),
                 ),
             )
@@ -1063,38 +1128,20 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 dataclasses.replace(
                     _StartCandidateEvent.with_data(
                         _StartCandidateEventData(
-                            cognition_input=data.cognition_input,
+                            turn=data.turn,
                             candidates=updated_candidates,
                             index=data.index + 1,
-                            operation_id=data.operation_id,
                         )
                     ),
-                    id=data.operation_id,
-                    metadata={
-                        **dict(event.metadata),
-                        _AUTONOMY_CANDIDATES_METADATA_KEY: updated_candidates,
-                    },
+                    id=event.id,
+                    metadata=dict(event.metadata),
                 ),
             )
             return
         child_metadata = dict(event.metadata)
-        # Preserve stimulus provenance (e.g. bot.phone.call_id) for habit callbacks.
-        stimulus = data.cognition_input.stimulus
-        if isinstance(stimulus, hsm.Event):
-            child_metadata = {**dict(stimulus.metadata), **child_metadata}
-        # Habit guards may check focus candidates (same key Bot uses).
-        if data.cognition_input.focus_candidates:
-            child_metadata.setdefault(
-                "bot.focus_candidates",
-                data.cognition_input.focus_candidates,
-            )
-        if data.cognition_input.focus is not None:
-            child_metadata.setdefault("bot.bot.focus", data.cognition_input.focus)
-        child_metadata[_AUTONOMY_INPUT_METADATA_KEY] = data.cognition_input
-        child_metadata[_AUTONOMY_CANDIDATES_METADATA_KEY] = data.candidates
-        child_metadata[_AUTONOMY_INDEX_METADATA_KEY] = data.index
         capability = _CandidateCapability(
-            operation_id=data.operation_id,
+            operation_id=event.id or data.turn.operation_id,
+            generation=data.turn.generation,
             index=data.index,
             token=uuid.uuid4().hex,
         )
@@ -1110,7 +1157,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 owner=instance,
                 behavior=behavior,
                 capability=capability,
-                cognition_input=data.cognition_input,
+                turn=data.turn,
                 candidates=data.candidates,
                 metadata=child_metadata,
             ),
@@ -1124,7 +1171,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance,
             dataclasses.replace(
                 _CandidateStartedEvent.with_data(capability),
-                id=data.operation_id,
+                id=event.id,
                 source=hsm.id(started),
                 target=hsm.id(instance),
                 metadata=dict(child_metadata),
@@ -1239,28 +1286,18 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         assert isinstance(result, _CandidateResultData)
         parent_id = result.capability.operation_id
         index = result.capability.index
-        cognition_input = _cognition_input_from_event(event)
-        candidates = _candidates_from_event(event)
+        cognition_input = result.turn.input
+        candidates = result.candidates
         compiled = _habit_at_index(candidates, index)
         public_metadata = _public_metadata(dict(event.metadata))
-        if cognition_input is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(
-                        ability.FailureData(message="Autonomy habit output is missing turn correlation.")
-                    ),
-                    id=parent_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
         try:
             output = result.output
             if output is None:
                 raise TypeError("Autonomy habit output is unhandled.")
-            processing_input = input.build_processing_input(cognition_input)
+            processing_input = input.build_processing_input(
+                cognition_input,
+                authority=instance._attachments[0] if instance._attachments else instance,
+            )
             if processing_input.actors and output:
                 selections = processing.coerce_event_selections(output)
                 if selections is None:
@@ -1271,6 +1308,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                     selections,
                     operation_id=parent_id,
                     source=instance,
+                    focus_candidates=result.turn.input.focus_candidates,
                     metadata=public_metadata,
                 )
         except Exception as error:
@@ -1280,7 +1318,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ApplyFailedEvent.with_data(ability.FailureData(message=str(error))),
+                    _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=result.turn)),
                     id=parent_id,
                     metadata=public_metadata,
                 ),
@@ -1292,7 +1330,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             ctx,
             instance,
             dataclasses.replace(
-                _ApplyCompletedEvent.with_data(_ApplyCompletedEventData(output=output, operation_id=parent_id)),
+                _ApplyCompletedEvent.with_data(
+                    _ApplyCompletedEventData(
+                        output=output,
+                        turn=result.turn,
+                        operation_id=parent_id,
+                    )
+                ),
                 id=parent_id,
                 metadata=public_metadata,
             ),
@@ -1305,25 +1349,11 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
         Autonomy._retire_candidate(instance, event)
         parent_id = result.capability.operation_id
         index = result.capability.index
-        cognition_input = _cognition_input_from_event(event)
-        candidates = _candidates_from_event(event)
+        candidates = result.candidates
         failed_habit = _habit_at_index(candidates, index) if result.outcome == "failed" else None
         if failed_habit is not None:
             updated = Autonomy._persist_habit_usage(instance, failed_habit, outcome="failed")
             candidates = _replace_habit_in_tuple(candidates or (), updated)
-        if cognition_input is None or candidates is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(
-                        ability.FailureData(message="Autonomy advance is missing turn correlation.")
-                    ),
-                    id=parent_id,
-                    metadata=_public_metadata(dict(event.metadata)),
-                ),
-            )
-            return
         next_index = index + 1
         _ = hsm.dispatch(
             ctx,
@@ -1331,17 +1361,13 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             dataclasses.replace(
                 _StartCandidateEvent.with_data(
                     _StartCandidateEventData(
-                        cognition_input=cognition_input,
+                        turn=result.turn,
                         candidates=candidates,
                         index=next_index,
-                        operation_id=parent_id,
                     )
                 ),
                 id=parent_id,
-                metadata={
-                    **dict(event.metadata),
-                    _AUTONOMY_CANDIDATES_METADATA_KEY: candidates,
-                },
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -1355,7 +1381,10 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance,
             operation_id=result.capability.operation_id,
             metadata=dict(event.metadata),
-            failure=ability.FailureData(message=result.message or "Autonomy habit teardown failed."),
+            failure=types.FailureData(
+                message=result.message or "Autonomy habit teardown failed.",
+                turn=result.turn,
+            ),
         )
 
     @staticmethod
@@ -1367,6 +1396,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             and event.target == hsm.id(instance)
             and bool(instance._attachments)
             and event.source == hsm.id(instance._attachments[0])
+            and processing.active_operation(instance, event.data.operation_id) is not None
         )
 
     @staticmethod
@@ -1378,6 +1408,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             instance,
             reason="Autonomy processing cancelled.",
             operation_id=data.operation_id,
+            parent_operation_id=data.parent_operation_id,
             request_id=event.id,
             token=data.token,
         )
@@ -1392,7 +1423,11 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
             owner,
             dataclasses.replace(
                 processing.CancelledEvent.with_data(
-                    processing.CancelledData(operation_id=data.operation_id, token=data.token)
+                    processing.CancelledData(
+                        operation_id=data.operation_id,
+                        token=data.token,
+                        parent_operation_id=data.parent_operation_id,
+                    )
                 ),
                 id=event.id,
                 source=hsm.id(instance),
@@ -1400,6 +1435,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                 metadata=dict(event.metadata),
             ),
         )
+        processing.finish_operation(ctx, instance, data.operation_id)
 
     @staticmethod
     def _complete_cancel(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
@@ -1418,6 +1454,7 @@ class Autonomy(ability.Ability[input.InputData, types.OutputData | None]):
                     processing.CancelledData(
                         operation_id=data.cancel_operation_id,
                         token=data.cancel_token,
+                        parent_operation_id=data.cancel_parent_operation_id,
                     )
                 ),
                 id=data.cancel_request_id,

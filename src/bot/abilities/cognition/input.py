@@ -85,6 +85,7 @@ def build_processing_input(
     cognition_input: InputData,
     *,
     extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
+    authority: hsm.Instance | None = None,
 ) -> processing.InputData:
     """Build the deliberative input and callable schemas for one cognition turn."""
 
@@ -103,7 +104,12 @@ def build_processing_input(
             if event.name not in seen:
                 seen.add(event.name)
                 schemas.append(event)
-    return processing.InputData(input=cognition_input.stimulus, schemas=tuple(schemas), actors=actors)
+    return processing.InputData(
+        input=cognition_input.stimulus,
+        schemas=tuple(schemas),
+        actors=actors,
+        authority=authority,
+    )
 
 
 __all__ = [

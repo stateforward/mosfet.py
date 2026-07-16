@@ -1,4 +1,6 @@
 from .. import processing
+from .. import ability
+from . import input as cognition_input
 
 import collections.abc
 import typing
@@ -71,6 +73,41 @@ class EventData(pydantic.BaseModel):
 # Always a tuple of selected events. Empty tuple = no dispatch.
 OutputData: typing.TypeAlias = tuple[EventData, ...]
 
+
+class TurnData(pydantic.BaseModel):
+    """Typed correlation and body input for one active cognition turn."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    input: cognition_input.InputData
+    operation_id: str = pydantic.Field(min_length=1)
+    generation: str = pydantic.Field(
+        min_length=1,
+        description="Live operation-actor identifier that proves this turn is still current.",
+    )
+
+
+class CompletionData(pydantic.BaseModel):
+    """Typed terminal from one cognition stage back to the Cognition host."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    turn: TurnData
+    output: OutputData | None = None
+
+
+class FailureData(ability.FailureData):
+    """Typed cognition-stage failure correlated to its originating turn."""
+
+    turn: TurnData
+
+
 OUTPUT_SCHEMA_CONTRACT = typing.cast(
     pydantic.TypeAdapter[OutputData],
     pydantic.TypeAdapter(OutputData),
@@ -101,6 +138,7 @@ async def dispatch_selected_events(
     *,
     operation_id: str,
     source: hsm.Instance,
+    focus_candidates: tuple[str, ...],
     metadata: collections.abc.Mapping[str, object] | None = None,
 ) -> None:
     """Validate body-action constraints, then dispatch selected modeled events."""
@@ -109,15 +147,11 @@ async def dispatch_selected_events(
     from bot import device
 
     event_metadata = dict(metadata or {})
-    event_metadata["bot.cognition.action_source"] = source
     configured_candidates = tuple(
         name for name, actor in input.actors.items() if name != "bot" and isinstance(actor, device.Device)
     )
-    candidates = configured_candidates
-    restricted = event_metadata.get("bot.focus_candidates")
-    if isinstance(restricted, collections.abc.Sequence) and not isinstance(restricted, str | bytes | bytearray):
-        allowed = {item for item in restricted if isinstance(item, str) and item}
-        candidates = tuple(item for item in candidates if item in allowed)
+    allowed = set(focus_candidates)
+    candidates = tuple(item for item in configured_candidates if item in allowed)
 
     for selection in selections:
         if selection.event == bot.FocusDeviceEvent.name:
@@ -143,9 +177,12 @@ async def dispatch_selected_events(
 __all__ = [
     "OUTPUT_SCHEMA",
     "OUTPUT_SCHEMA_CONTRACT",
+    "CompletionData",
     "EventData",
     "EventPayload",
+    "FailureData",
     "OutputData",
+    "TurnData",
     "OPTIONAL_OUTPUT_SCHEMA",
     "OPTIONAL_OUTPUT_SCHEMA_CONTRACT",
     "dispatch_selected_events",

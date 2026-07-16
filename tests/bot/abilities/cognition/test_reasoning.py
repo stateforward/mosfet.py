@@ -12,6 +12,11 @@ import typing
 import hsm
 
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
+
+
+def test_reasoning_never_uses_metadata_for_coordination() -> None:
+    assert_metadata_is_not_coordination(reasoning_module)
 
 
 class EmptyProcessor(processing.Processor):
@@ -34,6 +39,28 @@ class HeldProcessor(processing.Processor):
         return ()
 
 
+def reasoning_input(
+    stimulus: hsm.Event[typing.Any],
+    *,
+    operation_id: str = "reasoning-turn",
+) -> cognition.reasoning.InputData:
+    cognition_input = cognition.InputData(
+        stimulus=stimulus,
+        abilities=(),
+        actors={},
+        focus=None,
+        focus_candidates=(),
+    )
+    return cognition.reasoning.InputData(
+        turn=cognition.types.TurnData(
+            input=cognition_input,
+            operation_id=operation_id,
+            generation="operation-token",
+        ),
+        processing_input=processing.InputData(input=stimulus),
+    )
+
+
 def test_reasoning_retains_world_event_stimulus_without_stranding() -> None:
     async def run() -> tuple[object, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
         store = memory.Memory()
@@ -45,7 +72,7 @@ def test_reasoning_retains_world_event_stimulus_without_stranding() -> None:
         output = await dispatch_ability_for_test(
             reasoning,
             ctx,
-            processing.InputData(input=stimulus),
+            reasoning_input(stimulus),
             timeout=0.2,
         )
         retained = cognition.episodes.episodes_from_output(store.execute(cognition.episodes.episode_select_input()))
@@ -53,7 +80,7 @@ def test_reasoning_retains_world_event_stimulus_without_stranding() -> None:
 
     output, retained, state = asyncio.run(run())
 
-    assert output == ()
+    assert output.output == ()
     assert len(retained) == 1
     assert retained[0].stimulus_name == SoundEvent.name
     assert state == "/ReasoningLifecycle/attached/behavior/idle"
@@ -70,17 +97,29 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
             dispatch_ability_for_test(
                 reasoning,
                 ctx,
-                processing.InputData(input=SoundEvent.with_data(SoundData(audio=b"ring", kind="ring"))),
+                reasoning_input(
+                    SoundEvent.with_data(SoundData(audio=b"ring", kind="ring")),
+                    operation_id="live-operation",
+                ),
                 timeout=0.3,
             )
         )
         await asyncio.wait_for(processor.called.wait(), timeout=0.2)
+        forged_input = reasoning_input(
+            SoundEvent.with_data(SoundData(audio=b"forged", kind="ring")),
+            operation_id="stale-operation",
+        )
+        capability = reasoning_module._ReasoningCapability(
+            operation_id="stale-operation",
+            actor_id="forged-actor",
+            token="forged-token",
+        )
         forged_reasoned = dataclasses.replace(
             reasoning_module._ReasonedEvent.with_data(
                 reasoning_module._ReasonedEventData(
-                    host_input=processing.InputData(
-                        input=SoundEvent.with_data(SoundData(audio=b"forged", kind="ring"))
-                    ),
+                    turn=forged_input.turn,
+                    capability=capability,
+                    host_input=forged_input.processing_input,
                     reasoned=reasoning_module.OutputData(result=()),
                 )
             ),
@@ -90,7 +129,13 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
         )
         _ = await hsm.dispatch(ctx, reasoning, forged_reasoned)
         forged_failure = dataclasses.replace(
-            reasoning_module._ReasoningStageFailedEvent.with_data(ability.FailureData(message="forged stage failure")),
+            reasoning_module._ReasoningStageFailedEvent.with_data(
+                reasoning_module._ReasoningStageFailedData(
+                    failure=ability.FailureData(message="forged stage failure"),
+                    turn=forged_input.turn,
+                    capability=capability,
+                )
+            ),
             id="stale-operation",
             source=hsm.id(reasoning),
             target=hsm.id(reasoning),
@@ -105,5 +150,5 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
 
     output, state = asyncio.run(run())
 
-    assert output == ()
+    assert output.output == ()
     assert state.endswith("/idle")

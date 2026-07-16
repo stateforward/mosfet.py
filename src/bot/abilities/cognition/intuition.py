@@ -28,10 +28,9 @@ DEFAULT_INSTRUCTIONS = (
     "includes integer confidence 0–100: always set it on each selected event (whole number only, "
     "never a fraction). Use high confidence (80–100) when the match is clear, mid (40–70) when "
     "plausible but incomplete, and low (0–35) when guessing or the host likely cannot fulfill the "
-    "request—low confidence may still run world actions while escalating to deliberation. When "
-    "deliberation is needed and the user is waiting on speech, prefer multi-select: speaking.input "
-    "with a short bridge line together with reasoning.input. Leave the turn unhandled only when "
-    "no offered event should run."
+    "request—low confidence may still run world actions while Cognition escalates an unhandled "
+    "turn to deliberation. Leave the turn unhandled when no offered event should run or when the "
+    "stimulus requires slower deliberative reasoning."
 )
 
 
@@ -70,11 +69,23 @@ _AppliedEvent = hsm.Event[object](
     kind=hsm.CompletionEventKind,
     schema=pydantic.TypeAdapter(object),
 )
-_ApplyFailedEvent = hsm.Event[ability.FailureData](
+_ApplyFailedEvent = hsm.Event[types.FailureData](
     name="bot.ability.intuition.apply.failed",
     kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
+    schema=types.FailureData,
 )
+
+
+class InputData(pydantic.BaseModel):
+    """Typed Cognition request for one intuitive processing stage."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    turn: types.TurnData
+    processing_input: processing.InputData
 
 
 class OutputData(pydantic.BaseModel):
@@ -271,30 +282,17 @@ def _world_actions(
 
 def _selections_from_output(
     output: types.OutputData,
-    *,
-    current_input: processing.InputData,
 ) -> processing.Events:
-    """Build dispatch selections; reasoning.input uses CallData (host frame via metadata)."""
+    """Build ordinary actor selections owned by this intuition result."""
 
-    from . import reasoning as reasoning_ability
-
-    schemas = {event.name: event for event in current_input.schemas}
     selections: list[processing.SelectedEvent] = []
     for item in output:
-        raw: object = item.data if item.data is not None else {}
-        schema_event = schemas.get(item.event)
-        if item.event == reasoning_ability.InputEvent.name:
-            # Model-facing CallData is empty; runtime frame is stamped in dispatch metadata.
-            raw = {}
-        elif (raw is None or raw == {}) and schema_event is not None:
-            schema = getattr(schema_event, "schema", None)
-            if schema is processing.InputData:
-                raw = current_input
+        raw = item.data if item.data is not None else {}
         selections.append(
             processing.SelectedEvent(
                 event=item.event,
                 target=item.target,
-                data=raw if raw is not None else {},
+                data=raw,
                 reason=item.reason,
             )
         )
@@ -310,15 +308,20 @@ class Intuition(processing.Processing):
     selection list (no cascade). Explicit unhandled (``result is None``) always cascades.
     """
 
-    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = processing.InputData
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
-    input_event: typing.ClassVar[hsm.Event[processing.InputData]] = ability.ability_input_event(
+    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
+    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
         "bot.ability.intuition.input",
-        processing.InputData,
+        InputData,
     )
-    output_event: typing.ClassVar[hsm.Event[types.OutputData | None]] = hsm.Event[types.OutputData | None](
+    output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
         name="bot.ability.intuition.output",
-        schema=types.OPTIONAL_OUTPUT_SCHEMA_CONTRACT,
+        schema=types.CompletionData,
+    )
+    failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
+        name=ability.FailedEvent.name,
+        kind=hsm.ErrorEventKind,
+        schema=types.FailureData,
     )
     instructions: typing.ClassVar[str] = DEFAULT_INSTRUCTIONS
     _processor: processing.Processor
@@ -328,17 +331,17 @@ class Intuition(processing.Processing):
     @staticmethod
     def _has_intuition_input(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, processing.InputData)
+        return isinstance(event.data, InputData)
 
     @staticmethod
-    def _has_applied(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
+    def _has_intuition_applied(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return event.name == _AppliedEvent.name
 
     @staticmethod
     def _has_apply_failure(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, ability.FailureData)
+        return isinstance(event.data, types.FailureData)
 
     @staticmethod
     def _dispatch_terminal_output(
@@ -347,7 +350,7 @@ class Intuition(processing.Processing):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        output: types.OutputData | None,
+        output: types.CompletionData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -356,6 +359,8 @@ class Intuition(processing.Processing):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
     def _dispatch_terminal_failure(
@@ -364,7 +369,7 @@ class Intuition(processing.Processing):
         *,
         operation_id: str | None,
         metadata: dict[str, object],
-        failure: ability.FailureData,
+        failure: types.FailureData,
     ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
@@ -373,9 +378,11 @@ class Intuition(processing.Processing):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        if operation_id is not None:
+            processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
-    def _input_for_processor(instance: "Intuition", input: processing.InputData) -> processing.InputData:
+    def _intuition_input_for_processor(instance: "Intuition", input: processing.InputData) -> processing.InputData:
         """Stamp instructions and intuition EventPatch (confidence) onto the processing input."""
 
         stamped = processing.Processing._input_for_processor(instance, input)
@@ -387,11 +394,13 @@ class Intuition(processing.Processing):
         return stamped
 
     @staticmethod
-    async def _apply_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    async def _apply_intuition_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
         data = event.data
-        assert isinstance(data, processing.InputData)
-        input = Intuition._input_for_processor(instance, typing.cast(processing.InputData, data))
+        assert isinstance(data, InputData)
+        input = Intuition._intuition_input_for_processor(instance, data.processing_input)
         operation_id = event.id if event.id else uuid.uuid4().hex
+        if processing.active_operation(instance, operation_id) is None:
+            await processing.start_operation(instance, operation_id)
         metadata = dict(event.metadata)
         try:
             raw = await instance._processor.process(input)
@@ -401,7 +410,7 @@ class Intuition(processing.Processing):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ApplyFailedEvent.with_data(ability.FailureData(message=str(error))),
+                    _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=data.turn)),
                     id=operation_id,
                     metadata=metadata,
                 ),
@@ -424,7 +433,10 @@ class Intuition(processing.Processing):
         if product is None:
             terminal: types.OutputData | None = None
             to_dispatch: types.OutputData = ()
-        elif escalate:
+        elif escalate or any(
+            _is_deliberative_input_event(item.event, {schema.name: schema for schema in input.schemas})
+            for item in product
+        ):
             to_dispatch = _world_actions(product, current_input=input)
             terminal = None
         else:
@@ -433,27 +445,21 @@ class Intuition(processing.Processing):
 
         if to_dispatch and input.actors:
             try:
-                from . import reasoning as reasoning_ability
-
-                # Host frame for any multi-selected reasoning.input (CallData invoke).
-                dispatch_metadata = {
-                    **metadata,
-                    reasoning_ability.HOST_INPUT_METADATA_KEY: input,
-                }
                 await types.dispatch_selected_events(
                     ctx,
                     input,
-                    _selections_from_output(to_dispatch, current_input=input),
+                    _selections_from_output(to_dispatch),
                     operation_id=operation_id,
                     source=instance,
-                    metadata=dispatch_metadata,
+                    focus_candidates=data.turn.input.focus_candidates,
+                    metadata=metadata,
                 )
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
                     instance,
                     dataclasses.replace(
-                        _ApplyFailedEvent.with_data(ability.FailureData(message=str(error))),
+                        _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=data.turn)),
                         id=operation_id,
                         metadata=metadata,
                     ),
@@ -463,7 +469,7 @@ class Intuition(processing.Processing):
             ctx,
             instance,
             dataclasses.replace(
-                _AppliedEvent.with_data(terminal),
+                _AppliedEvent.with_data(types.CompletionData(turn=data.turn, output=terminal)),
                 id=operation_id,
                 metadata=metadata,
             ),
@@ -471,7 +477,8 @@ class Intuition(processing.Processing):
 
     @staticmethod
     def _complete_apply(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
-        output = typing.cast(types.OutputData | None, event.data)
+        output = event.data
+        assert isinstance(output, types.CompletionData)
         Intuition._dispatch_terminal_output(
             ctx,
             instance,
@@ -483,7 +490,7 @@ class Intuition(processing.Processing):
     @staticmethod
     def _fail_apply(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
         failure = event.data
-        assert isinstance(failure, ability.FailureData)
+        assert isinstance(failure, types.FailureData)
         Intuition._dispatch_terminal_failure(
             ctx,
             instance,
@@ -511,7 +518,7 @@ class Intuition(processing.Processing):
         hsm.state(
             "applying",
             hsm.defer(input_event),
-            hsm.activity(_apply_activity),
+            hsm.activity(_apply_intuition_activity),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
@@ -520,7 +527,7 @@ class Intuition(processing.Processing):
             ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
-                hsm.guard(_has_applied),
+                hsm.guard(_has_intuition_applied),
                 hsm.effect(_complete_apply),
                 hsm.target("/Intuition/idle"),
             ),
@@ -561,6 +568,7 @@ __all__ = [
     "ConfidenceTuner",
     "EventPatch",
     "InputEvent",
+    "InputData",
     "OutputEvent",
     "Intuition",
     "OutputData",

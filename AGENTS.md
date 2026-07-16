@@ -97,7 +97,13 @@
 - NEVER store transient event data on an HSM instance (`instance.set` / `hsm.attribute`, machine fields, or similar).
   That includes whole events, payloads, audio/bytes, intermediate stage results, and operation scratch tied to an
   in-flight run. ALWAYS carry transient operation results, failures, classifications, apply-operation identity, and
-  provenance through typed completion or failure events and event metadata only.
+  behavioral provenance through typed completion or failure event data.
+- ALWAYS reserve `hsm.Event.metadata` for telemetry propagation only. NEVER store or read domain data, operation or
+  actor identity, capabilities, retries, results, focus/control policy, correlation, or any value used by an HSM guard,
+  effect, activity, or progression decision in metadata. Behavioral coordination and correlation MUST use typed event
+  data plus the event's modeled `id`, `source`, and `target` fields. The architecture test maintains a frozen allowlist
+  for pre-existing violations outside the repaired scope: never add to it or increase an allowlisted use count; every
+  follow-up repair must shrink it.
 - ALWAYS follow the observability priority `METRICS > SPANS > Logs`: add high-leverage low-cardinality metrics first,
   spans when causality or timing needs trace context, and logs only when the log adds distinct operational value.
 - ALWAYS keep telemetry attributes low cardinality. Use stable names such as machine/component class, model, event

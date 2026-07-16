@@ -22,6 +22,8 @@ import typing
 import hsm
 import pytest
 
+from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_prefix_is_absent
+
 from bot.bot import Bot
 import bot.bot as bot_module
 from bot.device import Device
@@ -600,10 +602,19 @@ async def start_bot_with_devices(active_bot: Bot) -> World:
 
 
 def test_cognition_reboot_request_cycles_bot_lifecycle() -> None:
-    async def run() -> tuple[str, str, str, int]:
+    async def run() -> tuple[str, str, str, int, str]:
         active_bot = basic_agent()
         world = await start_bot_with_devices(active_bot)
         assert active_bot.state().startswith("/Bot/active/")
+        operation = bot_module._BotProcessingOperation()
+        await bot_module._BotProcessingOperation.started(
+            active_bot.context(),
+            operation,
+            owner=active_bot,
+            request_id="abandoned-turn",
+            timeout=datetime.timedelta(minutes=1),
+        )
+        assert operation.state() == "/BotProcessingTimer/waiting"
         cognition_ability = active_bot._cognition
         _ = await hsm.dispatch(
             world.context,
@@ -623,14 +634,15 @@ def test_cognition_reboot_request_cycles_bot_lifecycle() -> None:
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
-        return reboot_state, active_bot.state(), cognition_ability.state(), processing_actor_count
+        return reboot_state, active_bot.state(), cognition_ability.state(), processing_actor_count, operation.state()
 
-    reboot_state, final_state, cognition_state, processing_actor_count = asyncio.run(run())
+    reboot_state, final_state, cognition_state, processing_actor_count, operation_state = asyncio.run(run())
 
     assert reboot_state in {"/Bot/reboot_deactivating", "/Bot/reboot_cleanup"}
     assert final_state == "/Bot/active/unfocused"
     assert cognition_state.endswith("/idle")
     assert processing_actor_count == 0
+    assert operation_state == "/BotProcessingTimer"
 
 
 def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts(
@@ -1452,7 +1464,6 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
         bot.ClearFocusEvent.name,
         phone_device.AnswerCallEvent.name,
         phone_device.DeclineCallEvent.name,
-        cognition.reasoning.InputEvent.name,
     }
     assert event_data_schema(operations[bot.FocusDeviceEvent.name]) == bot.FocusDeviceEventData.model_json_schema()
     answer_operation = operations[phone_device.AnswerCallEvent.name]
@@ -2837,7 +2848,7 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_bot_processing_terminal_finishes_operation_timer_actor(fails: bool) -> None:
-    async def run() -> str:
+    async def run() -> tuple[str, dict[str, object]]:
         processor: processing.Processor = FailingProcessor() if fails else NestedPrimaryProcessor()
         cognition_ability = CapturingCognition(processor)
         active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognition_ability)
@@ -2847,11 +2858,13 @@ def test_bot_processing_terminal_finishes_operation_timer_actor(fails: bool) -> 
             bot.InputEvent.with_data_and_id(bot.InputEventData(target_device="phone", priority=3), "timer-turn"),
         )
         await wait_until(lambda: bool(cognition_ability.input_events))
-        actor = typing.cast(hsm.Instance, cognition_ability.input_events[0].metadata["bot.processing.actor"])
-        await wait_until(lambda: actor.state() == "/BotProcessingTimer/done")
-        return actor.state()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        return active_bot.state(), cognition_ability.input_events[0].metadata
 
-    assert asyncio.run(run()) == "/BotProcessingTimer/done"
+    state, metadata = asyncio.run(run())
+    assert state == "/Bot/active/focused"
+    assert "bot.processing.actor" not in metadata
+    assert "bot.processing.operation" not in metadata
 
 
 def test_bot_rejects_stale_processing_completion_for_blocked_turn() -> None:
@@ -3275,3 +3288,7 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
 
     assert calls == [probe_input()]
     assert acquired_state == "/ProbeAbilityLifecycle"
+
+
+def test_bot_processing_does_not_define_coordination_metadata_keys() -> None:
+    assert_metadata_key_prefix_is_absent(bot_module, "_PROCESSING_")

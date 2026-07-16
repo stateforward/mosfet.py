@@ -8,7 +8,7 @@ import hsm
 import pytest
 
 
-def test_focus_metadata_cannot_add_unconfigured_device_candidate() -> None:
+def test_typed_focus_candidates_cannot_add_unconfigured_device() -> None:
     async def run() -> None:
         input = processing.InputData(
             input=bot.InputEventData(target_device="phone", priority=0),
@@ -27,7 +27,7 @@ def test_focus_metadata_cannot_add_unconfigured_device_candidate() -> None:
                 selection,
                 operation_id="focus-operation",
                 source=hsm.Instance(),
-                metadata={"bot.focus_candidates": ("ghost",)},
+                focus_candidates=("ghost",),
             )
 
     asyncio.run(run())
