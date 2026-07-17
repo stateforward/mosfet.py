@@ -39,11 +39,6 @@ _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {
     "device/device.py": {"_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY": 7},
     "devices/phone/phone.py": {"_PHONE_CALL_ID_METADATA_KEY": 2},
     "habit/verify.py": {"operation:iteration": 1},
-    "protocols/attachment/group.py": {
-        "_MEMBER_INDEX_METADATA_KEY": 16,
-        "_OPERATION_METADATA_KEY": 19,
-        "_REQUEST_CONTEXT_METADATA_KEY": 7,
-    },
     "protocols/yamux/stream.py": {"_OPERATION_FAILURE_METADATA_KEY": 10},
 }
 

@@ -9,40 +9,11 @@ import typing
 import weakref
 
 import hsm
+import pydantic
+from pydantic.json_schema import SkipJsonSchema
 
 from . import events
 from .attachment import Attachment
-
-
-_OPERATION_METADATA_KEY = "attachment.group.operation"
-_MEMBER_INDEX_METADATA_KEY = "attachment.group.member.index"
-_REQUEST_CONTEXT_METADATA_KEY = "attachment.group.request.context"
-_MemberAttachCompleteEvent = hsm.Event[events.AttachCompleteData](
-    name="attachment.group.member.attach.complete",
-    kind=hsm.CompletionEventKind,
-    schema=events.AttachCompleteData,
-)
-_MemberAttachFailedEvent = hsm.Event[events.FailedData](
-    name="attachment.group.member.attach.failed",
-    kind=hsm.ErrorEventKind,
-    schema=events.FailedData,
-)
-_MemberDetachedEvent = hsm.Event[events.DetachedData](
-    name="attachment.group.member.detached",
-    kind=hsm.CompletionEventKind,
-    schema=events.DetachedData,
-)
-_MemberDetachFailedEvent = hsm.Event[events.FailedData](
-    name="attachment.group.member.detach.failed",
-    kind=hsm.ErrorEventKind,
-    schema=events.FailedData,
-)
-_FORWARDED_EVENTS = {
-    events.AttachCompleteEvent.name: _MemberAttachCompleteEvent,
-    events.AttachFailedEvent.name: _MemberAttachFailedEvent,
-    events.DetachedEvent.name: _MemberDetachedEvent,
-    events.DetachFailedEvent.name: _MemberDetachFailedEvent,
-}
 
 
 type _MemberResult = events.AttachCompleteData | events.DetachedData | events.FailedData
@@ -57,38 +28,87 @@ class _OperationKind(enum.StrEnum):
     DETACH = "detach"
 
 
-@dataclasses.dataclass(slots=True)
-class _Operation:
-    coordinator: hsm.Instance
-    actor: hsm.Instance
-    reply_to: hsm.Instance
+class _OperationData(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+    )
+
+    coordinator: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]]
+    actor: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]]
+    reply_to: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]]
     request_id: str
-    context: hsm.Context
-    expected_members: tuple[hsm.Instance, ...]
-    metadata: dict[str, object]
+    context: SkipJsonSchema[pydantic.SkipValidation[hsm.Context]]
+    expected_members: SkipJsonSchema[pydantic.SkipValidation[tuple[hsm.Instance, ...]]]
     timeout: datetime.timedelta
     kind: _OperationKind
     members: tuple[int, ...]
-    results: dict[int, _MemberResult] = dataclasses.field(default_factory=dict)
-    attempted_members: set[int] = dataclasses.field(default_factory=set)
+    results: dict[int, _MemberResult] = pydantic.Field(default_factory=dict)
+    attempted_members: set[int] = pydantic.Field(default_factory=set)
     created_members: tuple[int, ...] = ()
     failure: events.FailedData | None = None
     fallback_attached: bool = False
 
 
-def _operation(event: hsm.Event[typing.Any]) -> _Operation:
-    operation = event.metadata.get(_OPERATION_METADATA_KEY)
-    assert isinstance(operation, _Operation)
-    return operation
+class _MemberOutcomeData(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    operation: SkipJsonSchema[pydantic.SkipValidation[_OperationData]]
+    index: int = pydantic.Field(ge=0)
 
 
-def _member_index(event: hsm.Event[typing.Any]) -> int:
-    index = event.metadata.get(_MEMBER_INDEX_METADATA_KEY)
-    assert isinstance(index, int)
-    return index
+class _MemberAttachCompleteData(_MemberOutcomeData):
+    result: events.AttachCompleteData
 
 
-def _first_failure(operation: _Operation) -> events.FailedData | None:
+class _MemberAttachFailedData(_MemberOutcomeData):
+    result: events.FailedData
+
+
+class _MemberDetachedData(_MemberOutcomeData):
+    result: events.DetachedData
+
+
+class _MemberDetachFailedData(_MemberOutcomeData):
+    result: events.FailedData
+
+
+_StartAttachEvent = hsm.Event[_OperationData](name="attachment.group.attach.start", schema=_OperationData)
+_StartDetachEvent = hsm.Event[_OperationData](name="attachment.group.detach.start", schema=_OperationData)
+_MemberAttachCompleteEvent = hsm.Event[_MemberAttachCompleteData](
+    name="attachment.group.member.attach.complete",
+    kind=hsm.CompletionEventKind,
+    schema=_MemberAttachCompleteData,
+)
+_MemberAttachFailedEvent = hsm.Event[_MemberAttachFailedData](
+    name="attachment.group.member.attach.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_MemberAttachFailedData,
+)
+_MemberDetachedEvent = hsm.Event[_MemberDetachedData](
+    name="attachment.group.member.detached",
+    kind=hsm.CompletionEventKind,
+    schema=_MemberDetachedData,
+)
+_MemberDetachFailedEvent = hsm.Event[_MemberDetachFailedData](
+    name="attachment.group.member.detach.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_MemberDetachFailedData,
+)
+def _operation(event: hsm.Event[typing.Any]) -> _OperationData:
+    data = event.data
+    if isinstance(
+        data,
+        (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
+    ):
+        return data.operation
+    assert isinstance(data, _OperationData)
+    return data
+
+
+def _first_failure(operation: _OperationData) -> events.FailedData | None:
     for index in sorted(operation.results):
         result = operation.results[index]
         if isinstance(result, events.FailedData):
@@ -100,81 +120,122 @@ class _Reply(hsm.Instance):
     """Accept one correlated member outcome for one aggregate operation."""
 
     @staticmethod
-    def _forward(ctx: hsm.Context, instance: "_Reply", event: hsm.Event[typing.Any]) -> None:
+    def _forward(
+        ctx: hsm.Context,
+        instance: "_Reply",
+        event: hsm.Event[typing.Any],
+        operation: _OperationData,
+        index: int,
+        metadata: dict[str, object],
+    ) -> None:
         del instance
-        operation = _operation(event)
-        forwarded = _FORWARDED_EVENTS[event.name]
+        result = event.data
+        if event.name == events.AttachCompleteEvent.name and isinstance(result, events.AttachCompleteData):
+            forwarded = _MemberAttachCompleteEvent.with_data(
+                _MemberAttachCompleteData(operation=operation, index=index, result=result)
+            )
+        elif event.name == events.AttachFailedEvent.name and isinstance(result, events.FailedData):
+            forwarded = _MemberAttachFailedEvent.with_data(
+                _MemberAttachFailedData(operation=operation, index=index, result=result)
+            )
+        elif event.name == events.DetachedEvent.name and isinstance(result, events.DetachedData):
+            forwarded = _MemberDetachedEvent.with_data(
+                _MemberDetachedData(operation=operation, index=index, result=result)
+            )
+        else:
+            assert event.name == events.DetachFailedEvent.name and isinstance(result, events.FailedData)
+            forwarded = _MemberDetachFailedEvent.with_data(
+                _MemberDetachFailedData(operation=operation, index=index, result=result)
+            )
         _ = hsm.dispatch(
             ctx,
             operation.coordinator,
             dataclasses.replace(
-                forwarded.with_data(event.data),
-                id=event.id,
+                forwarded,
+                id=operation.request_id,
                 source=event.source,
                 target=hsm.id(operation.coordinator),
-                metadata=dict(event.metadata),
+                metadata=dict(metadata),
             ),
         )
 
     @staticmethod
-    def _timeout(ctx: hsm.Context, instance: "_Reply", event: hsm.Event[typing.Any]) -> None:
-        del instance
-        operation = _operation(event)
-        index = _member_index(event)
-        terminal = _MemberAttachFailedEvent if operation.kind is _OperationKind.ATTACH else _MemberDetachFailedEvent
+    def _timeout(
+        ctx: hsm.Context,
+        instance: "_Reply",
+        event: hsm.Event[typing.Any],
+        operation: _OperationData,
+        index: int,
+        metadata: dict[str, object],
+    ) -> None:
+        del instance, event
         operation_name = "attach" if operation.kind is _OperationKind.ATTACH else "detach"
+        failure = events.FailedData(
+            actor=operation.actor,
+            kind=events.FailureKind.TIMEOUT,
+            message=(
+                f"Attachment Group member {operation_name} timed out after "
+                f"{operation.timeout.total_seconds():g} seconds."
+            ),
+        )
+        if operation.kind is _OperationKind.ATTACH:
+            terminal = _MemberAttachFailedEvent.with_data(
+                _MemberAttachFailedData(operation=operation, index=index, result=failure)
+            )
+        else:
+            terminal = _MemberDetachFailedEvent.with_data(
+                _MemberDetachFailedData(operation=operation, index=index, result=failure)
+            )
         _ = hsm.dispatch(
             ctx,
             operation.coordinator,
             dataclasses.replace(
-                terminal.with_data(
-                    events.FailedData(
-                        actor=operation.actor,
-                        kind=events.FailureKind.TIMEOUT,
-                        message=(
-                            f"Attachment Group member {operation_name} timed out after "
-                            f"{operation.timeout.total_seconds():g} seconds."
-                        ),
-                    )
-                ),
+                terminal,
                 id=operation.request_id,
                 source=hsm.id(operation.expected_members[index]),
                 target=hsm.id(operation.coordinator),
-                metadata={
-                    **operation.metadata,
-                    _OPERATION_METADATA_KEY: operation,
-                    _MEMBER_INDEX_METADATA_KEY: index,
-                },
+                metadata=dict(metadata),
             ),
         )
 
     @classmethod
-    def _define_model(cls, operation: _Operation, index: int, *, with_timeout: bool) -> hsm.Model:
+    def _define_model(
+        cls,
+        operation: _OperationData,
+        index: int,
+        metadata: dict[str, object],
+        *,
+        with_timeout: bool,
+    ) -> hsm.Model:
         def is_expected(ctx: hsm.Context, instance: _Reply, event: hsm.Event[typing.Any]) -> bool:
             del ctx
             data = event.data
             return (
-                event.metadata.get(_OPERATION_METADATA_KEY) is operation
-                and event.metadata.get(_MEMBER_INDEX_METADATA_KEY) == index
-                and event.id == operation.request_id
+                event.id == hsm.id(instance)
                 and event.source == hsm.id(operation.expected_members[index])
                 and event.target == hsm.id(instance)
                 and isinstance(data, (events.AttachCompleteData, events.DetachedData, events.FailedData))
                 and data.actor is operation.actor
             )
 
+        def forward(ctx: hsm.Context, instance: _Reply, event: hsm.Event[typing.Any]) -> None:
+            cls._forward(ctx, instance, event, operation, index, metadata)
+
+        def timeout(ctx: hsm.Context, instance: _Reply, event: hsm.Event[typing.Any]) -> None:
+            cls._timeout(ctx, instance, event, operation, index, metadata)
+
         if operation.kind is _OperationKind.ATTACH:
             waiting: list[hsm.Element] = [
                 hsm.transition(
                     hsm.on(events.AttachCompleteEvent),
                     hsm.guard(is_expected),
-                    hsm.effect(cls._forward),
+                    hsm.effect(forward),
                     hsm.target("/AttachmentGroupReply/done"),
                 ),
                 hsm.transition(
                     hsm.on(events.AttachFailedEvent),
                     hsm.guard(is_expected),
-                    hsm.effect(cls._forward),
+                    hsm.effect(forward),
                     hsm.target("/AttachmentGroupReply/done"),
                 ),
             ]
@@ -183,13 +244,13 @@ class _Reply(hsm.Instance):
                 hsm.transition(
                     hsm.on(events.DetachedEvent),
                     hsm.guard(is_expected),
-                    hsm.effect(cls._forward),
+                    hsm.effect(forward),
                     hsm.target("/AttachmentGroupReply/done"),
                 ),
                 hsm.transition(
                     hsm.on(events.DetachFailedEvent),
                     hsm.guard(is_expected),
-                    hsm.effect(cls._forward),
+                    hsm.effect(forward),
                     hsm.target("/AttachmentGroupReply/done"),
                 ),
             ]
@@ -200,19 +261,13 @@ class _Reply(hsm.Instance):
                 instance: _Reply,
                 event: hsm.Event[typing.Any],
             ) -> datetime.timedelta:
-                del ctx, instance
-                event.metadata.update(
-                    {
-                        _OPERATION_METADATA_KEY: operation,
-                        _MEMBER_INDEX_METADATA_KEY: index,
-                    }
-                )
+                del ctx, instance, event
                 return operation.timeout
 
             waiting.append(
                 hsm.transition(
                     hsm.after(timeout_delay),
-                    hsm.effect(cls._timeout),
+                    hsm.effect(timeout),
                     hsm.target("/AttachmentGroupReply/done"),
                 )
             )
@@ -227,8 +282,9 @@ class _Reply(hsm.Instance):
     async def started(
         cls,
         ctx: hsm.Context,
-        operation: _Operation,
+        operation: _OperationData,
         index: int,
+        metadata: dict[str, object],
         *,
         with_timeout: bool,
     ) -> "_Reply":
@@ -238,7 +294,11 @@ class _Reply(hsm.Instance):
             values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
         )
         try:
-            return await hsm.started(reply_ctx, reply, cls._define_model(operation, index, with_timeout=with_timeout))
+            return await hsm.started(
+                reply_ctx,
+                reply,
+                cls._define_model(operation, index, metadata, with_timeout=with_timeout),
+            )
         except asyncio.CancelledError:
             await hsm.stop(reply, hsm.Context())
             raise
@@ -293,14 +353,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     lifetime,
                     dataclasses.replace(
                         events.AttachFailedEvent.with_data(failure),
-                        id=operation.request_id,
+                        id=hsm.id(reply),
                         source=hsm.id(member),
                         target=hsm.id(reply),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
 
@@ -309,7 +365,13 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             assert isinstance(member, Attachment)
             reply: _Reply | None = None
             try:
-                reply = await _Reply.started(operation.context, operation, index, with_timeout=True)
+                reply = await _Reply.started(
+                    operation.context,
+                    operation,
+                    index,
+                    dict(event.metadata),
+                    with_timeout=True,
+                )
                 replies[index] = reply
                 await member.attach(
                     operation.context,
@@ -317,14 +379,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         events.AttachEvent.with_data(
                             events.AttachData(actor=operation.actor, reply_to=reply, timeout=operation.timeout)
                         ),
-                        id=operation.request_id,
+                        id=hsm.id(reply),
                         source=hsm.id(instance),
                         target=hsm.id(member),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
             except asyncio.CancelledError:
@@ -334,20 +392,20 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         instance.context(),
                         dataclasses.replace(
                             _MemberAttachFailedEvent.with_data(
-                                events.FailedData(
-                                    actor=operation.actor,
-                                    kind=events.FailureKind.DISPATCH,
-                                    message=f"{type(instance).__name__} member reply start was canceled.",
+                                _MemberAttachFailedData(
+                                    operation=operation,
+                                    index=index,
+                                    result=events.FailedData(
+                                        actor=operation.actor,
+                                        kind=events.FailureKind.DISPATCH,
+                                        message=f"{type(instance).__name__} member reply start was canceled.",
+                                    ),
                                 )
                             ),
                             id=operation.request_id,
                             source=hsm.id(member),
                             target=hsm.id(instance),
-                            metadata={
-                                **operation.metadata,
-                                _OPERATION_METADATA_KEY: operation,
-                                _MEMBER_INDEX_METADATA_KEY: index,
-                            },
+                            metadata=dict(event.metadata),
                         ),
                     )
                     return
@@ -364,14 +422,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         ctx,
                         dataclasses.replace(
                             events.AttachFailedEvent.with_data(failure),
-                            id=operation.request_id,
+                            id=hsm.id(reply),
                             source=hsm.id(member),
                             target=hsm.id(reply),
-                            metadata={
-                                **operation.metadata,
-                                _OPERATION_METADATA_KEY: operation,
-                                _MEMBER_INDEX_METADATA_KEY: index,
-                            },
+                            metadata=dict(event.metadata),
                         ),
                     )
                     return
@@ -379,15 +433,13 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     instance,
                     ctx,
                     dataclasses.replace(
-                        _MemberAttachFailedEvent.with_data(failure),
+                        _MemberAttachFailedEvent.with_data(
+                            _MemberAttachFailedData(operation=operation, index=index, result=failure)
+                        ),
                         id=operation.request_id,
                         source=hsm.id(member),
                         target=hsm.id(instance),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
 
@@ -439,14 +491,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     lifetime,
                     dataclasses.replace(
                         events.DetachFailedEvent.with_data(failure),
-                        id=operation.request_id,
+                        id=hsm.id(reply),
                         source=hsm.id(member),
                         target=hsm.id(reply),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
 
@@ -455,7 +503,13 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             assert isinstance(member, Attachment)
             reply: _Reply | None = None
             try:
-                reply = await _Reply.started(operation.context, operation, index, with_timeout=True)
+                reply = await _Reply.started(
+                    operation.context,
+                    operation,
+                    index,
+                    dict(event.metadata),
+                    with_timeout=True,
+                )
                 replies[index] = reply
                 operation.attempted_members.add(index)
                 await member.detach(
@@ -468,14 +522,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                                 timeout=operation.timeout,
                             )
                         ),
-                        id=operation.request_id,
+                        id=hsm.id(reply),
                         source=hsm.id(instance),
                         target=hsm.id(member),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
             except asyncio.CancelledError:
@@ -485,20 +535,20 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         instance.context(),
                         dataclasses.replace(
                             _MemberDetachFailedEvent.with_data(
-                                events.FailedData(
-                                    actor=operation.actor,
-                                    kind=events.FailureKind.DISPATCH,
-                                    message=f"{type(instance).__name__} member reply start was canceled.",
+                                _MemberDetachFailedData(
+                                    operation=operation,
+                                    index=index,
+                                    result=events.FailedData(
+                                        actor=operation.actor,
+                                        kind=events.FailureKind.DISPATCH,
+                                        message=f"{type(instance).__name__} member reply start was canceled.",
+                                    ),
                                 )
                             ),
                             id=operation.request_id,
                             source=hsm.id(member),
                             target=hsm.id(instance),
-                            metadata={
-                                **operation.metadata,
-                                _OPERATION_METADATA_KEY: operation,
-                                _MEMBER_INDEX_METADATA_KEY: index,
-                            },
+                            metadata=dict(event.metadata),
                         ),
                     )
                     return
@@ -515,14 +565,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         ctx,
                         dataclasses.replace(
                             events.DetachFailedEvent.with_data(failure),
-                            id=operation.request_id,
+                            id=hsm.id(reply),
                             source=hsm.id(member),
                             target=hsm.id(reply),
-                            metadata={
-                                **operation.metadata,
-                                _OPERATION_METADATA_KEY: operation,
-                                _MEMBER_INDEX_METADATA_KEY: index,
-                            },
+                            metadata=dict(event.metadata),
                         ),
                     )
                     return
@@ -530,15 +576,13 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     instance,
                     ctx,
                     dataclasses.replace(
-                        _MemberDetachFailedEvent.with_data(failure),
+                        _MemberDetachFailedEvent.with_data(
+                            _MemberDetachFailedData(operation=operation, index=index, result=failure)
+                        ),
                         id=operation.request_id,
                         source=hsm.id(member),
                         target=hsm.id(instance),
-                        metadata={
-                            **operation.metadata,
-                            _OPERATION_METADATA_KEY: operation,
-                            _MEMBER_INDEX_METADATA_KEY: index,
-                        },
+                        metadata=dict(event.metadata),
                     ),
                 )
 
@@ -579,29 +623,35 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
     @staticmethod
     def _is_correlated(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = event.metadata.get(_OPERATION_METADATA_KEY)
-        index = event.metadata.get(_MEMBER_INDEX_METADATA_KEY)
         data = event.data
+        if not isinstance(
+            data,
+            (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
+        ):
+            return False
+        operation = data.operation
+        index = data.index
+        result = data.result
         return (
-            isinstance(operation, _Operation)
-            and isinstance(index, int)
-            and index in operation.members
+            index in operation.members
             and index not in operation.results
             and 0 <= index < len(instance._attachments)
             and event.id == operation.request_id
             and event.source == hsm.id(operation.expected_members[index])
             and event.target == hsm.id(instance)
-            and isinstance(data, (events.AttachCompleteData, events.DetachedData, events.FailedData))
-            and data.actor is operation.actor
+            and hsm.id(result.actor) == hsm.id(operation.actor)
         )
 
     @staticmethod
     def _is_last_result(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
-        operation = event.metadata.get(_OPERATION_METADATA_KEY)
+        data = event.data
         return (
             Group._is_correlated(ctx, instance, event)
-            and isinstance(operation, _Operation)
-            and len(operation.results) + 1 == len(operation.members)
+            and isinstance(
+                data,
+                (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
+            )
+            and len(data.operation.results) + 1 == len(data.operation.members)
         )
 
     @staticmethod
@@ -621,55 +671,19 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         return _operation(event).fallback_attached
 
     @staticmethod
-    def _begin_attach(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, events.AttachData)
-        request_context = event.metadata.pop(_REQUEST_CONTEXT_METADATA_KEY)
-        assert isinstance(request_context, hsm.Context)
-        reply_to = data.actor if data.reply_to is None else data.reply_to
-        event.metadata[_OPERATION_METADATA_KEY] = _Operation(
-            coordinator=instance,
-            actor=data.actor,
-            reply_to=reply_to,
-            request_id=event.id,
-            context=request_context,
-            expected_members=tuple(instance._attachments),
-            metadata=dict(event.metadata),
-            timeout=data.timeout,
-            kind=_OperationKind.ATTACH,
-            members=tuple(range(len(instance._attachments))),
-            fallback_attached=instance.state() == "/AttachmentGroup/attached",
-        )
-
-    @staticmethod
-    def _begin_detach(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, events.DetachData)
-        request_context = event.metadata.pop(_REQUEST_CONTEXT_METADATA_KEY)
-        assert isinstance(request_context, hsm.Context)
-        reply_to = data.actor if data.reply_to is None else data.reply_to
-        event.metadata[_OPERATION_METADATA_KEY] = _Operation(
-            coordinator=instance,
-            actor=data.actor,
-            reply_to=reply_to,
-            request_id=event.id,
-            context=request_context,
-            expected_members=tuple(instance._attachments),
-            metadata=dict(event.metadata),
-            timeout=data.timeout,
-            kind=_OperationKind.DETACH,
-            members=tuple(range(len(instance._attachments))),
-            fallback_attached=True,
-        )
+    def _begin_operation(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        _operation(event).request_id = event.id
 
     @staticmethod
     def _record_result(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
         del ctx, instance
         data = event.data
-        assert isinstance(data, (events.AttachCompleteData, events.DetachedData, events.FailedData))
-        _operation(event).results[_member_index(event)] = data
+        assert isinstance(
+            data,
+            (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
+        )
+        data.operation.results[data.index] = data.result
 
     @staticmethod
     def _finalize_attach(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
@@ -756,7 +770,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(operation.reply_to),
-                metadata=dict(operation.metadata),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -766,18 +780,18 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         instance: "Group",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, events.AttachData)
-        reply_to = data.actor if data.reply_to is None else data.reply_to
+        operation = _operation(event)
         _ = hsm.dispatch(
             ctx,
-            reply_to,
+            operation.reply_to,
             dataclasses.replace(
-                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=data.actor, created=True)),
-                id=event.id,
+                events.AttachCompleteEvent.with_data(
+                    events.AttachCompleteData(actor=operation.actor, created=True)
+                ),
+                id=operation.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(reply_to),
-                metadata={key: value for key, value in event.metadata.items() if key != _REQUEST_CONTEXT_METADATA_KEY},
+                target=hsm.id(operation.reply_to),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -793,7 +807,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(operation.reply_to),
-                metadata=dict(operation.metadata),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -811,24 +825,22 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(operation.reply_to),
-                metadata=dict(operation.metadata),
+                metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _dispatch_empty_detached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, events.DetachData)
-        reply_to = data.actor if data.reply_to is None else data.reply_to
+        operation = _operation(event)
         _ = hsm.dispatch(
             ctx,
-            reply_to,
+            operation.reply_to,
             dataclasses.replace(
-                events.DetachedEvent.with_data(events.DetachedData(actor=data.actor, removed=True)),
-                id=event.id,
+                events.DetachedEvent.with_data(events.DetachedData(actor=operation.actor, removed=True)),
+                id=operation.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(reply_to),
-                metadata={key: value for key, value in event.metadata.items() if key != _REQUEST_CONTEXT_METADATA_KEY},
+                target=hsm.id(operation.reply_to),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -844,7 +856,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(operation.reply_to),
-                metadata=dict(operation.metadata),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -854,17 +866,20 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         hsm.state(
             "detached",
             hsm.transition(
-                hsm.on(events.AttachEvent),
+                hsm.on(_StartAttachEvent),
                 hsm.guard(_has_members),
-                hsm.effect(_begin_attach),
+                hsm.effect(_begin_operation),
                 hsm.target("/AttachmentGroup/attaching"),
             ),
             hsm.transition(
-                hsm.on(events.AttachEvent),
-                hsm.effect(_dispatch_empty_attach_complete),
+                hsm.on(_StartAttachEvent),
+                hsm.effect(_begin_operation, _dispatch_empty_attach_complete),
                 hsm.target("/AttachmentGroup/attached"),
             ),
-            hsm.transition(hsm.on(events.DetachEvent), hsm.effect(_dispatch_empty_detached)),
+            hsm.transition(
+                hsm.on(_StartDetachEvent),
+                hsm.effect(_begin_operation, _dispatch_empty_detached),
+            ),
         ),
         hsm.state(
             "attaching",
@@ -927,27 +942,30 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         hsm.state(
             "attached",
             hsm.transition(
-                hsm.on(events.AttachEvent),
+                hsm.on(_StartAttachEvent),
                 hsm.guard(_has_members),
-                hsm.effect(_begin_attach),
+                hsm.effect(_begin_operation),
                 hsm.target("/AttachmentGroup/attaching"),
             ),
-            hsm.transition(hsm.on(events.AttachEvent), hsm.effect(_dispatch_empty_attach_complete)),
             hsm.transition(
-                hsm.on(events.DetachEvent),
+                hsm.on(_StartAttachEvent),
+                hsm.effect(_begin_operation, _dispatch_empty_attach_complete),
+            ),
+            hsm.transition(
+                hsm.on(_StartDetachEvent),
                 hsm.guard(_has_members),
-                hsm.effect(_begin_detach),
+                hsm.effect(_begin_operation),
                 hsm.target("/AttachmentGroup/detaching"),
             ),
             hsm.transition(
-                hsm.on(events.DetachEvent),
-                hsm.effect(_dispatch_empty_detached),
+                hsm.on(_StartDetachEvent),
+                hsm.effect(_begin_operation, _dispatch_empty_detached),
                 hsm.target("/AttachmentGroup/detached"),
             ),
         ),
         hsm.state(
             "detaching",
-            hsm.defer(events.AttachEvent),
+            hsm.defer(_StartAttachEvent),
             hsm.activity(_detach_members_activity.__get__(None, object)),
             hsm.transition(
                 hsm.on(_MemberDetachedEvent, _MemberDetachFailedEvent),
@@ -980,7 +998,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ),
         hsm.state(
             "rolling_forward",
-            hsm.defer(events.AttachEvent),
+            hsm.defer(_StartAttachEvent),
             hsm.activity(_attach_members_activity.__get__(None, object)),
             hsm.transition(
                 hsm.on(_MemberAttachCompleteEvent, _MemberAttachFailedEvent),
@@ -1002,6 +1020,9 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ctx: hsm.Context,
         event: hsm.Event[events.AttachData],
     ) -> collections.abc.Awaitable[None]:
+        data = event.data
+        assert isinstance(data, events.AttachData)
+
         async def start_members_and_dispatch() -> None:
             for member in self._attachments:
                 model = typing.cast(_Modeled, typing.cast(object, member)).model
@@ -1014,8 +1035,6 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 try:
                     _ = await hsm.started(ctx, member, model)
                 except Exception as error:
-                    data = event.data
-                    assert isinstance(data, events.AttachData)
                     reply_to = data.actor if data.reply_to is None else data.reply_to
                     await hsm.dispatch(
                         ctx,
@@ -1039,8 +1058,24 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 self,
                 ctx,
                 dataclasses.replace(
-                    event,
-                    metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
+                    _StartAttachEvent.with_data(
+                        _OperationData(
+                            coordinator=self,
+                            actor=data.actor,
+                            reply_to=data.actor if data.reply_to is None else data.reply_to,
+                            request_id=event.id,
+                            context=ctx,
+                            expected_members=tuple(self._attachments),
+                            timeout=data.timeout,
+                            kind=_OperationKind.ATTACH,
+                            members=tuple(range(len(self._attachments))),
+                            fallback_attached=self.state() == "/AttachmentGroup/attached",
+                        )
+                    ),
+                    id=event.id,
+                    source=event.source,
+                    target=hsm.id(self),
+                    metadata=dict(event.metadata),
                 ),
             )
 
@@ -1058,12 +1093,29 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ctx: hsm.Context,
         event: hsm.Event[events.DetachData],
     ) -> collections.abc.Awaitable[None]:
+        data = event.data
+        assert isinstance(data, events.DetachData)
+        operation = _OperationData(
+            coordinator=self,
+            actor=data.actor,
+            reply_to=data.actor if data.reply_to is None else data.reply_to,
+            request_id=event.id,
+            context=ctx,
+            expected_members=tuple(self._attachments),
+            timeout=data.timeout,
+            kind=_OperationKind.DETACH,
+            members=tuple(range(len(self._attachments))),
+            fallback_attached=True,
+        )
         return hsm.Instance.dispatch(
             self,
             ctx,
             dataclasses.replace(
-                event,
-                metadata={**event.metadata, _REQUEST_CONTEXT_METADATA_KEY: ctx},
+                _StartDetachEvent.with_data(operation),
+                id=event.id,
+                source=event.source,
+                target=hsm.id(self),
+                metadata=dict(event.metadata),
             ),
         )
 

@@ -1566,6 +1566,8 @@ def test_group_ignores_stale_public_terminal_event_during_new_operation() -> Non
         assert isinstance(first_request.data, attachment.AttachData)
         second_request = member.attach_calls[1]
         assert isinstance(second_request.data, attachment.AttachData)
+        assert first_request.id != second_request.id
+        assert first_request.metadata == second_request.metadata == {}
         active_reply = second_request.data.reply_to
         assert isinstance(active_reply, hsm.Instance)
         await hsm.Instance.dispatch(
@@ -1611,6 +1613,66 @@ def test_group_times_out_when_member_does_not_reply() -> None:
     assert [event.name for event in recorded] == [attachment.AttachFailedEvent.name]
     assert isinstance(recorded[0].data, attachment.FailedData)
     assert recorded[0].data.kind is attachment.FailureKind.TIMEOUT
+
+
+def test_group_member_metadata_cannot_control_completion_correlation() -> None:
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]]]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        release = asyncio.Event()
+        member = TestAttachment(attach_release=release)
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(
+            ctx,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(
+                    attachment.AttachData(actor=actor, timeout=datetime.timedelta(milliseconds=20))
+                ),
+                metadata={"traceparent": "test-trace"},
+            ),
+        )
+        _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
+        request = member.attach_calls[0]
+        request.metadata.clear()
+        request.metadata["attachment.group.operation"] = "poison"
+        request.metadata["attachment.group.member.index"] = -1
+        _ = release.set()
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return group.state(), actor.events
+
+    state, recorded = asyncio.run(run())
+
+    assert state == "/AttachmentGroup/attached"
+    assert [event.name for event in recorded] == [attachment.AttachCompleteEvent.name]
+    assert recorded[0].metadata == {"traceparent": "test-trace"}
+
+
+def test_group_internal_coordination_does_not_leak_into_event_metadata() -> None:
+    async def run() -> tuple[dict[str, object], dict[str, object]]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        member = TestAttachment()
+        group = attachment.Group(member)
+        _ = await hsm.started(ctx, actor, actor.model)
+        _ = await hsm.started(ctx, member, member.model)
+        _ = await hsm.started(ctx, group, group.model)
+        await group.attach(
+            ctx,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)),
+                metadata={"traceparent": "test-trace"},
+            ),
+        )
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        return member.attach_calls[0].metadata, actor.events[0].metadata
+
+    member_metadata, terminal_metadata = asyncio.run(run())
+
+    assert member_metadata == {"traceparent": "test-trace"}
+    assert terminal_metadata == {"traceparent": "test-trace"}
 
 
 def test_group_rejects_duplicate_members() -> None:
