@@ -2496,16 +2496,28 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=3),
+                "stale-focus-seed",
+            ),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=1)),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="browser", priority=1),
+                "stale-focus-live",
+            ),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/processing")
 
-        stale_focus = bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="screen", reason="stale"))
+        # Correct cognition source/target, wrong turn id — must not move focus.
+        stale_focus = dataclasses.replace(
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="screen", reason="stale")),
+            id="not-stale-focus-live",
+            source=hsm.id(cognitive),
+            target=hsm.id(active_bot),
+        )
         await active_bot.dispatch(active_bot.context(), stale_focus)
         assert active_bot.state() == "/Bot/active/processing"
 
@@ -2977,24 +2989,151 @@ def test_bot_rejects_stale_processing_completion_for_blocked_turn() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=3),
+                "live-turn",
+            ),
         )
         await wait_until(lambda: ability.calls == [3] and active_bot.state() == "/Bot/active/processing")
 
+        # Correct endpoints, wrong turn id: topology alone must not complete the live turn.
         stale = dataclasses.replace(
             bot.ProcessingCompletedEvent.with_data(
                 bot.ProcessingCompletedEventData(output=no_output("stale"), focus_candidates=("phone",))
             ),
             id="stale-operation",
-            metadata={"bot.processing.operation": "stale-operation"},
+            source=hsm.id(active_bot._cognition),
+            target=hsm.id(active_bot),
         )
         await active_bot.dispatch(active_bot.context(), stale)
         state_after_stale = active_bot.state()
         release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
         return state_after_stale
 
     assert asyncio.run(run()) == "/Bot/active/processing"
+
+
+def test_bot_rejects_stale_cognition_output_with_correct_endpoints() -> None:
+    async def run() -> tuple[str, list[cognition.types.OutputData]]:
+        release = asyncio.Event()
+        processor = BlockingSequenceProcessor(
+            release=release,
+            block_on_call=1,
+            outputs=(no_output("live"),),
+        )
+        cognitive = CapturingCognition(processor)
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=3),
+                "live-output-turn",
+            ),
+        )
+        await wait_until(lambda: bool(cognitive.input_events) and active_bot.state() == "/Bot/active/processing")
+        stale_output = dataclasses.replace(
+            cognition.OutputEvent.with_data(no_output("stale-output")),
+            id="not-the-live-turn",
+            source=hsm.id(cognitive),
+            target=hsm.id(active_bot),
+        )
+        await active_bot.dispatch(active_bot.context(), stale_output)
+        await asyncio.sleep(0)
+        assert active_bot.state() == "/Bot/active/processing"
+        assert active_bot.actions == []
+        release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        return active_bot.state(), active_bot.actions
+
+    state, actions = asyncio.run(run())
+    assert state == "/Bot/active/focused"
+    assert actions == [no_output("live")]
+
+
+def test_bot_rejects_focus_for_wrong_turn_id_during_processing() -> None:
+    async def run() -> tuple[str, str | None]:
+        release = asyncio.Event()
+        processor = BlockingSequenceProcessor(
+            release=release,
+            block_on_call=2,
+            outputs=(no_output("seed"), no_output("live"), no_output("observe")),
+        )
+        cognitive = InputRecordingCognition(
+            processing.Processing(processor=processor),
+        )
+        active_bot = AbilityAgent(
+            devices=configured_devices("phone", "browser"),
+            cognition=cognitive,
+        )
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=1),
+                "focus-seed",
+            ),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and len(cognitive.inputs) == 1)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=2),
+                "focus-live-turn",
+            ),
+        )
+        await wait_until(lambda: len(cognitive.inputs) == 2 and active_bot.state() == "/Bot/active/processing")
+        forged = dataclasses.replace(
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser", reason="wrong turn")),
+            id="not-focus-live-turn",
+            source=hsm.id(cognitive),
+            target=hsm.id(active_bot),
+        )
+        await active_bot.dispatch(active_bot.context(), forged)
+        await asyncio.sleep(0)
+        release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(cognitive.inputs) == 3 and active_bot.state() == "/Bot/active/focused")
+        return active_bot.state(), cognitive.inputs[2].focus
+
+    state, focus = asyncio.run(run())
+    assert state == "/Bot/active/focused"
+    assert focus == "phone"
+
+
+def test_bot_rejects_cancelled_with_wrong_token() -> None:
+    async def run() -> str:
+        processor = CancellableHangingProcessor()
+        cognitive = CapturingCognition(processor)
+        active_bot = TimeoutAbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data_and_id(
+                bot.InputEventData(target_device="phone", priority=3),
+                "cancel-token-turn",
+            ),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/active/cancelling_processing")
+        forged = dataclasses.replace(
+            cognition.CancelledEvent.with_data(
+                cognition.CancelledData(operation_id="cancel-token-turn", token="not-the-timer-token")
+            ),
+            id="cancel-token-turn",
+            source=hsm.id(cognitive),
+            target=hsm.id(active_bot),
+        )
+        await active_bot.dispatch(active_bot.context(), forged)
+        await asyncio.sleep(0)
+        return active_bot.state()
+
+    assert asyncio.run(run()) == "/Bot/active/cancelling_processing"
 
 
 @pytest.mark.parametrize("wrong_endpoint", ["source", "target"])
@@ -3384,7 +3523,12 @@ def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPa
 
         monkeypatch.setattr(hsm, "stop", stop)
         _ = await active_bot.detach(world)
-        await asyncio.sleep(0.05)
+        # FastDeactivationTimeoutAgent uses a 10ms HSM after; wait_until only yields, so give
+        # the timer wall-clock time to fire deactivating -> cleanup -> degraded.
+        for _ in range(50):
+            if active_bot.state() == "/Bot/degraded":
+                break
+            await asyncio.sleep(0.005)
         return active_bot.state() or ""
 
     assert asyncio.run(run()) == "/Bot/degraded"

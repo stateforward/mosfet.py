@@ -146,16 +146,42 @@ _BotProcessingCancelTimedOutEvent = hsm.Event[_BotProcessingOperationData](
 )
 
 
+def _bot_cancel_operation_id(request_id: str, token: str, owner: hsm.Instance) -> str:
+    """Live cancel capability identity for one Bot-issued processing cancellation."""
+
+    return processing.cancellation_operation_id(request_id, request_id, token, hsm.id(owner))
+
+
+def _event_belongs_to_turn(event: hsm.Event[typing.Any], request_id: str) -> bool:
+    """Return whether an event is the turn root or a child id under that turn."""
+
+    return bool(event.id) and (event.id == request_id or event.id.startswith(f"{request_id}:"))
+
+
+def _active_bot_turn_id(instance: "Bot", event: hsm.Event[typing.Any]) -> str | None:
+    """Return the live Bot turn id this event belongs to, if any.
+
+    Turn identity is a ``processing.Operation`` owned by Bot (same live-capability pattern as
+    Cognition). Timers stay activity-scoped and are never consulted for correlation.
+    """
+
+    if not event.id:
+        return None
+    if processing.active_operation(instance, event.id) is not None:
+        return event.id
+    parent, separator, _suffix = event.id.partition(":")
+    if separator and parent and processing.active_operation(instance, parent) is not None:
+        return parent
+    return None
+
+
 class _BotProcessingOperation(hsm.Instance):
     """Single-shot timer actor scoped to one Bot processing turn.
 
-    Identity is closure-bound in the model, never recovered from shared registries. The
-    owning state's activity starts the actor and stops it on state exit (hsm 1.1.4 does not
-    stop machines on context cancel), and the actor withholds its timeout once the owning
-    activity is canceled. A timeout event already dispatched before that stop lands is
-    correlated only by its self-certifying payload; a later turn can still dequeue it first
-    in a narrow RTC-ordering window. Closing that window would need per-turn correlation
-    storage the contract forbids (HSM-COMPLETION-001), so it is an accepted residual.
+    Identity is closure-bound in the model. The owning state's activity starts the actor and
+    stops it on state exit (hsm 1.1.4 does not stop machines on context cancel), and the actor
+    withholds its timeout once the owning activity is canceled. Turn correlation is owned by a
+    separate ``processing.Operation`` on Bot, not by this timer or a shared Instances rewrite.
     """
 
     @classmethod
@@ -458,6 +484,7 @@ class Bot(hsm.Instance, abc.ABC):
                 if ability is instance._cognition:
                     continue
                 await hsm.stop(ability, lifetime)
+        processing.finish_operations(ctx, instance)
         terminal = _BotCleanupData(request_id=event.id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
@@ -571,8 +598,11 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             isinstance(event.data, events.FocusDeviceEventData)
+            and turn_id is not None
+            and _event_belongs_to_turn(event, turn_id)
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
             and event.data.device in instance._devices
@@ -585,8 +615,11 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             isinstance(event.data, events.ClearFocusEventData)
+            and turn_id is not None
+            and _event_belongs_to_turn(event, turn_id)
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
             and instance._focused_device is not None
@@ -595,8 +628,11 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _processing_completed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             isinstance(event.data, events.ProcessingCompletedEventData)
+            and turn_id is not None
+            and event.id == turn_id
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
         )
@@ -604,8 +640,11 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _processing_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             isinstance(event.data, events.ProcessingFailedEventData)
+            and turn_id is not None
+            and event.id == turn_id
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
         )
@@ -674,28 +713,37 @@ class Bot(hsm.Instance, abc.ABC):
             focus=instance._focused_device if instance._focused_device in instance._devices else None,
             focus_candidates=focus_candidates,
         )
-        # The turn timer rides this state's activity: the activity holds the state until HSM
-        # exits it, then stops the timer (hsm 1.1.4 does not stop machines on context cancel;
-        # the stop is explicit). The timer also withholds its event once this scope is done.
-        operation = _BotProcessingOperation()
-        await _BotProcessingOperation.started(
+        # Live turn capability + activity-owned timer. The cancel-token capability is minted with
+        # the timer id so a cancelled confirmation can match immediately (before the cancelling
+        # activity runs). Successful terminals retire both; timeout keeps only the cancel token.
+        request_id = event.id
+        assert request_id
+        _ = await processing.start_operation(instance, request_id)
+        timer = _BotProcessingOperation()
+        _ = await _BotProcessingOperation.started(
             ctx,
-            operation,
+            timer,
             owner=instance,
-            request_id=event.id,
+            request_id=request_id,
             delay=instance._processing_timeout,
             event_template=_BotProcessingTimedOutEvent,
         )
+        cancel_id = _bot_cancel_operation_id(request_id, hsm.id(timer), instance)
+        _ = await processing.start_operation(instance, cancel_id)
         try:
             input_event = dataclasses.replace(
                 cognition.InputEvent.with_data(cognition_input),
-                id=event.id,
+                id=request_id,
                 metadata=dict(event.metadata),
             )
             _ = hsm.dispatch(ctx, instance._cognition, input_event)
             await asyncio.wrap_future(ctx.Done())
         finally:
-            await hsm.stop(operation, hsm.Context())
+            await hsm.stop(timer, hsm.Context())
+            # Drop only the turn id if still live. Cancel-token ops are owned by the cancel path
+            # (_retire_bot_turn on success, cancel confirmation/timeout, or deactivation cleanup).
+            if processing.active_operation(instance, request_id) is not None:
+                processing.finish_operation(ctx, instance, request_id)
 
     @staticmethod
     def _cancel_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -705,6 +753,9 @@ class Bot(hsm.Instance, abc.ABC):
         cancel_event = ability.cancel_event or processing.CancelEvent
         schema = cancel_event.schema
         assert isinstance(schema, type) and issubclass(schema, pydantic.BaseModel)
+        # Drop turn correlation; the pre-minted cancel-token capability remains for confirmation.
+        if processing.active_operation(instance, data.request_id) is not None:
+            processing.finish_operation(ctx, instance, data.request_id)
         _ = hsm.dispatch(
             ctx,
             ability,
@@ -721,8 +772,11 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_bot_processing_output(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             event.name == ability.output_event.name
+            and turn_id is not None
+            and event.id == turn_id
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
         )
@@ -731,14 +785,19 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_bot_processing_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
+        turn_id = _active_bot_turn_id(instance, event)
         return (
             event.name == ability.failed_event.name
+            and turn_id is not None
+            and event.id == turn_id
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
         )
 
     @staticmethod
     def _complete_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        # Keep the turn capability live until ProcessingCompleted is matched so that private
+        # terminal still carries exact request-id correlation (same RTC as the output match).
         focus_candidates: tuple[str, ...] = ()
         if instance._focused_device is not None:
             focus_candidates = (instance._focused_device,)
@@ -757,14 +816,25 @@ class Bot(hsm.Instance, abc.ABC):
         )
 
     @staticmethod
+    def _retire_bot_turn(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del event
+        # Successful terminals never consume the cancel token; retire every Bot-owned capability.
+        processing.finish_operations(ctx, instance)
+
+    @staticmethod
     def _dispatch_processing_timeout_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         if isinstance(data, _BotProcessingOperationData):
             request_id = data.request_id
+            token = data.token
         elif isinstance(data, (cognition.CancelledData, processing.CancelledData)):
             request_id = data.operation_id
+            token = data.token
         else:
             raise AssertionError(f"unsupported processing timeout event data: {type(data)!r}")
+        cancel_id = _bot_cancel_operation_id(request_id, token, instance)
+        if processing.active_operation(instance, cancel_id) is not None:
+            processing.finish_operation(ctx, instance, cancel_id)
         seconds = instance._processing_timeout.total_seconds()
         failure = events.ProcessingFailedEventData(message=f"Bot processing timed out after {seconds:g} seconds.")
         _ = instance.dispatch(
@@ -780,6 +850,7 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _fail_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        # Keep the turn capability live until ProcessingFailed is matched (mirrors completion).
         failure_message = getattr(event.data, "message", "Bot processing ability failed.")
         failure = events.ProcessingFailedEventData(message=str(failure_message))
         _ = instance.dispatch(
@@ -811,10 +882,13 @@ class Bot(hsm.Instance, abc.ABC):
         ability = instance._cognition
         cancelled_event = ability.cancelled_event or processing.CancelledEvent
         data = event.data
+        if not isinstance(data, (cognition.CancelledData, processing.CancelledData)):
+            return False
+        cancel_id = _bot_cancel_operation_id(data.operation_id, data.token, instance)
         return (
             event.name == cancelled_event.name
-            and isinstance(data, (cognition.CancelledData, processing.CancelledData))
             and event.id == data.operation_id
+            and processing.active_operation(instance, cancel_id) is not None
             and event.source == hsm.id(ability)
             and event.target == hsm.id(instance)
         )
@@ -1017,10 +1091,13 @@ class Bot(hsm.Instance, abc.ABC):
     async def _cancelling_processing_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, _BotProcessingOperationData)
-        operation = _BotProcessingOperation()
-        await _BotProcessingOperation.started(
+        cancel_id = _bot_cancel_operation_id(data.request_id, data.token, instance)
+        # Cancel-token capability was minted with the turn timer; only the cancel-timeout timer
+        # is owned here.
+        timer = _BotProcessingOperation()
+        _ = await _BotProcessingOperation.started(
             ctx,
-            operation,
+            timer,
             owner=instance,
             request_id=data.request_id,
             delay=min(
@@ -1032,7 +1109,9 @@ class Bot(hsm.Instance, abc.ABC):
         try:
             await asyncio.wrap_future(ctx.Done())
         finally:
-            await hsm.stop(operation, hsm.Context())
+            await hsm.stop(timer, hsm.Context())
+            if processing.active_operation(instance, cancel_id) is not None:
+                processing.finish_operation(ctx, instance, cancel_id)
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Bot",
@@ -1246,21 +1325,25 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),
                     hsm.guard(_processing_completed_with_focus),
+                    hsm.effect(_retire_bot_turn),
                     hsm.target("../focused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),
                     hsm.guard(_processing_completed),
+                    hsm.effect(_retire_bot_turn),
                     hsm.target("../unfocused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingFailedEvent),
                     hsm.guard(_processing_failed_with_focus),
+                    hsm.effect(_retire_bot_turn),
                     hsm.target("../focused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingFailedEvent),
                     hsm.guard(_processing_failed),
+                    hsm.effect(_retire_bot_turn),
                     hsm.target("../unfocused"),
                 ),
                 hsm.transition(
