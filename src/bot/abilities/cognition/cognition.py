@@ -201,6 +201,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
+    cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelEvent
+    cancelled_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelledEvent
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _autonomy: autonomy.Autonomy | None
     _intuition: intuition.Intuition

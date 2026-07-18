@@ -1113,6 +1113,8 @@ class Processing(ability.Ability[InputData, CompletionData]):
         kind=hsm.ErrorEventKind,
         schema=FailureData,
     )
+    cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelEvent
+    cancelled_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelledEvent
 
     @staticmethod
     def _has_input(ctx: hsm.Context, instance: "Processing", event: hsm.Event[typing.Any]) -> bool:

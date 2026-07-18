@@ -311,6 +311,14 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     input_event: typing.ClassVar[hsm.Event[typing.Any]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[typing.Any]] = OutputEvent
     failed_event: typing.ClassVar[hsm.Event[typing.Any]] = FailedEvent
+    # Cancel contract: abilities that support cancellation declare their cancel request and
+    # cancelled-confirmation events (Processing and Cognition declare their own; None means no
+    # declared contract). Payloads must expose ``operation_id`` and ``token`` fields so owners
+    # can build the request from the declared event's schema. Machines that trigger on these
+    # events model static triggers; an owner can only consume cancelled events named in its
+    # own model.
+    cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = None
+    cancelled_event: typing.ClassVar[hsm.Event[typing.Any] | None] = None
     input_data_type: typing.ClassVar[_DataType] = None
     output_data_type: typing.ClassVar[_DataType] = None
     submodel: typing.ClassVar[hsm.Model | None] = None
