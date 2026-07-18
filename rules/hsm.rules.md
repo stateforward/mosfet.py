@@ -196,8 +196,11 @@ Ingress sinks, SDK callbacks, audio/media consumers, and other deferred entry po
 
 ## Required gates
 
-- MUST decide “is this machine still running?” with machine liveness (`instance.state()` is set / machine is started), not `context().is_done()`.
-- MUST model delivery policy, readiness, and drop paths with HSM guards, transitions, and typed drop/failure observability—not silent early returns on canceled contexts.
+- MUST NOT answer “is this machine still running?” with `context().is_done()`; cancellation of an owning activity says nothing about machine liveness.
+- MUST NOT synchronize on `instance.state()`. `state()` is a point-in-time observation of a machine that may be mid-transition: two back-to-back invocations can return different values, and a decision made from one value can be stale before it is used. `state()` is valid for snapshots, telemetry, diagnostics, and tests—never for readiness, delivery, gating, or progression decisions.
+- MUST synchronize actor lifecycle with typed events: lifecycle, completion, and failure events update the observing machine's own topology, and guards read the observer's own state—not the peer's runtime state.
+- MUST model delivery policy, readiness, and drop paths with HSM guards, transitions, and typed drop/failure observability—not silent early returns on canceled contexts or probed peer state. Ingress sinks, SDK callbacks, and audio/media consumers SHOULD be registered by the owning state's entry activities and unregistered on exit, so deferred entry points exist only while the machine can accept what they deliver.
+- MUST surface dispatch to an unstarted or stopped actor as a typed drop/failure outcome (event or telemetry), never a silent return.
 - MUST treat `context().is_done()` as a cancel signal for work that should stop when the **owning operation/activity** is canceled—not as a substitute for machine lifecycle state.
 - When a machine or World must outlive the activity that creates it, MUST start or re-parent it under a longer-lived scope (device/world/root context), not only under the transient activity context, or MUST document and test that cancel cascade is intended.
 - From an activity or effect, when starting or attaching an actor that must outlive that behavior, MUST use the owning machine's lifetime context (`instance.context()` / `owner.context()` when the owner is started), not the activity `ctx`. Prefer `World.from_context(instance.context())` over `World.from_context(activity_ctx)` for durable attach.

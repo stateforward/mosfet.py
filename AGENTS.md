@@ -90,8 +90,14 @@
   (or an ancestor) was **canceled**, not that the machine stopped. Activities run under a child context that HSM
   cancels on state exit; cancel cascades to `World.from_context(activity_ctx)` and machines started under that World
   (common in device firmware attach). A live machine can still accept dispatches while `context().is_done()` is true.
-  Gate sinks/callbacks on `instance.state()` (started) and model delivery/drop with HSM guards—not
-  `if ctx.is_done(): return`. When starting/attaching actors that must outlive an activity, parent them under
+  NEVER synchronize on `instance.state()` either: it is a point-in-time observation of a machine that may be
+  mid-transition, so two back-to-back invocations can disagree and a decision made from one value can be stale
+  before it is used. Reserve `state()` for snapshots, telemetry, diagnostics, and tests—never readiness, delivery,
+  gating, or progression decisions. Synchronize actor lifecycle through typed lifecycle/completion/failure events
+  tracked in the observing machine's own topology, with guards reading the observer's own state. Register ingress
+  sinks and SDK callbacks in the owning state's entry activities and unregister on exit; surface dispatch to an
+  unstarted or stopped actor as a typed drop/failure outcome—never a silent `if ctx.is_done(): return` or a
+  probed-state early return. When starting/attaching actors that must outlive an activity, parent them under
   `instance.context()` / `owner.context()` (or `World.from_context(instance.context())`), not the activity `ctx`.
   See `rules/hsm.rules.md` HSM-CONTEXT-001.
 - NEVER store transient event data on an HSM instance (`instance.set` / `hsm.attribute`, machine fields, or similar).
