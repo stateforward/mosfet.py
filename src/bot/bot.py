@@ -7,7 +7,6 @@ import collections.abc
 import dataclasses
 import datetime
 import typing
-import uuid
 import weakref
 
 import hsm
@@ -25,41 +24,88 @@ _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
-_STARTED_DEVICES_METADATA_KEY = "bot.activation.started_devices"
-_STARTED_ABILITIES_METADATA_KEY = "bot.activation.started_abilities"
-_STARTED_ATTACHMENT_GROUP_METADATA_KEY = "bot.activation.started_attachment_group"
-_LIFECYCLE_OPERATION_METADATA_KEY = "bot.lifecycle.operation"
-_REBOOT_CLEANUP_METADATA_KEY = "bot.lifecycle.reboot_cleanup"
-_REBOOT_CLEANUP_PRESERVE = "preserve"
-_REBOOT_CLEANUP_RESET = "reset"
+
+# hsm surfaces idempotency conditions only as exception messages ("already has a running HSM"
+# on start, "dispatch requires a started HSM" on dispatch). The predicates below implement
+# idempotent attach/detach and canonical-inventory reactivation; they are not peer-state
+# gating (HSM-CONTEXT-001).
+_HSM_ALREADY_RUNNING_MESSAGE = "already has a running HSM"
+_HSM_NOT_STARTED_MESSAGE = "dispatch requires a started HSM"
 
 
-class _BotLifecycleOperation(pydantic.BaseModel):
-    """Immutable JSON-safe capability for one lifecycle operation."""
+def _is_already_running_error(error: Exception) -> bool:
+    return isinstance(error, hsm.ErrorValidatingModel) and _HSM_ALREADY_RUNNING_MESSAGE in str(error)
+
+
+def _is_not_started_error(error: Exception) -> bool:
+    return isinstance(error, RuntimeError) and _HSM_NOT_STARTED_MESSAGE in str(error)
+
+
+class _BotLifecycleTerminalData(pydantic.BaseModel):
+    """Immutable typed terminal for one lifecycle run, correlated by request id."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    token: str
-    request_id: str
+    request_id: str = pydantic.Field(min_length=1)
     kind: typing.Literal["attach", "detach"]
-    _context: hsm.Context = pydantic.PrivateAttr()
 
-    @classmethod
-    def create(
-        cls,
+
+_BotLifecycleCompletedEvent = hsm.Event[_BotLifecycleTerminalData](
+    name="bot.lifecycle.completed",
+    kind=hsm.CompletionEventKind,
+    schema=_BotLifecycleTerminalData,
+)
+_BotLifecycleFailedEvent = hsm.Event[_BotLifecycleTerminalData](
+    name="bot.lifecycle.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_BotLifecycleTerminalData,
+)
+
+
+class _BotLifecycleReply(hsm.Instance):
+    """One-shot reply inbox that hands the attachment group terminal to the owning activity."""
+
+
+def _lifecycle_reply_model(request_id: str, terminal: asyncio.Future[hsm.Event[typing.Any]]) -> hsm.Model:
+    def correlated(
         ctx: hsm.Context,
-        *,
-        request_id: str,
-        kind: typing.Literal["attach", "detach"],
-    ) -> "_BotLifecycleOperation":
-        operation = cls(token=uuid.uuid4().hex, request_id=request_id, kind=kind)
-        operation._context = ctx
-        return operation
+        instance: _BotLifecycleReply,
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, instance
+        return event.id == request_id and isinstance(
+            event.data,
+            (attachment.AttachCompleteData, attachment.DetachedData, attachment.FailedData),
+        )
 
-    def is_active(self) -> bool:
-        """Return whether the HSM activity scope that owns this capability is active."""
+    def complete(
+        ctx: hsm.Context,
+        instance: _BotLifecycleReply,
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx, instance
+        if not terminal.done():
+            terminal.set_result(event)
 
-        return not self._context.is_done()
+    return hsm.define(
+        "BotLifecycleReply",
+        hsm.initial(hsm.target("waiting")),
+        hsm.state(
+            "waiting",
+            hsm.transition(
+                hsm.on(
+                    attachment.AttachCompleteEvent,
+                    attachment.AttachFailedEvent,
+                    attachment.DetachedEvent,
+                    attachment.DetachFailedEvent,
+                ),
+                hsm.guard(correlated),
+                hsm.effect(complete),
+                hsm.target("/BotLifecycleReply/done"),
+            ),
+        ),
+        hsm.final("done"),
+    )
 
 
 class _BotCleanupData(pydantic.BaseModel):
@@ -67,27 +113,8 @@ class _BotCleanupData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    token: str = pydantic.Field(min_length=1)
-    request_id: str
+    request_id: str = pydantic.Field(min_length=1)
     kind: typing.Literal["activation", "deactivation"]
-    _context: hsm.Context | None = pydantic.PrivateAttr(default=None)
-
-    @classmethod
-    def create(
-        cls,
-        ctx: hsm.Context,
-        *,
-        request_id: str,
-        kind: typing.Literal["activation", "deactivation"],
-    ) -> "_BotCleanupData":
-        operation = cls(token=uuid.uuid4().hex, request_id=request_id, kind=kind)
-        operation._context = ctx
-        return operation
-
-    def is_active(self) -> bool:
-        """Return whether the cleanup activity that owns this terminal is active."""
-
-        return self._context is not None and not self._context.is_done()
 
 
 _BotCleanupDoneEvent = hsm.Event[_BotCleanupData](
@@ -117,21 +144,28 @@ _BotProcessingCancelTimedOutEvent = hsm.Event[_BotProcessingOperationData](
     kind=hsm.ErrorEventKind,
     schema=_BotProcessingOperationData,
 )
-_BotProcessingFinishedEvent = hsm.Event[_BotProcessingOperationData](
-    name="bot.processing.finished",
-    kind=hsm.CompletionEventKind,
-    schema=_BotProcessingOperationData,
-)
 
 
 class _BotProcessingOperation(hsm.Instance):
-    """Operation-scoped HSM actor that owns timeout progression."""
+    """Single-shot timer actor scoped to one Bot processing turn.
+
+    Identity is closure-bound in the model, never recovered from shared registries. The
+    owning state's activity starts the actor and stops it on state exit (hsm 1.1.4 does not
+    stop machines on context cancel), and the actor withholds its timeout once the owning
+    activity is canceled. A timeout event already dispatched before that stop lands is
+    correlated only by its self-certifying payload; a later turn can still dequeue it first
+    in a narrow RTC-ordering window. Closing that window would need per-turn correlation
+    storage the contract forbids (HSM-COMPLETION-001), so it is an accepted residual.
+    """
 
     @classmethod
     def _model(
         cls,
-        timeout: datetime.timedelta,
-        cancellation_timeout: datetime.timedelta,
+        *,
+        owner: hsm.Instance,
+        request_id: str,
+        delay: datetime.timedelta,
+        event_template: hsm.Event[_BotProcessingOperationData],
     ) -> hsm.Model:
         def timeout_delay(
             ctx: hsm.Context,
@@ -139,32 +173,7 @@ class _BotProcessingOperation(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> datetime.timedelta:
             del ctx, instance, event
-            return timeout
-
-        def cancellation_timeout_delay(
-            ctx: hsm.Context,
-            instance: _BotProcessingOperation,
-            event: hsm.Event[typing.Any],
-        ) -> datetime.timedelta:
-            del ctx, instance, event
-            return cancellation_timeout
-
-        def is_finished(
-            ctx: hsm.Context,
-            instance: _BotProcessingOperation,
-            event: hsm.Event[typing.Any],
-        ) -> bool:
-            del ctx
-            identity = _processing_operation_identity(instance)
-            return (
-                isinstance(event.data, _BotProcessingOperationData)
-                and identity is not None
-                and event.id == event.data.request_id
-                and event.source == identity[0]
-                and event.target == hsm.id(instance)
-                and event.data.actor_id == hsm.id(instance)
-                and event.data.request_id == identity[1]
-            )
+            return delay
 
         def dispatch_timeout(
             ctx: hsm.Context,
@@ -172,48 +181,25 @@ class _BotProcessingOperation(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> None:
             del event
-            identity = _processing_operation_identity(instance)
-            assert identity is not None
-            owner_id, request_id = identity
+            if ctx.is_done():
+                # The owning activity was canceled: this timer's turn is over, so the timeout
+                # must not be dispatched (HSM-CONTEXT-001: is_done is a cancel signal for work
+                # owned by the canceled activity, never a liveness gate).
+                return
             capability = _BotProcessingOperationData(
                 token=hsm.id(instance),
                 request_id=request_id,
                 actor_id=hsm.id(instance),
             )
-            _ = hsm.dispatch_to(
+            _ = hsm.dispatch(
                 ctx,
+                owner,
                 dataclasses.replace(
-                    _BotProcessingTimedOutEvent.with_data(capability),
+                    event_template.with_data(capability),
                     id=request_id,
                     source=hsm.id(instance),
-                    target=owner_id,
+                    target=hsm.id(owner),
                 ),
-                owner_id,
-            )
-
-        def dispatch_cancel_timeout(
-            ctx: hsm.Context,
-            instance: _BotProcessingOperation,
-            event: hsm.Event[typing.Any],
-        ) -> None:
-            del event
-            identity = _processing_operation_identity(instance)
-            assert identity is not None
-            owner_id, request_id = identity
-            capability = _BotProcessingOperationData(
-                token=hsm.id(instance),
-                request_id=request_id,
-                actor_id=hsm.id(instance),
-            )
-            _ = hsm.dispatch_to(
-                ctx,
-                dataclasses.replace(
-                    _BotProcessingCancelTimedOutEvent.with_data(capability),
-                    id=request_id,
-                    source=hsm.id(instance),
-                    target=owner_id,
-                ),
-                owner_id,
             )
 
         return hsm.define(
@@ -222,26 +208,8 @@ class _BotProcessingOperation(hsm.Instance):
             hsm.state(
                 "waiting",
                 hsm.transition(
-                    hsm.on(_BotProcessingFinishedEvent),
-                    hsm.guard(is_finished),
-                    hsm.target("/BotProcessingTimer/done"),
-                ),
-                hsm.transition(
                     hsm.after(timeout_delay),
                     hsm.effect(dispatch_timeout),
-                    hsm.target("/BotProcessingTimer/cancelling"),
-                ),
-            ),
-            hsm.state(
-                "cancelling",
-                hsm.transition(
-                    hsm.on(_BotProcessingFinishedEvent),
-                    hsm.guard(is_finished),
-                    hsm.target("/BotProcessingTimer/done"),
-                ),
-                hsm.transition(
-                    hsm.after(cancellation_timeout_delay),
-                    hsm.effect(dispatch_cancel_timeout),
                     hsm.target("/BotProcessingTimer/done"),
                 ),
             ),
@@ -256,90 +224,39 @@ class _BotProcessingOperation(hsm.Instance):
         *,
         owner: "Bot",
         request_id: str,
-        timeout: datetime.timedelta,
-    ) -> tuple["_BotProcessingOperation", _BotProcessingOperationData]:
+        delay: datetime.timedelta,
+        event_template: hsm.Event[_BotProcessingOperationData],
+    ) -> "_BotProcessingOperation":
         try:
-            cancellation_timeout = min(
-                max(timeout, _MIN_BOT_CANCELLATION_TIMEOUT),
-                _MAX_BOT_CANCELLATION_TIMEOUT,
+            return await hsm.started(
+                _private_scope(ctx),
+                operation,
+                cls._model(
+                    owner=owner,
+                    request_id=request_id,
+                    delay=delay,
+                    event_template=event_template,
+                ),
             )
-            started = await hsm.started(ctx, operation, cls._model(timeout, cancellation_timeout))
-            capability = _BotProcessingOperationData(
-                token=hsm.id(operation),
-                request_id=request_id,
-                actor_id=hsm.id(operation),
-            )
-            instances = ctx.value(hsm.Keys.Instances)
-            if isinstance(instances, collections.abc.MutableMapping):
-                _ = instances.pop(hsm.id(operation), None)
-                instances[_processing_operation_key(owner, request_id)] = operation
-            return started, capability
         except asyncio.CancelledError:
             await hsm.stop(operation, hsm.Context())
             raise
-
-
-def _processing_operation_key(owner: "Bot", request_id: str) -> str:
-    return f"bot.processing:{hsm.id(owner)}:{request_id}"
-
-
-def _processing_operation_identity(operation: _BotProcessingOperation) -> tuple[str, str] | None:
-    instances = operation.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.Mapping):
-        return None
-    prefix = "bot.processing:"
-    for key, actor in instances.items():
-        if isinstance(key, str) and key.startswith(prefix) and actor is operation:
-            owner_id, separator, request_id = key.removeprefix(prefix).partition(":")
-            if owner_id and separator and request_id:
-                return owner_id, request_id
-    return None
-
-
-def _event_belongs_to_processing(event: hsm.Event[typing.Any], operation: _BotProcessingOperationData) -> bool:
-    return event.id == operation.request_id or event.id.startswith(f"{operation.request_id}:")
-
-
-def _active_processing_operation(
-    instance: "Bot",
-    event: hsm.Event[typing.Any],
-    *,
-    phases: tuple[str, ...] = ("/BotProcessingTimer/waiting", "/BotProcessingTimer/cancelling"),
-) -> _BotProcessingOperationData | None:
-    """Return the capability only while its exact operation actor owns an active phase."""
-
-    instances = instance.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.Mapping):
-        return None
-    prefix = f"bot.processing:{hsm.id(instance)}:"
-    for key, actor in instances.items():
-        if (
-            isinstance(key, str)
-            and key.startswith(prefix)
-            and isinstance(actor, _BotProcessingOperation)
-            and actor.state() in phases
-        ):
-            request_id = key.removeprefix(prefix)
-            operation = _BotProcessingOperationData(token=hsm.id(actor), request_id=request_id, actor_id=hsm.id(actor))
-            if _event_belongs_to_processing(event, operation):
-                return operation
-    return None
 
 
 def _device_tree(*roots: Device) -> tuple[Device, ...]:
     return Device.device_tree(*roots)
 
 
-def _ability_attach_context(lifetime: hsm.Context) -> hsm.Context:
-    """Parent abilities under bot lifetime without joining the world broadcast set.
+def _private_scope(parent: hsm.Context) -> hsm.Context:
+    """Child context with a private Instances map, off the world broadcast set.
 
-    World ``dispatch_all`` delivers to every instance in the world's Instances map. Input
-    abilities must only receive ``world.sound`` / ``world.visual`` via the bot's parallel
-    fan-out, not a second direct world delivery.
+    World ``dispatch_all`` delivers to every instance in the world's Instances map. Actors
+    started under this scope (bot-owned abilities, ephemeral reply and timer actors) receive
+    events only through explicit dispatch, and cancel with ``parent``.
     """
 
     values: dict[typing.Hashable, object] = {hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()}
-    return hsm.Context(parent=lifetime, values=values)
+    return hsm.Context(parent=parent, values=values)
 
 
 def _instance_id(instance: hsm.Instance) -> str:
@@ -403,16 +320,22 @@ class Bot(hsm.Instance, abc.ABC):
 
     async def attach(self, world: World) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
-        if not self.state() or self.state() == self.model.qualified_name:
+        try:
             _ = await hsm.started(world.context, self, self.model)
+        except hsm.ErrorValidatingModel as error:
+            if not _is_already_running_error(error):
+                raise
         await self.dispatch(world.context, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
     async def detach(self, world: World) -> typing.Self:
-        if not self.state() or self.state() == self.model.qualified_name:
-            return self
         require_world_scope(world, self, participant="Bot")
-        await self.dispatch(world.context, events.DeactivateEvent.with_data(events.DeactivateEventData()))
+        try:
+            await self.dispatch(world.context, events.DeactivateEvent.with_data(events.DeactivateEventData()))
+        except RuntimeError as error:
+            # An unstarted or stopped bot is already detached; deactivation is idempotent.
+            if not _is_not_started_error(error):
+                raise
         return self
 
     @staticmethod
@@ -445,29 +368,74 @@ class Bot(hsm.Instance, abc.ABC):
         return tuple(members)
 
     @staticmethod
-    async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        operation = _BotLifecycleOperation.create(
-            ctx,
-            request_id=event.id,
-            kind="detach",
-        )
-        await instance._attachments.detach(
-            ctx,
-            dataclasses.replace(
-                attachment.DetachEvent.with_data(attachment.DetachData(actor=instance)),
+    async def _request_attachment_terminal(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event,
+        *,
+        kind: typing.Literal["attach", "detach"],
+    ) -> None:
+        """Run one attachment group operation and emit the bot-private lifecycle terminal.
+
+        The group replies to a one-shot inbox addressed through ``reply_to``; the activity
+        alone emits the terminal, so a canceled run can never deliver a stale completion.
+        """
+
+        terminal: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+        reply = _BotLifecycleReply()
+        try:
+            _ = await hsm.started(_private_scope(ctx), reply, _lifecycle_reply_model(event.id, terminal))
+            request: hsm.Event[typing.Any]
+            if kind == "attach":
+                request = attachment.AttachEvent.with_data(attachment.AttachData(actor=instance, reply_to=reply))
+            else:
+                request = attachment.DetachEvent.with_data(attachment.DetachData(actor=instance, reply_to=reply))
+            request = dataclasses.replace(
+                request,
                 id=event.id,
                 source=hsm.id(instance),
                 target=hsm.id(instance._attachments),
-                metadata={**event.metadata, _LIFECYCLE_OPERATION_METADATA_KEY: operation},
+                metadata=dict(event.metadata),
+            )
+            if kind == "attach":
+                await instance._attachments.attach(ctx, typing.cast(hsm.Event[attachment.AttachData], request))
+            else:
+                await instance._attachments.detach(ctx, typing.cast(hsm.Event[attachment.DetachData], request))
+            outcome = await terminal
+        finally:
+            await hsm.stop(reply, hsm.Context())
+        outcome_data = _BotLifecycleTerminalData(request_id=event.id, kind=kind)
+        if isinstance(outcome.data, (attachment.AttachCompleteData, attachment.DetachedData)):
+            terminal_event = _BotLifecycleCompletedEvent.with_data(outcome_data)
+        else:
+            terminal_event = _BotLifecycleFailedEvent.with_data(outcome_data)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                terminal_event,
+                id=outcome_data.request_id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
-    async def _deactivation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+    async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        await Bot._request_attachment_terminal(ctx, instance, event, kind="detach")
+
+    @staticmethod
+    async def _deactivation_cleanup(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event,
+        *,
+        cleanup: typing.Literal["preserve", "reset"] | None,
+    ) -> None:
         lifetime = instance.context()
-        cleanup_mode = event.metadata.get(_REBOOT_CLEANUP_METADATA_KEY)
         world = World.from_context(lifetime)
-        if cleanup_mode == _REBOOT_CLEANUP_RESET:
+        if cleanup == "reset":
             for member in Bot._lifecycle_attachment_members(instance):
                 await hsm.Instance.dispatch(
                     member,
@@ -482,7 +450,7 @@ class Bot(hsm.Instance, abc.ABC):
                 )
             await hsm.stop(instance._attachments, world.context)
             instance._attachments = attachment.Group(*Bot._lifecycle_attachment_members(instance))
-        elif cleanup_mode != _REBOOT_CLEANUP_PRESERVE:
+        elif cleanup is None:
             await hsm.stop(instance._attachments, world.context)
             for ability in Bot._lifecycle_abilities(instance):
                 # Cognition's required composite tree remains detached under Bot lifetime;
@@ -490,38 +458,30 @@ class Bot(hsm.Instance, abc.ABC):
                 if ability is instance._cognition:
                     continue
                 await hsm.stop(ability, lifetime)
-        instances = lifetime.value(hsm.Keys.Instances)
-        operation_actors = (
-            tuple((key, actor) for key, actor in instances.items() if isinstance(actor, _BotProcessingOperation))
-            if isinstance(instances, collections.abc.Mapping)
-            else ()
-        )
-        for key, actor in operation_actors:
-            await actor.stop(lifetime)
-            if isinstance(instances, collections.abc.MutableMapping):
-                _ = instances.pop(key, None)
-        cleanup = _BotCleanupData.create(ctx, request_id=event.id, kind="deactivation")
+        terminal = _BotCleanupData(request_id=event.id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
-                _BotCleanupDoneEvent.with_data(cleanup),
-                id=cleanup.request_id,
+                _BotCleanupDoneEvent.with_data(terminal),
+                id=terminal.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(instance),
+                metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
-    def _preserve_reboot_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        if event.metadata.get(_REBOOT_CLEANUP_METADATA_KEY) != _REBOOT_CLEANUP_RESET:
-            event.metadata[_REBOOT_CLEANUP_METADATA_KEY] = _REBOOT_CLEANUP_PRESERVE
+    async def _deactivation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        await Bot._deactivation_cleanup(ctx, instance, event, cleanup=None)
 
     @staticmethod
-    def _reset_reboot_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_REBOOT_CLEANUP_METADATA_KEY] = _REBOOT_CLEANUP_RESET
+    async def _reboot_cleanup_preserve_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        await Bot._deactivation_cleanup(ctx, instance, event, cleanup="preserve")
+
+    @staticmethod
+    async def _reboot_cleanup_reset_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        await Bot._deactivation_cleanup(ctx, instance, event, cleanup="reset")
 
     @staticmethod
     def _device_reference_for_source(instance: "Bot", source: str) -> str | None:
@@ -593,9 +553,14 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
+        try:
+            cognition_id = hsm.id(instance._cognition)
+        except hsm.ErrorValidatingModel:
+            # Cognition is not started yet (early activation); it cannot have requested reboot.
+            return False
         return (
             isinstance(event.data, events.RebootEventData)
-            and event.source == hsm.id(instance._cognition)
+            and event.source == cognition_id
             and event.target == hsm.id(instance)
         )
 
@@ -606,12 +571,8 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
-        if not isinstance(event.data, events.FocusDeviceEventData):
-            return False
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
-            operation is not None
-            and _event_belongs_to_processing(event, operation)
+            isinstance(event.data, events.FocusDeviceEventData)
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
             and event.data.device in instance._devices
@@ -624,11 +585,8 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ClearFocusEventData)
-            and operation is not None
-            and _event_belongs_to_processing(event, operation)
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
             and instance._focused_device is not None
@@ -637,11 +595,8 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _processing_completed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ProcessingCompletedEventData)
-            and operation is not None
-            and event.id == operation.request_id
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
         )
@@ -649,11 +604,8 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _processing_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             isinstance(event.data, events.ProcessingFailedEventData)
-            and operation is not None
-            and event.id == operation.request_id
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
         )
@@ -722,41 +674,45 @@ class Bot(hsm.Instance, abc.ABC):
             focus=instance._focused_device if instance._focused_device in instance._devices else None,
             focus_candidates=focus_candidates,
         )
-        operation_actor = _BotProcessingOperation()
+        # The turn timer rides this state's activity: the activity holds the state until HSM
+        # exits it, then stops the timer (hsm 1.1.4 does not stop machines on context cancel;
+        # the stop is explicit). The timer also withholds its event once this scope is done.
+        operation = _BotProcessingOperation()
         await _BotProcessingOperation.started(
-            instance.context(),
-            operation_actor,
+            ctx,
+            operation,
             owner=instance,
             request_id=event.id,
-            timeout=instance._processing_timeout,
+            delay=instance._processing_timeout,
+            event_template=_BotProcessingTimedOutEvent,
         )
-        input_event = dataclasses.replace(
-            cognition.InputEvent.with_data(cognition_input),
-            id=event.id,
-            metadata=dict(event.metadata),
-        )
-        _ = hsm.dispatch(ctx, instance._cognition, input_event)
+        try:
+            input_event = dataclasses.replace(
+                cognition.InputEvent.with_data(cognition_input),
+                id=event.id,
+                metadata=dict(event.metadata),
+            )
+            _ = hsm.dispatch(ctx, instance._cognition, input_event)
+            await asyncio.wrap_future(ctx.Done())
+        finally:
+            await hsm.stop(operation, hsm.Context())
 
     @staticmethod
     def _cancel_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _active_processing_operation(instance, event)
-        assert operation is not None
-        if isinstance(instance._cognition, cognition.Cognition):
-            cancel_event: hsm.Event[typing.Any] = cognition.CancelEvent.with_data(
-                cognition.CancelData(operation_id=operation.request_id, token=operation.token)
-            )
-        else:
-            cancel_event = processing.CancelEvent.with_data(
-                processing.CancelData(operation_id=operation.request_id, token=operation.token)
-            )
+        data = event.data
+        assert isinstance(data, _BotProcessingOperationData)
+        ability = instance._cognition
+        cancel_event = ability.cancel_event or processing.CancelEvent
+        schema = cancel_event.schema
+        assert isinstance(schema, type) and issubclass(schema, pydantic.BaseModel)
         _ = hsm.dispatch(
             ctx,
-            instance._cognition,
+            ability,
             dataclasses.replace(
-                cancel_event,
-                id=operation.request_id,
+                cancel_event.with_data(schema(operation_id=data.request_id, token=data.token)),
+                id=data.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(instance._cognition),
+                target=hsm.id(ability),
                 metadata=dict(event.metadata),
             ),
         )
@@ -765,41 +721,29 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_bot_processing_output(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             event.name == ability.output_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
-            and operation is not None
-            and event.id == operation.request_id
         )
 
     @staticmethod
     def _matches_bot_processing_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/waiting",))
         return (
             event.name == ability.failed_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
-            and operation is not None
-            and event.id == operation.request_id
         )
 
     @staticmethod
     def _complete_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        selected_focus: list[str] = []
-        if cognition.is_output(event.data):
-            for item in event.data:
-                if item.event == events.FocusDeviceEvent.name:
-                    selected_focus.append(events.FocusDeviceEventData.model_validate(item.data or {}).device)
-        focus_candidates = tuple(selected_focus)
-        if not focus_candidates:
-            if instance._focused_device is not None:
-                focus_candidates = (instance._focused_device,)
-            elif instance._devices:
-                focus_candidates = (next(iter(instance._devices)),)
+        focus_candidates: tuple[str, ...] = ()
+        if instance._focused_device is not None:
+            focus_candidates = (instance._focused_device,)
+        elif instance._devices:
+            focus_candidates = (next(iter(instance._devices)),)
         completed = events.ProcessingCompletedEventData(output=event.data, focus_candidates=focus_candidates)
         _ = instance.dispatch(
             ctx,
@@ -814,15 +758,20 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _dispatch_processing_timeout_failure(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/cancelling",))
-        assert operation is not None
+        data = event.data
+        if isinstance(data, _BotProcessingOperationData):
+            request_id = data.request_id
+        elif isinstance(data, (cognition.CancelledData, processing.CancelledData)):
+            request_id = data.operation_id
+        else:
+            raise AssertionError(f"unsupported processing timeout event data: {type(data)!r}")
         seconds = instance._processing_timeout.total_seconds()
         failure = events.ProcessingFailedEventData(message=f"Bot processing timed out after {seconds:g} seconds.")
         _ = instance.dispatch(
             ctx,
             dataclasses.replace(
                 events.ProcessingFailedEvent.with_data(failure),
-                id=operation.request_id,
+                id=request_id,
                 source=hsm.id(instance._cognition),
                 target=hsm.id(instance),
                 metadata=dict(event.metadata),
@@ -847,51 +796,28 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _matches_processing_timeout(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(instance, event)
+        data = event.data
         return (
-            isinstance(event.data, _BotProcessingOperationData)
-            and operation is not None
-            and event.data == operation
-            and event.id == operation.request_id
-            and event.source == operation.actor_id
+            isinstance(data, _BotProcessingOperationData)
+            and event.id == data.request_id
+            and event.source == data.actor_id
+            and data.token == data.actor_id
             and event.target == hsm.id(instance)
         )
 
     @staticmethod
     def _matches_cognition_cancelled(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        operation = _active_processing_operation(instance, event, phases=("/BotProcessingTimer/cancelling",))
+        ability = instance._cognition
+        cancelled_event = ability.cancelled_event or processing.CancelledEvent
         data = event.data
         return (
-            isinstance(data, cognition.CancelledData | processing.CancelledData)
-            and operation is not None
-            and data.operation_id == operation.request_id
-            and data.token == operation.token
-            and event.id == operation.request_id
-            and event.source == hsm.id(instance._cognition)
+            event.name == cancelled_event.name
+            and isinstance(data, (cognition.CancelledData, processing.CancelledData))
+            and event.id == data.operation_id
+            and event.source == hsm.id(ability)
             and event.target == hsm.id(instance)
         )
-
-    @staticmethod
-    def _consume_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        operation = _active_processing_operation(instance, event)
-        assert operation is not None
-        instances = instance.context().value(hsm.Keys.Instances)
-        assert isinstance(instances, collections.abc.Mapping)
-        actor = instances.get(_processing_operation_key(instance, operation.request_id))
-        assert isinstance(actor, _BotProcessingOperation)
-        _ = hsm.dispatch(
-            ctx,
-            actor,
-            dataclasses.replace(
-                _BotProcessingFinishedEvent.with_data(operation),
-                id=operation.request_id,
-                source=hsm.id(instance),
-                target=hsm.id(actor),
-            ),
-        )
-        if isinstance(instances, collections.abc.MutableMapping):
-            _ = instances.pop(_processing_operation_key(instance, operation.request_id), None)
 
     @staticmethod
     def _clear_focus(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -947,21 +873,12 @@ class Bot(hsm.Instance, abc.ABC):
     async def _activate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         lifetime = instance.context()
         world = World.from_context(lifetime)
-        started_devices: list[Device] = []
-        started_abilities: list[abilities.Ability[typing.Any, typing.Any]] = []
-        group_started = False
-        operation = _BotLifecycleOperation.create(
-            ctx,
-            request_id=event.id,
-            kind="attach",
-        )
         try:
-            group_scope = _ability_attach_context(lifetime)
+            group_scope = _private_scope(lifetime)
             try:
                 _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
-                group_started = True
             except hsm.ErrorValidatingModel as error:
-                if "already has a running HSM" not in str(error):
+                if not _is_already_running_error(error):
                     raise
             for device in _device_tree(*instance._devices.values()):
                 require_world_scope(world, device, participant="Device")
@@ -970,96 +887,80 @@ class Bot(hsm.Instance, abc.ABC):
                     raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
                 try:
                     _ = await hsm.started(world.context, device, model)
-                    started_devices.append(device)
                 except hsm.ErrorValidatingModel as error:
-                    if "already has a running HSM" not in str(error):
+                    if not _is_already_running_error(error):
                         raise
-            ability_scope = _ability_attach_context(lifetime)
+            ability_scope = _private_scope(lifetime)
             for ability in Bot._lifecycle_abilities(instance):
                 model = ability.model
                 if model is None:
                     raise RuntimeError(f"{type(ability).__name__} has no lifecycle model.")
                 try:
                     _ = await hsm.started(ability_scope, ability, model)
-                    started_abilities.append(ability)
                 except hsm.ErrorValidatingModel as error:
+                    # Residual peer inspection: skip abilities already running under our
+                    # private scope (idempotent reactivation), but raise when an injected
+                    # ability runs under the world scope, where it would receive world
+                    # broadcasts directly. Removing this needs typed errors from hsm.
                     shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.context.value(
                         hsm.Keys.Instances
                     )
-                    if "already has a running HSM" not in str(error) or shares_world_instances:
+                    if not _is_already_running_error(error) or shares_world_instances:
                         raise
-            await instance._attachments.attach(
-                ctx,
-                dataclasses.replace(
-                    attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)),
-                    id=event.id,
-                    source=hsm.id(instance),
-                    target=hsm.id(instance._attachments),
-                    metadata={
-                        **event.metadata,
-                        _LIFECYCLE_OPERATION_METADATA_KEY: operation,
-                        _STARTED_DEVICES_METADATA_KEY: tuple(started_devices),
-                        _STARTED_ABILITIES_METADATA_KEY: tuple(started_abilities),
-                        _STARTED_ATTACHMENT_GROUP_METADATA_KEY: group_started,
-                    },
-                ),
-            )
+            await Bot._request_attachment_terminal(ctx, instance, event, kind="attach")
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Public notification for observers; the private terminal drives topology.
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
                     events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()),
-                    id=operation.request_id,
+                    id=event.id,
                     source=hsm.id(instance),
                     target=hsm.id(instance),
-                    metadata={
-                        **event.metadata,
-                        _LIFECYCLE_OPERATION_METADATA_KEY: operation,
-                        _STARTED_DEVICES_METADATA_KEY: tuple(started_devices),
-                        _STARTED_ABILITIES_METADATA_KEY: tuple(started_abilities),
-                        _STARTED_ATTACHMENT_GROUP_METADATA_KEY: group_started,
-                    },
+                    metadata=dict(event.metadata),
+                ),
+            )
+            failure = _BotLifecycleTerminalData(request_id=event.id, kind="attach")
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _BotLifecycleFailedEvent.with_data(failure),
+                    id=failure.request_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
                 ),
             )
 
     @staticmethod
-    def _matches_attachment_group(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+    def _matches_lifecycle_terminal(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+        *,
+        kind: typing.Literal["attach", "detach"],
+    ) -> bool:
         del ctx
-        operation = event.metadata.get(_LIFECYCLE_OPERATION_METADATA_KEY)
-        if not isinstance(operation, _BotLifecycleOperation):
-            return False
-        expected_kind = (
-            "attach"
-            if event.name in {attachment.AttachCompleteEvent.name, attachment.AttachFailedEvent.name}
-            else "detach"
-        )
+        data = event.data
         return (
-            operation.kind == expected_kind
-            and operation.is_active()
-            and event.id == operation.request_id
-            and event.source == hsm.id(instance._attachments)
+            isinstance(data, _BotLifecycleTerminalData)
+            and data.kind == kind
+            and event.id == data.request_id
+            and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
         )
 
     @staticmethod
-    def _matches_activation_failure(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        operation = event.metadata.get(_LIFECYCLE_OPERATION_METADATA_KEY)
-        return (
-            isinstance(operation, _BotLifecycleOperation)
-            and operation.kind == "attach"
-            and operation.is_active()
-            and event.id == operation.request_id
-            and event.source == hsm.id(instance)
-            and event.target == hsm.id(instance)
-        )
+    def _matches_attach_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        return Bot._matches_lifecycle_terminal(ctx, instance, event, kind="attach")
+
+    @staticmethod
+    def _matches_detach_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        return Bot._matches_lifecycle_terminal(ctx, instance, event, kind="detach")
 
     @staticmethod
     def _matches_cleanup_done(
@@ -1073,7 +974,6 @@ class Bot(hsm.Instance, abc.ABC):
         return (
             isinstance(data, _BotCleanupData)
             and data.kind == kind
-            and data.is_active()
             and event.id == data.request_id
             and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
@@ -1100,17 +1000,39 @@ class Bot(hsm.Instance, abc.ABC):
             await hsm.stop(ability, lifetime)
         for device in reversed(_device_tree(*instance._devices.values())):
             await hsm.stop(device, world.context)
-        cleanup = _BotCleanupData.create(ctx, request_id=event.id, kind="activation")
+        terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
-                _BotCleanupDoneEvent.with_data(cleanup),
-                id=cleanup.request_id,
+                _BotCleanupDoneEvent.with_data(terminal),
+                id=terminal.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(instance),
+                metadata=dict(event.metadata),
             ),
         )
+
+    @staticmethod
+    async def _cancelling_processing_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        data = event.data
+        assert isinstance(data, _BotProcessingOperationData)
+        operation = _BotProcessingOperation()
+        await _BotProcessingOperation.started(
+            ctx,
+            operation,
+            owner=instance,
+            request_id=data.request_id,
+            delay=min(
+                max(instance._processing_timeout, _MIN_BOT_CANCELLATION_TIMEOUT),
+                _MAX_BOT_CANCELLATION_TIMEOUT,
+            ),
+            event_template=_BotProcessingCancelTimedOutEvent,
+        )
+        try:
+            await asyncio.wrap_future(ctx.Done())
+        finally:
+            await hsm.stop(operation, hsm.Context())
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Bot",
@@ -1128,7 +1050,7 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),
-                hsm.effect(_clear_focus, _reset_reboot_cleanup),
+                hsm.effect(_clear_focus),
                 hsm.target("../reboot_deactivating"),
             ),
             hsm.transition(
@@ -1137,18 +1059,13 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.target("../activation_cleanup"),
             ),
             hsm.transition(
-                hsm.on(attachment.AttachCompleteEvent),
-                hsm.guard(_matches_attachment_group),
+                hsm.on(_BotLifecycleCompletedEvent),
+                hsm.guard(_matches_attach_terminal),
                 hsm.target("../active"),
             ),
             hsm.transition(
-                hsm.on(attachment.AttachFailedEvent),
-                hsm.guard(_matches_attachment_group),
-                hsm.target("../activation_cleanup"),
-            ),
-            hsm.transition(
-                hsm.on(events.ActivatingFailedEvent),
-                hsm.guard(_matches_activation_failure),
+                hsm.on(_BotLifecycleFailedEvent),
+                hsm.guard(_matches_attach_terminal),
                 hsm.target("../activation_cleanup"),
             ),
         ),
@@ -1158,7 +1075,7 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),
-                hsm.effect(_clear_focus, _reset_reboot_cleanup),
+                hsm.effect(_clear_focus),
                 hsm.target("../reboot_deactivating"),
             ),
             hsm.transition(
@@ -1181,8 +1098,8 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.target("../reboot_deactivating"),
             ),
             hsm.transition(
-                hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
-                hsm.guard(_matches_attachment_group),
+                hsm.on(_BotLifecycleCompletedEvent, _BotLifecycleFailedEvent),
+                hsm.guard(_matches_detach_terminal),
                 hsm.target("../deactivation_cleanup"),
             ),
             hsm.transition(
@@ -1196,8 +1113,8 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),
-                hsm.effect(_clear_focus, _reset_reboot_cleanup),
-                hsm.target("../reboot_cleanup"),
+                hsm.effect(_clear_focus),
+                hsm.target("../reboot_cleanup_reset"),
             ),
             hsm.transition(
                 hsm.on(_BotCleanupDoneEvent),
@@ -1213,26 +1130,36 @@ class Bot(hsm.Instance, abc.ABC):
             "reboot_deactivating",
             hsm.activity(_deactivate_activity),
             hsm.transition(
-                hsm.on(attachment.DetachedEvent),
-                hsm.guard(_matches_attachment_group),
-                hsm.effect(_preserve_reboot_cleanup),
-                hsm.target("../reboot_cleanup"),
+                hsm.on(_BotLifecycleCompletedEvent),
+                hsm.guard(_matches_detach_terminal),
+                hsm.target("../reboot_cleanup_preserve"),
             ),
             hsm.transition(
-                hsm.on(attachment.DetachFailedEvent),
-                hsm.guard(_matches_attachment_group),
-                hsm.effect(_reset_reboot_cleanup),
-                hsm.target("../reboot_cleanup"),
+                hsm.on(_BotLifecycleFailedEvent),
+                hsm.guard(_matches_detach_terminal),
+                hsm.target("../reboot_cleanup_reset"),
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
-                hsm.effect(_reset_reboot_cleanup),
-                hsm.target("../reboot_cleanup"),
+                hsm.target("../reboot_cleanup_reset"),
             ),
         ),
         hsm.state(
-            "reboot_cleanup",
-            hsm.activity(_deactivation_cleanup_activity),
+            "reboot_cleanup_preserve",
+            hsm.activity(_reboot_cleanup_preserve_activity),
+            hsm.transition(
+                hsm.on(_BotCleanupDoneEvent),
+                hsm.guard(_matches_deactivation_cleanup_done),
+                hsm.target("../activating"),
+            ),
+            hsm.transition(
+                hsm.after(_bot_deactivation_timeout),
+                hsm.target("../degraded"),
+            ),
+        ),
+        hsm.state(
+            "reboot_cleanup_reset",
+            hsm.activity(_reboot_cleanup_reset_activity),
             hsm.transition(
                 hsm.on(_BotCleanupDoneEvent),
                 hsm.guard(_matches_deactivation_cleanup_done),
@@ -1278,27 +1205,9 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
-                hsm.transition(
-                    hsm.on(events.FocusDeviceEvent),
-                    hsm.guard(_ability_selected_configured_focus_device),
-                    hsm.effect(_dispatch_focus_device_action),
-                    hsm.target("../focused"),
-                ),
             ),
             hsm.state(
                 "focused",
-                hsm.transition(
-                    hsm.on(events.ClearFocusEvent),
-                    hsm.guard(_ability_selected_clear_focus),
-                    hsm.effect(_dispatch_clear_focus_action),
-                    hsm.target("../unfocused"),
-                ),
-                hsm.transition(
-                    hsm.on(events.FocusDeviceEvent),
-                    hsm.guard(_ability_selected_configured_focus_device),
-                    hsm.effect(_dispatch_focus_device_action),
-                    hsm.target("../focused"),
-                ),
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
@@ -1337,25 +1246,21 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),
                     hsm.guard(_processing_completed_with_focus),
-                    hsm.effect(_consume_bot_processing),
                     hsm.target("../focused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),
                     hsm.guard(_processing_completed),
-                    hsm.effect(_consume_bot_processing),
                     hsm.target("../unfocused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingFailedEvent),
                     hsm.guard(_processing_failed_with_focus),
-                    hsm.effect(_consume_bot_processing),
                     hsm.target("../focused"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingFailedEvent),
                     hsm.guard(_processing_failed),
-                    hsm.effect(_consume_bot_processing),
                     hsm.target("../unfocused"),
                 ),
                 hsm.transition(
@@ -1367,25 +1272,26 @@ class Bot(hsm.Instance, abc.ABC):
             ),
             hsm.state(
                 "cancelling_processing",
+                hsm.activity(_cancelling_processing_activity),
                 hsm.defer(events.InputEvent),
                 hsm.defer(cognition.InputEvent),
                 hsm.transition(
-                    hsm.on(cognition.CancelledEvent),
+                    hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
                     hsm.guard(_matches_cognition_cancelled),
                     hsm.guard(_has_focused_device),
-                    hsm.effect(_dispatch_processing_timeout_failure, _consume_bot_processing),
+                    hsm.effect(_dispatch_processing_timeout_failure),
                     hsm.target("../focused"),
                 ),
                 hsm.transition(
-                    hsm.on(cognition.CancelledEvent),
+                    hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
                     hsm.guard(_matches_cognition_cancelled),
-                    hsm.effect(_dispatch_processing_timeout_failure, _consume_bot_processing),
+                    hsm.effect(_dispatch_processing_timeout_failure),
                     hsm.target("../unfocused"),
                 ),
                 hsm.transition(
                     hsm.on(_BotProcessingCancelTimedOutEvent),
                     hsm.guard(_matches_processing_timeout),
-                    hsm.effect(_dispatch_processing_timeout_failure, _consume_bot_processing),
+                    hsm.effect(_dispatch_processing_timeout_failure),
                     hsm.target("/Bot/degraded"),
                 ),
             ),

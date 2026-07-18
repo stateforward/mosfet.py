@@ -20,6 +20,7 @@ import inspect
 import typing
 
 import hsm
+import pydantic
 import pytest
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_prefix_is_absent
@@ -419,6 +420,54 @@ def as_cognition(
     )
 
 
+class _StubCancelData(pydantic.BaseModel):
+    """Cancel payload for the contract stub cognition."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    operation_id: str = pydantic.Field(min_length=1)
+    token: str = pydantic.Field(min_length=1)
+
+
+_StubCancelEvent = hsm.Event[_StubCancelData](name="test.stub.cancel", schema=_StubCancelData)
+
+
+class _BaseStubCognition(abilities.Ability[cognition.InputData, typing.Any]):
+    """Cognition stub that records cancel dispatches and never produces output."""
+
+    submodel: typing.ClassVar[hsm.Model] = hsm.define(
+        "StubCognition",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+    )
+    received: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name in {_StubCancelEvent.name, processing.CancelEvent.name}:
+            self.received.append(event)
+        return super().dispatch(ctx, event)
+
+
+class StubCognition(_BaseStubCognition):
+    cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = _StubCancelEvent
+
+
+class DefaultCognition(_BaseStubCognition):
+    """No cancel_event override: the bot must fall back to processing.CancelEvent."""
+
+
+class TimeoutStubCognitionAgent(Bot):
+    _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
+
+    def __init__(self, cognition: abilities.Ability[cognition.InputData, typing.Any]) -> None:
+        super().__init__(devices=configured_devices("phone"), cognition=cognition)
+
+
 class BasicAgent(Bot):
     actions: list[cognition.types.OutputData]
     failures: list[bot.ProcessingFailedEventData]
@@ -502,6 +551,10 @@ class AbilityAgent(Bot):
 
 class TimeoutAbilityAgent(AbilityAgent):
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
+
+
+class QuickTimeoutAgent(AbilityAgent):
+    _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=20)
 
 
 class FastDeactivationTimeoutAgent(BasicAgent):
@@ -601,21 +654,37 @@ async def start_bot_with_devices(active_bot: Bot) -> World:
     return world
 
 
-def test_cognition_reboot_request_cycles_bot_lifecycle() -> None:
-    async def run() -> tuple[str, str, str, int, str]:
-        active_bot = basic_agent()
-        world = await start_bot_with_devices(active_bot)
-        assert active_bot.state().startswith("/Bot/active/")
-        operation = bot_module._BotProcessingOperation()
-        await bot_module._BotProcessingOperation.started(
-            active_bot.context(),
-            operation,
-            owner=active_bot,
-            request_id="abandoned-turn",
-            timeout=datetime.timedelta(minutes=1),
+def test_cognition_reboot_request_cycles_bot_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations: list[object] = []
+    started = bot_module._BotProcessingOperation.started
+
+    @classmethod
+    async def spy_started(
+        cls,
+        ctx: hsm.Context,
+        operation: bot_module._BotProcessingOperation,
+        **kwargs: typing.Any,
+    ) -> bot_module._BotProcessingOperation:
+        operations.append(operation)
+        return await started(ctx, operation, **kwargs)
+
+    monkeypatch.setattr(bot_module._BotProcessingOperation, "started", spy_started)
+
+    async def run() -> tuple[str, str, str, bool, list[bot.ProcessingFailedEventData]]:
+        release = asyncio.Event()
+        ability = BlockingSequenceAbility(
+            release=release, block_on_call=1, outputs=(no_output("turn"), no_output("turn"))
         )
-        assert operation.state() == "/BotProcessingTimer/waiting"
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability)
+        world = await start_bot_with_devices(active_bot)
         cognition_ability = active_bot._cognition
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/active/processing" and len(ability.calls) == 1)
         _ = await hsm.dispatch(
             world.context,
             active_bot,
@@ -627,22 +696,32 @@ def test_cognition_reboot_request_cycles_bot_lifecycle() -> None:
             ),
         )
         reboot_state = active_bot.state()
-        await wait_until(lambda: active_bot.state().startswith("/Bot/active/"))
-        instances = active_bot.context().value(hsm.Keys.Instances)
-        processing_actor_count = (
-            sum(isinstance(actor, bot_module._BotProcessingOperation) for actor in instances.values())
-            if isinstance(instances, collections.abc.Mapping)
-            else 0
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        timer_stopped = bool(operations) and all(operation.state() == "/BotProcessingTimer" for operation in operations)
+        _ = release.set()
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=4)),
         )
-        return reboot_state, active_bot.state(), cognition_ability.state(), processing_actor_count, operation.state()
+        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
+        return (
+            reboot_state,
+            active_bot.state(),
+            cognition_ability.state(),
+            timer_stopped,
+            active_bot.failures,
+            active_bot.actions,
+        )
 
-    reboot_state, final_state, cognition_state, processing_actor_count, operation_state = asyncio.run(run())
+    reboot_state, final_state, cognition_state, timer_stopped, failures, actions = asyncio.run(run())
 
-    assert reboot_state in {"/Bot/reboot_deactivating", "/Bot/reboot_cleanup"}
-    assert final_state == "/Bot/active/unfocused"
+    assert reboot_state in {"/Bot/reboot_deactivating", "/Bot/reboot_cleanup_preserve", "/Bot/reboot_cleanup_reset"}
+    assert final_state == "/Bot/active/focused"
     assert cognition_state.endswith("/idle")
-    assert processing_actor_count == 0
-    assert operation_state == "/BotProcessingTimer"
+    # Exiting processing stops the interrupted turn's timer; it can never fire into a later turn.
+    assert timer_stopped
+    assert failures == []
+    assert actions == [no_output("turn")]
 
 
 def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts(
@@ -1287,19 +1366,26 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "/Bot/deactivating" in model.members
     assert "/Bot/deactivation_cleanup" in model.members
     assert "/Bot/reboot_deactivating" in model.members
-    assert "/Bot/reboot_cleanup" in model.members
+    assert "/Bot/reboot_cleanup_preserve" in model.members
+    assert "/Bot/reboot_cleanup_reset" in model.members
     assert "/Bot/active" in model.members
     assert "/Bot/active/unfocused" in model.members
     assert "/Bot/active/focused" in model.members
     assert "/Bot/active/processing" in model.members
+    assert "/Bot/active/cancelling_processing" in model.members
     assert "bot.activate" in transitions["/Bot/inactive"]
-    assert "attachment.attach.complete" in transitions["/Bot/activating"]
-    assert "attachment.attach.failed" in transitions["/Bot/activating"]
-    assert "bot.activating.failed" in transitions["/Bot/activating"]
+    assert "bot.lifecycle.completed" in transitions["/Bot/activating"]
+    assert "bot.lifecycle.failed" in transitions["/Bot/activating"]
+    assert "attachment.attach.complete" not in transitions["/Bot/activating"]
+    assert "bot.activating.failed" not in transitions["/Bot/activating"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/activation_cleanup"]
-    assert "attachment.detached" in transitions["/Bot/deactivating"]
-    assert "attachment.detach.failed" in transitions["/Bot/deactivating"]
+    assert "bot.lifecycle.completed" in transitions["/Bot/deactivating"]
+    assert "bot.lifecycle.failed" in transitions["/Bot/deactivating"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/deactivation_cleanup"]
+    assert "bot.lifecycle.completed" in transitions["/Bot/reboot_deactivating"]
+    assert "bot.lifecycle.failed" in transitions["/Bot/reboot_deactivating"]
+    assert "bot.lifecycle.cleanup.done" in transitions["/Bot/reboot_cleanup_preserve"]
+    assert "bot.lifecycle.cleanup.done" in transitions["/Bot/reboot_cleanup_reset"]
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivating"])
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivation_cleanup"])
     assert "world.sound" in transitions["/Bot/active"]
@@ -1319,8 +1405,14 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.ability.cognition.input" in deferred_map["/Bot/active/processing"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
+    assert "bot.focus_device" in transitions["/Bot/active/processing"]
+    assert "bot.clear_focus" in transitions["/Bot/active/processing"]
     assert "bot.processing.completed" in transitions["/Bot/active/processing"]
     assert "bot.processing.failed" in transitions["/Bot/active/processing"]
+    assert "bot.processing.timed_out" in transitions["/Bot/active/processing"]
+    assert "bot.ability.cognition.cancelled" in transitions["/Bot/active/cancelling_processing"]
+    assert "bot.ability.processing.cancelled" in transitions["/Bot/active/cancelling_processing"]
+    assert "bot.processing.cancel.timed_out" in transitions["/Bot/active/cancelling_processing"]
 
 
 def test_unfocused_agent_focuses_target_device_before_processing_input() -> None:
@@ -1496,8 +1588,9 @@ def test_bot_snapshot_merges_focused_device_transitions() -> None:
 
     assert phone_device.AnswerCallEvent.name not in before_focus
     assert phone_device.DeclineCallEvent.name not in before_focus
-    assert bot.FocusDeviceEvent.name in after_focus
-    assert bot.ClearFocusEvent.name in after_focus
+    # Focus control is a processing-turn affordance: it appears only in the processing snapshot.
+    assert bot.FocusDeviceEvent.name not in after_focus
+    assert bot.ClearFocusEvent.name not in after_focus
     assert phone_device.AnswerCallEvent.name in after_focus
     assert phone_device.DeclineCallEvent.name in after_focus
 
@@ -3024,6 +3117,105 @@ def test_bot_processing_cancellation_timeout_fails_closed_and_rejects_next_turn(
     assert calls == [3]
     assert len(failures) == 1
     assert "timed out" in failures[0].message
+
+
+def test_completed_turn_cancels_processing_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+    operations: list[object] = []
+    started = bot_module._BotProcessingOperation.started
+
+    @classmethod
+    async def spy_started(
+        cls,
+        ctx: hsm.Context,
+        operation: bot_module._BotProcessingOperation,
+        **kwargs: typing.Any,
+    ) -> bot_module._BotProcessingOperation:
+        operations.append(operation)
+        return await started(ctx, operation, **kwargs)
+
+    monkeypatch.setattr(bot_module._BotProcessingOperation, "started", spy_started)
+
+    async def run() -> tuple[list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+        active_bot = QuickTimeoutAgent(devices=configured_devices("phone"), cognition=IgnoreAbility())
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and bool(active_bot.actions))
+        await asyncio.sleep(0.05)  # well past the 20ms turn timeout
+        return active_bot.failures, active_bot.actions
+
+    failures, actions = asyncio.run(run())
+
+    timer_stopped = bool(operations) and all(operation.state() == "/BotProcessingTimer" for operation in operations)
+
+    # Completing the turn exits processing; the owning activity stops the timer explicitly.
+    assert timer_stopped
+    assert failures == []
+    assert actions == [no_output("priority:3")]
+
+
+def test_bot_timeout_cancel_uses_cognition_cancel_event_contract() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        cognition_ability = StubCognition()
+        active_bot = TimeoutStubCognitionAgent(cognition_ability)
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: bool(cognition_ability.received))
+        return cognition_ability.received
+
+    received = asyncio.run(run())
+
+    assert [event.name for event in received] == [_StubCancelEvent.name]
+    data = received[0].data
+    assert isinstance(data, _StubCancelData)
+    assert data.operation_id
+    assert data.token
+
+
+def test_bot_timeout_cancel_falls_back_to_processing_cancel_event() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        cognition_ability = DefaultCognition()
+        active_bot = TimeoutStubCognitionAgent(cognition_ability)
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: bool(cognition_ability.received))
+        return cognition_ability.received
+
+    received = asyncio.run(run())
+
+    assert [event.name for event in received] == [processing.CancelEvent.name]
+    data = received[0].data
+    assert isinstance(data, processing.CancelData)
+    assert data.operation_id
+    assert data.token
+
+
+def test_attach_is_idempotent_for_started_bot() -> None:
+    async def run() -> str:
+        active_bot = basic_agent()
+        world = await start_bot_with_devices(active_bot)
+        await wait_until(lambda: active_bot.state().startswith("/Bot/active/"))
+        _ = await active_bot.attach(world)
+        await asyncio.sleep(0)
+        return active_bot.state()
+
+    assert asyncio.run(run()).startswith("/Bot/active/")
+
+
+def test_detach_is_idempotent_for_unstarted_bot() -> None:
+    async def run() -> None:
+        detached = basic_agent()
+        _ = await detached.detach(World())
+
+    asyncio.run(run())
 
 
 def test_bot_activation_dispatches_completion_after_queueing_device_notifications() -> None:

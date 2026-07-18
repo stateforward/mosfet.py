@@ -29,13 +29,6 @@ _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {
         "_READING_CLASSIFIED_METADATA_KEY": 6,
         "_READING_INPUT_METADATA_KEY": 4,
     },
-    "bot.py": {
-        "_LIFECYCLE_OPERATION_METADATA_KEY": 6,
-        "_REBOOT_CLEANUP_METADATA_KEY": 5,
-        "_STARTED_ABILITIES_METADATA_KEY": 3,
-        "_STARTED_ATTACHMENT_GROUP_METADATA_KEY": 3,
-        "_STARTED_DEVICES_METADATA_KEY": 3,
-    },
     "device/device.py": {"_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY": 7},
     "devices/phone/phone.py": {"_PHONE_CALL_ID_METADATA_KEY": 2},
     "habit/verify.py": {"operation:iteration": 1},
