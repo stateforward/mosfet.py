@@ -1,6 +1,5 @@
 from bot import abilities
 import bot
-from bot.abilities import ability
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import decoding
@@ -405,18 +404,18 @@ def test_thin_conversation_ends_after_participation() -> None:
     async def run() -> tuple[
         list[participating.InputData],
         list[conversation.Response],
-        conversation.ParticipatedTurn | None,
+        conversation.ParticipatedTurn,
         str,
     ]:
         participating_ability = RecordingParticipating()
         conversation_ability = RecordingConversation(participating=participating_ability)
         await start_conversation(conversation_ability)
-        _ = await conversation_ability.apply(text_message())
+        participated = await conversation.contribute_conversation_turn(conversation_ability, text_message())
         await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
         return (
             participating_ability.calls,
             conversation_ability.outputs,
-            conversation_ability.last_participated_turn(),
+            participated,
             conversation_ability.state(),
         )
 
@@ -426,7 +425,6 @@ def test_thin_conversation_ends_after_participation() -> None:
     assert len(outputs) == 1
     assert outputs[0].content is None
     assert outputs[0].conversation_ref == "support-call"
-    assert participated is not None
     assert participated.decoded_text == "hello"
     assert state.endswith("/silent")
     assert "/active/deciding" not in state
@@ -435,19 +433,18 @@ def test_thin_conversation_ends_after_participation() -> None:
 
 
 def test_voice_conversation_contribution_is_thin() -> None:
-    async def run() -> tuple[list[bytes], list[conversation.Response], conversation.ParticipatedTurn | None]:
+    async def run() -> tuple[list[bytes], list[conversation.Response], conversation.ParticipatedTurn]:
         decoder = RecordingAudioStimulusDecoder()
         conversation_ability = RecordingVoiceConversation(decoder=decoder)
         await start_conversation(conversation_ability)
-        _ = await conversation_ability.apply(voice_message())
+        participated = await conversation.contribute_conversation_turn(conversation_ability, voice_message())
         await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
-        return decoder.inputs, conversation_ability.outputs, conversation_ability.last_participated_turn()
+        return decoder.inputs, conversation_ability.outputs, participated
 
     decoding_inputs, outputs, participated = asyncio.run(run())
     assert decoding_inputs == [b"\x01\x00"]
     assert len(outputs) == 1
     assert outputs[0].content is None
-    assert participated is not None
     assert participated.decoded_text == "hello"
 
 
@@ -546,8 +543,14 @@ def test_host_correlation_metadata_is_not_owner_visible(monkeypatch: pytest.Monk
 
     metadata = asyncio.run(run())
 
-    assert all(conversation_impl.conversation_result_metadata_key not in item for item in metadata)
-    assert all(ability.TERMINAL_RESULT_METADATA_KEY not in item for item in metadata)
+    # Host waiters and stage context must not leak into owner-visible event.metadata.
+    forbidden = {
+        "bot.conversation.result",
+        "bot.ability.terminal.result",
+        "bot.conversation.message",
+        "bot.conversation.decoded",
+    }
+    assert all(forbidden.isdisjoint(item) for item in metadata)
 
 
 def test_start_ability_tree_waits_for_attachment_events(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -559,11 +562,7 @@ def test_start_ability_tree_waits_for_attachment_events(monkeypatch: pytest.Monk
 
         monkeypatch.setattr(conversation_ability, "state", fail_state_read)
         await start_conversation(conversation_ability)
-        _ = await conversation_ability.apply(text_message())
-        await wait_until(lambda: conversation_ability.last_participated_turn() is not None)
-        participated = conversation_ability.last_participated_turn()
-        assert participated is not None
-        return participated
+        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
 
     participated = asyncio.run(run())
 
@@ -585,11 +584,11 @@ def test_start_ability_tree_surfaces_typed_attachment_failure() -> None:
 
 
 def test_conversation_detach_clears_prior_turn_state() -> None:
-    async def run() -> tuple[conversation.ParticipatedTurn | None, conversation.Snapshot]:
+    async def run() -> conversation.Snapshot:
         conversation_ability = RecordingConversation()
         await start_conversation(conversation_ability)
-        _ = await conversation_ability.apply(text_message())
-        await wait_until(lambda: conversation_ability.last_participated_turn() is not None)
+        _ = await conversation.contribute_conversation_turn(conversation_ability, text_message())
+        await wait_until(lambda: bool(conversation_ability.outputs))
         owner = ability_terminal_owner(conversation_ability)
         assert owner is not None
         _ = await conversation_ability.detach(
@@ -603,11 +602,10 @@ def test_conversation_detach_clears_prior_turn_state() -> None:
             conversation.SnapshotRequestEvent.with_data(conversation.SnapshotRequest(request_ref="after-detach")),
         )
         await wait_until(lambda: bool(conversation_ability.snapshots))
-        return conversation_ability.last_participated_turn(), conversation_ability.snapshots[-1]
+        return conversation_ability.snapshots[-1]
 
-    participated, snapshot = asyncio.run(run())
+    snapshot = asyncio.run(run())
 
-    assert participated is None
     assert snapshot.conversation_ref is None
     assert snapshot.participants == ()
 

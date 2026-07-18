@@ -26,13 +26,6 @@ from bot.telemetry import observer
 Stage: typ.TypeAlias = typ.Literal["decoding", "participating"]
 ConversationChildKind: typ.TypeAlias = typ.Literal["decoding", "participating"]
 TContent = typ.TypeVar("TContent", covariant=True)
-# Durable domain memory of the last contribution terminal (not in-flight bridge state).
-_LAST_PARTICIPATED_ATTRIBUTE = "conversation_last_participated"
-# Event-chain keys for async child stages (HSM-COMPLETION-001). Never instance.set.
-_CONVERSATION_MESSAGE_METADATA_KEY = "bot.conversation.message"
-_CONVERSATION_DECODED_METADATA_KEY = "bot.conversation.decoded"
-conversation_result_metadata_key = "bot.conversation.result"
-_CONVERSATION_CHILD_ID_MARKER = ":conversation:"
 _CONVERSATION_TEXT_INPUT_EXAMPLE: JsonDict = {
     "conversation_ref": "support-call",
     "self_participant_ref": "bot",
@@ -372,43 +365,6 @@ def _has_conversation_operation_id(
     return _conversation_operation_id(event) is not None
 
 
-def _public_conversation_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    """Metadata safe on private completions and host terminals (no stage payloads)."""
-
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key
-        not in (
-            _CONVERSATION_MESSAGE_METADATA_KEY,
-            _CONVERSATION_DECODED_METADATA_KEY,
-            conversation_result_metadata_key,
-        )
-    }
-
-
-def _conversation_child_operation_id(event: hsm.Event[typ.Any], kind: ConversationChildKind) -> str:
-    operation_id = event.id if event.id else "operation"
-    return f"{operation_id}{_CONVERSATION_CHILD_ID_MARKER}{kind}"
-
-
-conversation_child_operation_id = _conversation_child_operation_id
-
-
-def _operation_id_from_conversation_child_event(
-    event: hsm.Event[typ.Any],
-    kind: ConversationChildKind,
-) -> str | None:
-    child_id = event.id if event.id else None
-    if child_id is None:
-        return None
-    suffix = f"{_CONVERSATION_CHILD_ID_MARKER}{kind}"
-    if child_id.endswith(suffix):
-        parent = child_id[: -len(suffix)]
-        return parent or None
-    return child_id
-
-
 def _conversation_event_with_operation(
     event: hsm.Event[typ.Any],
     source: hsm.Event[typ.Any],
@@ -416,27 +372,15 @@ def _conversation_event_with_operation(
     operation_id: str | None = None,
     public_metadata: bool = True,
 ) -> hsm.Event[typ.Any]:
+    del public_metadata
     resolved_operation_id = operation_id if operation_id is not None else _conversation_operation_id(source)
     if resolved_operation_id is not None:
         event = event.with_data_and_id(event.data, resolved_operation_id)
-    metadata = dict(source.metadata)
-    if public_metadata:
-        metadata = _public_conversation_metadata(metadata)
-    return dataclasses.replace(event, metadata=metadata)
+    # Telemetry only: never stage payloads or host Futures.
+    return dataclasses.replace(event, metadata=dict(source.metadata))
 
 
 conversation_event_with_operation = _conversation_event_with_operation
-
-
-def _clear_last_participated_on_input(
-    ctx: hsm.Context,
-    instance: "Conversation[typ.Any, typ.Any]",
-    event: hsm.Event[typ.Any],
-) -> None:
-    """Reset durable last-contribution memory when a new turn starts."""
-
-    del ctx, event
-    _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
 
 
 def _has_conversation_decoded(
@@ -511,11 +455,9 @@ def _dispatch_conversation_phase_failure(
     *,
     kind: ConversationChildKind | None = None,
 ) -> None:
-    operation_id = (
-        _operation_id_from_conversation_child_event(source, kind)
-        if kind is not None
-        else _conversation_operation_id(source)
-    )
+    del kind
+    # Child terminals carry the parent turn id; private phase failures keep that id.
+    operation_id = _conversation_operation_id(source)
     _ = hsm.dispatch(
         ctx,
         instance,
@@ -534,18 +476,22 @@ def _matches_conversation_child_event(
     terminal_kind: str,
     kind: ConversationChildKind,
 ) -> bool:
+    """Match a child ability terminal for the active turn.
+
+    Routing is explicit private completions after this match. Correlation is:
+    child source + parent target + shared turn id (no id-suffix role markers).
+    """
+
     child = instance.child_for_kind(kind)
     if child is None:
         return False
     terminal_event = child.output_event if terminal_kind == "output" else child.failed_event
-    child_id = event.id if event.id else None
-    suffix = f"{_CONVERSATION_CHILD_ID_MARKER}{kind}"
+    turn_id = event.id if event.id else None
     return (
         event.name == terminal_event.name
         and event.source == hsm.id(child)
         and event.target == hsm.id(instance)
-        and child_id is not None
-        and child_id.endswith(suffix)
+        and turn_id is not None
     )
 
 
@@ -566,9 +512,9 @@ def _dispatch_conversation_terminal_failure(
     source: hsm.Event[typ.Any],
     failure: FailureData,
 ) -> None:
-    result = source.metadata.get(conversation_result_metadata_key)
-    if isinstance(result, asyncio.Future) and not result.done():
-        result.set_exception(RuntimeError(failure.message))
+    operation_id = _conversation_operation_id(source)
+    if operation_id is not None:
+        instance.fail_contribution_waiter(operation_id, RuntimeError(failure.message))
     terminal = _conversation_event_with_operation(instance.failed_event.with_data(failure), source)
     terminal = dataclasses.replace(terminal, source=hsm.id(instance))
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
@@ -686,6 +632,10 @@ class Conversation(
     _attachment_group: attachment.Group
     _conversation_ref: str | None
     _participants_by_ref: dict[str, participating.ParticipantSnapshot]
+    # Single-flight stage context for the deferred turn (not event.metadata).
+    _stage_message: AnyMessage | None
+    _stage_decoded: DecodedTurn | None
+    _contribution_waiters: dict[str, asyncio.Future[object]]
 
     def __init__(
         self,
@@ -703,18 +653,39 @@ class Conversation(
         self._attachment_group = attachment.Group(self._decoding, self._participating)
         self._conversation_ref = None
         self._participants_by_ref = {}
+        self._stage_message = None
+        self._stage_decoded = None
+        self._contribution_waiters = {}
+
+    def register_contribution_waiter(self, operation_id: str, waiter: asyncio.Future[object]) -> None:
+        """Register a host Future completed with ParticipatedTurn for ``operation_id``."""
+
+        if not operation_id:
+            raise ValueError("operation_id is required.")
+        self._contribution_waiters[operation_id] = waiter
+
+    def clear_contribution_waiter(self, operation_id: str) -> None:
+        """Drop a host contribution waiter if it is still registered."""
+
+        _ = self._contribution_waiters.pop(operation_id, None)
+
+    def complete_contribution_waiter(self, operation_id: str, participated: ParticipatedTurn) -> None:
+        """Complete a host contribution waiter with the participated turn."""
+
+        waiter = self._contribution_waiters.pop(operation_id, None)
+        if isinstance(waiter, asyncio.Future) and not waiter.done():
+            waiter.set_result(participated)
+
+    def fail_contribution_waiter(self, operation_id: str, error: BaseException) -> None:
+        """Fail a host contribution waiter."""
+
+        waiter = self._contribution_waiters.pop(operation_id, None)
+        if isinstance(waiter, asyncio.Future) and not waiter.done():
+            waiter.set_exception(error)
 
     @abc.abstractmethod
     def _conversation_kind(self) -> str:
         """Return the concrete conversation modality marker."""
-
-    def last_participated_turn(self) -> ParticipatedTurn | None:
-        """Return the participated turn from the most recent contribution terminal, if any."""
-
-        value, ok = typ.cast(tuple[object, bool], self.get(_LAST_PARTICIPATED_ATTRIBUTE))
-        if ok and isinstance(value, ParticipatedTurn):
-            return value
-        return None
 
     def _dispatch_child_ability(
         self,
@@ -724,16 +695,16 @@ class Conversation(
         kind: ConversationChildKind,
         child: ability.Ability[typ.Any, typ.Any],
         input: object,
-        stage_metadata: dict[str, object],
     ) -> None:
-        """Dispatch a child ability; stage provenance rides child event metadata/id suffix."""
+        """Dispatch a child ability with the parent turn id; stage context is on self."""
 
-        operation_id = _conversation_child_operation_id(source_event, kind)
-        metadata = dict(source_event.metadata)
-        metadata.update(stage_metadata)
+        del kind
+        operation_id = _conversation_operation_id(source_event) or "operation"
         child_event = dataclasses.replace(
             child.input_event.with_data_and_id(input, operation_id),
-            metadata=metadata,
+            source=hsm.id(self),
+            target=hsm.id(child),
+            metadata=dict(source_event.metadata),
         )
         _ = hsm.dispatch(ctx, child, child_event)
 
@@ -759,21 +730,24 @@ class Conversation(
     def _start_decode_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
         input = event.data
         assert isinstance(input, Message)
+        self._stage_message = typ.cast(AnyMessage, input)
+        self._stage_decoded = None
         self._dispatch_child_ability(
             ctx,
             event,
             kind="decoding",
             child=typ.cast(ability.Ability[typ.Any, typ.Any], self._decoding),
             input=input.content,
-            stage_metadata={_CONVERSATION_MESSAGE_METADATA_KEY: input},
         )
 
     def _complete_decode_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
-        message = event.metadata.get(_CONVERSATION_MESSAGE_METADATA_KEY)
+        """Translate a decoding-child terminal into a private decoding completion event."""
+
+        message = self._stage_message
         if not isinstance(message, Message):
             return
         input = typ.cast(AnyMessage, message)
-        operation_id = _operation_id_from_conversation_child_event(event, "decoding")
+        operation_id = _conversation_operation_id(event)
         if not isinstance(event.data, str):
             failure = FailureData(stage="decoding", message="Conversation decoding produced a non-text output.")
             _dispatch_conversation_phase_failure(
@@ -818,6 +792,7 @@ class Conversation(
     def _start_participate_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
         decoded = event.data
         assert isinstance(decoded, DecodedTurn)
+        self._stage_decoded = decoded
         input = decoded.input
         participating_input = participating.InputData(
             conversation_ref=input.conversation_ref,
@@ -831,14 +806,15 @@ class Conversation(
             kind="participating",
             child=typ.cast(ability.Ability[typ.Any, typ.Any], self._participating),
             input=participating_input,
-            stage_metadata={_CONVERSATION_DECODED_METADATA_KEY: decoded},
         )
 
     def _complete_participate_phase(self, ctx: hsm.Context, event: hsm.Event[typ.Any]) -> None:
-        decoded = event.metadata.get(_CONVERSATION_DECODED_METADATA_KEY)
+        """Translate a participating-child terminal into a private participating completion event."""
+
+        decoded = self._stage_decoded
         if not isinstance(decoded, DecodedTurn):
             return
-        operation_id = _operation_id_from_conversation_child_event(event, "participating")
+        operation_id = _conversation_operation_id(event)
         output = event.data
         if not isinstance(output, participating.OutputData):
             failure = FailureData(stage="participating", message="Conversation participation produced invalid output.")
@@ -892,8 +868,8 @@ class Conversation(
 
         participated = event.data
         assert isinstance(participated, ParticipatedTurn)
-        # Durable domain memory of the last contribution (kept intentionally).
-        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, participated)
+        instance._stage_message = None
+        instance._stage_decoded = None
         output = Conversation._build_contribution_response(instance, participated)
         if not _matches_conversation_output_contract(instance, output):
             failure = FailureData(
@@ -903,9 +879,9 @@ class Conversation(
             _dispatch_conversation_terminal_failure(ctx, instance, event, failure)
             return
         assert isinstance(output, Response)
-        result = event.metadata.get(conversation_result_metadata_key)
-        if isinstance(result, asyncio.Future) and not result.done():
-            result.set_result(participated)
+        operation_id = _conversation_operation_id(event)
+        if operation_id is not None:
+            instance.complete_contribution_waiter(operation_id, participated)
         _dispatch_conversation_terminal_output(ctx, instance, event, output)
 
     @staticmethod
@@ -927,9 +903,11 @@ class Conversation(
         event: hsm.Event[typ.Any],
     ) -> None:
         del ctx, event
-        _ = instance.set(_LAST_PARTICIPATED_ATTRIBUTE, None)
         instance._conversation_ref = None
         instance._participants_by_ref = {}
+        instance._stage_message = None
+        instance._stage_decoded = None
+        instance._contribution_waiters.clear()
 
     @staticmethod
     def _dispatch_conversation_snapshot(
@@ -1018,7 +996,6 @@ class Conversation(
         return hsm.define(
             root_name,
             hsm.initial(hsm.target(f"{root_path}/initializing")),
-            hsm.attribute(_LAST_PARTICIPATED_ATTRIBUTE),
             hsm.transition(
                 hsm.on(cls.snapshot_request_event),
                 hsm.guard(_has_conversation_snapshot_request),
@@ -1040,10 +1017,7 @@ class Conversation(
                 hsm.transition(
                     hsm.on(input_event),
                     hsm.guard(_has_correlated_input),
-                    hsm.effect(
-                        _clear_last_participated_on_input,
-                        cls._record_participant_states,
-                    ),
+                    hsm.effect(cls._record_participant_states),
                     hsm.target(f"{root_path}/active/decoding"),
                 ),
             ),
@@ -1062,11 +1036,7 @@ class Conversation(
                 hsm.state(
                     "decoding",
                     hsm.entry(cls._start_decoding),
-                    hsm.transition(
-                        hsm.on(_ConversationDecodingCompletedEvent),
-                        hsm.guard(_has_conversation_decoded),
-                        hsm.target(f"{root_path}/active/participating"),
-                    ),
+                    # Child ability terminals → private completion events (explicit progression).
                     hsm.transition(
                         hsm.on(hsm.AnyEvent),
                         hsm.guard(_matches_decoding_child_output),
@@ -1077,16 +1047,15 @@ class Conversation(
                         hsm.guard(_matches_decoding_child_failure),
                         hsm.effect(cls._fail_decoding_child),
                     ),
+                    hsm.transition(
+                        hsm.on(_ConversationDecodingCompletedEvent),
+                        hsm.guard(_has_conversation_decoded),
+                        hsm.target(f"{root_path}/active/participating"),
+                    ),
                 ),
                 hsm.state(
                     "participating",
                     hsm.entry(cls._start_participating),
-                    hsm.transition(
-                        hsm.on(_ConversationParticipatingCompletedEvent),
-                        hsm.guard(_has_conversation_participated),
-                        hsm.effect(Conversation._dispatch_contribution_output),
-                        hsm.target(f"{root_path}/silent"),
-                    ),
                     hsm.transition(
                         hsm.on(hsm.AnyEvent),
                         hsm.guard(_matches_participating_child_output),
@@ -1096,6 +1065,12 @@ class Conversation(
                         hsm.on(hsm.AnyEvent),
                         hsm.guard(_matches_participating_child_failure),
                         hsm.effect(cls._fail_participating_child),
+                    ),
+                    hsm.transition(
+                        hsm.on(_ConversationParticipatingCompletedEvent),
+                        hsm.guard(_has_conversation_participated),
+                        hsm.effect(Conversation._dispatch_contribution_output),
+                        hsm.target(f"{root_path}/silent"),
                     ),
                 ),
             ),

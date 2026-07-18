@@ -450,7 +450,7 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> No
     assert getattr(sound, "channels", None) == 1
     assert getattr(sound, "audio", b"").startswith(b"RIFF")
     assert getattr(sound, "audio", b"") == phone_device.RING_SOUND_WAV
-    assert inside_events[0].metadata.get("bot.phone.call_id") == "call-123"
+    assert inside_events[0].id == "call-123"
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 

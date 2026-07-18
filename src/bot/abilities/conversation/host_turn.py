@@ -6,6 +6,7 @@ equivalent runtime boundary).
 
 from __future__ import annotations
 
+import bot
 from bot import abilities
 
 from .. import ability
@@ -22,12 +23,10 @@ from .conversation import (
     Response,
     TextMessage,
     VoiceMessage,
-    conversation_result_metadata_key,
 )
 
 import asyncio
 import collections.abc
-import dataclasses
 import typing
 import uuid
 
@@ -67,7 +66,7 @@ def _cognition_input_for_participated(
         target_device=_target_device_ref(participated),
     )
     return abilities.cognition.InputData(
-        stimulus=shaped.input,
+        stimulus=typing.cast(bot.BotInputData, shaped.input),
         abilities=(cognition,),
         focus=None,
     )
@@ -84,12 +83,13 @@ async def _apply_and_await_output(
 
     operation_id = uuid.uuid4().hex
     result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
-    input_event = dataclasses.replace(
-        machine.input_event.with_data_and_id(input, operation_id),
-        metadata={ability.TERMINAL_RESULT_METADATA_KEY: result},
-    )
-    _ = await hsm.dispatch(ctx, machine, input_event)
-    terminal = await asyncio.wait_for(result, timeout=5.0)
+    machine.register_terminal_waiter(operation_id, result)
+    input_event = machine.input_event.with_data_and_id(input, operation_id)
+    try:
+        _ = await hsm.dispatch(ctx, machine, input_event)
+        terminal = await asyncio.wait_for(result, timeout=5.0)
+    finally:
+        machine.clear_terminal_waiter(operation_id)
     if terminal.name == machine.failed_event.name:
         raise RuntimeError(f"{type(machine).__name__} failed during host conversation turn: {terminal.data!r}")
     if not accept(terminal.data):
@@ -108,12 +108,18 @@ async def contribute_conversation_turn(
     context = conversation.context() if ctx is None else ctx
     operation_id = uuid.uuid4().hex
     result: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-    input_event = dataclasses.replace(
-        conversation.input_event.with_data_and_id(message, operation_id),
-        metadata={conversation_result_metadata_key: result},
-    )
-    _ = await hsm.dispatch(context, conversation, input_event)
-    participated = await asyncio.wait_for(result, timeout=5.0)
+    register = getattr(conversation, "register_contribution_waiter", None)
+    if not callable(register):
+        raise TypeError("Conversation must support register_contribution_waiter for host composition.")
+    register(operation_id, result)
+    input_event = conversation.input_event.with_data_and_id(message, operation_id)
+    try:
+        _ = await hsm.dispatch(context, conversation, input_event)
+        participated = await asyncio.wait_for(result, timeout=5.0)
+    finally:
+        clear = getattr(conversation, "clear_contribution_waiter", None)
+        if callable(clear):
+            clear(operation_id)
     if not isinstance(participated, ParticipatedTurn):
         raise RuntimeError("Conversation produced no participated turn.")
     return participated

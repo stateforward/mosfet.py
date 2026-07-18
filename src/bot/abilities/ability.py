@@ -17,8 +17,6 @@ from bot.telemetry import observer
 TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
 _DataType = type[object] | tuple[type[object], ...] | None
-_COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY = "bot.ability.attachment.operation"
-TERMINAL_RESULT_METADATA_KEY = "bot.ability.terminal.result"
 
 
 class _CompositeAttachmentTerminalData(pydantic.BaseModel):
@@ -69,9 +67,9 @@ class _CompositeAttachmentReply(hsm.Instance):
         ) -> bool:
             del ctx
             data = event.data
+            # Reply actor is one-shot and closure-bound to ``operation``; correlate by envelope.
             return (
-                event.metadata.get(_COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY) is operation
-                and event.id == operation.request_id
+                event.id == operation.request_id
                 and event.source == hsm.id(operation.source)
                 and event.target == hsm.id(instance)
                 and isinstance(data, (attachment.AttachCompleteData, attachment.DetachedData, attachment.FailedData))
@@ -322,6 +320,24 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     input_data_type: typing.ClassVar[_DataType] = None
     output_data_type: typing.ClassVar[_DataType] = None
     submodel: typing.ClassVar[hsm.Model | None] = None
+    # Host-boundary waiters keyed by operation id (not event.metadata). Single-flight hosts register before dispatch.
+    _terminal_waiters: dict[str, asyncio.Future[hsm.Event[typing.Any]]]
+
+    def register_terminal_waiter(
+        self,
+        operation_id: str,
+        waiter: asyncio.Future[hsm.Event[typing.Any]],
+    ) -> None:
+        """Register a host Future completed when this ability emits a terminal for ``operation_id``."""
+
+        if not operation_id:
+            raise ValueError("operation_id is required.")
+        self._terminal_waiters[operation_id] = waiter
+
+    def clear_terminal_waiter(self, operation_id: str) -> None:
+        """Drop a host terminal waiter if it is still registered."""
+
+        _ = self._terminal_waiters.pop(operation_id, None)
 
     @staticmethod
     def _has_terminal_event(
@@ -340,11 +356,10 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> None:
         terminal = event.data
         assert isinstance(terminal, hsm.Event)
-        result = terminal.metadata.get(TERMINAL_RESULT_METADATA_KEY)
-        if isinstance(result, asyncio.Future) and not result.done():
-            result.set_result(terminal)
-        metadata = dict(terminal.metadata)
-        _ = metadata.pop(TERMINAL_RESULT_METADATA_KEY, None)
+        operation_id = terminal.id if terminal.id else ""
+        waiter = instance._terminal_waiters.pop(operation_id, None) if operation_id else None
+        if isinstance(waiter, asyncio.Future) and not waiter.done():
+            waiter.set_result(terminal)
         if not instance._attachments:
             return
         owner = instance._attachments[0]
@@ -355,7 +370,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 terminal,
                 source=hsm.id(instance),
                 target=hsm.id(owner),
-                metadata=metadata,
+                metadata=dict(terminal.metadata),
             ),
         )
 
@@ -368,7 +383,6 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         request = event.data
         assert isinstance(request, attachment.AttachData)
         reply: hsm.Instance | None = None
-        correlation: dict[str, object] = {}
         source: hsm.Instance = instance._attachment_group
         try:
             private_scope = hsm.Context(
@@ -383,7 +397,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 except Exception:
                     source = instance
                     raise
-            reply, correlation = await instance._start_composite_attachment_reply(
+            reply = await instance._start_composite_attachment_reply(
                 source,
                 request,
                 event,
@@ -397,10 +411,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     id=event.id,
                     source=hsm.id(instance),
                     target=hsm.id(instance._attachment_group),
-                    metadata={
-                        **event.metadata,
-                        **correlation,
-                    },
+                    metadata=dict(event.metadata),
                 ),
             )
         except Exception as error:
@@ -426,7 +437,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     id=event.id,
                     source=hsm.id(source),
                     target=hsm.id(reply),
-                    metadata={**event.metadata, **correlation},
+                    metadata=dict(event.metadata),
                 ),
             )
 
@@ -439,13 +450,12 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         request = event.data
         assert isinstance(request, attachment.DetachData)
         reply: hsm.Instance | None = None
-        correlation: dict[str, object] = {}
         try:
             private_scope = hsm.Context(
                 parent=instance.context(),
                 values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
             )
-            reply, correlation = await instance._start_composite_attachment_reply(
+            reply = await instance._start_composite_attachment_reply(
                 instance._attachment_group,
                 request,
                 event,
@@ -459,10 +469,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     id=event.id,
                     source=hsm.id(instance),
                     target=hsm.id(instance._attachment_group),
-                    metadata={
-                        **event.metadata,
-                        **correlation,
-                    },
+                    metadata=dict(event.metadata),
                 ),
             )
         except Exception as error:
@@ -488,7 +495,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     id=event.id,
                     source=hsm.id(instance._attachment_group),
                     target=hsm.id(reply),
-                    metadata={**event.metadata, **correlation},
+                    metadata=dict(event.metadata),
                 ),
             )
 
@@ -548,7 +555,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         source: hsm.Instance,
         request: attachment.AttachData | attachment.DetachData,
         event: hsm.Event[typing.Any],
-    ) -> tuple[hsm.Instance, dict[str, object]]:
+    ) -> hsm.Instance:
         operation = _CompositeAttachmentOperation(
             owner=self,
             source=source,
@@ -566,7 +573,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             _CompositeAttachmentReply.model_for(operation),
         )
         operation.reply = reply
-        return reply, {_COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY: operation}
+        return reply
 
     def _dispatch_composite_attachment_failure(
         self,
@@ -592,10 +599,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             id=event.id,
             source=hsm.id(source),
             target=hsm.id(self),
-            metadata={
-                **event.metadata,
-                _COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY: operation,
-            },
+            metadata=dict(event.metadata),
         )
         operation.terminal = terminal
         _ = hsm.dispatch(
@@ -677,7 +681,6 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             and data.terminal.id == operation.request_id
             and data.terminal.source == hsm.id(operation.source)
             and data.terminal.target == hsm.id(data.reply)
-            and data.terminal.metadata.get(_COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY) is operation
         )
 
     @staticmethod
@@ -901,6 +904,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         super().__init__()
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._terminal_waiters = {}
 
     @typing.override
     def attach(

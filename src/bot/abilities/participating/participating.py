@@ -14,9 +14,6 @@ import pydantic
 
 from bot.telemetry import observer
 
-# Event-chain keys for async child stages (HSM-COMPLETION-001). Never instance.set.
-_PARTICIPATING_INPUT_METADATA_KEY = "bot.participating.input"
-_PERCEPTION_CHILD_ID_MARKER = ":perception:"
 ParticipantKind: typing.TypeAlias = typing.Literal["bot", "human", "service", "runtime"]
 ParticipantPresence: typing.TypeAlias = typing.Literal["absent", "joining", "present", "leaving", "left"]
 ParticipantAttention: typing.TypeAlias = typing.Literal["available", "occupied", "unavailable"]
@@ -536,10 +533,6 @@ _PerceptionApplyFailedEvent = hsm.Event[ability.FailureData](
 )
 
 
-def _public_participating_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {key: value for key, value in metadata.items() if key != _PARTICIPATING_INPUT_METADATA_KEY}
-
-
 def _event_with_source_context(
     event: hsm.Event[typing.Any],
     source: hsm.Event[typing.Any],
@@ -547,18 +540,13 @@ def _event_with_source_context(
     operation_id: str | None = None,
     public_metadata: bool = False,
 ) -> hsm.Event[typing.Any]:
-    """Copy operation id/metadata along the event chain.
+    """Copy operation id and telemetry metadata along the event chain."""
 
-    Keep stage payloads on private completions; strip them only for host terminals.
-    """
-
+    del public_metadata
     resolved = operation_id if operation_id is not None else (source.id if source.id else None)
     if resolved is not None:
         event = event.with_data_and_id(event.data, resolved)
-    metadata = dict(source.metadata)
-    if public_metadata:
-        metadata = _public_participating_metadata(metadata)
-    return dataclasses.replace(event, metadata=metadata)
+    return dataclasses.replace(event, metadata=dict(source.metadata))
 
 
 def _dispatch_terminal_output(
@@ -808,6 +796,8 @@ class _PerceptionCompletedEventData(pydantic.BaseModel):
     )
 
 
+_participating_stage_input: dict[str, InputData] = {}
+
 ParticipatingInputEvent = ability.ability_input_event(
     "bot.ability.participating.input",
     InputData,
@@ -844,18 +834,17 @@ _ParticipatingChildrenAttachedEvent = hsm.Event[object](
 
 def _dispatch_child_input(
     ctx: hsm.Context,
+    owner: "Participating",
     child: ability.Ability[typing.Any, typing.Any],
     input: object,
     operation_id: str,
     source: hsm.Event[typing.Any],
-    *,
-    stage_metadata: dict[str, object],
 ) -> None:
-    metadata = dict(source.metadata)
-    metadata.update(stage_metadata)
     child_event = dataclasses.replace(
         child.input_event.with_data_and_id(input, operation_id),
-        metadata=metadata,
+        source=hsm.id(owner),
+        target=hsm.id(child),
+        metadata=dict(source.metadata),
     )
     _ = hsm.dispatch(ctx, child, child_event)
 
@@ -972,24 +961,14 @@ def _perception_failure(error: BaseException | str) -> FailedEventData:
     return FailedEventData(stage="perception", message=str(error))
 
 
-def _perception_child_operation_id(event: hsm.Event[typing.Any], kind: str) -> str:
-    operation_id = event.id if event.id else "operation"
-    return f"{operation_id}{_PERCEPTION_CHILD_ID_MARKER}{kind}"
+def _participating_turn_id(event: hsm.Event[typing.Any]) -> str | None:
+    return event.id if event.id else None
 
 
-def _operation_id_from_perception_child_event(event: hsm.Event[typing.Any], kind: str) -> str | None:
-    child_id = event.id if event.id else None
-    if child_id is None:
-        return None
-    suffix = f"{_PERCEPTION_CHILD_ID_MARKER}{kind}"
-    if child_id.endswith(suffix):
-        parent = child_id[: -len(suffix)]
-        return parent or None
-    return child_id
-
-
-def _participating_input_from_event(event: hsm.Event[typing.Any]) -> InputData | None:
-    value = event.metadata.get(_PARTICIPATING_INPUT_METADATA_KEY)
+def _participating_input_from_event(instance: "Participating", event: hsm.Event[typing.Any]) -> InputData | None:
+    del instance
+    op = _participating_turn_id(event) or ""
+    value = _participating_stage_input.get(op) if op else None
     if isinstance(value, InputData):
         return value
     return None
@@ -1000,7 +979,7 @@ def _complete_audio_perception(
     instance: "Participating",
     event: hsm.Event[typing.Any],
 ) -> None:
-    input = _participating_input_from_event(event)
+    input = _participating_input_from_event(instance, event)
     if input is None:
         return
     listening_output = event.data
@@ -1021,7 +1000,7 @@ def _complete_audio_perception(
             speech=listening_output.speech,
             confidence=listening_output.voice_detection.confidence,
         )
-    operation_id = _operation_id_from_perception_child_event(event, "audio")
+    operation_id = _participating_turn_id(event)
     _ = hsm.dispatch(
         ctx,
         instance,
@@ -1042,14 +1021,14 @@ def _complete_reading_perception(
     *,
     kind: typing.Literal["text", "image"],
 ) -> None:
-    input = _participating_input_from_event(event)
+    input = _participating_input_from_event(instance, event)
     if input is None:
         return
     reading_output = event.data
     assert isinstance(reading_output, reading.OutputData)
     stimulus = input.stimulus
     assert isinstance(stimulus, (TextStimulus, ImageStimulus))
-    operation_id = _operation_id_from_perception_child_event(event, kind)
+    operation_id = _participating_turn_id(event)
     _dispatch_reading_perception(
         ctx,
         instance,
@@ -1082,7 +1061,7 @@ def _fail_perception_child(
     kind: typing.Literal["audio", "text", "image"],
 ) -> None:
     message = getattr(event.data, "message", "Perception child failed.")
-    operation_id = _operation_id_from_perception_child_event(event, kind)
+    operation_id = _participating_turn_id(event)
     _ = hsm.dispatch(
         ctx,
         instance,
@@ -1273,14 +1252,15 @@ class Participating(ability.Ability[InputData, OutputData]):
         assert isinstance(stimulus, AudioStimulus)
         listening = instance._listening
         assert listening is not None
-        operation_id = _perception_child_operation_id(event, "audio")
+        operation_id = _participating_turn_id(event) or "operation"
+        _participating_stage_input[operation_id] = input
         _dispatch_child_input(
             ctx,
+            instance,
             typing.cast(ability.Ability[typing.Any, typing.Any], listening),
             stimulus.content,
             operation_id,
             event,
-            stage_metadata={_PARTICIPATING_INPUT_METADATA_KEY: input},
         )
 
     @staticmethod
@@ -1295,14 +1275,15 @@ class Participating(ability.Ability[InputData, OutputData]):
         assert isinstance(stimulus, TextStimulus)
         child = instance._reading
         assert child is not None
-        operation_id = _perception_child_operation_id(event, "text")
+        operation_id = _participating_turn_id(event) or "operation"
+        _participating_stage_input[operation_id] = input
         _dispatch_child_input(
             ctx,
+            instance,
             typing.cast(ability.Ability[typing.Any, typing.Any], child),
             reading.InputData(kind="text", content=stimulus.content),
             operation_id,
             event,
-            stage_metadata={_PARTICIPATING_INPUT_METADATA_KEY: input},
         )
 
     @staticmethod
@@ -1317,14 +1298,15 @@ class Participating(ability.Ability[InputData, OutputData]):
         assert isinstance(stimulus, ImageStimulus)
         child = instance._reading
         assert child is not None
-        operation_id = _perception_child_operation_id(event, "image")
+        operation_id = _participating_turn_id(event) or "operation"
+        _participating_stage_input[operation_id] = input
         _dispatch_child_input(
             ctx,
+            instance,
             typing.cast(ability.Ability[typing.Any, typing.Any], child),
             reading.InputData(kind="image", content=stimulus.content),
             operation_id,
             event,
-            stage_metadata={_PARTICIPATING_INPUT_METADATA_KEY: input},
         )
 
     @staticmethod
@@ -1334,18 +1316,18 @@ class Participating(ability.Ability[InputData, OutputData]):
         terminal_kind: typing.Literal["output", "failure"],
         kind: typing.Literal["audio", "text", "image"],
     ) -> bool:
+        """Match child terminal by type + source; turn id is shared parent OP (no suffix markers)."""
+
         child = instance._listening if kind == "audio" else instance._reading
         if child is None:
             return False
         terminal_event = child.output_event if terminal_kind == "output" else child.failed_event
-        child_id = event.id if event.id else None
-        suffix = f"{_PERCEPTION_CHILD_ID_MARKER}{kind}"
+        turn_id = _participating_turn_id(event)
         return (
             event.name == terminal_event.name
             and event.target == hsm.id(instance)
             and event.source == hsm.id(child)
-            and child_id is not None
-            and child_id.endswith(suffix)
+            and turn_id is not None
         )
 
     @staticmethod
@@ -1456,11 +1438,17 @@ class Participating(ability.Ability[InputData, OutputData]):
         instance: "Participating",
         event: hsm.Event[typing.Any],
     ) -> None:
-        del event
+        operation_id = event.id if event.id else "participating-children"
         for child in (instance._listening, instance._reading):
             if child is None:
                 continue
-            _ = await child.attach(owner=instance, ctx=ctx)
+            _ = await child.attach(
+                ctx,
+                attachment.AttachEvent.with_data_and_id(
+                    attachment.AttachData(actor=instance),
+                    f"{operation_id}:attach:{type(child).__name__}",
+                ),
+            )
         _ = hsm.dispatch(ctx, instance, _ParticipatingChildrenAttachedEvent.with_data(None))
 
     @staticmethod
@@ -1474,7 +1462,13 @@ class Participating(ability.Ability[InputData, OutputData]):
         for child in (instance._listening, instance._reading):
             if child is None:
                 continue
-            _ = child.detach(ctx=ctx)
+            _ = child.detach(
+                ctx,
+                attachment.DetachEvent.with_data_and_id(
+                    attachment.DetachData(actor=instance),
+                    event.id if event.id else f"participating-detach:{type(child).__name__}",
+                ),
+            )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Participating",

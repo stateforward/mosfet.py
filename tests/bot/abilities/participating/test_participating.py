@@ -2,6 +2,7 @@ from bot import abilities
 from bot.abilities import participating
 from bot.abilities import reading
 from bot.abilities.hearing import voice
+from bot.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -262,7 +263,11 @@ def test_participating_detach_releases_owned_perception_while_reading() -> None:
         )
         assert ability.state() == "/RecordingParticipatingLifecycle/attached/behavior/perceiving/reading_text"
 
-        _ = await ability.detach(ctx=ctx)
+        owner = ability._attachments[0]
+        _ = await ability.detach(
+            ctx,
+            attachment.DetachEvent.with_data_and_id(attachment.DetachData(actor=owner), "participating-detach"),
+        )
         await wait_until(lambda: reading.state().endswith("/detached"))
         reading_state = reading.state()
         state = ability.state()

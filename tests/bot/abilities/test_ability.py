@@ -155,7 +155,7 @@ class CompositeAbility(abilities.Ability[object, object]):
         operation_id: str,
     ) -> None:
         operation_event = dataclasses.replace(terminal, id=operation_id)
-        reply, correlation = await self._start_composite_attachment_reply(
+        reply = await self._start_composite_attachment_reply(
             self,
             request,
             operation_event,
@@ -168,7 +168,7 @@ class CompositeAbility(abilities.Ability[object, object]):
                 id=operation_id,
                 source=hsm.id(self),
                 target=hsm.id(reply),
-                metadata=correlation,
+                metadata=dict(operation_event.metadata),
             ),
         )
 

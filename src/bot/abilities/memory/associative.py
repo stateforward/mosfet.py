@@ -17,10 +17,7 @@ import pydantic
 
 from bot.telemetry import observer
 
-# Private event-chain key: carries this turn's decoded phase with processor requests.
-# Not a metric/span attribute; not stored on the instance (HSM-COMPLETION-001).
-_ASSOCIATIVE_MEMORY_PHASE_METADATA_KEY = "bot.memory.associative.phase"
-_ASSOCIATIVE_MEMORY_PROCESSING_ID_SUFFIX = ":associative-memory:processing"
+_associative_stage_decoded: dict[str, object] = {}
 _AssociativeMemoryChildrenAttachedEvent = hsm.Event[object](
     name="bot.ability.memory.associative.children.attached",
     kind=hsm.CompletionEventKind,
@@ -391,28 +388,20 @@ def _associative_memory_event_with_context(
 
 
 def _public_associative_memory_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    """Metadata safe to forward on host terminals (no phase payload)."""
+    """Pass-through telemetry metadata (phase payloads are instance-owned)."""
 
-    return {key: value for key, value in metadata.items() if key != _ASSOCIATIVE_MEMORY_PHASE_METADATA_KEY}
+    return dict(metadata)
+
+
+def _associative_turn_id(event: hsm.Event[typing.Any]) -> str | None:
+    return event.id if event.id else None
 
 
 def _associative_memory_phase_from_event(event: hsm.Event[typing.Any]) -> object | None:
-    return event.metadata.get(_ASSOCIATIVE_MEMORY_PHASE_METADATA_KEY)
-
-
-def _associative_memory_child_operation_id(event: hsm.Event[typing.Any]) -> str:
-    operation_id = event.id if event.id else uuid.uuid4().hex
-    return f"{operation_id}{_ASSOCIATIVE_MEMORY_PROCESSING_ID_SUFFIX}"
-
-
-def _parent_operation_id_from_associative_child(event: hsm.Event[typing.Any]) -> str | None:
-    child_id = event.id if event.id else None
-    if child_id is None:
+    parent = _associative_turn_id(event)
+    if not parent:
         return None
-    if child_id.endswith(_ASSOCIATIVE_MEMORY_PROCESSING_ID_SUFFIX):
-        parent = child_id[: -len(_ASSOCIATIVE_MEMORY_PROCESSING_ID_SUFFIX)]
-        return parent or None
-    return child_id
+    return _associative_stage_decoded.get(parent)
 
 
 def _dispatch_associative_memory_output(
@@ -578,9 +567,8 @@ def _dispatch_associative_memory_processor(
 ) -> None:
     decoded = event.data
     assert isinstance(decoded, _AssociativeMemoryDecodedEventData)
-    operation_id = _associative_memory_child_operation_id(event)
-    metadata = dict(event.metadata)
-    metadata[_ASSOCIATIVE_MEMORY_PHASE_METADATA_KEY] = decoded
+    operation_id = _associative_turn_id(event) or uuid.uuid4().hex
+    _associative_stage_decoded[operation_id] = decoded
     _ = hsm.dispatch(
         ctx,
         instance.processor,
@@ -598,7 +586,9 @@ def _dispatch_associative_memory_processor(
                 ),
                 operation_id,
             ),
-            metadata=metadata,
+            source=hsm.id(instance),
+            target=hsm.id(instance.processor),
+            metadata=dict(event.metadata),
         ),
     )
 
@@ -608,14 +598,15 @@ def _matches_associative_memory_processor_event(
     event: hsm.Event[typing.Any],
     terminal_kind: typing.Literal["output", "failure"],
 ) -> bool:
+    """Match processor terminal by type + source; turn id is parent OP (no suffix markers)."""
+
     terminal_event = instance.processor.output_event if terminal_kind == "output" else instance.processor.failed_event
-    child_id = event.id if event.id else None
+    turn_id = _associative_turn_id(event)
     return (
         event.name == terminal_event.name
         and event.source == hsm.id(instance.processor)
         and event.target == hsm.id(instance)
-        and child_id is not None
-        and child_id.endswith(_ASSOCIATIVE_MEMORY_PROCESSING_ID_SUFFIX)
+        and turn_id is not None
         and isinstance(_associative_memory_phase_from_event(event), _AssociativeMemoryDecodedEventData)
     )
 
@@ -647,7 +638,7 @@ def _complete_associative_memory_processing(
     assert isinstance(decoded, _AssociativeMemoryDecodedEventData)
     linked = event.data
     public_metadata = _public_associative_memory_metadata(dict(event.metadata))
-    parent_id = _parent_operation_id_from_associative_child(event)
+    parent_id = _associative_turn_id(event)
     if not isinstance(linked, LinkedData):
         _ = hsm.dispatch(
             ctx,
@@ -690,7 +681,7 @@ def _fail_associative_memory_processing(
         instance,
         dataclasses.replace(
             _AssociativeMemoryApplyFailedEvent.with_data(ability.FailureData(message=str(message))),
-            id=_parent_operation_id_from_associative_child(event),
+            id=_associative_turn_id(event),
             metadata=_public_associative_memory_metadata(dict(event.metadata)),
         ),
     )

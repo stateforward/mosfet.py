@@ -312,8 +312,10 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
 @pytest.mark.parametrize(
     "event",
     [
-        FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData()),
-        FirmwareInitializingFailedEvent.with_data(FirmwareInitializingFailedEventData(message="forged failure")),
+        FirmwareInitializingDoneEvent.with_data(FirmwareInitializingDoneEventData(operation_id="forged-init")),
+        FirmwareInitializingFailedEvent.with_data(
+            FirmwareInitializingFailedEventData(message="forged failure", operation_id="forged-init")
+        ),
     ],
 )
 def test_device_ignores_uncorrelated_firmware_initialization_results(event: hsm.Event[typing.Any]) -> None:

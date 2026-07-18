@@ -111,7 +111,6 @@ def _load_ring_sound_wav() -> bytes:
 # Real short ring WAV (see assets/SOURCES.md). Sensory classifiers match this acoustic payload;
 # Listening does not special-case phone.
 RING_SOUND_WAV = _load_ring_sound_wav()
-_PHONE_CALL_ID_METADATA_KEY = "bot.phone.call_id"
 _RingingCommittedEvent = hsm.Event[PhoneCallData](
     name="bot.phone.ringing.committed",
     kind=hsm.CompletionEventKind,
@@ -283,8 +282,7 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
         )
     data = event.data
     assert isinstance(data, PhoneCallData)
-    metadata = dict(event.metadata)
-    metadata[_PHONE_CALL_ID_METADATA_KEY] = data.call_id
+    # Call identity rides the elevated event id (not event.metadata).
     return dataclasses.replace(
         SoundEvent.with_data(
             SoundData(
@@ -295,8 +293,9 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
                 kind="ring",
             )
         ),
+        id=data.call_id,
         source=hsm.id(owner),
-        metadata=metadata,
+        metadata=dict(event.metadata),
     )
 
 

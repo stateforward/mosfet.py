@@ -4,35 +4,9 @@ import pathlib
 
 
 _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {
-    "abilities/cognition/intuition.py": {
-        "literal:bot.intuition.confidence": 4,
-        "literal:bot.intuition.confidence_threshold": 4,
-        "literal:bot.intuition.escalate": 4,
-    },
-    "abilities/ability.py": {
-        "TERMINAL_RESULT_METADATA_KEY": 3,
-        "_COMPOSITE_ATTACHMENT_OPERATION_METADATA_KEY": 5,
-    },
-    "abilities/conversation/conversation.py": {
-        "_CONVERSATION_DECODED_METADATA_KEY": 4,
-        "_CONVERSATION_MESSAGE_METADATA_KEY": 4,
-        "local:conversation_result_metadata_key": 2,
-    },
-    "abilities/conversation/host_turn.py": {
-        "TERMINAL_RESULT_METADATA_KEY": 1,
-        "local:conversation_result_metadata_key": 1,
-    },
-    "abilities/memory/associative.py": {"_ASSOCIATIVE_MEMORY_PHASE_METADATA_KEY": 4},
-    "abilities/participating/participating.py": {"_PARTICIPATING_INPUT_METADATA_KEY": 6},
+    # for-key iteration over telemetry metadata maps (not coordination keys).
     "abilities/processing.py": {"operation:iteration": 1},
-    "abilities/reading/reading.py": {
-        "_READING_CLASSIFIED_METADATA_KEY": 6,
-        "_READING_INPUT_METADATA_KEY": 4,
-    },
-    "device/device.py": {"_FIRMWARE_LIFECYCLE_OPERATION_METADATA_KEY": 7},
-    "devices/phone/phone.py": {"_PHONE_CALL_ID_METADATA_KEY": 2},
     "habit/verify.py": {"operation:iteration": 1},
-    "protocols/yamux/stream.py": {"_OPERATION_FAILURE_METADATA_KEY": 10},
 }
 
 

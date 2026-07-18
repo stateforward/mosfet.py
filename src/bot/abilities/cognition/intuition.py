@@ -420,13 +420,7 @@ class Intuition(processing.Processing):
         if confidence is not None:
             instance._confidence_tuner.observe(confidence)
         escalate = instance._confidence_tuner.should_escalate(confidence)
-        # Always stamp tuner state for hosts/logs (not only on escalate).
-        metadata = {
-            **metadata,
-            "bot.intuition.confidence": confidence,
-            "bot.intuition.confidence_threshold": instance._confidence_tuner.threshold(),
-            "bot.intuition.escalate": escalate,
-        }
+        # Tuner state drives escalate choice only; do not put it in event.metadata.
 
         # Explicit unhandled, or low confidence → Cognition cascade (System 2).
         # On escalate with selections: fire world actions first, then terminal None.

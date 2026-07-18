@@ -107,8 +107,6 @@ class StreamWindowData(pydantic.BaseModel):
 class _StreamOperationFailure:
     message: str
 
-
-_OPERATION_FAILURE_METADATA_KEY = "protocol.yamux.stream.operation_failure"
 _AcknowledgeEvent = hsm.Event[None](name="protocol.yamux.stream.acknowledge")
 _SendEvent = hsm.Event[StreamSendData](
     name="protocol.yamux.stream.send",
@@ -300,55 +298,55 @@ class Stream(hsm.Instance):
 
     @staticmethod
     def _reject_send(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream is not writable or send window is exhausted."
         )
 
     @staticmethod
     def _reject_receive(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream is not readable or receive window is exhausted."
         )
 
     @staticmethod
     def _reject_send_window_update(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream send window cannot be updated."
         )
 
     @staticmethod
     def _reject_receive_window_grant(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream receive window cannot be granted."
         )
 
     @staticmethod
     def _reject_local_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream local writes are already closed."
         )
 
     @staticmethod
     def _reject_remote_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream remote writes are already closed."
         )
 
     @staticmethod
     def _reject_reset(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure("Yamux stream is terminal.")
+        del ctx
+        instance._operation_failure = _StreamOperationFailure("Yamux stream is terminal.")
 
     @staticmethod
     def _reject_acknowledge(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        event.metadata[_OPERATION_FAILURE_METADATA_KEY] = _StreamOperationFailure(
+        del ctx
+        instance._operation_failure = _StreamOperationFailure(
             "Yamux stream is not awaiting acknowledgement."
         )
 
@@ -547,6 +545,7 @@ class Stream(hsm.Instance):
     _sent_bytes: int = dataclasses.field(init=False, repr=False)
     _state: StreamState = dataclasses.field(init=False, repr=False)
     _stream_id: int = dataclasses.field(init=False, repr=False)
+    _operation_failure: _StreamOperationFailure | None = dataclasses.field(init=False, repr=False)
 
     def __post_init__(
         self,
@@ -576,6 +575,7 @@ class Stream(hsm.Instance):
         self._on_window_consumed = on_window_consumed
         self._reader = None
         self._state = StreamState.LOCAL_OPENING if locally_initiated else StreamState.OPEN
+        self._operation_failure = None
 
     @typing.override
     def take_snapshot(self) -> StreamSnapshot:
@@ -699,7 +699,8 @@ class Stream(hsm.Instance):
         error = completion.exception()
         if error is not None:
             raise error
-        failure = event.metadata.pop(_OPERATION_FAILURE_METADATA_KEY, None)
+        failure = self._operation_failure
+        self._operation_failure = None
         if isinstance(failure, _StreamOperationFailure):
             raise RuntimeError(failure.message)
 

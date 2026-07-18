@@ -312,13 +312,11 @@ def test_reading_waits_for_aggregate_attachment_completion(monkeypatch: pytest.M
             target=hsm.id(reply),
             metadata=dict(request.metadata),
         )
+        # Uncorrelated terminal: wrong request id must not complete attachment.
         await hsm.dispatch(
             ctx,
             reply,
-            dataclasses.replace(
-                terminal,
-                metadata={**request.metadata, "bot.ability.attachment.operation": object()},
-            ),
+            dataclasses.replace(terminal, id="forged-uncorrelated-id"),
         )
         assert owner.lifecycle == []
         await hsm.dispatch(

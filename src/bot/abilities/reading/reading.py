@@ -25,9 +25,6 @@ ReadingStage: typing.TypeAlias = typing.Literal[
     "output_encoding",
 ]
 
-# Event-chain keys for async child stages (HSM-COMPLETION-001). Never instance.set.
-_READING_INPUT_METADATA_KEY = "bot.reading.input"
-_READING_CLASSIFIED_METADATA_KEY = "bot.reading.classified"
 # Minimal correlation id only (HSM-CORRELATION-001); not a source_event bag.
 _READING_ACTIVE_OPERATION_ID_ATTRIBUTE = "reading_active_operation_id"
 
@@ -164,6 +161,10 @@ class _ReadingClassifiedEventData(pydantic.BaseModel):
     classification: vision.classification.OutputData
 
 
+
+_reading_stage_input: dict[str, InputData] = {}
+_reading_stage_classified: dict[str, _ReadingClassifiedEventData] = {}
+
 class _ReadingOutputCandidateEventData(pydantic.BaseModel):
     """Private completion payload for conversation-ready reading output candidates."""
 
@@ -259,21 +260,12 @@ def _reading_event_with_context(
     *,
     public_metadata: bool = False,
 ) -> hsm.Event[typing.Any]:
+    del public_metadata
     operation_id = source.id if source.id else None
     if operation_id is not None:
         event = event.with_data_and_id(event.data, operation_id)
-    metadata = dict(source.metadata)
-    if public_metadata:
-        metadata = {
-            key: value
-            for key, value in metadata.items()
-            if key
-            not in (
-                _READING_INPUT_METADATA_KEY,
-                _READING_CLASSIFIED_METADATA_KEY,
-            )
-        }
-    return dataclasses.replace(event, metadata=metadata)
+    # Telemetry only; stage payloads live on Reading instance fields.
+    return dataclasses.replace(event, metadata=dict(source.metadata))
 
 
 def _dispatch_reading_child_input(
@@ -281,17 +273,12 @@ def _dispatch_reading_child_input(
     child: ability.Ability[typing.Any, typing.Any],
     input: object,
     source: hsm.Event[typing.Any],
-    *,
-    stage_metadata: dict[str, object] | None = None,
 ) -> None:
-    metadata = dict(source.metadata)
-    if stage_metadata:
-        metadata.update(stage_metadata)
     child_event = child.input_event.with_data(input)
     operation_id = source.id if source.id else None
     if operation_id is not None:
         child_event = child.input_event.with_data_and_id(input, operation_id)
-    child_event = dataclasses.replace(child_event, metadata=metadata)
+    child_event = dataclasses.replace(child_event, metadata=dict(source.metadata))
     _ = hsm.dispatch(ctx, child, child_event)
 
 
@@ -356,13 +343,15 @@ async def _run_reading_classification(
             ),
         )
         return
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if op:
+        _reading_stage_input[op] = input
     child = _reading_visual_classifier(instance)
     _dispatch_reading_child_input(
         ctx,
         child,
         classification_input,
         event,
-        stage_metadata={_READING_INPUT_METADATA_KEY: input},
     )
 
 
@@ -386,13 +375,15 @@ async def _run_text_decoding(
             ),
         )
         return
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if op:
+        _reading_stage_classified[op] = classified
     child = _reading_text_decoder(instance)
     _dispatch_reading_child_input(
         ctx,
         child,
         content,
         event,
-        stage_metadata={_READING_CLASSIFIED_METADATA_KEY: classified},
     )
 
 
@@ -416,13 +407,15 @@ async def _run_image_decoding(
             ),
         )
         return
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if op:
+        _reading_stage_classified[op] = classified
     child = _reading_image_decoder(instance)
     _dispatch_reading_child_input(
         ctx,
         child,
         content,
         event,
-        stage_metadata={_READING_CLASSIFIED_METADATA_KEY: classified},
     )
 
 
@@ -507,7 +500,8 @@ def _complete_reading_classification(
     instance: "Reading",
     event: hsm.Event[typing.Any],
 ) -> None:
-    input = event.metadata.get(_READING_INPUT_METADATA_KEY)
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    input = _reading_stage_input.get(op) if op else None
     classification = event.data
     if not isinstance(input, InputData):
         return
@@ -549,7 +543,8 @@ def _complete_reading_text_decoding(
 ) -> None:
     text = event.data
     assert isinstance(text, str)
-    classified = event.metadata.get(_READING_CLASSIFIED_METADATA_KEY)
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    classified = _reading_stage_classified.get(op) if op else None
     if not isinstance(classified, _ReadingClassifiedEventData):
         return
     completion = _ReadingOutputCandidateEventData(
@@ -593,7 +588,8 @@ def _complete_reading_image_decoding(
 ) -> None:
     text = event.data
     assert isinstance(text, str)
-    classified = event.metadata.get(_READING_CLASSIFIED_METADATA_KEY)
+    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    classified = _reading_stage_classified.get(op) if op else None
     if not isinstance(classified, _ReadingClassifiedEventData):
         return
     completion = _ReadingOutputCandidateEventData(
