@@ -1995,23 +1995,26 @@ def test_focused_agent_dispatches_operation_output_to_target_device() -> None:
     ]
 
 
-def test_focused_agent_rejects_stale_target_device_operation_output() -> None:
+def test_focused_agent_stale_device_selection_drops_at_device() -> None:
+    """Stale device selections dispatch; the device drops them per its own topology.
+
+    Delivery validation resolves against declared events (HSM-CONTEXT-001: no probed peer
+    state), so a selection whose target moved on is no longer rejected pre-dispatch. The
+    device ignores it as unmatched, the turn completes, and the hangup is observed as the
+    next stimulus.
+    """
+
     async def run() -> tuple[
         str, str, str | None, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]
     ]:
         release = asyncio.Event()
-        ability = BlockingSequenceAbility(
-            release=release,
-            block_on_call=1,
-            outputs=(
-                cognition.types.EventData(
-                    target="phone",
-                    event=phone_device.AnswerCallEvent.name,
-                    data={"call_id": "call-123"},
-                    reason="answer incoming call",
-                ),
-            ),
+        answer_selection = cognition.types.EventData(
+            target="phone",
+            event=phone_device.AnswerCallEvent.name,
+            data={"call_id": "call-123"},
+            reason="answer incoming call",
         )
+        ability = BlockingSequenceAbility(release=release, block_on_call=1, outputs=(answer_selection,))
         phone = phone_device.Phone()
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
 
@@ -2026,7 +2029,7 @@ def test_focused_agent_rejects_stale_target_device_operation_output() -> None:
         )
         await wait_until(lambda: firmware.state() == "/Phone/hung_up")
         release.set()
-        await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
         return (
             active_bot.state(),
@@ -2041,12 +2044,17 @@ def test_focused_agent_rejects_stale_target_device_operation_output() -> None:
     assert state == "/Bot/active/focused"
     assert phone_state == "/Phone/hung_up"
     assert focused_device
-    assert actions == []
-    assert len(failures) == 1
-    assert (
-        failures[0].message
-        == f"Processing selected unavailable event for target phone: {phone_device.AnswerCallEvent.name}."
-    )
+    assert actions == [
+        (
+            cognition.types.EventData(
+                target="phone",
+                event=phone_device.AnswerCallEvent.name,
+                data={"call_id": "call-123"},
+                reason="answer incoming call",
+            ),
+        )
+    ]
+    assert failures == []
 
 
 def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema() -> None:

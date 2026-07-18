@@ -939,8 +939,20 @@ def enabled_call_events(instance: hsm.Instance) -> tuple[Event[typing.Any], ...]
     return tuple(offered)
 
 
-def _enabled_call_event_names(instance: hsm.Instance) -> set[str]:
-    return {event.name for event in enabled_call_events(instance)}
+def _declared_call_event_names(instance: hsm.Instance) -> set[str]:
+    """Call events declared by the instance's model (explicit transitions).
+
+    Delivery validation reads the model, not a point-in-time transition snapshot: the
+    observer can be mid-transition when sampled, so snapshot-derived readiness is stale on
+    arrival (HSM-CONTEXT-001). Whether the event applies right now is the target's own
+    topology and guards.
+    """
+
+    return {
+        name
+        for name, event in _instance_event_map(instance).items()
+        if isinstance(event, hsm.Event) and event.kind == hsm.CallEventKind
+    }
 
 
 def _unavailable_message(*, event: str, target: str | None = None) -> str:
@@ -952,11 +964,11 @@ def _unavailable_message(*, event: str, target: str | None = None) -> str:
 def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
     if selection.target is not None:
         instance = input.actors.get(selection.target)
-        if instance is None or selection.event not in _enabled_call_event_names(instance):
+        if instance is None or selection.event not in _declared_call_event_names(instance):
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
         return instance
     matches = [
-        name for name, instance in input.actors.items() if selection.event in _enabled_call_event_names(instance)
+        name for name, instance in input.actors.items() if selection.event in _declared_call_event_names(instance)
     ]
     if len(matches) == 1:
         return input.actors[matches[0]]
