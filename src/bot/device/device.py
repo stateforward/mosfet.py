@@ -123,13 +123,44 @@ class Device(hsm.Instance, attachment.Attachment):
             visit(root)
         return tuple(ordered)
 
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: typing.Any = None) -> typing.Self | None:
+        return await hsm.Instance.start(self, ctx, data)
+
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
         world = World.from_context(ctx)
         _require_attach_world_scope(world, self)
         await hsm.Instance.dispatch(self, ctx, event)
 
     async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
-        if not self.state() or self.state() == self.model.qualified_name:
+        # hsm 1.3.2+: id fails when stopped/unstarted — surface typed failure when a reply sink exists.
+        try:
+            _ = hsm.id(self)
+        except hsm.ErrorValidatingModel:
+            data = event.data
+            reply_to = data.reply_to if data.reply_to is not None else data.actor
+            if reply_to is not None:
+                try:
+                    reply_id = hsm.id(reply_to)
+                except hsm.ErrorValidatingModel:
+                    reply_id = ""
+                await hsm.Instance.dispatch(
+                    reply_to,
+                    ctx,
+                    dataclasses.replace(
+                        attachment.DetachFailedEvent.with_data(
+                            attachment.FailedData(
+                                actor=data.actor,
+                                kind=attachment.FailureKind.DISPATCH,
+                                message=f"{type(self).__name__} is stopped or not started; detach refused.",
+                            )
+                        ),
+                        id=event.id,
+                        source=event.source or "",
+                        target=reply_id,
+                        metadata=dict(event.metadata),
+                    ),
+                )
             return
         require_world_scope(World.from_context(ctx), self, participant="Device")
         await hsm.Instance.dispatch(self, ctx, event)
@@ -139,11 +170,25 @@ class Device(hsm.Instance, attachment.Attachment):
         await hsm.Instance.stop(self, ctx)
 
         firmware = self._firmware
-        firmware_id = hsm.id(firmware) if firmware is not None and firmware.state() else ""
-        firmware_instances = None if firmware is None else firmware.context().value(hsm.Keys.Instances)
-        if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
-            await hsm.stop(firmware)
-        if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
+        if firmware is None:
+            return
+        # hsm 1.3.2+: id fails when firmware was never started or already stopped.
+        # Do not raise into Bot multi-device teardown by calling hsm.stop on a dead machine.
+        firmware_id = ""
+        firmware_instances: object | None = None
+        try:
+            firmware_id = hsm.id(firmware)
+            firmware_instances = firmware.context().value(hsm.Keys.Instances)
+        except hsm.ErrorValidatingModel:
+            if self._firmware is firmware:
+                self._firmware = None
+            return
+        await hsm.stop(firmware)
+        try:
+            _ = hsm.id(firmware)
+        except hsm.ErrorValidatingModel:
+            pass
+        else:
             raise RuntimeError("Device firmware remained started after Device stop.")
         if (
             firmware_id
@@ -188,9 +233,15 @@ class Device(hsm.Instance, attachment.Attachment):
     @typing.override
     def take_snapshot(self) -> hsm.Snapshot:
         snapshot = super().take_snapshot()
-        if self._firmware is None:
+        firmware = self._firmware
+        if firmware is None:
             return snapshot
-        firmware_snapshot = self._firmware.take_snapshot()
+        # hsm 1.3.2+: stopped machines cannot take_snapshot. Firmware may already be
+        # stopped during initialization_failing cleanup while still referenced here.
+        try:
+            firmware_snapshot = firmware.take_snapshot()
+        except hsm.ErrorValidatingModel:
+            return snapshot
         return dataclasses.replace(
             snapshot,
             Transitions=(*snapshot.Transitions, *firmware_snapshot.Transitions),
@@ -295,9 +346,9 @@ class Device(hsm.Instance, attachment.Attachment):
                 seconds = instance._firmware_initializing_timeout.total_seconds()
                 failure_message = f"Device firmware initialization timed out after {seconds:g} seconds."
             firmware = instance._firmware
-            if firmware is not None and firmware.state():
+            if firmware is not None:
                 try:
-                    # Stop against the firmware's own context so cancel completes hsm.stop's wait.
+                    # HSM-CONTEXT-001: do not probe firmware.state() for readiness before stop.
                     await hsm.stop(firmware)
                 except Exception as error:
                     result = _FirmwareInitializingCleanupFailedEvent.with_data(
@@ -318,25 +369,6 @@ class Device(hsm.Instance, attachment.Attachment):
                         ),
                     )
                     return
-            if firmware is not None and firmware.state() != firmware.take_snapshot().QualifiedName:
-                result = _FirmwareInitializingCleanupFailedEvent.with_data(
-                    _FirmwareInitializingCleanupData(
-                        message="Device firmware initialization rollback returned before firmware stopped.",
-                        operation_id=operation_id,
-                    )
-                )
-                await hsm.dispatch(
-                    ctx,
-                    instance,
-                    dataclasses.replace(
-                        result,
-                        id=operation_id,
-                        source=device_id,
-                        target=device_id,
-                        metadata=dict(event.metadata),
-                    ),
-                )
-                return
             if instance._firmware is firmware:
                 instance._firmware = None
             result = _FirmwareInitializingCleanedUpEvent.with_data(

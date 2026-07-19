@@ -374,8 +374,14 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         _ = await device.restart(world.context)
 
         assert device.state() == "/Device/initializing"
-        assert first_firmware.state() == first_firmware.take_snapshot().QualifiedName
-        assert first_firmware_id not in instances
+        # hsm 1.3.2: stopped firmware has empty state and cannot take_snapshot / id.
+        assert first_firmware.state() == ""
+        try:
+            _ = hsm.id(first_firmware)
+            raise AssertionError("stopped firmware must not remain addressable via hsm.id")
+        except hsm.ErrorValidatingModel:
+            pass
+        del first_firmware_id, instances
 
         await device.dispatch(world.context, stale_result)
 
@@ -386,11 +392,16 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         second_firmware = device_firmware(device)
         assert second_firmware is not None
         second_firmware_id = hsm.id(second_firmware)
+        del second_firmware_id
 
         await hsm.stop(device)
 
-        assert second_firmware.state() == second_firmware.take_snapshot().QualifiedName
-        assert second_firmware_id not in instances
+        assert second_firmware.state() == ""
+        try:
+            _ = hsm.id(second_firmware)
+            raise AssertionError("stopped firmware must not remain addressable via hsm.id")
+        except hsm.ErrorValidatingModel:
+            pass
 
     asyncio.run(run())
 

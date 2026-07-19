@@ -1044,7 +1044,8 @@ def test_group_attach_cancellation_during_reply_start_fails_member(
     group_state, reply_state, attach_calls, recorded = asyncio.run(run())
 
     assert group_state == "/AttachmentGroup/detached"
-    assert reply_state == "/AttachmentGroupReply"
+    # hsm 1.3.2+: cancelled reply is stopped; state() is empty (was model root previously).
+    assert reply_state in {"", "/AttachmentGroupReply"}
     assert attach_calls == 0
     assert [event.name for event in recorded] == [attachment.AttachFailedEvent.name]
     assert isinstance(recorded[0].data, attachment.FailedData)
@@ -1093,7 +1094,8 @@ def test_group_detach_cancellation_during_reply_start_fails_member(
     group_state, reply_state, detach_calls, recorded = asyncio.run(run())
 
     assert group_state == "/AttachmentGroup/attached"
-    assert reply_state == "/AttachmentGroupReply"
+    # hsm 1.3.2+: cancelled reply is stopped; state() is empty (was model root previously).
+    assert reply_state in {"", "/AttachmentGroupReply"}
     assert detach_calls == 0
     assert [event.name for event in recorded] == [
         attachment.AttachCompleteEvent.name,

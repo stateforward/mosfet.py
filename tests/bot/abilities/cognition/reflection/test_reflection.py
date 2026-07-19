@@ -858,7 +858,10 @@ def test_reflection_detaches_once_and_cancels_active_processing(
     requests, cancelled, lifecycle, state = asyncio.run(run())
 
     assert len(requests) == 2
-    assert all(request.id == f"reflection-{expected_state}-detach" for request in requests)
+    # Outer composite group detach carries the request id; nested group fanout
+    # correlates members with reply envelope ids (not the parent request id).
+    assert requests[0].id == f"reflection-{expected_state}-detach"
+    assert requests[1].id
     assert cancelled
     assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
     assert lifecycle[0].id == f"reflection-{expected_state}-detach"
@@ -930,7 +933,8 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
     requests, lifecycle, state = asyncio.run(run())
 
     assert len(requests) == 2
-    assert all(request.id == f"reflection-{expected_state}-detach" for request in requests)
+    assert requests[0].id == f"reflection-{expected_state}-detach"
+    assert requests[1].id
     assert [event.name for event in lifecycle] == [attachment.DetachedEvent.name]
     assert lifecycle[0].id == f"reflection-{expected_state}-detach"
     assert state == "/ReflectionLifecycle/detached"
@@ -1062,7 +1066,8 @@ def test_reflection_detaches_once_through_group_and_can_reattach(
     requests, lifecycle, state = asyncio.run(run())
 
     assert len(requests) == 2
-    assert all(request.id == "reflection-detach" for request in requests)
+    assert requests[0].id == "reflection-detach"
+    assert requests[1].id
     assert [event.name for event in lifecycle] == [
         attachment.DetachedEvent.name,
         attachment.AttachCompleteEvent.name,

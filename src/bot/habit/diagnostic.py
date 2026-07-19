@@ -189,8 +189,9 @@ _HELP: dict[str, str] = {
         "Dry-run apply failed against the live turn stimulus. Effects must hsm.dispatch(output_event, selection) "
         "and must not return a value. input_event schema must accept the live stimulus fields (prefer "
         "additionalProperties true or only require fields actually present). Selection data identifiers must be "
-        "read from event['data'] / event['metadata'] at runtime, not hardcoded from episode examples. "
-        "Guards must return bool and not block the observed pattern."
+        "read from event['data'] and envelope fields (event['id']/event['source']/event['target']) at runtime, "
+        "not hardcoded from episode examples. Never use event['metadata'] for live IDs — it is telemetry only "
+        "and is not on the Starlark event facade. Guards must return bool and not block the observed pattern."
     ),
 }
 

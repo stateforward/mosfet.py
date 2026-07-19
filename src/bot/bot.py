@@ -954,6 +954,7 @@ class Bot(hsm.Instance, abc.ABC):
             except hsm.ErrorValidatingModel as error:
                 if not _is_already_running_error(error):
                     raise
+
             for device in _device_tree(*instance._devices.values()):
                 require_world_scope(world, device, participant="Device")
                 model = device.model
@@ -1073,7 +1074,7 @@ class Bot(hsm.Instance, abc.ABC):
         for ability in reversed(Bot._lifecycle_abilities(instance)):
             await hsm.stop(ability, lifetime)
         for device in reversed(_device_tree(*instance._devices.values())):
-            await hsm.stop(device, world.context)
+            await device.stop(world.context)
         terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(
             ctx,
@@ -1375,7 +1376,8 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.on(_BotProcessingCancelTimedOutEvent),
                     hsm.guard(_matches_processing_timeout),
                     hsm.effect(_dispatch_processing_timeout_failure),
-                    hsm.target("/Bot/degraded"),
+                    # Relative so redefines (e.g. PhoneBot(Bot.model, ...)) keep a valid target.
+                    hsm.target("../../degraded"),
                 ),
             ),
         ),

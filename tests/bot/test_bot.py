@@ -697,7 +697,7 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
         )
         reboot_state = active_bot.state()
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        timer_stopped = bool(operations) and all(operation.state() == "/BotProcessingTimer" for operation in operations)
+        timer_stopped = bool(operations) and all(operation.state() in {"", "/BotProcessingTimer"} for operation in operations)
         _ = release.set()
         await active_bot.dispatch(
             active_bot.context(),
@@ -1040,9 +1040,10 @@ def test_bot_detach_during_activation_stops_owned_lifecycle_tree() -> None:
     state, group_state, device_state, ability_states = asyncio.run(run())
 
     assert state == "/Bot/inactive"
-    assert group_state == "/AttachmentGroup"
-    assert device_state == "/Device"
-    assert ability_states == ("/CognitionLifecycle", "/ProbeAbilityLifecycle", "/ProbeAbilityLifecycle")
+    # hsm 1.3.2: stopped machines report empty state() (was model-root previously).
+    assert group_state in {"", "/AttachmentGroup"}
+    assert device_state in {"", "/Device"}
+    assert ability_states == ("", "", "")
 
 
 def test_bot_activation_rolls_back_when_device_firmware_initialization_fails() -> None:
@@ -1061,8 +1062,8 @@ def test_bot_activation_rolls_back_when_device_firmware_initialization_fails() -
         return (
             active_bot.state(),
             device_bots(first_device),
-            first_device.state() == "/Device",
-            failing_device.state() == "/Device",
+            first_device.state() in {"", "/Device"},
+            failing_device.state() in {"", "/Device"},
         )
 
     state, first_bots, first_stopped, failing_stopped = asyncio.run(run())
@@ -1086,8 +1087,8 @@ def test_bot_activation_rolls_back_when_device_failed_before_attachment() -> Non
         return (
             active_bot.state(),
             device_bots(first_device),
-            first_device.state() == "/Device",
-            failing_device.state() == "/Device",
+            first_device.state() in {"", "/Device"},
+            failing_device.state() in {"", "/Device"},
         )
 
     state, first_bots, first_stopped, failing_stopped = asyncio.run(run())
@@ -1108,7 +1109,7 @@ def test_bot_attachment_group_uses_modeled_device_events_not_dispatch_override()
         _ = await active_bot.attach(world)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
-        return active_bot.state(), device_bots(first_device), first_device.state() == "/Device"
+        return active_bot.state(), device_bots(first_device), first_device.state() in {"", "/Device"}
 
     state, first_bots, first_stopped = asyncio.run(run())
 
@@ -1133,13 +1134,18 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
         monkeypatch.setattr(hsm.Instance, "dispatch", dispatch)
 
         _ = await active_bot.attach(world)
-        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        # Activation cleanup now stops nested ability/group holds; give wall-clock time
+        # beyond pure yield scheduling for the modeled rollback path.
+        for _ in range(200):
+            if active_bot.state() == "/Bot/inactive":
+                break
+            await asyncio.sleep(0.01)
 
         return (
             active_bot.state(),
             device_bots(first_device),
-            first_device.state() == "/Device",
-            failing_device.state() == "/Device",
+            first_device.state() in {"", "/Device"},
+            failing_device.state() in {"", "/Device"},
         )
 
     state, first_bots, first_stopped, failing_stopped = asyncio.run(run())
@@ -1176,9 +1182,9 @@ def test_bot_attachment_group_handles_multiple_firmware_initialization_failures(
         return (
             active_bot.state(),
             device_bots(first_device),
-            first_device.state() == "/Device",
-            first_failing_device.state() == "/Device",
-            second_failing_device.state() == "/Device",
+            first_device.state() in {"", "/Device"},
+            first_failing_device.state() in {"", "/Device"},
+            second_failing_device.state() in {"", "/Device"},
         )
 
     state, first_bots, first_stopped, first_failing_stopped, second_failing_stopped = asyncio.run(run())
@@ -1199,7 +1205,7 @@ def test_bot_deactivation_detaches_shared_device_alias() -> None:
         _ = await active_bot.detach(world)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
-        return active_bot.state(), device_bots(shared_device), shared_device.state() == "/Device"
+        return active_bot.state(), device_bots(shared_device), shared_device.state() in {"", "/Device"}
 
     state, agents, shared_stopped = asyncio.run(run())
 
@@ -1208,11 +1214,19 @@ def test_bot_deactivation_detaches_shared_device_alias() -> None:
     assert not shared_stopped
 
 
-async def wait_until(condition: typing.Callable[[], bool]) -> None:
-    for _ in range(100):
+async def wait_until(condition: typing.Callable[[], bool], *, timeout: float = 2.0) -> None:
+    """Wait until ``condition`` is true.
+
+    Uses tight yields so short-lived HSM states remain observable, with a wall-clock
+    deadline so async cleanup under hsm 1.3.2 cannot hang the suite forever.
+    """
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
         if condition():
             return
         await asyncio.sleep(0)
+    raise TimeoutError("wait_until condition not met")
 
 
 async def ring_phone(phone: phone_device.Phone, call_id: str = "call-123") -> None:
@@ -1619,7 +1633,8 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert isinstance(observed_browser_input.input, hsm.Event)
     assert observed_browser_input.input.name == SoundEvent.name
     assert isinstance(observed_browser_input.input.data, SoundData)
-    assert observed_browser_input.input.metadata.get("bot.phone.call_id") == "call-456"
+    # Call identity rides elevated event.id (not event.metadata) — HSM-COMPLETION-001.
+    assert observed_browser_input.input.id == "call-456"
     offered = {event.name for event in observed_browser_input.schemas}
     assert bot.FocusDeviceEvent.name in offered
     assert bot.ClearFocusEvent.name in offered
@@ -3287,7 +3302,7 @@ def test_completed_turn_cancels_processing_timer(monkeypatch: pytest.MonkeyPatch
 
     failures, actions = asyncio.run(run())
 
-    timer_stopped = bool(operations) and all(operation.state() == "/BotProcessingTimer" for operation in operations)
+    timer_stopped = bool(operations) and all(operation.state() in {"", "/BotProcessingTimer"} for operation in operations)
 
     # Completing the turn exits processing; the owning activity stops the timer explicitly.
     assert timer_stopped
@@ -3456,6 +3471,49 @@ def test_bot_deactivation_clears_focus() -> None:
 
     assert state == "/Bot/inactive"
     assert not focused_device
+
+
+def test_bot_deactivation_stops_input_output_abilities() -> None:
+    """Normal deactivate stops input/output abilities; cognition stays started."""
+
+    def started(instance: hsm.Instance) -> bool:
+        try:
+            _ = hsm.id(instance)
+        except hsm.ErrorValidatingModel:
+            return False
+        return True
+
+    async def run() -> tuple[bool, bool, bool, bool]:
+        cognition_ability = as_cognition(IgnoreAbility())
+        input_ability = ProbeAbility()
+        output_ability = ProbeAbility()
+        active_bot = AbilityAgent(
+            devices={},
+            cognition=cognition_ability,
+            input=(input_ability,),
+            output=(output_ability,),
+        )
+        world = await start_bot_with_devices(active_bot)
+        assert started(input_ability) is True
+        assert started(output_ability) is True
+        assert started(cognition_ability) is True
+
+        _ = await active_bot.detach(world)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+
+        return (
+            started(input_ability),
+            started(output_ability),
+            started(cognition_ability),
+            started(active_bot),
+        )
+
+    input_live, output_live, cognition_live, bot_live = asyncio.run(run())
+
+    assert input_live is False
+    assert output_live is False
+    assert cognition_live is True
+    assert bot_live is True
 
 
 def test_bot_focus_state_has_no_public_accessor() -> None:
@@ -3631,7 +3689,7 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
     calls, acquired_state = asyncio.run(run())
 
     assert calls == [probe_input()]
-    assert acquired_state == "/ProbeAbilityLifecycle"
+    assert acquired_state in {"", "/ProbeAbilityLifecycle"}  # hsm 1.3.2: stopped state is empty
 
 
 def test_bot_processing_does_not_define_coordination_metadata_keys() -> None:

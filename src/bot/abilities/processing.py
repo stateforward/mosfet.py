@@ -605,13 +605,17 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
 
 
 def active_operation(owner: hsm.Instance, operation_id: str) -> Operation | None:
-    """Resolve the exact live operation capability owned by a machine."""
+    """Resolve the exact live operation capability owned by a machine.
+
+    Liveness is map membership under the operation key. ``finish_operation`` removes the
+    entry before the capability is retired (HSM-CONTEXT-001: do not probe ``state()``).
+    """
 
     instances = owner.context().value(hsm.Keys.Instances)
     if not isinstance(instances, collections.abc.Mapping):
         return None
     operation = instances.get(_operation_key(owner, operation_id))
-    return operation if isinstance(operation, Operation) and operation.state().endswith("/active") else None
+    return operation if isinstance(operation, Operation) else None
 
 
 def active_operation_id(owner: hsm.Instance) -> str | None:
@@ -627,7 +631,6 @@ def active_operation_id(owner: hsm.Instance) -> str | None:
         if isinstance(key, str)
         and key.startswith(prefix)
         and isinstance(operation, Operation)
-        and operation.state().endswith("/active")
     ]
     return active[0] if len(active) == 1 else None
 

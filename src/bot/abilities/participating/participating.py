@@ -796,8 +796,6 @@ class _PerceptionCompletedEventData(pydantic.BaseModel):
     )
 
 
-_participating_stage_input: dict[str, InputData] = {}
-
 ParticipatingInputEvent = ability.ability_input_event(
     "bot.ability.participating.input",
     InputData,
@@ -965,112 +963,7 @@ def _participating_turn_id(event: hsm.Event[typing.Any]) -> str | None:
     return event.id if event.id else None
 
 
-def _participating_input_from_event(instance: "Participating", event: hsm.Event[typing.Any]) -> InputData | None:
-    del instance
-    op = _participating_turn_id(event) or ""
-    value = _participating_stage_input.get(op) if op else None
-    if isinstance(value, InputData):
-        return value
-    return None
 
-
-def _complete_audio_perception(
-    ctx: hsm.Context,
-    instance: "Participating",
-    event: hsm.Event[typing.Any],
-) -> None:
-    input = _participating_input_from_event(instance, event)
-    if input is None:
-        return
-    listening_output = event.data
-    assert isinstance(listening_output, AudioPerceptionData)
-    stimulus = input.stimulus
-    assert isinstance(stimulus, AudioStimulus)
-    if listening_output.speech is None:
-        perception = Perception(
-            source_participant_ref=stimulus.source_participant_ref,
-            modality="audio",
-            structured={"voice_detected": False},
-            confidence=listening_output.voice_detection.confidence,
-        )
-    else:
-        perception = Perception(
-            source_participant_ref=stimulus.source_participant_ref,
-            modality="audio",
-            speech=listening_output.speech,
-            confidence=listening_output.voice_detection.confidence,
-        )
-    operation_id = _participating_turn_id(event)
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _event_with_source_context(
-            _ParticipatingPerceptionCompletedEvent.with_data(
-                _PerceptionCompletedEventData(input=input, perception=perception)
-            ),
-            event,
-            operation_id=operation_id,
-        ),
-    )
-
-
-def _complete_reading_perception(
-    ctx: hsm.Context,
-    instance: "Participating",
-    event: hsm.Event[typing.Any],
-    *,
-    kind: typing.Literal["text", "image"],
-) -> None:
-    input = _participating_input_from_event(instance, event)
-    if input is None:
-        return
-    reading_output = event.data
-    assert isinstance(reading_output, reading.OutputData)
-    stimulus = input.stimulus
-    assert isinstance(stimulus, (TextStimulus, ImageStimulus))
-    operation_id = _participating_turn_id(event)
-    _dispatch_reading_perception(
-        ctx,
-        instance,
-        event=event,
-        input=input,
-        source=stimulus.source_participant_ref,
-        output=reading_output,
-        operation_id=operation_id,
-    )
-
-
-def _complete_perception_child(
-    ctx: hsm.Context,
-    instance: "Participating",
-    event: hsm.Event[typing.Any],
-    *,
-    kind: typing.Literal["audio", "text", "image"],
-) -> None:
-    if kind == "audio":
-        _complete_audio_perception(ctx, instance, event)
-        return
-    _complete_reading_perception(ctx, instance, event, kind=kind)
-
-
-def _fail_perception_child(
-    ctx: hsm.Context,
-    instance: "Participating",
-    event: hsm.Event[typing.Any],
-    *,
-    kind: typing.Literal["audio", "text", "image"],
-) -> None:
-    message = getattr(event.data, "message", "Perception child failed.")
-    operation_id = _participating_turn_id(event)
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _event_with_source_context(
-            _ParticipatingStageFailedEvent.with_data(_perception_failure(str(message))),
-            event,
-            operation_id=operation_id,
-        ),
-    )
 
 
 def _dispatch_reading_perception(
@@ -1241,30 +1134,83 @@ class Participating(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _run_audio_perception(
+    async def _run_audio_perception(
         ctx: hsm.Context,
         instance: "Participating",
         event: hsm.Event[typing.Any],
     ) -> None:
+        """Audio perception activity: InputData is activity-local (HSM-COMPLETION-001)."""
+
         input = event.data
         assert isinstance(input, InputData)
         stimulus = input.stimulus
         assert isinstance(stimulus, AudioStimulus)
         listening = instance._listening
         assert listening is not None
-        operation_id = _participating_turn_id(event) or "operation"
-        _participating_stage_input[operation_id] = input
-        _dispatch_child_input(
+        operation_id = _participating_turn_id(event)
+        if operation_id is None:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(
+                        _perception_failure("Participating refused perception without operation id.")
+                    ),
+                    event,
+                ),
+            )
+            return
+        child = typing.cast(ability.Ability[typing.Any, typing.Any], listening)
+        terminal = await ability.Ability.await_child_terminal(
+            ctx,
+            owner=instance,
+            child=child,
+            operation_id=operation_id,
+            input=stimulus.content,
+            metadata=event.metadata,
+        )
+        if terminal.name == child.failed_event.name:
+            message = getattr(terminal.data, "message", "Perception child failed.")
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(_perception_failure(str(message))),
+                    event,
+                    operation_id=operation_id,
+                ),
+            )
+            return
+        listening_output = terminal.data
+        assert isinstance(listening_output, AudioPerceptionData)
+        if listening_output.speech is None:
+            perception = Perception(
+                source_participant_ref=stimulus.source_participant_ref,
+                modality="audio",
+                structured={"voice_detected": False},
+                confidence=listening_output.voice_detection.confidence,
+            )
+        else:
+            perception = Perception(
+                source_participant_ref=stimulus.source_participant_ref,
+                modality="audio",
+                speech=listening_output.speech,
+                confidence=listening_output.voice_detection.confidence,
+            )
+        _ = hsm.dispatch(
             ctx,
             instance,
-            typing.cast(ability.Ability[typing.Any, typing.Any], listening),
-            stimulus.content,
-            operation_id,
-            event,
+            _event_with_source_context(
+                _ParticipatingPerceptionCompletedEvent.with_data(
+                    _PerceptionCompletedEventData(input=input, perception=perception)
+                ),
+                event,
+                operation_id=operation_id,
+            ),
         )
 
     @staticmethod
-    def _run_text_perception(
+    async def _run_text_perception(
         ctx: hsm.Context,
         instance: "Participating",
         event: hsm.Event[typing.Any],
@@ -1275,19 +1221,54 @@ class Participating(ability.Ability[InputData, OutputData]):
         assert isinstance(stimulus, TextStimulus)
         child = instance._reading
         assert child is not None
-        operation_id = _participating_turn_id(event) or "operation"
-        _participating_stage_input[operation_id] = input
-        _dispatch_child_input(
+        operation_id = _participating_turn_id(event)
+        if operation_id is None:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(
+                        _perception_failure("Participating refused perception without operation id.")
+                    ),
+                    event,
+                ),
+            )
+            return
+        ability_child = typing.cast(ability.Ability[typing.Any, typing.Any], child)
+        terminal = await ability.Ability.await_child_terminal(
+            ctx,
+            owner=instance,
+            child=ability_child,
+            operation_id=operation_id,
+            input=reading.InputData(kind="text", content=stimulus.content),
+            metadata=event.metadata,
+        )
+        if terminal.name == ability_child.failed_event.name:
+            message = getattr(terminal.data, "message", "Perception child failed.")
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(_perception_failure(str(message))),
+                    event,
+                    operation_id=operation_id,
+                ),
+            )
+            return
+        output = terminal.data
+        assert isinstance(output, reading.OutputData)
+        _dispatch_reading_perception(
             ctx,
             instance,
-            typing.cast(ability.Ability[typing.Any, typing.Any], child),
-            reading.InputData(kind="text", content=stimulus.content),
-            operation_id,
-            event,
+            event=event,
+            input=input,
+            source=stimulus.source_participant_ref,
+            output=output,
+            operation_id=operation_id,
         )
 
     @staticmethod
-    def _run_image_perception(
+    async def _run_image_perception(
         ctx: hsm.Context,
         instance: "Participating",
         event: hsm.Event[typing.Any],
@@ -1298,139 +1279,64 @@ class Participating(ability.Ability[InputData, OutputData]):
         assert isinstance(stimulus, ImageStimulus)
         child = instance._reading
         assert child is not None
-        operation_id = _participating_turn_id(event) or "operation"
-        _participating_stage_input[operation_id] = input
-        _dispatch_child_input(
+        operation_id = _participating_turn_id(event)
+        if operation_id is None:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(
+                        _perception_failure("Participating refused perception without operation id.")
+                    ),
+                    event,
+                ),
+            )
+            return
+        ability_child = typing.cast(ability.Ability[typing.Any, typing.Any], child)
+        terminal = await ability.Ability.await_child_terminal(
+            ctx,
+            owner=instance,
+            child=ability_child,
+            operation_id=operation_id,
+            input=reading.InputData(kind="image", content=stimulus.content),
+            metadata=event.metadata,
+        )
+        if terminal.name == ability_child.failed_event.name:
+            message = getattr(terminal.data, "message", "Perception child failed.")
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _event_with_source_context(
+                    _ParticipatingStageFailedEvent.with_data(_perception_failure(str(message))),
+                    event,
+                    operation_id=operation_id,
+                ),
+            )
+            return
+        output = terminal.data
+        assert isinstance(output, reading.OutputData)
+        _dispatch_reading_perception(
             ctx,
             instance,
-            typing.cast(ability.Ability[typing.Any, typing.Any], child),
-            reading.InputData(kind="image", content=stimulus.content),
-            operation_id,
-            event,
+            event=event,
+            input=input,
+            source=stimulus.source_participant_ref,
+            output=output,
+            operation_id=operation_id,
         )
 
-    @staticmethod
-    def _matches_perception_child_event(
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-        terminal_kind: typing.Literal["output", "failure"],
-        kind: typing.Literal["audio", "text", "image"],
-    ) -> bool:
-        """Match child terminal by type + source; turn id is shared parent OP (no suffix markers)."""
 
-        child = instance._listening if kind == "audio" else instance._reading
-        if child is None:
-            return False
-        terminal_event = child.output_event if terminal_kind == "output" else child.failed_event
-        turn_id = _participating_turn_id(event)
-        return (
-            event.name == terminal_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and turn_id is not None
-        )
 
-    @staticmethod
-    def _matches_audio_perception_output(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "output", "audio")
 
-    @staticmethod
-    def _matches_audio_perception_failure(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "failure", "audio")
 
-    @staticmethod
-    def _matches_text_perception_output(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "output", "text")
 
-    @staticmethod
-    def _matches_text_perception_failure(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "failure", "text")
 
-    @staticmethod
-    def _matches_image_perception_output(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "output", "image")
 
-    @staticmethod
-    def _matches_image_perception_failure(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return Participating._matches_perception_child_event(instance, event, "failure", "image")
 
-    @staticmethod
-    def _complete_audio_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _complete_perception_child(ctx, instance, event, kind="audio")
 
-    @staticmethod
-    def _complete_text_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _complete_perception_child(ctx, instance, event, kind="text")
 
-    @staticmethod
-    def _complete_image_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _complete_perception_child(ctx, instance, event, kind="image")
 
-    @staticmethod
-    def _fail_audio_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _fail_perception_child(ctx, instance, event, kind="audio")
 
-    @staticmethod
-    def _fail_text_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _fail_perception_child(ctx, instance, event, kind="text")
-
-    @staticmethod
-    def _fail_image_perception_child(
-        ctx: hsm.Context,
-        instance: "Participating",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        _fail_perception_child(ctx, instance, event, kind="image")
 
     @staticmethod
     async def _attach_participating_children(
@@ -1547,57 +1453,20 @@ class Participating(ability.Ability[InputData, OutputData]):
             ),
             hsm.state(
                 "listening",
-                hsm.entry(_run_audio_perception),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_audio_perception_output),
-                    hsm.effect(_complete_audio_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_audio_perception_failure),
-                    hsm.effect(_fail_audio_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
+                hsm.activity(_run_audio_perception),
             ),
             hsm.state(
                 "reading_text",
-                hsm.entry(_run_text_perception),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_text_perception_output),
-                    hsm.effect(_complete_text_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_text_perception_failure),
-                    hsm.effect(_fail_text_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
+                hsm.activity(_run_text_perception),
             ),
             hsm.state(
                 "reading_image",
-                hsm.entry(_run_image_perception),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_image_perception_output),
-                    hsm.effect(_complete_image_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_matches_image_perception_failure),
-                    hsm.effect(_fail_image_perception_child),
-                    hsm.target("/Participating/perceiving/completing"),
-                ),
+                hsm.activity(_run_image_perception),
             ),
             hsm.state(
                 "observing_event",
                 hsm.activity(_run_event_perception),
             ),
-            hsm.state("completing"),
         ),
         hsm.state(
             "contributing",

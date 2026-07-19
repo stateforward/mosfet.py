@@ -67,7 +67,14 @@ async def _apply_once(
     input_data: object,
     metadata: collections.abc.Mapping[str, object],
     timeout: float,
-) -> object:
+    operation_id: str | None = None,
+) -> tuple[object, str, str]:
+    """Dry-run one habit apply. Returns ``(output, operation_id, owner_id)``.
+
+    ``source`` on the input event is always the real ``hsm.id(owner)`` so habit
+    replies that target ``event['source']`` can route back to the verify owner.
+    """
+
     behavior = compiler.build(program)
     owner = _TerminalOwner(
         output_event_name=behavior.output_event.name,
@@ -75,38 +82,51 @@ async def _apply_once(
     )
     ctx = hsm.Context()
     _ = await hsm.started(ctx, owner, typing.cast(hsm.Model, owner.model))
+    owner_id = hsm.id(owner)
     _ = await behavior.attach(
         ctx,
         dataclasses.replace(
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
-            source=hsm.id(owner),
+            source=owner_id,
         ),
     )
-    operation_id = uuid.uuid4().hex
+    resolved_operation_id = operation_id if operation_id else uuid.uuid4().hex
     input_event = dataclasses.replace(
-        behavior.input_event.with_data_and_id(input_data, operation_id),
+        behavior.input_event.with_data_and_id(input_data, resolved_operation_id),
         metadata=dict(metadata),
+        source=owner_id,
+        target=hsm.id(behavior),
     )
     _ = await hsm.dispatch(ctx, behavior, input_event)
-    return await asyncio.wait_for(owner.result, timeout=timeout)
+    output = await asyncio.wait_for(owner.result, timeout=timeout)
+    return output, resolved_operation_id, owner_id
 
 
 def _live_binding_values(
     input_data: object,
-    metadata: collections.abc.Mapping[str, object],
+    *,
+    event_id: str = "",
+    source: str = "",
+    target: str = "",
 ) -> dict[str, object]:
+    """Collect scalar live values for selection binding equality.
+
+    Live bindings come from input_data fields and optional event envelope
+    id/source/target. Telemetry metadata is never a coordination ID source.
+    """
+
     values: dict[str, object] = {}
     if isinstance(input_data, collections.abc.Mapping):
         mapping = typing.cast(collections.abc.Mapping[object, object], input_data)
         for key, item in mapping.items():
             if isinstance(key, str) and isinstance(item, str | int | float | bool):
                 values[key] = item
-    for key, item in metadata.items():
-        if isinstance(item, str | int | float | bool):
-            values[key] = item
-            # Common id carriers also appear under bare names in selection data.
-            if key.endswith(".call_id") or key.endswith("_call_id") or key == "call_id":
-                values.setdefault("call_id", item)
+    if event_id:
+        _ = values.setdefault("id", event_id)
+    if source:
+        _ = values.setdefault("source", source)
+    if target:
+        _ = values.setdefault("target", target)
     return values
 
 
@@ -133,10 +153,12 @@ def _selection_binding_errors(
             if live is None:
                 continue
             if value != live:
-                errors.append(
-                    f"selection data[{key!r}]={value!r} does not match live input/metadata value "
-                    f"{live!r}; read identifiers from event['data']/event['metadata'] at runtime."
+                message = (
+                    f"selection data[{key!r}]={value!r} does not match live input/envelope value "
+                    + f"{live!r}; read identifiers from event['data'] and envelope fields "
+                    + "(event['id']/event['source']/event['target']) at runtime."
                 )
+                errors.append(message)
     return tuple(errors)
 
 
@@ -178,15 +200,17 @@ def verify_apply(
     if not checked.ok or checked.value is None:
         return checked
 
+    # metadata is telemetry pass-through into apply_once only — never selection binding.
     meta = dict(metadata or {})
-    live_values = _live_binding_values(input_data, meta)
+    operation_id = uuid.uuid4().hex
     try:
-        output = _run_coroutine(
+        output, resolved_operation_id, owner_id = _run_coroutine(
             _apply_once(
                 program,
                 input_data=input_data,
                 metadata=meta,
                 timeout=timeout,
+                operation_id=operation_id,
             )
         )
     except Exception as error:
@@ -199,6 +223,11 @@ def verify_apply(
         )
         return diagnostic.Checked[instance_mod.Instance](value=None, report=report)
 
+    live_values = _live_binding_values(
+        input_data,
+        event_id=resolved_operation_id,
+        source=owner_id,
+    )
     binding_errors = _selection_binding_errors(output, live_values=live_values)
     if binding_errors:
         report = diagnostic.report_of(

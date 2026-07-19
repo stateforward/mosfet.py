@@ -758,3 +758,63 @@ def test_text_message_requires_self_participant_state_and_unique_participants() 
             ),
             content=participating.TextStimulus(source_participant_ref="bot", content="hello"),
         )
+
+
+class _BlockingTextDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
+    """Decoder that blocks until released so mid-turn isolation can be observed."""
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.inputs: list[str] = []
+
+    @typing.override
+    async def decode(self, input: participating.ParticipationStimulus) -> str:
+        if isinstance(input, participating.TextStimulus):
+            self.inputs.append(input.content)
+        await self.gate.wait()
+        return "live-decode"
+
+
+def test_conversation_phase_context_is_not_instance_stashed() -> None:
+    """Message/DecodedTurn are activity-local; only turn id is machine-owned correlation."""
+
+    conversation_ability = RecordingConversation()
+    assert "_active_message" not in conversation_ability.__dict__
+    assert "_active_decoded" not in conversation_ability.__dict__
+    assert conversation_ability._active_turn_id is None
+
+
+def test_conversation_activity_holds_turn_without_stage_fields() -> None:
+    """While decoding, machine has turn id only — no Message/DecodedTurn instance stash."""
+
+    async def run() -> tuple[str | None, bool, bool, str]:
+        decoder = _BlockingTextDecoder()
+        conversation_ability = RecordingConversation(decoding=text_decoding_ability(decoder))
+        await start_conversation(conversation_ability)
+        turn_id = "turn-live-1"
+        _ = await conversation_ability.dispatch(
+            conversation_ability.context(),
+            conversation_ability.input_event.with_data_and_id(text_message(content="hello"), turn_id),
+        )
+        await wait_until(lambda: conversation_ability.state().endswith("/active/decoding"))
+        mid_id = conversation_ability._active_turn_id
+        has_message = "_active_message" in conversation_ability.__dict__
+        has_decoded = "_active_decoded" in conversation_ability.__dict__
+        decoder.gate.set()
+        await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
+        return mid_id, has_message, has_decoded, conversation_ability.state()
+
+    mid_id, has_message, has_decoded, state = asyncio.run(run())
+    assert mid_id == "turn-live-1"
+    assert has_message is False
+    assert has_decoded is False
+    assert state.endswith("/silent")
+
+
+def test_conversation_active_turn_match_is_id_equality() -> None:
+    conversation_ability = RecordingConversation()
+    conversation_ability._active_turn_id = "turn-a"
+    wrong = conversation_ability.input_event.with_data_and_id(text_message(), "turn-b")
+    right = conversation_ability.input_event.with_data_and_id(text_message(), "turn-a")
+    assert conversation_impl._matches_active_turn(conversation_ability, wrong) is False
+    assert conversation_impl._matches_active_turn(conversation_ability, right) is True

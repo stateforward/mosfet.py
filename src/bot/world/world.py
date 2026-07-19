@@ -4,6 +4,7 @@ import weakref
 
 import hsm
 
+
 def _instance_scope(instance: hsm.Instance) -> object | None:
     return instance.context().value(hsm.Keys.Instances)
 
@@ -52,10 +53,14 @@ class World(hsm.Context):
 
         await hsm.dispatch_all(self, event)
 
+
 def require_world_scope(world: World, instance: hsm.Instance, *, participant: str) -> None:
     """Reject attaching a running instance to a different world scope."""
 
-    if not instance.state():
+    # Only enforce while the machine is started (hsm 1.3.2+: id fails after stop).
+    try:
+        _ = hsm.id(instance)
+    except hsm.ErrorValidatingModel:
         return
     if _instance_scope(instance) is world.value(hsm.Keys.Instances):
         return

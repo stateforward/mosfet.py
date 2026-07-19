@@ -3,19 +3,53 @@ import collections
 import pathlib
 
 
+# Flat allowlist keyed by stable relative paths:
+# - bot production: relative to src/bot (e.g. abilities/processing.py)
+# - provider production: relative to src/ (e.g. providers/livekit/src/bot/providers/livekit/phone.py)
+# Only production .py under those roots is scanned (provider package tests and
+# hatch/vendor trees outside each provider's src/ are excluded).
 _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {
     # for-key iteration over telemetry metadata maps (not coordination keys).
     "abilities/processing.py": {"operation:iteration": 1},
-    "habit/verify.py": {"operation:iteration": 1},
 }
 
 
-def _coordination_metadata_references(source_root: pathlib.Path) -> dict[str, dict[str, int]]:
+def _repo_root() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def _production_source_entries() -> list[tuple[str, pathlib.Path]]:
+    """Production Python sources under core bot and provider packages.
+
+    Returns (allowlist_key, absolute_path) pairs. Keys form one flat map:
+    bot paths stay relative to ``src/bot``; provider paths are relative to
+    ``src/`` so they cannot collide with bot module names.
+    """
+    src = _repo_root() / "src"
+    entries: list[tuple[str, pathlib.Path]] = []
+    bot_root = src / "bot"
+    for path in sorted(bot_root.rglob("*.py")):
+        entries.append((path.relative_to(bot_root).as_posix(), path))
+
+    providers_root = src / "providers"
+    if providers_root.is_dir():
+        for provider in sorted(providers_root.iterdir()):
+            provider_src = provider / "src"
+            if not provider_src.is_dir():
+                continue
+            for path in sorted(provider_src.rglob("*.py")):
+                if "tests" in path.parts:
+                    continue
+                entries.append((path.relative_to(src).as_posix(), path))
+    return entries
+
+
+def _coordination_metadata_references() -> dict[str, dict[str, int]]:
     references: dict[str, dict[str, int]] = {}
-    for path in sorted(source_root.rglob("*.py")):
+    for key, path in _production_source_entries():
         counts = _coordination_metadata_counts(path.read_text())
         if counts:
-            references[str(path.relative_to(source_root))] = dict(counts)
+            references[key] = dict(counts)
     return references
 
 
@@ -147,8 +181,7 @@ def _count_unmodeled_metadata_key(counts: collections.Counter[str], node: ast.AS
 
 
 def test_behavioral_metadata_legacy_allowlist_can_only_shrink() -> None:
-    source_root = pathlib.Path(__file__).parents[2] / "src" / "bot"
-    actual = _coordination_metadata_references(source_root)
+    actual = _coordination_metadata_references()
     violations = {
         path: {
             key: count

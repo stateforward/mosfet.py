@@ -32,10 +32,10 @@ class FakeAudioFrame:
 
 @dataclasses.dataclass
 class FakeAudioSource:
-    captured_inputs: list[FakeAudioFrame] = dataclasses.field(default_factory=list)
+    captured_frames: list[FakeAudioFrame] = dataclasses.field(default_factory=list)
 
     async def capture_frame(self, frame: FakeAudioFrame) -> None:
-        self.captured_inputs.append(frame)
+        self.captured_frames.append(frame)
 
 @dataclasses.dataclass
 class RecordingSpeechDecoder(speech.SpeechDecoder):

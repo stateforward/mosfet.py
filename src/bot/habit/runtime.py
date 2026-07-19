@@ -419,11 +419,20 @@ def _habit_id(instance: _Instance) -> str:
 
 
 def _target_is_live(ctx: hsm.Context, target: str) -> bool:
+    """True when ``target`` resolves to a started instance that can accept HSM dispatch."""
+
     instances = ctx.value(hsm.Keys.Instances)
     if not isinstance(instances, collections.abc.Mapping):
         return False
     found = typing.cast(collections.abc.Mapping[object, object], instances).get(target)
-    return isinstance(found, hsm.Instance)
+    if not isinstance(found, hsm.Instance):
+        return False
+    # hsm 1.3.2+: id fails after stop (map membership alone is not delivery liveness).
+    try:
+        _ = hsm.id(found)
+    except hsm.ErrorValidatingModel:
+        return False
+    return True
 
 
 def _habit_event(

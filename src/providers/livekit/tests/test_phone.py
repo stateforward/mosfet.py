@@ -1320,7 +1320,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
             service.context(),
             dataclasses.replace(
                 dial_failed.with_data(phone_device.CallFailedData(call_id="call-123", failure_kind="signaling_failed")),
-                metadata={"bot.provider.livekit.phone.operation_id": "stale-operation"},
+                id="stale-operation",
             ),
         )
         await asyncio.sleep(0)
@@ -1355,7 +1355,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
                 answer_failed.with_data(
                     phone_device.CallFailedData(call_id="call-123", failure_kind="signaling_failed")
                 ),
-                metadata={"bot.provider.livekit.phone.operation_id": "stale-operation"},
+                id="stale-operation",
             ),
         )
         await asyncio.sleep(0)
@@ -1407,7 +1407,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
                         failure_kind="signaling_failed",
                     )
                 ),
-                metadata={"bot.provider.livekit.phone.operation_id": "stale-operation"},
+                id="stale-operation",
             ),
         )
         await asyncio.sleep(0)

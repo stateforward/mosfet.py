@@ -171,9 +171,19 @@ class _PhoneObservationService:
             self.target = None
 
     def speaker_ready_in_world(self, ctx: hsm.Context) -> bool:
-        """True when the phone-owned speaker is running in the same world as ``ctx``."""
+        """True when observation is attached and the phone speaker can elevate audio.
 
-        if not self.speaker.state():
+        Elevation stamps ``source=hsm.id(speaker)`` on ``world.sound``; that requires a
+        started speaker in the same world Instances map as ``ctx``. Readiness uses this
+        service's attach hold (``self.target``), successful ``hsm.id(speaker)`` (hsm 1.3.2+
+        fails after stop), and same-world scope — never ``state()``.
+        """
+
+        if self.target is None:
+            return False
+        try:
+            _ = hsm.id(self.speaker)
+        except hsm.ErrorValidatingModel:
             return False
         speaker_context = self.speaker.context()
         return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
@@ -348,7 +358,15 @@ class PhoneFirmware(hsm.Instance):
         trigger: hsm.Event,
         event: hsm.Event[typing.Any],
     ) -> None:
-        instance._service.publish(ctx, dataclasses.replace(event, metadata=dict(trigger.metadata)))
+        # Preserve request envelope id end-to-end for HSM completion correlation; metadata is telemetry only.
+        instance._service.publish(
+            ctx,
+            dataclasses.replace(
+                event,
+                id=trigger.id if trigger.id else event.id,
+                metadata=dict(trigger.metadata),
+            ),
+        )
 
     @staticmethod
     def _queue_committed(
@@ -357,7 +375,15 @@ class PhoneFirmware(hsm.Instance):
         trigger: hsm.Event,
         event: hsm.Event[typing.Any],
     ) -> None:
-        _ = hsm.dispatch(ctx, instance, dataclasses.replace(event, metadata=dict(trigger.metadata)))
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                event,
+                id=trigger.id if trigger.id else event.id,
+                metadata=dict(trigger.metadata),
+            ),
+        )
 
     @staticmethod
     def _is_new_incoming_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:

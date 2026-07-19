@@ -94,17 +94,12 @@ def _log_ability_terminals(machine: typing.Any, *, name: str, model: str) -> Non
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
             public = typing.cast(hsm.Event[typing.Any], event.data)
             if public.name == machine.output_event.name:
-                escalate = public.metadata.get("bot.intuition.escalate")
-                confidence = public.metadata.get("bot.intuition.confidence")
-                threshold = public.metadata.get("bot.intuition.confidence_threshold")
+                # Typed terminal data only — never event.metadata for behavior (HSM-COMPLETION-001).
                 _LOG.info(
-                    "%s terminal model=%s outcome=%s escalate=%s confidence=%s threshold=%s",
+                    "%s terminal model=%s outcome=%s",
                     name,
                     model,
                     _summarize_selections(public.data),
-                    escalate,
-                    confidence,
-                    threshold,
                 )
         elif event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
             public = typing.cast(hsm.Event[typing.Any], event.data)

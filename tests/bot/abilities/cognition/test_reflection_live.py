@@ -17,11 +17,6 @@ from bot import habit as habit_events
 from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
-from bot.providers.gemini import ChatClient as GeminiChatClient
-from bot.providers.gemini import Processor as GeminiProcessor
-from bot.providers.openai_compat import ChatClient as OpenAIChatClient
-from bot.providers.openai_compat import Processor as OpenAIProcessor
-
 import asyncio
 import collections.abc
 import dataclasses
@@ -31,6 +26,16 @@ from pathlib import Path
 
 import hsm
 import pytest
+
+# Optional provider packages — skip collection when not installed in this env.
+GeminiChatClient = pytest.importorskip("bot.providers.gemini", reason="bot-provider-gemini not installed").ChatClient
+GeminiProcessor = pytest.importorskip("bot.providers.gemini", reason="bot-provider-gemini not installed").Processor
+OpenAIChatClient = pytest.importorskip(
+    "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
+).ChatClient
+OpenAIProcessor = pytest.importorskip(
+    "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
+).Processor
 
 from bot.habit import storage as habit_storage
 from bot.devices import phone as phone_device

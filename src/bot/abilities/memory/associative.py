@@ -8,7 +8,6 @@ from .. import processing
 
 import dataclasses
 import typing
-import uuid
 
 import hsm
 
@@ -17,7 +16,6 @@ import pydantic
 
 from bot.telemetry import observer
 
-_associative_stage_decoded: dict[str, object] = {}
 _AssociativeMemoryChildrenAttachedEvent = hsm.Event[object](
     name="bot.ability.memory.associative.children.attached",
     kind=hsm.CompletionEventKind,
@@ -388,20 +386,13 @@ def _associative_memory_event_with_context(
 
 
 def _public_associative_memory_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    """Pass-through telemetry metadata (phase payloads are instance-owned)."""
+    """Pass-through telemetry metadata (telemetry only; phase payloads ride completions)."""
 
     return dict(metadata)
 
 
 def _associative_turn_id(event: hsm.Event[typing.Any]) -> str | None:
     return event.id if event.id else None
-
-
-def _associative_memory_phase_from_event(event: hsm.Event[typing.Any]) -> object | None:
-    parent = _associative_turn_id(event)
-    if not parent:
-        return None
-    return _associative_stage_decoded.get(parent)
 
 
 def _dispatch_associative_memory_output(
@@ -560,85 +551,61 @@ async def _decode_associative_memory_sources(
     )
 
 
-def _dispatch_associative_memory_processor(
+async def _run_associative_memory_processor(
     ctx: hsm.Context,
     instance: "AssociativeMemory",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Processor activity: decoded payload is entry-event local (HSM-COMPLETION-001)."""
+
     decoded = event.data
     assert isinstance(decoded, _AssociativeMemoryDecodedEventData)
-    operation_id = _associative_turn_id(event) or uuid.uuid4().hex
-    _associative_stage_decoded[operation_id] = decoded
-    _ = hsm.dispatch(
-        ctx,
-        instance.processor,
-        dataclasses.replace(
-            instance.processor.input_event.with_data_and_id(
-                processing.InputData(
-                    input=AssociationData(
-                        sources=decoded.sources,
-                        context=decoded.input.context,
-                        context_ref=decoded.input.context_ref,
-                        subject_ref=decoded.input.subject_ref,
-                        store_ref=decoded.input.store_ref,
-                        graph_ref=decoded.input.graph_ref,
-                    )
-                ),
-                operation_id,
-            ),
-            source=hsm.id(instance),
-            target=hsm.id(instance.processor),
-            metadata=dict(event.metadata),
-        ),
-    )
-
-
-def _matches_associative_memory_processor_event(
-    instance: "AssociativeMemory",
-    event: hsm.Event[typing.Any],
-    terminal_kind: typing.Literal["output", "failure"],
-) -> bool:
-    """Match processor terminal by type + source; turn id is parent OP (no suffix markers)."""
-
-    terminal_event = instance.processor.output_event if terminal_kind == "output" else instance.processor.failed_event
-    turn_id = _associative_turn_id(event)
-    return (
-        event.name == terminal_event.name
-        and event.source == hsm.id(instance.processor)
-        and event.target == hsm.id(instance)
-        and turn_id is not None
-        and isinstance(_associative_memory_phase_from_event(event), _AssociativeMemoryDecodedEventData)
-    )
-
-
-def _matches_associative_memory_processor_output(
-    ctx: hsm.Context,
-    instance: "AssociativeMemory",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_associative_memory_processor_event(instance, event, "output")
-
-
-def _matches_associative_memory_processor_failure(
-    ctx: hsm.Context,
-    instance: "AssociativeMemory",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_associative_memory_processor_event(instance, event, "failure")
-
-
-def _complete_associative_memory_processing(
-    ctx: hsm.Context,
-    instance: "AssociativeMemory",
-    event: hsm.Event[typing.Any],
-) -> None:
-    decoded = _associative_memory_phase_from_event(event)
-    assert isinstance(decoded, _AssociativeMemoryDecodedEventData)
-    linked = event.data
+    operation_id = _associative_turn_id(event)
     public_metadata = _public_associative_memory_metadata(dict(event.metadata))
-    parent_id = _associative_turn_id(event)
+    if operation_id is None:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _AssociativeMemoryApplyFailedEvent.with_data(
+                    ability.FailureData(message="AssociativeMemory refused processing without operation id.")
+                ),
+                id=event.id or "",
+                metadata=public_metadata,
+            ),
+        )
+        return
+    child = instance.processor
+    terminal = await ability.Ability.await_child_terminal(
+        ctx,
+        owner=instance,
+        child=child,
+        operation_id=operation_id,
+        input=processing.InputData(
+            input=AssociationData(
+                sources=decoded.sources,
+                context=decoded.input.context,
+                context_ref=decoded.input.context_ref,
+                subject_ref=decoded.input.subject_ref,
+                store_ref=decoded.input.store_ref,
+                graph_ref=decoded.input.graph_ref,
+            )
+        ),
+        metadata=public_metadata,
+    )
+    if terminal.name == child.failed_event.name:
+        message = getattr(terminal.data, "message", "AssociativeMemory processor failed.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _AssociativeMemoryApplyFailedEvent.with_data(ability.FailureData(message=str(message))),
+                id=operation_id,
+                metadata=public_metadata,
+            ),
+        )
+        return
+    linked = terminal.data
     if not isinstance(linked, LinkedData):
         _ = hsm.dispatch(
             ctx,
@@ -649,7 +616,7 @@ def _complete_associative_memory_processing(
                         message="AssociativeMemory processor produced output that does not match its output schema."
                     )
                 ),
-                id=parent_id,
+                id=operation_id,
                 metadata=public_metadata,
             ),
         )
@@ -664,25 +631,8 @@ def _complete_associative_memory_processing(
         instance,
         dataclasses.replace(
             _AssociativeMemoryProcessingCompletedEvent.with_data(data),
-            id=parent_id,
+            id=operation_id,
             metadata=public_metadata,
-        ),
-    )
-
-
-def _fail_associative_memory_processing(
-    ctx: hsm.Context,
-    instance: "AssociativeMemory",
-    event: hsm.Event[typing.Any],
-) -> None:
-    message = getattr(event.data, "message", "AssociativeMemory processor failed.")
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        dataclasses.replace(
-            _AssociativeMemoryApplyFailedEvent.with_data(ability.FailureData(message=str(message))),
-            id=_associative_turn_id(event),
-            metadata=_public_associative_memory_metadata(dict(event.metadata)),
         ),
     )
 
@@ -830,18 +780,8 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
         hsm.state(
             "processing",
             hsm.defer(input_event),
-            hsm.entry(_dispatch_associative_memory_processor),
+            hsm.activity(_run_associative_memory_processor),
             hsm.exit(_detach_associative_memory_children_on_detach),
-            hsm.transition(
-                hsm.on(hsm.AnyEvent),
-                hsm.guard(_matches_associative_memory_processor_output),
-                hsm.effect(_complete_associative_memory_processing),
-            ),
-            hsm.transition(
-                hsm.on(hsm.AnyEvent),
-                hsm.guard(_matches_associative_memory_processor_failure),
-                hsm.effect(_fail_associative_memory_processing),
-            ),
             hsm.transition(
                 hsm.on(_AssociativeMemoryProcessingCompletedEvent),
                 hsm.guard(_has_associative_memory_processing),

@@ -169,7 +169,7 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
 def _matches_child_terminal(
     event: hsm.Event[typing.Any],
     *,
-    owner: hsm.Instance,
+    owner: "Cognition",
     child: ability.Ability[typing.Any, typing.Any],
     suffix: str,
     terminal_name: str,
@@ -178,6 +178,8 @@ def _matches_child_terminal(
     if not isinstance(data, types.CompletionData | types.FailureData):
         return False
     operation = processing.active_operation(owner, data.turn.operation_id)
+    # Phase identity is machine-owned active-child suffix (set when starting the child),
+    # not a state() probe (HSM-CONTEXT-001). Envelope id + generation still correlate the turn.
     return (
         event.name == terminal_name
         and event.source == hsm.id(child)
@@ -185,8 +187,7 @@ def _matches_child_terminal(
         and operation is not None
         and data.turn.generation == hsm.id(operation)
         and event.id == f"{data.turn.operation_id}{suffix}"
-        and bool(owner.state())
-        and owner.state().endswith(f"/{suffix.removeprefix(':')}")
+        and owner._active_child_suffix == suffix
     )
 
 
@@ -204,6 +205,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
     cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelEvent
     cancelled_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelledEvent
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
+    # Active child phase for terminal matching (HSM-CORRELATION / HSM-CONTEXT-001).
+    # Set when a processing child is started; cleared on state exit and turn finish. Not state().
+    _active_child_suffix: str | None
     _autonomy: autonomy.Autonomy | None
     _intuition: intuition.Intuition
     _reasoning: reasoning.Reasoning
@@ -264,6 +268,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         operation_id = event.id or uuid.uuid4().hex
         if processing.active_operation(instance, operation_id) is None:
             _ = await processing.start_operation(instance, operation_id)
+        instance._active_child_suffix = _AUTONOMY_ID_SUFFIX
         turn = Cognition._turn(instance, data, operation_id)
         input_event = dataclasses.replace(
             autonomy_ability.input_event.with_data_and_id(
@@ -299,6 +304,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         operation_id = event.id or uuid.uuid4().hex
         if processing.active_operation(instance, operation_id) is None:
             _ = await processing.start_operation(instance, operation_id)
+        instance._active_child_suffix = _INTUITION_ID_SUFFIX
         turn = Cognition._turn(instance, data, operation_id)
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
@@ -456,6 +462,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             )
             return
         base = operation_id if operation_id else uuid.uuid4().hex
+        instance._active_child_suffix = _INTUITION_ID_SUFFIX
         turn = Cognition._turn(instance, cognition_input, base)
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
@@ -472,6 +479,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
+        # Prefer full unhandled-autonomy match (envelope id, generation, live op, suffix).
+        # Suffix is still set when this activity starts from the autonomy→intuition transition.
         if Cognition._autonomy_is_unhandled(ctx, instance, event):
             await Cognition._start_intuition(ctx, instance, event)
             return
@@ -573,6 +582,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         from . import reasoning as reasoning_ability
 
         base = operation_id if operation_id else uuid.uuid4().hex
+        instance._active_child_suffix = _REASONING_ID_SUFFIX
         turn = Cognition._turn(instance, cognition_input, base)
         input_event = dataclasses.replace(
             instance._reasoning.input_event.with_data_and_id(
@@ -724,6 +734,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         return True
 
     @staticmethod
+    def _clear_active_child_suffix(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Drop phase identity when leaving a child-wait state (stale after exit)."""
+
+        del ctx, event
+        instance._active_child_suffix = None
+
+    @staticmethod
     def _finish_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         if isinstance(data, types.CompletionData):
@@ -738,6 +759,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             operation_id = event.id
         else:
             operation_id = _parent_operation_id(event)
+        instance._active_child_suffix = None
         if operation_id is not None:
             processing.finish_operation(ctx, instance, operation_id)
 
@@ -921,6 +943,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     @staticmethod
     def _finish_operations(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
         del event
+        instance._active_child_suffix = None
         processing.finish_operations(ctx, instance)
 
     @staticmethod
@@ -1085,6 +1108,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
             hsm.state(
                 "cancelling",
+                # Cancel leaves child-wait without finish_turn until cancelled confirms.
+                hsm.entry(_clear_active_child_suffix),
                 hsm.initial(hsm.target("intuition")),
                 hsm.transition(
                     hsm.on(processing.CancelledEvent),
@@ -1137,6 +1162,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         autonomy: autonomy.Autonomy | None = None,
     ) -> None:
         super().__init__()
+        self._active_child_suffix = None
         self._autonomy = autonomy
         self._intuition = intuition
         self._reasoning = reasoning

@@ -162,9 +162,6 @@ class _ReadingClassifiedEventData(pydantic.BaseModel):
 
 
 
-_reading_stage_input: dict[str, InputData] = {}
-_reading_stage_classified: dict[str, _ReadingClassifiedEventData] = {}
-
 class _ReadingOutputCandidateEventData(pydantic.BaseModel):
     """Private completion payload for conversation-ready reading output candidates."""
 
@@ -264,22 +261,8 @@ def _reading_event_with_context(
     operation_id = source.id if source.id else None
     if operation_id is not None:
         event = event.with_data_and_id(event.data, operation_id)
-    # Telemetry only; stage payloads live on Reading instance fields.
+    # Telemetry only; stage payloads ride private completions / activity locals.
     return dataclasses.replace(event, metadata=dict(source.metadata))
-
-
-def _dispatch_reading_child_input(
-    ctx: hsm.Context,
-    child: ability.Ability[typing.Any, typing.Any],
-    input: object,
-    source: hsm.Event[typing.Any],
-) -> None:
-    child_event = child.input_event.with_data(input)
-    operation_id = source.id if source.id else None
-    if operation_id is not None:
-        child_event = child.input_event.with_data_and_id(input, operation_id)
-    child_event = dataclasses.replace(child_event, metadata=dict(source.metadata))
-    _ = hsm.dispatch(ctx, child, child_event)
 
 
 def _dispatch_reading_terminal_output(
@@ -329,8 +312,23 @@ async def _run_reading_classification(
     instance: "Reading",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Classification activity: InputData is activity-local; completion carries both input+label."""
+
     input = event.data
     assert isinstance(input, InputData)
+    operation_id = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if not operation_id:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="classification", message="Reading refused apply without operation id.")
+                ),
+                event,
+            ),
+        )
+        return
     try:
         classification_input = vision.classification.InputData(kind=input.kind, content=input.content)
     except Exception as error:
@@ -343,15 +341,46 @@ async def _run_reading_classification(
             ),
         )
         return
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    if op:
-        _reading_stage_input[op] = input
     child = _reading_visual_classifier(instance)
-    _dispatch_reading_child_input(
+    terminal = await ability.Ability.await_child_terminal(
         ctx,
-        child,
-        classification_input,
-        event,
+        owner=instance,
+        child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
+        operation_id=operation_id,
+        input=classification_input,
+        metadata=event.metadata,
+    )
+    if terminal.name == child.failed_event.name:
+        message = getattr(terminal.data, "message", "Reading classification child failed.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="classification", message=str(message))
+                ),
+                event,
+            ),
+        )
+        return
+    classification = terminal.data
+    if not isinstance(classification, vision.classification.OutputData):
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="classification", message="Reading classification produced invalid output.")
+                ),
+                event,
+            ),
+        )
+        return
+    completion = _ReadingClassifiedEventData(input=input, classification=classification)
+    _ = hsm.dispatch(
+        ctx,
+        instance,
+        _reading_event_with_context(_ReadingClassificationCompletedEvent.with_data(completion), event),
     )
 
 
@@ -360,8 +389,23 @@ async def _run_text_decoding(
     instance: "Reading",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Text decode activity: classified payload is the entry event (completion), not a module bag."""
+
     classified = event.data
     assert isinstance(classified, _ReadingClassifiedEventData)
+    operation_id = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if not operation_id:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="text_decoding", message="Reading refused decode without operation id.")
+                ),
+                event,
+            ),
+        )
+        return
     try:
         content = classified.input.content
         assert isinstance(content, str)
@@ -375,15 +419,48 @@ async def _run_text_decoding(
             ),
         )
         return
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    if op:
-        _reading_stage_classified[op] = classified
     child = _reading_text_decoder(instance)
-    _dispatch_reading_child_input(
+    terminal = await ability.Ability.await_child_terminal(
         ctx,
-        child,
-        content,
-        event,
+        owner=instance,
+        child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
+        operation_id=operation_id,
+        input=content,
+        metadata=event.metadata,
+    )
+    if terminal.name == child.failed_event.name:
+        message = getattr(terminal.data, "message", "Reading text decoder failed.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(FailedEventData(stage="text_decoding", message=str(message))),
+                event,
+            ),
+        )
+        return
+    text = terminal.data
+    if not isinstance(text, str):
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="text_decoding", message="Reading text decoder produced non-text output.")
+                ),
+                event,
+            ),
+        )
+        return
+    completion = _ReadingOutputCandidateEventData(
+        text=text,
+        source_kind="text",
+        confidence=classified.classification.confidence,
+    )
+    _ = hsm.dispatch(
+        ctx,
+        instance,
+        _reading_event_with_context(_ReadingTextDecodedEvent.with_data(completion), event),
     )
 
 
@@ -392,8 +469,23 @@ async def _run_image_decoding(
     instance: "Reading",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Image decode activity: classified payload is the entry event (completion), not a module bag."""
+
     classified = event.data
     assert isinstance(classified, _ReadingClassifiedEventData)
+    operation_id = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if not operation_id:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="image_decoding", message="Reading refused decode without operation id.")
+                ),
+                event,
+            ),
+        )
+        return
     try:
         content = classified.input.content
         assert isinstance(content, bytes)
@@ -407,15 +499,48 @@ async def _run_image_decoding(
             ),
         )
         return
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    if op:
-        _reading_stage_classified[op] = classified
     child = _reading_image_decoder(instance)
-    _dispatch_reading_child_input(
+    terminal = await ability.Ability.await_child_terminal(
         ctx,
-        child,
-        content,
-        event,
+        owner=instance,
+        child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
+        operation_id=operation_id,
+        input=content,
+        metadata=event.metadata,
+    )
+    if terminal.name == child.failed_event.name:
+        message = getattr(terminal.data, "message", "Reading image decoder failed.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(FailedEventData(stage="image_decoding", message=str(message))),
+                event,
+            ),
+        )
+        return
+    text = terminal.data
+    if not isinstance(text, str):
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="image_decoding", message="Reading image decoder produced non-text output.")
+                ),
+                event,
+            ),
+        )
+        return
+    completion = _ReadingOutputCandidateEventData(
+        text=text,
+        source_kind="image",
+        confidence=classified.classification.confidence,
+    )
+    _ = hsm.dispatch(
+        ctx,
+        instance,
+        _reading_event_with_context(_ReadingImageDecodedEvent.with_data(completion), event),
     )
 
 
@@ -443,282 +568,71 @@ async def _run_output_encoding(
     instance: "Reading",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Encode activity: candidate is entry-event local (HSM-COMPLETION-001)."""
+
     candidate = event.data
     assert isinstance(candidate, _ReadingOutputCandidateEventData)
+    operation_id = _reading_active_operation_id(instance) or (event.id if event.id else "")
+    if not operation_id:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="output_encoding", message="Reading refused encode without operation id.")
+                ),
+                event,
+            ),
+        )
+        return
     output_candidate = OutputData(
         text=candidate.text,
         source_kind=candidate.source_kind,
         confidence=candidate.confidence,
     )
-    child = _reading_output_encoder(instance)
-    _dispatch_reading_child_input(ctx, child, output_candidate, event)
-
-
-def _matches_reading_child_event(
-    instance: "Reading",
-    child: ability.Ability[typing.Any, typing.Any],
-    event: hsm.Event[typing.Any],
-    terminal_event: hsm.Event[typing.Any],
-) -> bool:
-    """Match child terminals for the active operation id (HSM-CORRELATION-001)."""
-
-    return (
-        event.name == terminal_event.name
-        and event.target == hsm.id(instance)
-        and event.source == hsm.id(child)
-        and _matches_active_reading_operation(instance, event)
-    )
-
-
-def _has_reading_classification_output(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_visual_classifier(instance), event, _reading_visual_classifier(instance).output_event
-    ) and isinstance(event.data, vision.classification.OutputData)
-
-
-def _has_reading_classification_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance,
-        _reading_visual_classifier(instance),
-        event,
-        _reading_visual_classifier(instance).failed_event,
-    )
-
-
-def _complete_reading_classification(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    input = _reading_stage_input.get(op) if op else None
-    classification = event.data
-    if not isinstance(input, InputData):
-        return
-    assert isinstance(classification, vision.classification.OutputData)
-    completion = _ReadingClassifiedEventData(input=input, classification=classification)
-    _ = hsm.dispatch(
+    child = typing.cast(ability.Ability[typing.Any, typing.Any], _reading_output_encoder(instance))
+    terminal = await ability.Ability.await_child_terminal(
         ctx,
-        instance,
-        _reading_event_with_context(_ReadingClassificationCompletedEvent.with_data(completion), event),
+        owner=instance,
+        child=child,
+        operation_id=operation_id,
+        input=output_candidate,
+        metadata=event.metadata,
     )
-
-
-def _has_reading_text_output(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_text_decoder(instance), event, _reading_text_decoder(instance).output_event
-    ) and isinstance(event.data, str)
-
-
-def _has_reading_text_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_text_decoder(instance), event, _reading_text_decoder(instance).failed_event
-    )
-
-
-def _complete_reading_text_decoding(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    text = event.data
-    assert isinstance(text, str)
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    classified = _reading_stage_classified.get(op) if op else None
-    if not isinstance(classified, _ReadingClassifiedEventData):
+    if terminal.name == child.failed_event.name:
+        message = getattr(terminal.data, "message", "Reading encoder failed.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(stage="output_encoding", message=str(message))
+                ),
+                event,
+            ),
+        )
         return
-    completion = _ReadingOutputCandidateEventData(
-        text=text,
-        source_kind="text",
-        confidence=classified.classification.confidence,
-    )
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _reading_event_with_context(_ReadingTextDecodedEvent.with_data(completion), event),
-    )
-
-
-def _has_reading_image_output(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_image_decoder(instance), event, _reading_image_decoder(instance).output_event
-    ) and isinstance(event.data, str)
-
-
-def _has_reading_image_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_image_decoder(instance), event, _reading_image_decoder(instance).failed_event
-    )
-
-
-def _complete_reading_image_decoding(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    text = event.data
-    assert isinstance(text, str)
-    op = _reading_active_operation_id(instance) or (event.id if event.id else "")
-    classified = _reading_stage_classified.get(op) if op else None
-    if not isinstance(classified, _ReadingClassifiedEventData):
+    output = terminal.data
+    if not isinstance(output, OutputData):
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _reading_event_with_context(
+                _ReadingStageFailedEvent.with_data(
+                    FailedEventData(
+                        stage="output_encoding",
+                        message="Reading output encoder produced output that does not match its output schema.",
+                    )
+                ),
+                event,
+            ),
+        )
         return
-    completion = _ReadingOutputCandidateEventData(
-        text=text,
-        source_kind="image",
-        confidence=classified.classification.confidence,
-    )
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _reading_event_with_context(_ReadingImageDecodedEvent.with_data(completion), event),
-    )
-
-
-def _has_reading_encoded_output(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_output_encoder(instance), event, _reading_output_encoder(instance).output_event
-    ) and isinstance(event.data, OutputData)
-
-
-def _has_invalid_reading_encoded_output(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance, _reading_output_encoder(instance), event, _reading_output_encoder(instance).output_event
-    ) and not isinstance(event.data, OutputData)
-
-
-def _has_reading_encoding_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx
-    return _matches_reading_child_event(
-        instance,
-        _reading_output_encoder(instance),
-        event,
-        _reading_output_encoder(instance).failed_event,
-    )
-
-
-def _complete_reading_output_encoding(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    output = event.data
-    assert isinstance(output, OutputData)
     _ = hsm.dispatch(
         ctx,
         instance,
         _reading_event_with_context(_ReadingOutputEncodedEvent.with_data(output), event),
     )
-
-
-def _dispatch_invalid_reading_output_encoding(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    failure = FailedEventData(
-        stage="output_encoding",
-        message="Reading output encoder produced output that does not match its output schema.",
-    )
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _reading_event_with_context(_ReadingStageFailedEvent.with_data(failure), event),
-    )
-
-
-def _dispatch_reading_child_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-    *,
-    stage: ReadingStage,
-) -> None:
-    failure = event.data
-    if isinstance(failure, ability.FailureData):
-        reading_failure = FailedEventData.from_ability_failure(stage=stage, failure=failure)
-    else:
-        reading_failure = FailedEventData(stage=stage, message=f"{stage} failed.")
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _reading_event_with_context(_ReadingStageFailedEvent.with_data(reading_failure), event),
-    )
-
-
-def _dispatch_reading_classification_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    _dispatch_reading_child_failure(ctx, instance, event, stage="classification")
-
-
-def _dispatch_reading_text_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    _dispatch_reading_child_failure(ctx, instance, event, stage="text_decoding")
-
-
-def _dispatch_reading_image_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    _dispatch_reading_child_failure(ctx, instance, event, stage="image_decoding")
-
-
-def _dispatch_reading_encoding_failure(
-    ctx: hsm.Context,
-    instance: "Reading",
-    event: hsm.Event[typing.Any],
-) -> None:
-    _dispatch_reading_child_failure(ctx, instance, event, stage="output_encoding")
 
 
 def _dispatch_reading_output(ctx: hsm.Context, instance: "Reading", event: hsm.Event[typing.Any]) -> None:
@@ -919,16 +833,6 @@ class Reading(ability.Ability[InputData, OutputData]):
                         hsm.guard(_has_reading_classification),
                         hsm.target("/Reading/Focused/Classifying/Classified"),
                     ),
-                    hsm.transition(
-                        hsm.on(hsm.AnyEvent),
-                        hsm.guard(_has_reading_classification_output),
-                        hsm.effect(_complete_reading_classification),
-                    ),
-                    hsm.transition(
-                        hsm.on(hsm.AnyEvent),
-                        hsm.guard(_has_reading_classification_failure),
-                        hsm.effect(_dispatch_reading_classification_failure),
-                    ),
                 ),
                 hsm.choice(
                     "Classified",
@@ -959,16 +863,6 @@ class Reading(ability.Ability[InputData, OutputData]):
                     hsm.guard(_has_text_output_candidate),
                     hsm.target("/Reading/Focused/EncodingOutput"),
                 ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_text_output),
-                    hsm.effect(_complete_reading_text_decoding),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_text_failure),
-                    hsm.effect(_dispatch_reading_text_failure),
-                ),
             ),
             hsm.state(
                 "DecodingImage",
@@ -978,16 +872,6 @@ class Reading(ability.Ability[InputData, OutputData]):
                     hsm.on(_ReadingImageDecodedEvent),
                     hsm.guard(_has_image_output_candidate),
                     hsm.target("/Reading/Focused/EncodingOutput"),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_image_output),
-                    hsm.effect(_complete_reading_image_decoding),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_image_failure),
-                    hsm.effect(_dispatch_reading_image_failure),
                 ),
             ),
             hsm.state(
@@ -1009,21 +893,6 @@ class Reading(ability.Ability[InputData, OutputData]):
                     hsm.guard(_has_reading_output),
                     hsm.effect(_dispatch_reading_output, _clear_reading_operation),
                     hsm.target("/Reading/Unfocused"),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_encoded_output),
-                    hsm.effect(_complete_reading_output_encoding),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_invalid_reading_encoded_output),
-                    hsm.effect(_dispatch_invalid_reading_output_encoding),
-                ),
-                hsm.transition(
-                    hsm.on(hsm.AnyEvent),
-                    hsm.guard(_has_reading_encoding_failure),
-                    hsm.effect(_dispatch_reading_encoding_failure),
                 ),
             ),
         ),

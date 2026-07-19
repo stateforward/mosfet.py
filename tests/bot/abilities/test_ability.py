@@ -812,3 +812,67 @@ def test_text_generation_routes_wrong_output_type_to_failure() -> None:
         assert "output schema" in typing.cast(abilities.FailureData, owner.failures[0]).message
 
     asyncio.run(run())
+
+
+def test_ability_production_stop_then_attach_restarts() -> None:
+    """``hsm.stop(ability)`` then attach must restart without RuntimeError (hsm 1.3.2)."""
+
+    def started(instance: hsm.Instance) -> bool:
+        try:
+            _ = hsm.id(instance)
+        except hsm.ErrorValidatingModel:
+            return False
+        return True
+
+    async def run() -> None:
+        generation = RecordingTextGeneration(generator=EchoTextGenerator())
+        ctx, owner = await start_recorded_generation(generation)
+        assert started(generation) is True
+        await hsm.stop(generation)
+        assert started(generation) is False
+        await generation.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+        )
+        assert started(generation) is True
+
+    asyncio.run(run())
+
+
+def test_ability_detach_when_stopped_emits_detach_failed() -> None:
+    """Stopped ability detach with reply sink must surface DetachFailed, not silent drop."""
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        generation = RecordingTextGeneration(generator=EchoTextGenerator())
+        ctx, owner = await start_recorded_generation(generation)
+        await hsm.stop(generation)
+        failures: list[hsm.Event[typing.Any]] = []
+
+        def record_failure(
+            _ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event[typing.Any]
+        ) -> None:
+            failures.append(event)
+
+        reply_model = hsm.define(
+            "DetachReply",
+            hsm.initial(hsm.target("s")),
+            hsm.state(
+                "s",
+                hsm.transition(hsm.on(attachment.DetachFailedEvent), hsm.effect(record_failure)),
+            ),
+        )
+        reply = hsm.Instance()
+        await hsm.started(ctx, reply, reply_model)
+        await generation.detach(
+            ctx,
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner, reply_to=reply)),
+        )
+        for _ in range(20):
+            if failures:
+                break
+            await asyncio.sleep(0)
+        return failures
+
+    failures = asyncio.run(run())
+    assert len(failures) == 1
+    assert failures[0].name == attachment.DetachFailedEvent.name

@@ -340,6 +340,45 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         _ = self._terminal_waiters.pop(operation_id, None)
 
     @staticmethod
+    async def await_child_terminal(
+        ctx: hsm.Context,
+        *,
+        owner: hsm.Instance,
+        child: "Ability[typing.Any, typing.Any]",
+        operation_id: str,
+        input: object,
+        metadata: collections.abc.Mapping[str, object],
+    ) -> hsm.Event[typing.Any]:
+        """Dispatch one child apply and await its terminal by envelope id (HSM-CORRELATION-001).
+
+        Registers a waiter on ``child``, dispatches the child's input event with
+        ``source=owner`` / ``target=child`` / ``id=operation_id``, and returns the
+        terminal event. Cancels the waiter cleanly when the owning activity exits.
+        """
+
+        if not operation_id:
+            raise ValueError("operation_id is required.")
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[hsm.Event[typing.Any]] = loop.create_future()
+        child.register_terminal_waiter(operation_id, waiter)
+        try:
+            child_event = dataclasses.replace(
+                child.input_event.with_data_and_id(input, operation_id),
+                source=hsm.id(owner),
+                target=hsm.id(child),
+                metadata=dict(metadata),
+            )
+            await hsm.dispatch(ctx, child, child_event)
+            return await waiter
+        except asyncio.CancelledError:
+            child.clear_terminal_waiter(operation_id)
+            if not waiter.done():
+                _ = waiter.cancel()
+            raise
+        finally:
+            child.clear_terminal_waiter(operation_id)
+
+    @staticmethod
     def _has_terminal_event(
         ctx: hsm.Context,
         instance: "Ability[typing.Any, typing.Any]",
@@ -389,11 +428,14 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 parent=instance.context(),
                 values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
             )
+            # hsm 1.3.2+: id fails after stop, so this is a valid start gate again.
             try:
                 _ = hsm.id(instance._attachment_group)
             except hsm.ErrorValidatingModel:
                 try:
-                    _ = await hsm.started(private_scope, instance._attachment_group, instance._attachment_group.model)
+                    _ = await hsm.started(
+                        private_scope, instance._attachment_group, instance._attachment_group.model
+                    )
                 except Exception:
                     source = instance
                     raise
@@ -919,6 +961,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         async def start_and_dispatch() -> None:
             if model is None:
                 return
+            # hsm 1.3.2+: id fails after stop — restart when not started.
             try:
                 _ = hsm.id(self)
             except hsm.ErrorValidatingModel:
@@ -941,7 +984,59 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> collections.abc.Awaitable[None]:
         """Dispatch this ability's detach request."""
 
-        return hsm.dispatch(ctx, self, event)
+        async def detach_or_fail() -> None:
+            try:
+                _ = hsm.id(self)
+            except hsm.ErrorValidatingModel:
+                data = event.data
+                reply_to = data.reply_to if data.reply_to is not None else data.actor
+                if reply_to is not None:
+                    try:
+                        reply_id = hsm.id(reply_to)
+                    except hsm.ErrorValidatingModel:
+                        reply_id = ""
+                    await hsm.dispatch(
+                        ctx,
+                        reply_to,
+                        dataclasses.replace(
+                            attachment.DetachFailedEvent.with_data(
+                                attachment.FailedData(
+                                    actor=data.actor,
+                                    kind=attachment.FailureKind.DISPATCH,
+                                    message=f"{type(self).__name__} is stopped or not started; detach refused.",
+                                )
+                            ),
+                            id=event.id,
+                            source=event.source or "",
+                            target=reply_id,
+                            metadata=dict(event.metadata),
+                        ),
+                    )
+                return
+            await hsm.dispatch(ctx, self, event)
+
+        task = asyncio.Task(
+            detach_or_fail(),
+            loop=asyncio.get_running_loop(),
+            eager_start=True,
+        )
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return task
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop this ability and any nested composite attachment group if started."""
+
+        group = getattr(self, "_attachment_group", None)
+        await hsm.Instance.stop(self, ctx)
+        if not isinstance(group, attachment.Group):
+            return
+        # Group is started lazily on attach; do not hsm.stop an unstarted machine.
+        try:
+            _ = hsm.id(group)
+        except hsm.ErrorValidatingModel:
+            return
+        await hsm.stop(group, ctx)
 
     def apply(self, input: TInput, *, ctx: hsm.Context | None = None) -> collections.abc.Awaitable[None]:
         """Dispatch this ability's input event."""

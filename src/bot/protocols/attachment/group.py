@@ -333,6 +333,8 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             visit(member, {id(self)})
         self._attachments: list[hsm.Instance] = list(attachments)
         self._attachment_timeout: datetime.timedelta = datetime.timedelta(seconds=30)
+        # Machine-owned attach hold (HSM-CONTEXT-001): not instance.state() for fallback routing.
+        self._held_attached: bool = False
 
     @staticmethod
     async def _attach_members_activity(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
@@ -381,7 +383,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         ),
                         id=hsm.id(reply),
                         source=hsm.id(instance),
-                        target=hsm.id(member),
+                        target=Attachment._actor_id(member),
                         metadata=dict(event.metadata),
                     ),
                 )
@@ -416,6 +418,8 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     kind=events.FailureKind.DISPATCH,
                     message=f"{type(instance).__name__} member attach failed: {error}",
                 )
+                # Prefer Attachment._actor_id: hsm.id can fail mid-stop (hsm 1.3.2+).
+                member_id = Attachment._actor_id(member)
                 if reply is not None:
                     _ = hsm.Instance.dispatch(
                         reply,
@@ -423,7 +427,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         dataclasses.replace(
                             events.AttachFailedEvent.with_data(failure),
                             id=hsm.id(reply),
-                            source=hsm.id(member),
+                            source=member_id,
                             target=hsm.id(reply),
                             metadata=dict(event.metadata),
                         ),
@@ -437,7 +441,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                             _MemberAttachFailedData(operation=operation, index=index, result=failure)
                         ),
                         id=operation.request_id,
-                        source=hsm.id(member),
+                        source=member_id,
                         target=hsm.id(instance),
                         metadata=dict(event.metadata),
                     ),
@@ -666,6 +670,16 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         return operation.failure is not None and bool(operation.created_members)
 
     @staticmethod
+    def _mark_held_attached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._held_attached = True
+
+    @staticmethod
+    def _clear_held_attached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._held_attached = False
+
+    @staticmethod
     def _fallback_is_attached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return _operation(event).fallback_attached
@@ -865,6 +879,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         hsm.initial(hsm.target("detached")),
         hsm.state(
             "detached",
+            hsm.entry(_clear_held_attached),
             hsm.transition(
                 hsm.on(_StartAttachEvent),
                 hsm.guard(_has_members),
@@ -941,6 +956,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         ),
         hsm.state(
             "attached",
+            hsm.entry(_mark_held_attached),
             hsm.transition(
                 hsm.on(_StartAttachEvent),
                 hsm.guard(_has_members),
@@ -1026,6 +1042,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         async def start_members_and_dispatch() -> None:
             for member in self._attachments:
                 model = typing.cast(_Modeled, typing.cast(object, member)).model
+                # hsm 1.3.2+: id fails after stop — start only when not started.
                 try:
                     _ = hsm.id(member)
                     continue
@@ -1069,7 +1086,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                             timeout=data.timeout,
                             kind=_OperationKind.ATTACH,
                             members=tuple(range(len(self._attachments))),
-                            fallback_attached=self.state() == "/AttachmentGroup/attached",
+                            fallback_attached=self._held_attached,
                         )
                     ),
                     id=event.id,

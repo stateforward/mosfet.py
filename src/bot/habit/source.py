@@ -435,7 +435,8 @@ Habit-only Starlark limits (not full HSM host DSL):
 - No host-language operations, attributes, submachine models, history, choice, entry/exit points
 - No direct ability bindings or ability-alias dispatch — events only
 - Guards: def name(event): return bool; payload is event["data"]
-- Event facade keys: name, data, metadata, id, source, target, kind
+- Event facade keys: name, data, id, source, target, kind
+  (metadata is telemetry-only and is intentionally omitted from the Starlark event facade)
 - Effects/activities must hsm.dispatch(declared_event, payload_dict, target=optional_id)
   and must not return a value (returning is a runtime error)
 - To wait on a reply: transition on the reply event after dispatching with source stamped
@@ -456,7 +457,9 @@ Invent input/output contracts, guards, and effects from the observed cognitive p
 Habit terminal output (output_event payload) must be cognition event selection(s):
 - Prefer a single object with keys: event (required), target?, data?, reason?
 - Mirror the event names, targets, and data field names from prior episode / this-turn outputs
-- Fill live values from event["data"] and event["metadata"] at runtime; do not hardcode example ids
+- Fill live values from event["data"] and envelope fields (event["id"], event["source"],
+  event["target"]) at runtime; do not hardcode example ids. Never read event["metadata"] —
+  it is not on the facade and must not carry coordination or selection IDs.
 - Input contracts and guards must use fields present on the live habit input
 - triggers should list the stimulus names that should propose this habit
 """.strip()

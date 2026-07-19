@@ -8,6 +8,7 @@ from ... import processing
 
 import dataclasses
 import datetime
+import functools
 import typing
 import uuid
 
@@ -385,6 +386,9 @@ class Revision(processing.Processing):
 
     _change_processing: processing.Processing
     _memory: memory.Memory
+    # Authoring attempt index for child correlation (HSM-CORRELATION-001 / HSM-CONTEXT-001).
+    # Set by attempt-state entry effects — never parsed from instance.state().
+    _active_attempt: int | None
 
     @staticmethod
     def _operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | None:
@@ -422,14 +426,29 @@ class Revision(processing.Processing):
     @staticmethod
     def _active_child_id(instance: "Revision") -> str | None:
         operation_id = processing.active_operation_id(instance)
-        state = instance.state()
-        if operation_id is None or "/authoring/attempt_" not in state:
+        attempt = instance._active_attempt
+        if operation_id is None or attempt is None:
             return None
         operation = processing.active_operation(instance, operation_id)
         if operation is None:
             return None
-        attempt = int(state.rsplit("_", 1)[1])
         return Revision._child_id(operation_id, attempt, hsm.id(operation))
+
+    @staticmethod
+    def _set_active_attempt(
+        ctx: hsm.Context,
+        instance: "Revision",
+        event: hsm.Event[typing.Any],
+        *,
+        attempt: int,
+    ) -> None:
+        del ctx, event
+        instance._active_attempt = attempt
+
+    @staticmethod
+    def _clear_active_attempt(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._active_attempt = None
 
     @staticmethod
     def _private_event(
@@ -1025,6 +1044,7 @@ class Revision(processing.Processing):
         ),
         hsm.state(
             "idle",
+            hsm.entry(_clear_active_attempt),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
@@ -1074,6 +1094,8 @@ class Revision(processing.Processing):
         ),
         hsm.state(
             "authoring",
+            # Any leave from authoring (idle, starting, starting_cancel, detaching) drops attempt index.
+            hsm.exit(_clear_active_attempt),
             hsm.defer(input_event),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
@@ -1104,9 +1126,18 @@ class Revision(processing.Processing):
                 hsm.guard(_has_cancel_requested),
                 hsm.target("/Revision/starting_cancel"),
             ),
-            hsm.state("attempt_0"),
-            hsm.state("attempt_1"),
-            hsm.state("attempt_2"),
+            hsm.state(
+                "attempt_0",
+                hsm.entry(functools.partial(_set_active_attempt, attempt=0)),
+            ),
+            hsm.state(
+                "attempt_1",
+                hsm.entry(functools.partial(_set_active_attempt, attempt=1)),
+            ),
+            hsm.state(
+                "attempt_2",
+                hsm.entry(functools.partial(_set_active_attempt, attempt=2)),
+            ),
         ),
         hsm.state(
             "starting_cancel",
@@ -1159,6 +1190,7 @@ class Revision(processing.Processing):
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)
         self._memory = memory
+        self._active_attempt = None
         self._attachment_group: attachment.Group = attachment.Group(self._change_processing)
 
 

@@ -68,8 +68,24 @@ class _PhoneServiceAttachmentData(pydantic.BaseModel):
     )
 
 
-_ACTIVE_OPERATION_EVENT_ATTRIBUTE = "active_operation_event"
-_PRIVATE_OPERATION_ID_METADATA = "bot.provider.livekit.phone.operation_id"
+_ACTIVE_OPERATION_ATTRIBUTE = "active_operation"
+_ActiveRequestData = (
+    phone.DialData
+    | phone.AnswerCallData
+    | phone.DeclineCallData
+    | phone.HangUpCallData
+    | phone.TransferCallData
+)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ActiveOperation:
+    """In-flight call-control identity: envelope id + typed request data only (HSM-COMPLETION-001)."""
+
+    id: str
+    data: _ActiveRequestData
+
+
 _ServiceAttachedEvent = hsm.Event[_PhoneServiceAttachmentData](
     name="bot.provider.livekit.phone.attached",
     schema=_PhoneServiceAttachmentData,
@@ -218,53 +234,60 @@ def _failure_kind(error: Exception) -> phone.FailureKind:
     return "unknown"
 
 
-def _public_metadata(metadata: collections.abc.Mapping[str, object]) -> dict[str, object]:
-    return {key: value for key, value in metadata.items() if key != _PRIVATE_OPERATION_ID_METADATA}
-
-
 def _with_trigger_metadata[T](event: hsm.Event[T], trigger: hsm.Event[typing.Any]) -> hsm.Event[T]:
     return dataclasses.replace(event, metadata=dict(trigger.metadata))
 
 
-def _with_operation_metadata[T](event: hsm.Event[T], trigger: hsm.Event[typing.Any]) -> hsm.Event[T]:
-    metadata = dict(trigger.metadata)
-    if trigger.id:
-        metadata[_PRIVATE_OPERATION_ID_METADATA] = trigger.id
-    return dataclasses.replace(event, metadata=metadata)
+def _with_operation_correlation[T](
+    event: hsm.Event[T],
+    *,
+    operation_id: str,
+    metadata: collections.abc.Mapping[str, object] | None = None,
+) -> hsm.Event[T]:
+    """Stamp private completion/failure with the active request envelope id; copy telemetry metadata only."""
+
+    if operation_id:
+        event = event.with_data_and_id(event.data, operation_id)
+    return dataclasses.replace(event, metadata=dict(metadata or {}))
 
 
-def _active_operation_event(instance: "PhoneService") -> hsm.Event[typing.Any] | None:
-    value, ok = typing.cast(tuple[object, bool], instance.get(_ACTIVE_OPERATION_EVENT_ATTRIBUTE))
-    if not ok or not isinstance(value, hsm.Event):
+def _with_trigger_correlation[T](event: hsm.Event[T], trigger: hsm.Event[typing.Any]) -> hsm.Event[T]:
+    return _with_operation_correlation(event, operation_id=trigger.id, metadata=trigger.metadata)
+
+
+def _active_operation(instance: "PhoneService") -> _ActiveOperation | None:
+    value, ok = typing.cast(tuple[object, bool], instance.get(_ACTIVE_OPERATION_ATTRIBUTE))
+    if not ok or not isinstance(value, _ActiveOperation):
         return None
     return value
 
 
-def _set_active_operation_event(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+def _set_active_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
     del ctx
-    _ = instance.set(_ACTIVE_OPERATION_EVENT_ATTRIBUTE, _with_operation_metadata(event, event))
-
-
-def _clear_active_operation_event(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
-    del ctx, event
-    _ = instance.set(_ACTIVE_OPERATION_EVENT_ATTRIBUTE, None)
-
-
-def _active_operation_call_id(instance: "PhoneService") -> str | None:
-    active = _active_operation_event(instance)
-    if active is None:
-        return None
-    data = active.data
-    if isinstance(
+    data = event.data
+    if not event.id or not isinstance(
         data,
         phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData | phone.TransferCallData,
     ):
-        return data.call_id
-    return None
+        _ = instance.set(_ACTIVE_OPERATION_ATTRIBUTE, None)
+        return
+    _ = instance.set(_ACTIVE_OPERATION_ATTRIBUTE, _ActiveOperation(id=event.id, data=data))
+
+
+def _clear_active_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+    del ctx, event
+    _ = instance.set(_ACTIVE_OPERATION_ATTRIBUTE, None)
+
+
+def _active_operation_call_id(instance: "PhoneService") -> str | None:
+    active = _active_operation(instance)
+    if active is None:
+        return None
+    return active.data.call_id
 
 
 def _active_operation_transfer(instance: "PhoneService") -> phone.TransferCallData | None:
-    active = _active_operation_event(instance)
+    active = _active_operation(instance)
     if active is None or not isinstance(active.data, phone.TransferCallData):
         return None
     return active.data
@@ -274,12 +297,11 @@ def _matches_active_call(instance: "PhoneService", call_id: str) -> bool:
     return _active_operation_call_id(instance) == call_id
 
 
-def _matches_active_operation_metadata(instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
-    active = _active_operation_event(instance)
-    if active is None:
+def _matches_active_operation_id(instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
+    active = _active_operation(instance)
+    if active is None or not active.id:
         return False
-    active_id = active.metadata.get(_PRIVATE_OPERATION_ID_METADATA)
-    return active_id is not None and event.metadata.get(_PRIVATE_OPERATION_ID_METADATA) == active_id
+    return event.id == active.id
 
 
 def _matches_active_transfer(
@@ -434,26 +456,26 @@ def _has_current_transfer_failed(ctx: hsm.Context, instance: "PhoneService", eve
 
 
 def _has_uncorrelated_remote_hang_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
-    return _active_operation_event(instance) is None and _has_remote_hang_up(ctx, instance, event)
+    return _active_operation(instance) is None and _has_remote_hang_up(ctx, instance, event)
 
 
 def _has_uncorrelated_call_failed(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
-    return _active_operation_event(instance) is None and _has_call_failed(ctx, instance, event)
+    return _active_operation(instance) is None and _has_call_failed(ctx, instance, event)
 
 
 def _has_uncorrelated_transfer_completed(
     ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]
 ) -> bool:
-    return _active_operation_event(instance) is None and _has_transfer_completed(ctx, instance, event)
+    return _active_operation(instance) is None and _has_transfer_completed(ctx, instance, event)
 
 
 def _has_uncorrelated_transfer_failed(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
-    return _active_operation_event(instance) is None and _has_transfer_failed(ctx, instance, event)
+    return _active_operation(instance) is None and _has_transfer_failed(ctx, instance, event)
 
 
 def _has_active_call_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, event
-    active = _active_operation_event(instance)
+    active = _active_operation(instance)
     return active is not None and isinstance(
         active.data, phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData
     )
@@ -461,7 +483,7 @@ def _has_active_call_operation(ctx: hsm.Context, instance: "PhoneService", event
 
 def _has_active_transfer_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, event
-    active = _active_operation_event(instance)
+    active = _active_operation(instance)
     return active is not None and isinstance(active.data, phone.TransferCallData)
 
 
@@ -484,7 +506,7 @@ def _has_call_connected_completion(
     return (
         isinstance(event.data, phone.CallConnectedData)
         and _matches_active_call(instance, event.data.call_id)
-        and _matches_active_operation_metadata(instance, event)
+        and _matches_active_operation_id(instance, event)
     )
 
 
@@ -497,7 +519,7 @@ def _has_call_id_completion(
     return (
         isinstance(event.data, phone.CallIdData)
         and _matches_active_call(instance, event.data.call_id)
-        and _matches_active_operation_metadata(instance, event)
+        and _matches_active_operation_id(instance, event)
     )
 
 
@@ -510,7 +532,7 @@ def _has_transfer_accepted_completion(
     return (
         isinstance(event.data, phone.TransferAcceptedData)
         and _matches_active_transfer(instance, event.data)
-        and _matches_active_operation_metadata(instance, event)
+        and _matches_active_operation_id(instance, event)
     )
 
 
@@ -523,7 +545,7 @@ def _has_call_failed_completion(
     return (
         isinstance(event.data, phone.CallFailedData)
         and _matches_active_call(instance, event.data.call_id)
-        and _matches_active_operation_metadata(instance, event)
+        and _matches_active_operation_id(instance, event)
     )
 
 
@@ -536,7 +558,7 @@ def _has_transfer_failed_completion(
     return (
         isinstance(event.data, phone.TransferFailedData)
         and _matches_active_transfer(instance, event.data)
-        and _matches_active_operation_metadata(instance, event)
+        and _matches_active_operation_id(instance, event)
     )
 
 
@@ -564,20 +586,20 @@ def _active_call_operation_resolution_transitions(
             hsm.on(ServiceRemoteHangUpEvent),
             hsm.guard(_has_current_remote_hang_up),
             hsm.effect(emit_remote_hang_up),
-            hsm.effect(_clear_active_operation_event),
+            hsm.effect(_clear_active_operation),
             hsm.target("/PhoneService/ready"),
         ),
         hsm.transition(
             hsm.on(ServiceCallFailedEvent),
             hsm.guard(_has_current_call_failed),
             hsm.effect(emit_call_failed),
-            hsm.effect(_clear_active_operation_event),
+            hsm.effect(_clear_active_operation),
             hsm.target("/PhoneService/ready"),
         ),
         hsm.transition(
             hsm.on(phone.HungUpEvent),
             hsm.guard(_has_provider_terminal_hang_up),
-            hsm.effect(_clear_active_operation_event),
+            hsm.effect(_clear_active_operation),
             hsm.target("/PhoneService/ready"),
         ),
     )
@@ -592,7 +614,7 @@ def _active_call_operation_timeout_transition(
         hsm.after(operation_timeout),
         hsm.guard(_has_active_call_operation),
         hsm.effect(emit_active_call_timeout),
-        hsm.effect(_clear_active_operation_event),
+        hsm.effect(_clear_active_operation),
         hsm.target("/PhoneService/ready"),
     )
 
@@ -734,6 +756,15 @@ class PhoneService(hsm.Instance):
     def _call_id_for_participant(identity: str) -> str:
         return f"livekit:{identity}"
 
+    def _sdk_ingress_open(self) -> bool:
+        """True when attach effects opened provider ingress (not a ``state()`` probe).
+
+        HSM-CONTEXT-001: delivery policy is machine-owned attach lifetime, never
+        ``instance.state()`` readiness sampling from SDK callbacks.
+        """
+
+        return self._attached_phone_target_ref is not None
+
     def _bind_room_presence(self, room: RoomHandle) -> None:
         """Map remote room presence to phone call observations (ring / remote hang-up).
 
@@ -746,14 +777,14 @@ class PhoneService(hsm.Instance):
 
         def on_participant_connected(participant: object) -> object:
             live_service = service_ref()
-            if live_service is None or not live_service.state():
+            if live_service is None or not live_service._sdk_ingress_open():
                 return None
             live_service._offer_incoming_call_for_participant(participant)
             return None
 
         def on_participant_disconnected(participant: object) -> object:
             live_service = service_ref()
-            if live_service is None or not live_service.state():
+            if live_service is None or not live_service._sdk_ingress_open():
                 return None
             live_service._hang_up_for_participant(participant)
             return None
@@ -781,7 +812,7 @@ class PhoneService(hsm.Instance):
             self._offer_incoming_call_for_participant(participant)
 
     def _offer_incoming_call_for_participant(self, participant: object) -> None:
-        if not self.state():
+        if not self._sdk_ingress_open():
             return
         # One active media call at a time for this room-phone mapping.
         if self._media_call_id is not None:
@@ -795,7 +826,7 @@ class PhoneService(hsm.Instance):
         )
 
     def _hang_up_for_participant(self, participant: object) -> None:
-        if not self.state():
+        if not self._sdk_ingress_open():
             return
         identity = PhoneService._participant_identity(participant)
         call_id = self._presence_call_ids.pop(identity, PhoneService._call_id_for_participant(identity))
@@ -831,19 +862,18 @@ class PhoneService(hsm.Instance):
         async def consume_remote_audio(audio_input: audio.AudioInputData) -> None:
             """Ingress: publish remote PCM into PhoneService RTC (guards decide deliver vs drop).
 
-            Do not gate on ``context().is_done()``: after device firmware attach, the service
-            context can report done while the machine is still live and accepting events.
-            Use started state instead; HSM guards decide deliver vs drop.
+            HSM-CONTEXT-001: do not gate on ``context().is_done()`` or ``state()``. Attach
+            lifetime opens ingress; HSM guards decide deliver vs drop once dispatched.
             """
 
             live_service = service_ref()
-            if live_service is None or not live_service.state():
+            if live_service is None or not live_service._sdk_ingress_open():
                 return
             await live_service.receive_remote_audio(live_service.context(), audio_input)
 
         def record_connected(data: RoomAudioConnectedData) -> None:
             live_service = service_ref()
-            if live_service is None or not live_service.state():
+            if live_service is None or not live_service._sdk_ingress_open():
                 return
             _ = live_service.dispatch(live_service.context(), _RoomAudioStatusEvent.with_data(data))
 
@@ -910,10 +940,15 @@ class PhoneService(hsm.Instance):
 
         require_world_scope(world, target, participant="Phone service target")
         _, track_path = self._ensure_media()
-        if not track_path.state():
+        # hsm 1.3.2+: id fails after stop — start only when not started.
+        try:
+            _ = hsm.id(track_path)
+        except hsm.ErrorValidatingModel:
             _ = await hsm.started(world.context, track_path, track_path.model)
         # Start this service before room connect so participant_connected can ring.
-        if not self.state():
+        try:
+            _ = hsm.id(self)
+        except hsm.ErrorValidatingModel:
             _ = await hsm.started(world.context, self, self.model)
         require_world_scope(world, self, participant="PhoneService")
         await self.dispatch(world.context, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
@@ -933,7 +968,10 @@ class PhoneService(hsm.Instance):
     async def detach(self, world: World, target: hsm.Instance) -> None:
         """Detach this service from the phone-owned firmware target."""
 
-        if not self.state():
+        try:
+            _ = hsm.id(self)
+        except hsm.ErrorValidatingModel:
+            # Idempotent when already stopped; no firmware reply channel on this API.
             return
         require_world_scope(world, target, participant="Phone service target")
         require_world_scope(world, self, participant="PhoneService")
@@ -949,8 +987,15 @@ class PhoneService(hsm.Instance):
         """Connect the privately owned LiveKit room audio path for this service."""
 
         _, track_path = self._ensure_media()
-        if not track_path.state():
-            _ = await hsm.started(self.context() if self.state() else None, track_path, track_path.model)
+        try:
+            _ = hsm.id(track_path)
+        except hsm.ErrorValidatingModel:
+            try:
+                parent = self.context()
+                _ = hsm.id(self)
+            except hsm.ErrorValidatingModel:
+                parent = None
+            _ = await hsm.started(parent, track_path, track_path.model)
         await track_path.connect_room(
             track_path.context(),
             RoomAudioConnectData(url=url, token=token, track_name=track_name),
@@ -964,6 +1009,24 @@ class PhoneService(hsm.Instance):
 
         _, track_path = self._ensure_media()
         await track_path.disconnect_room(track_path.context())
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop this service and its privately owned room track path if started."""
+
+        track_path = self._track_path
+        # Ingress opens when attach holds a target ref; clear on stop so SDK callbacks
+        # cannot deliver after the service is stopped (only detach effect cleared it before).
+        self._attached_phone_target_ref = None
+        await hsm.Instance.stop(self, ctx)
+        if track_path is None:
+            return
+        # Track path is created by _ensure_media before start; only stop if started.
+        try:
+            _ = hsm.id(track_path)
+        except hsm.ErrorValidatingModel:
+            return
+        await hsm.stop(track_path, ctx)
 
     async def publish_audio(self, output: audio.AudioOutputData) -> None:
         """Publish generated or encoded audio through the local LiveKit audio track."""
@@ -1127,7 +1190,7 @@ class PhoneService(hsm.Instance):
                     ),
                     source=hsm.id(instance),
                     target=hsm.id(phone_event_target),
-                    metadata=_public_metadata(event.metadata),
+                    metadata=dict(event.metadata),
                 ),
             )
         finally:
@@ -1162,15 +1225,15 @@ class PhoneService(hsm.Instance):
         assert target_ref is not None
         phone_event_target = target_ref()
         assert phone_event_target is not None
-        _ = phone_event_target.dispatch(
-            ctx,
-            dataclasses.replace(
-                event,
-                source=hsm.id(instance),
-                target=hsm.id(phone_event_target),
-                metadata=_public_metadata(trigger.metadata),
-            ),
+        emitted = dataclasses.replace(
+            event,
+            source=hsm.id(instance),
+            target=hsm.id(phone_event_target),
+            metadata=dict(trigger.metadata),
         )
+        if trigger.id:
+            emitted = emitted.with_data_and_id(emitted.data, trigger.id)
+        _ = phone_event_target.dispatch(ctx, emitted)
 
     @staticmethod
     def _emit_incoming_call(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
@@ -1232,15 +1295,19 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         del event
-        active = _active_operation_event(instance)
+        active = _active_operation(instance)
         assert active is not None
         data = active.data
         assert isinstance(data, phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData)
         failure = phone.CallFailedData(call_id=data.call_id, failure_kind="timeout")
+        # Stamp envelope id from the active request (same correlation path as activity completions).
         PhoneService._emit_call_failed(
             ctx,
             instance,
-            _with_trigger_metadata(ServiceCallFailedEvent.with_data(failure), active),
+            _with_operation_correlation(
+                ServiceCallFailedEvent.with_data(failure),
+                operation_id=active.id,
+            ),
         )
 
     @staticmethod
@@ -1250,7 +1317,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         del event
-        active = _active_operation_event(instance)
+        active = _active_operation(instance)
         assert active is not None
         assert isinstance(active.data, phone.TransferCallData)
         data = active.data
@@ -1263,7 +1330,10 @@ class PhoneService(hsm.Instance):
         PhoneService._emit_transfer_failed(
             ctx,
             instance,
-            _with_trigger_metadata(ServiceTransferFailedEvent.with_data(failure), active),
+            _with_operation_correlation(
+                ServiceTransferFailedEvent.with_data(failure),
+                operation_id=active.id,
+            ),
         )
 
     @staticmethod
@@ -1277,12 +1347,12 @@ class PhoneService(hsm.Instance):
         failure_kind = await _await_call_control_operation(instance.answer_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
-            _ = hsm.dispatch(ctx, instance, _with_operation_metadata(_AnswerFailedEvent.with_data(failure), event))
+            _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_AnswerFailedEvent.with_data(failure), event))
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            _with_operation_metadata(
+            _with_trigger_correlation(
                 _AnswerCompletedEvent.with_data(phone.CallConnectedData(call_id=data.call_id)),
                 event,
             ),
@@ -1304,12 +1374,12 @@ class PhoneService(hsm.Instance):
             connected = await instance.dial(data)
         except Exception as error:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=_failure_kind(error))
-            _ = hsm.dispatch(ctx, instance, _with_operation_metadata(_DialFailedEvent.with_data(failure), event))
+            _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_DialFailedEvent.with_data(failure), event))
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            _with_operation_metadata(_DialCompletedEvent.with_data(connected), event),
+            _with_trigger_correlation(_DialCompletedEvent.with_data(connected), event),
         )
 
     @staticmethod
@@ -1323,12 +1393,12 @@ class PhoneService(hsm.Instance):
         failure_kind = await _await_call_control_operation(instance.decline_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
-            _ = hsm.dispatch(ctx, instance, _with_operation_metadata(_DeclineFailedEvent.with_data(failure), event))
+            _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_DeclineFailedEvent.with_data(failure), event))
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            _with_operation_metadata(_DeclineCompletedEvent.with_data(phone.CallIdData(call_id=data.call_id)), event),
+            _with_trigger_correlation(_DeclineCompletedEvent.with_data(phone.CallIdData(call_id=data.call_id)), event),
         )
 
     @staticmethod
@@ -1342,12 +1412,12 @@ class PhoneService(hsm.Instance):
         failure_kind = await _await_call_control_operation(instance.hang_up_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
-            _ = hsm.dispatch(ctx, instance, _with_operation_metadata(_HangUpFailedEvent.with_data(failure), event))
+            _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_HangUpFailedEvent.with_data(failure), event))
             return
         _ = hsm.dispatch(
             ctx,
             instance,
-            _with_operation_metadata(_HangUpCompletedEvent.with_data(phone.CallIdData(call_id=data.call_id)), event),
+            _with_trigger_correlation(_HangUpCompletedEvent.with_data(phone.CallIdData(call_id=data.call_id)), event),
         )
 
     @staticmethod
@@ -1369,11 +1439,11 @@ class PhoneService(hsm.Instance):
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                _with_operation_metadata(_TransferRequestFailedEvent.with_data(failure), event),
+                _with_trigger_correlation(_TransferRequestFailedEvent.with_data(failure), event),
             )
             return
         accepted = phone.TransferAcceptedData(call_id=data.call_id, transfer_id=data.transfer_id, target=data.target)
-        _ = hsm.dispatch(ctx, instance, _with_operation_metadata(_TransferAcceptedEvent.with_data(accepted), event))
+        _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_TransferAcceptedEvent.with_data(accepted), event))
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         """Accept phone firmware provider requests through the `PhoneService` protocol."""
@@ -1436,7 +1506,7 @@ class PhoneService(hsm.Instance):
                     failure_event,
                     source=hsm.id(self),
                     target=event.source,
-                    metadata=_public_metadata(event.metadata),
+                    metadata=dict(event.metadata),
                 ),
             )
             return
@@ -1485,7 +1555,7 @@ class PhoneService(hsm.Instance):
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "PhoneService",
-        hsm.attribute(_ACTIVE_OPERATION_EVENT_ATTRIBUTE),
+        hsm.attribute(_ACTIVE_OPERATION_ATTRIBUTE),
         hsm.initial(hsm.target("/PhoneService/unconnected")),
         hsm.transition(
             hsm.on(_ServiceAttachedEvent),
@@ -1506,7 +1576,7 @@ class PhoneService(hsm.Instance):
         hsm.transition(
             hsm.on(_ServiceDetachedEvent),
             hsm.guard(_matches_service_attachment),
-            hsm.effect(_clear_active_operation_event),
+            hsm.effect(_clear_active_operation),
             hsm.effect(_clear_phone_event_target),
             hsm.target("/PhoneService/unconnected"),
         ),
@@ -1545,7 +1615,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(ServiceRemoteHangUpEvent),
                 hsm.guard(_has_current_remote_hang_up),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.effect(_emit_remote_hang_up),
             ),
             hsm.transition(
@@ -1556,7 +1626,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(ServiceCallFailedEvent),
                 hsm.guard(_has_current_call_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.effect(_emit_call_failed),
             ),
             hsm.transition(
@@ -1567,7 +1637,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(ServiceTransferCompletedEvent),
                 hsm.guard(_has_current_transfer_completed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.effect(_emit_transfer_completed),
             ),
             hsm.transition(
@@ -1578,7 +1648,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(ServiceTransferFailedEvent),
                 hsm.guard(_has_current_transfer_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.effect(_emit_transfer_failed),
             ),
             hsm.transition(
@@ -1589,46 +1659,46 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(phone.HungUpEvent),
                 hsm.guard(_has_provider_terminal_hang_up),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
             ),
             hsm.transition(
                 hsm.on(phone.CallTransferCompletedEvent),
                 hsm.guard(_has_provider_transfer_completed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
             ),
             hsm.transition(
                 hsm.on(phone.CallTransferFailedEvent),
                 hsm.guard(_has_provider_transfer_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceDialRequestedEvent),
                 hsm.guard(_has_dial_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/dialing"),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceAnswerRequestedEvent),
                 hsm.guard(_has_answer_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/answering"),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceDeclineRequestedEvent),
                 hsm.guard(_has_decline_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/declining"),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceTransferRequestedEvent),
                 hsm.guard(_has_transfer_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/transferring"),
             ),
         ),
@@ -1641,7 +1711,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
@@ -1655,14 +1725,14 @@ class PhoneService(hsm.Instance):
                 hsm.on(_DialCompletedEvent),
                 hsm.guard(_has_call_connected_completion),
                 hsm.effect(_emit_call_connected),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(_DialFailedEvent),
                 hsm.guard(_has_call_failed_completion),
                 hsm.effect(_emit_call_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             _active_call_operation_timeout_transition(
@@ -1678,13 +1748,13 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(phone.ServiceDeclineRequestedEvent),
                 hsm.guard(_has_decline_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/declining"),
             ),
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.activity(_run_answer_call),
@@ -1697,14 +1767,14 @@ class PhoneService(hsm.Instance):
                 hsm.on(_AnswerCompletedEvent),
                 hsm.guard(_has_call_connected_completion),
                 hsm.effect(_emit_call_connected),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(_AnswerFailedEvent),
                 hsm.guard(_has_call_failed_completion),
                 hsm.effect(_emit_call_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             _active_call_operation_timeout_transition(
@@ -1721,7 +1791,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
@@ -1734,14 +1804,14 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(_DeclineCompletedEvent),
                 hsm.guard(_has_call_id_completion),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(_DeclineFailedEvent),
                 hsm.guard(_has_call_failed_completion),
                 hsm.effect(_emit_call_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             _active_call_operation_timeout_transition(
@@ -1766,14 +1836,14 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(_HangUpCompletedEvent),
                 hsm.guard(_has_call_id_completion),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(_HangUpFailedEvent),
                 hsm.guard(_has_call_failed_completion),
                 hsm.effect(_emit_call_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             _active_call_operation_timeout_transition(
@@ -1790,7 +1860,7 @@ class PhoneService(hsm.Instance):
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
-                hsm.effect(_set_active_operation_event),
+                hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
@@ -1803,26 +1873,26 @@ class PhoneService(hsm.Instance):
                 hsm.on(ServiceTransferCompletedEvent),
                 hsm.guard(_has_current_transfer_completed),
                 hsm.effect(_emit_transfer_completed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(ServiceTransferFailedEvent),
                 hsm.guard(_has_current_transfer_failed),
                 hsm.effect(_emit_transfer_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(phone.CallTransferCompletedEvent),
                 hsm.guard(_has_provider_transfer_completed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(phone.CallTransferFailedEvent),
                 hsm.guard(_has_provider_transfer_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
@@ -1835,14 +1905,14 @@ class PhoneService(hsm.Instance):
                 hsm.on(_TransferRequestFailedEvent),
                 hsm.guard(_has_transfer_failed_completion),
                 hsm.effect(_emit_transfer_failed),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.after(_operation_timeout_value),
                 hsm.guard(_has_active_transfer_operation),
                 hsm.effect(_emit_active_transfer_timeout),
-                hsm.effect(_clear_active_operation_event),
+                hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
         ),
