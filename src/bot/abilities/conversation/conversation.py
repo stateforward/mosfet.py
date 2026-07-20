@@ -990,6 +990,7 @@ class Conversation(
             ),
             hsm.state(
                 "active",
+                hsm.initial(hsm.target(f"{root_path}/active/decoding")),
                 hsm.defer(input_event),
                 hsm.transition(
                     hsm.on(

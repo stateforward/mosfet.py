@@ -1400,6 +1400,7 @@ class Participating(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "perceiving",
+            hsm.initial(hsm.target("/Participating/perceiving/routing")),
             hsm.defer(input_event),
             hsm.exit(_detach_participating_children_on_detach),
             hsm.transition(

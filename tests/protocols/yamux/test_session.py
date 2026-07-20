@@ -416,6 +416,103 @@ def test_yamux_session_rejects_send_when_flow_control_is_exhausted() -> None:
     asyncio.run(run())
 
 
+def test_yamux_session_admission_guards_use_session_ledger_not_stream_private_fields() -> None:
+    """Session flow-control admission is ledger-owned (HSM-OWNERSHIP-001), not peer Stream peeks."""
+
+    import ast
+    import inspect
+
+    import bot.protocols.yamux.session as session_mod
+
+    tree = ast.parse(inspect.getsource(session_mod))
+    stream_private_attrs = {"_state", "_send_window", "_receive_window", "_awaiting_ack", "_sent_bytes", "_received_bytes"}
+    stream_mutations = {
+        "send",
+        "receive",
+        "acknowledge",
+        "local_fin",
+        "remote_fin",
+        "reset",
+        "update_send_window",
+        "grant_receive_window",
+    }
+    peek_sites: list[str] = []
+    bare_mutations: list[str] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self._function: str | None = None
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            prev = self._function
+            self._function = node.name
+            self.generic_visit(node)
+            self._function = prev
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            prev = self._function
+            self._function = node.name
+            self.generic_visit(node)
+            self._function = prev
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            # stream._private  or  any_name._state-like peeks on Stream fields
+            if isinstance(node.ctx, ast.Load) and node.attr in stream_private_attrs:
+                base = node.value
+                if isinstance(base, ast.Name) and base.id in {"stream", "peer", "child"}:
+                    peek_sites.append(f"{self._function}:{node.attr}")
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            # object.__getattribute__(stream, "_…") / getattr(stream, "_…")
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in {"__getattribute__", "getattr"}:
+                if node.args:
+                    target = node.args[0]
+                    attr_arg = node.args[1] if len(node.args) > 1 else None
+                    if isinstance(target, ast.Name) and target.id in {"stream", "peer", "child"}:
+                        if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+                            if attr_arg.value.startswith("_"):
+                                peek_sites.append(f"{self._function}:getattribute({attr_arg.value})")
+            # stream.send / … must only live inside _drive_stream_* methods
+            if isinstance(func, ast.Attribute) and func.attr in stream_mutations:
+                if isinstance(func.value, ast.Name) and func.value.id in {"stream", "peer", "child"}:
+                    owner = self._function or ""
+                    if not owner.startswith("_drive_stream_"):
+                        bare_mutations.append(f"{owner}:{func.attr}")
+            if isinstance(func, ast.Attribute) and func.attr in stream_mutations:
+                # self._streams[id].send(...) pattern
+                if isinstance(func.value, ast.Subscript):
+                    owner = self._function or ""
+                    if not owner.startswith("_drive_stream_"):
+                        bare_mutations.append(f"{owner}:subscript.{func.attr}")
+            self.generic_visit(node)
+
+    _Visitor().visit(tree)
+    assert peek_sites == [], f"Session peeks Stream private fields: {peek_sites}"
+    assert bare_mutations == [], f"Stream mutations outside _drive_stream_*: {bare_mutations}"
+    assert any(isinstance(node, ast.FunctionDef) and node.name.startswith("_drive_stream_") for node in tree.body) or any(
+        isinstance(node, ast.ClassDef)
+        and any(isinstance(item, ast.FunctionDef) and item.name.startswith("_drive_stream_") for item in node.body)
+        for node in tree.body
+    )
+
+    async def run() -> int:
+        session = Session(role="client")
+        _ = await hsm.started(None, session, session.model)
+        await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
+        _ = await read_outbound(session)
+        await session.dispatch(
+            session.context(),
+            SendDataEvent.with_data(SendData(stream_id=1, payload=b"hello")),
+        )
+        _ = await read_outbound(session)
+        # Public observation only — StreamSnapshot is the external surface.
+        return session.take_snapshot().streams[1].send_window
+
+    assert asyncio.run(run()) == INITIAL_STREAM_WINDOW - 5
+
+
 def test_yamux_session_rejects_inbound_data_when_receive_window_is_exhausted() -> None:
     async def run() -> None:
         session = Session(role="client")

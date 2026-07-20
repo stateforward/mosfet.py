@@ -737,6 +737,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         ),
         hsm.state(
             "DecodingSpeech",
+            hsm.initial(hsm.target("/Listening/DecodingSpeech/Detected")),
             hsm.transition(
                 hsm.on(_SpeechDecodingCompletedEvent),
                 hsm.guard(_has_speech_decoding_completion),

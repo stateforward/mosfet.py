@@ -264,44 +264,60 @@ def _flags(value: int) -> Flag:
     return Flag(value)
 
 
-def _stream_is_writable(stream: Stream) -> bool:
-    return _stream_state(stream) in {
+@dataclasses.dataclass(slots=True)
+class _StreamAdmission:
+    """Session-owned admission view for one stream (HSM-OWNERSHIP-001).
+
+    Stream machines own their private counters and lifecycle for Stream HSM guards.
+    Session never peeks those fields; effects update this ledger when they drive Stream APIs.
+    """
+
+    lifecycle: StreamState
+    awaiting_ack: bool
+    send_window: int
+    receive_window: int
+
+
+def _admission_is_writable(admission: _StreamAdmission) -> bool:
+    return admission.lifecycle in {
         StreamState.LOCAL_OPENING,
         StreamState.OPEN,
         StreamState.REMOTE_CLOSED,
     }
 
 
-def _stream_is_readable(stream: Stream) -> bool:
-    return _stream_state(stream) in {
+def _admission_is_readable(admission: _StreamAdmission) -> bool:
+    return admission.lifecycle in {
         StreamState.LOCAL_OPENING,
         StreamState.OPEN,
         StreamState.LOCAL_CLOSED,
     }
 
 
-def _stream_is_terminal(stream: Stream) -> bool:
-    return _stream_state(stream) in {StreamState.CLOSED, StreamState.RESET}
+def _admission_is_terminal(admission: _StreamAdmission) -> bool:
+    return admission.lifecycle in {StreamState.CLOSED, StreamState.RESET}
 
 
-def _stream_accepts_ack(stream: Stream) -> bool:
-    return _stream_awaiting_ack(stream)
+def _admission_accepts_ack(admission: _StreamAdmission) -> bool:
+    return admission.awaiting_ack
 
 
-def _data_frame_is_ack_only_for_stream(stream: Stream, data: ReceiveDataFrameData) -> bool:
+def _data_frame_is_ack_only_for_admission(admission: _StreamAdmission, data: ReceiveDataFrameData) -> bool:
     flags = _flags(data.flags)
     return (
-        _stream_awaiting_ack(stream)
+        admission.awaiting_ack
         and bool(flags & Flag.ACK)
         and not bool(flags & (Flag.SYN | Flag.FIN | Flag.RST))
         and len(data.payload) == 0
     )
 
 
-def _window_frame_is_ack_only_for_stream(stream: Stream, data: ReceiveWindowUpdateFrameData) -> bool:
+def _window_frame_is_ack_only_for_admission(
+    admission: _StreamAdmission, data: ReceiveWindowUpdateFrameData
+) -> bool:
     flags = _flags(data.flags)
     return (
-        _stream_awaiting_ack(stream)
+        admission.awaiting_ack
         and bool(flags & Flag.ACK)
         and not bool(flags & (Flag.SYN | Flag.FIN | Flag.RST))
         and data.delta == 0
@@ -340,28 +356,12 @@ def _session_ping_timeout_value(instance: "Session") -> datetime.timedelta:
     return typing.cast(datetime.timedelta, object.__getattribute__(instance, "_ping_timeout"))
 
 
-def _session_streams(instance: "Session") -> dict[int, Stream]:
-    return typing.cast(dict[int, Stream], object.__getattribute__(instance, "_streams"))
+def _session_admissions(instance: "Session") -> dict[int, _StreamAdmission]:
+    return typing.cast(dict[int, _StreamAdmission], object.__getattribute__(instance, "_stream_admission"))
 
 
-def _session_stream(instance: "Session", stream_id: int) -> Stream | None:
-    return _session_streams(instance).get(stream_id)
-
-
-def _stream_state(stream: Stream) -> StreamState:
-    return typing.cast(StreamState, object.__getattribute__(stream, "_state"))
-
-
-def _stream_awaiting_ack(stream: Stream) -> bool:
-    return typing.cast(bool, object.__getattribute__(stream, "_awaiting_ack"))
-
-
-def _stream_send_window(stream: Stream) -> int:
-    return typing.cast(int, object.__getattribute__(stream, "_send_window"))
-
-
-def _stream_receive_window(stream: Stream) -> int:
-    return typing.cast(int, object.__getattribute__(stream, "_receive_window"))
+def _session_admission(instance: "Session", stream_id: int) -> _StreamAdmission | None:
+    return _session_admissions(instance).get(stream_id)
 
 
 def _has_stream_id_capacity(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -378,7 +378,7 @@ def _cannot_open_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[
 
 def _has_active_streams(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
     del ctx, event
-    return any(not _stream_is_terminal(stream) for stream in _session_streams(instance).values())
+    return any(not _admission_is_terminal(admission) for admission in _session_admissions(instance).values())
 
 
 def _can_send_data(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -386,14 +386,18 @@ def _can_send_data(ctx: hsm.Context, instance: "Session", event: hsm.Event[typin
     data = _send_data_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_writable(stream) and len(data.payload) <= _stream_send_window(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return (
+        admission is not None
+        and _admission_is_writable(admission)
+        and len(data.payload) <= admission.send_window
+    )
 
 
 def _send_data_unknown_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
     del ctx
     data = _send_data_event_data(event)
-    return data is not None and _session_stream(instance, data.stream_id) is None
+    return data is not None and _session_admission(instance, data.stream_id) is None
 
 
 def _send_data_inactive_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -401,8 +405,8 @@ def _send_data_inactive_stream(ctx: hsm.Context, instance: "Session", event: hsm
     data = _send_data_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and not _stream_is_writable(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is not None and not _admission_is_writable(admission)
 
 
 def _send_data_exhausts_window(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -410,8 +414,12 @@ def _send_data_exhausts_window(ctx: hsm.Context, instance: "Session", event: hsm
     data = _send_data_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_writable(stream) and len(data.payload) > _stream_send_window(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return (
+        admission is not None
+        and _admission_is_writable(admission)
+        and len(data.payload) > admission.send_window
+    )
 
 
 def _can_close_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -419,14 +427,14 @@ def _can_close_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[ty
     data = _stream_id_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_writable(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is not None and _admission_is_writable(admission)
 
 
 def _stream_command_unknown(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
     del ctx
     data = _stream_id_event_data(event)
-    return data is not None and _session_stream(instance, data.stream_id) is None
+    return data is not None and _session_admission(instance, data.stream_id) is None
 
 
 def _stream_command_inactive(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -434,8 +442,8 @@ def _stream_command_inactive(ctx: hsm.Context, instance: "Session", event: hsm.E
     data = _stream_id_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and not _stream_is_writable(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is not None and not _admission_is_writable(admission)
 
 
 def _can_reset_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -443,8 +451,8 @@ def _can_reset_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[ty
     data = _stream_id_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and not _stream_is_terminal(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is not None and not _admission_is_terminal(admission)
 
 
 def _received_data_has_duplicate_syn(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -453,7 +461,7 @@ def _received_data_has_duplicate_syn(ctx: hsm.Context, instance: "Session", even
     return (
         data is not None
         and bool(_flags(data.flags) & Flag.SYN)
-        and _session_stream(instance, data.stream_id) is not None
+        and _session_admission(instance, data.stream_id) is not None
     )
 
 
@@ -462,7 +470,7 @@ def _received_data_has_bad_peer_stream_id(ctx: hsm.Context, instance: "Session",
     data = _received_data_event_data(event)
     return (
         data is not None
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and bool(_flags(data.flags) & Flag.SYN)
         and not _peer_stream_id_is_valid(_session_role(instance), data.stream_id)
     )
@@ -473,8 +481,8 @@ def _received_data_has_bad_ack(ctx: hsm.Context, instance: "Session", event: hsm
     data = _received_data_event_data(event)
     if data is None or not bool(_flags(data.flags) & Flag.ACK):
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is None or not _stream_accepts_ack(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is None or not _admission_accepts_ack(admission)
 
 
 def _received_data_unknown_without_syn(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -482,7 +490,7 @@ def _received_data_unknown_without_syn(ctx: hsm.Context, instance: "Session", ev
     data = _received_data_event_data(event)
     return (
         data is not None
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and not bool(_flags(data.flags) & Flag.SYN)
     )
 
@@ -492,8 +500,12 @@ def _received_data_hits_terminal_stream(ctx: hsm.Context, instance: "Session", e
     data = _received_data_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_terminal(stream) and not _data_frame_is_ack_only_for_stream(stream, data)
+    admission = _session_admission(instance, data.stream_id)
+    return (
+        admission is not None
+        and _admission_is_terminal(admission)
+        and not _data_frame_is_ack_only_for_admission(admission, data)
+    )
 
 
 def _received_data_hits_inactive_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -501,9 +513,11 @@ def _received_data_hits_inactive_stream(ctx: hsm.Context, instance: "Session", e
     data = _received_data_event_data(event)
     if data is None or bool(_flags(data.flags) & Flag.RST):
         return False
-    stream = _session_stream(instance, data.stream_id)
+    admission = _session_admission(instance, data.stream_id)
     return (
-        stream is not None and not _stream_is_readable(stream) and not _data_frame_is_ack_only_for_stream(stream, data)
+        admission is not None
+        and not _admission_is_readable(admission)
+        and not _data_frame_is_ack_only_for_admission(admission, data)
     )
 
 
@@ -512,10 +526,10 @@ def _received_data_exhausts_window(ctx: hsm.Context, instance: "Session", event:
     data = _received_data_event_data(event)
     if data is None or bool(_flags(data.flags) & Flag.RST):
         return False
-    stream = _session_stream(instance, data.stream_id)
-    if stream is None:
+    admission = _session_admission(instance, data.stream_id)
+    if admission is None:
         return bool(_flags(data.flags) & Flag.SYN) and len(data.payload) > _session_initial_stream_window(instance)
-    return _stream_is_readable(stream) and len(data.payload) > _stream_receive_window(stream)
+    return _admission_is_readable(admission) and len(data.payload) > admission.receive_window
 
 
 def _can_receive_existing_data(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -523,16 +537,16 @@ def _can_receive_existing_data(ctx: hsm.Context, instance: "Session", event: hsm
     data = _received_data_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    if stream is None:
+    admission = _session_admission(instance, data.stream_id)
+    if admission is None:
         return False
     if bool(_flags(data.flags) & Flag.RST):
-        return not _stream_is_terminal(stream)
-    if _data_frame_is_ack_only_for_stream(stream, data):
+        return not _admission_is_terminal(admission)
+    if _data_frame_is_ack_only_for_admission(admission, data):
         return True
-    if _stream_is_terminal(stream):
+    if _admission_is_terminal(admission):
         return False
-    return _stream_is_readable(stream) and len(data.payload) <= _stream_receive_window(stream)
+    return _admission_is_readable(admission) and len(data.payload) <= admission.receive_window
 
 
 def _can_receive_new_data(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -541,7 +555,7 @@ def _can_receive_new_data(ctx: hsm.Context, instance: "Session", event: hsm.Even
     return (
         data is not None
         and _session_accepts_new_streams(instance)
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and bool(_flags(data.flags) & Flag.SYN)
         and _peer_stream_id_is_valid(_session_role(instance), data.stream_id)
         and len(data.payload) <= _session_initial_stream_window(instance)
@@ -556,7 +570,7 @@ def _received_data_new_stream_while_draining(
     return (
         data is not None
         and not _session_accepts_new_streams(instance)
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
     )
 
 
@@ -566,7 +580,7 @@ def _received_window_has_duplicate_syn(ctx: hsm.Context, instance: "Session", ev
     return (
         data is not None
         and bool(_flags(data.flags) & Flag.SYN)
-        and _session_stream(instance, data.stream_id) is not None
+        and _session_admission(instance, data.stream_id) is not None
     )
 
 
@@ -577,7 +591,7 @@ def _received_window_has_bad_peer_stream_id(
     data = _received_window_event_data(event)
     return (
         data is not None
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and bool(_flags(data.flags) & Flag.SYN)
         and not _peer_stream_id_is_valid(_session_role(instance), data.stream_id)
     )
@@ -588,8 +602,8 @@ def _received_window_has_bad_ack(ctx: hsm.Context, instance: "Session", event: h
     data = _received_window_event_data(event)
     if data is None or not bool(_flags(data.flags) & Flag.ACK):
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is None or not _stream_accepts_ack(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is None or not _admission_accepts_ack(admission)
 
 
 def _received_window_unknown_without_syn(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -597,7 +611,7 @@ def _received_window_unknown_without_syn(ctx: hsm.Context, instance: "Session", 
     data = _received_window_event_data(event)
     return (
         data is not None
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and not bool(_flags(data.flags) & Flag.SYN)
     )
 
@@ -607,8 +621,12 @@ def _received_window_hits_terminal_stream(ctx: hsm.Context, instance: "Session",
     data = _received_window_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_terminal(stream) and not _window_frame_is_ack_only_for_stream(stream, data)
+    admission = _session_admission(instance, data.stream_id)
+    return (
+        admission is not None
+        and _admission_is_terminal(admission)
+        and not _window_frame_is_ack_only_for_admission(admission, data)
+    )
 
 
 def _received_window_has_bad_fin(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -616,11 +634,11 @@ def _received_window_has_bad_fin(ctx: hsm.Context, instance: "Session", event: h
     data = _received_window_event_data(event)
     if data is None or not bool(_flags(data.flags) & Flag.FIN) or bool(_flags(data.flags) & Flag.RST):
         return False
-    stream = _session_stream(instance, data.stream_id)
+    admission = _session_admission(instance, data.stream_id)
     return (
-        stream is not None
-        and not _stream_is_readable(stream)
-        and not _window_frame_is_ack_only_for_stream(stream, data)
+        admission is not None
+        and not _admission_is_readable(admission)
+        and not _window_frame_is_ack_only_for_admission(admission, data)
     )
 
 
@@ -629,20 +647,20 @@ def _received_window_overflows(ctx: hsm.Context, instance: "Session", event: hsm
     data = _received_window_event_data(event)
     if data is None or bool(_flags(data.flags) & Flag.RST):
         return False
-    stream = _session_stream(instance, data.stream_id)
-    if stream is None:
+    admission = _session_admission(instance, data.stream_id)
+    if admission is None:
         return bool(_flags(data.flags) & Flag.SYN) and INITIAL_STREAM_WINDOW + data.delta > _MAX_UINT32
-    return not _stream_is_terminal(stream) and _stream_send_window(stream) + data.delta > _MAX_UINT32
+    return not _admission_is_terminal(admission) and admission.send_window + data.delta > _MAX_UINT32
 
 
 def _can_receive_existing_window(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
     data = _received_window_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
+    admission = _session_admission(instance, data.stream_id)
     return (
-        stream is not None
-        and (not _stream_is_terminal(stream) or _window_frame_is_ack_only_for_stream(stream, data))
+        admission is not None
+        and (not _admission_is_terminal(admission) or _window_frame_is_ack_only_for_admission(admission, data))
         and (bool(_flags(data.flags) & Flag.RST) or not _received_window_overflows(ctx, instance, event))
     )
 
@@ -653,7 +671,7 @@ def _can_receive_new_window(ctx: hsm.Context, instance: "Session", event: hsm.Ev
     return (
         data is not None
         and _session_accepts_new_streams(instance)
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
         and bool(_flags(data.flags) & Flag.SYN)
         and _peer_stream_id_is_valid(_session_role(instance), data.stream_id)
         and INITIAL_STREAM_WINDOW + data.delta <= _MAX_UINT32
@@ -668,7 +686,7 @@ def _received_window_new_stream_while_draining(
     return (
         data is not None
         and not _session_accepts_new_streams(instance)
-        and _session_stream(instance, data.stream_id) is None
+        and _session_admission(instance, data.stream_id) is None
     )
 
 
@@ -677,8 +695,8 @@ def _can_grant_receive_window(ctx: hsm.Context, instance: "Session", event: hsm.
     data = _window_consumed_event_data(event)
     if data is None:
         return False
-    stream = _session_stream(instance, data.stream_id)
-    return stream is not None and _stream_is_readable(stream)
+    admission = _session_admission(instance, data.stream_id)
+    return admission is not None and _admission_is_readable(admission)
 
 
 def _is_inbound_ping(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -711,6 +729,7 @@ class Session(hsm.Instance):
     _ping_timeout: datetime.timedelta
     _role: Role
     _streams: dict[int, Stream]
+    _stream_admission: dict[int, _StreamAdmission]
 
     def __init__(
         self,
@@ -729,6 +748,7 @@ class Session(hsm.Instance):
         self._initial_stream_window = initial_stream_window
         self._next_stream_id = 1 if role == "client" else 2
         self._streams = {}
+        self._stream_admission = {}
         outbound_frames: asyncio.Queue[FrameData] = asyncio.Queue()
         self._frame_sink = _FrameSink(outbound_frames)
         self._outbound = FrameStream(outbound_frames)
@@ -802,18 +822,102 @@ class Session(hsm.Instance):
         initial_send_window: int = INITIAL_STREAM_WINDOW,
         initial_receive_window: int | None = None,
     ) -> Stream:
+        receive_window = (
+            self._initial_stream_window if initial_receive_window is None else initial_receive_window
+        )
         stream = Stream(
             stream_id=stream_id,
             initial_send_window=initial_send_window,
-            initial_receive_window=self._initial_stream_window
-            if initial_receive_window is None
-            else initial_receive_window,
+            initial_receive_window=receive_window,
             locally_initiated=locally_initiated,
             on_window_consumed=self._dispatch_window_consumed,
         )
         self._start_stream(ctx, stream)
         self._streams[stream_id] = stream
+        self._stream_admission[stream_id] = _StreamAdmission(
+            lifecycle=StreamState.LOCAL_OPENING if locally_initiated else StreamState.OPEN,
+            awaiting_ack=locally_initiated,
+            send_window=initial_send_window,
+            receive_window=receive_window,
+        )
         return stream
+
+    def _mark_admission_ack(self, stream_id: int) -> None:
+        admission = self._stream_admission[stream_id]
+        admission.awaiting_ack = False
+        if admission.lifecycle is StreamState.LOCAL_OPENING:
+            admission.lifecycle = StreamState.OPEN
+
+    def _mark_admission_local_fin(self, stream_id: int) -> None:
+        admission = self._stream_admission[stream_id]
+        if admission.lifecycle is StreamState.REMOTE_CLOSED:
+            admission.lifecycle = StreamState.CLOSED
+        elif admission.lifecycle in {StreamState.LOCAL_OPENING, StreamState.OPEN}:
+            admission.lifecycle = StreamState.LOCAL_CLOSED
+
+    def _mark_admission_remote_fin(self, stream_id: int) -> None:
+        admission = self._stream_admission[stream_id]
+        if admission.lifecycle is StreamState.LOCAL_CLOSED:
+            admission.lifecycle = StreamState.CLOSED
+        elif admission.lifecycle in {StreamState.LOCAL_OPENING, StreamState.OPEN}:
+            admission.lifecycle = StreamState.REMOTE_CLOSED
+
+    def _mark_admission_reset(self, stream_id: int) -> None:
+        admission = self._stream_admission[stream_id]
+        admission.lifecycle = StreamState.RESET
+        admission.awaiting_ack = False
+
+    def _record_admission_sent(self, stream_id: int, payload: bytes, *, end_stream: bool) -> None:
+        admission = self._stream_admission[stream_id]
+        admission.send_window -= len(payload)
+        if end_stream:
+            self._mark_admission_local_fin(stream_id)
+
+    def _record_admission_received(self, stream_id: int, payload: bytes, *, end_stream: bool) -> None:
+        admission = self._stream_admission[stream_id]
+        admission.receive_window -= len(payload)
+        if end_stream:
+            self._mark_admission_remote_fin(stream_id)
+
+    def _record_admission_send_window(self, stream_id: int, delta: int) -> None:
+        self._stream_admission[stream_id].send_window += delta
+
+    def _record_admission_receive_window(self, stream_id: int, delta: int) -> None:
+        self._stream_admission[stream_id].receive_window += delta
+
+    def _drive_stream_send(self, stream_id: int, payload: bytes, *, end_stream: bool) -> None:
+        """Drive Stream.send and update Session admission in one path (no dual-write drift)."""
+
+        self._streams[stream_id].send(payload, end_stream=end_stream)
+        self._record_admission_sent(stream_id, payload, end_stream=end_stream)
+
+    def _drive_stream_receive(self, stream_id: int, payload: bytes, *, end_stream: bool) -> None:
+        self._streams[stream_id].receive(payload, end_stream=end_stream)
+        self._record_admission_received(stream_id, payload, end_stream=end_stream)
+
+    def _drive_stream_acknowledge(self, stream_id: int) -> None:
+        self._streams[stream_id].acknowledge()
+        self._mark_admission_ack(stream_id)
+
+    def _drive_stream_local_fin(self, stream_id: int) -> None:
+        self._streams[stream_id].local_fin()
+        self._mark_admission_local_fin(stream_id)
+
+    def _drive_stream_remote_fin(self, stream_id: int) -> None:
+        self._streams[stream_id].remote_fin()
+        self._mark_admission_remote_fin(stream_id)
+
+    def _drive_stream_reset(self, stream_id: int) -> None:
+        self._streams[stream_id].reset()
+        self._mark_admission_reset(stream_id)
+
+    def _drive_stream_update_send_window(self, stream_id: int, delta: int) -> None:
+        self._streams[stream_id].update_send_window(delta)
+        self._record_admission_send_window(stream_id, delta)
+
+    def _drive_stream_grant_receive_window(self, stream_id: int, delta: int) -> None:
+        self._streams[stream_id].grant_receive_window(delta)
+        self._record_admission_receive_window(stream_id, delta)
 
     def _start_stream(self, ctx: hsm.Context, stream: Stream) -> None:
         # Streams outlive the opening transition/activity; parent under session lifetime (HSM-CONTEXT-001).
@@ -851,9 +955,8 @@ class Session(hsm.Instance):
     def _send_data(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, SendData)
-        stream = self._streams[data.stream_id]
         flags = Flag.FIN if data.end_stream else Flag(0)
-        stream.send(data.payload, end_stream=data.end_stream)
+        self._drive_stream_send(data.stream_id, data.payload, end_stream=data.end_stream)
         self._write_input(FrameData.data(stream_id=data.stream_id, payload=data.payload, flags=flags))
         self._dispatch_drained_if_ready(ctx)
 
@@ -878,8 +981,7 @@ class Session(hsm.Instance):
     def _close_stream(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, CloseStreamData)
-        stream = self._streams[data.stream_id]
-        stream.local_fin()
+        self._drive_stream_local_fin(data.stream_id)
         self._write_input(FrameData.data(stream_id=data.stream_id, flags=Flag.FIN))
         self._dispatch_drained_if_ready(ctx)
 
@@ -898,8 +1000,7 @@ class Session(hsm.Instance):
     def _reset_stream(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ResetStreamData)
-        stream = self._streams[data.stream_id]
-        stream.reset()
+        self._drive_stream_reset(data.stream_id)
         self._write_input(FrameData.data(stream_id=data.stream_id, flags=Flag.RST))
         self._dispatch_drained_if_ready(ctx)
 
@@ -918,27 +1019,27 @@ class Session(hsm.Instance):
     def _receive_new_data(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ReceiveDataFrameData)
-        stream = self._new_stream(ctx, data.stream_id, locally_initiated=False)
+        _ = self._new_stream(ctx, data.stream_id, locally_initiated=False)
         delta = max(0, self._initial_stream_window - INITIAL_STREAM_WINDOW)
         self._write_input(FrameData.window_update(stream_id=data.stream_id, delta=delta, flags=Flag.ACK))
-        self._apply_data_frame(ctx, stream, data)
+        self._apply_data_frame(ctx, data)
 
     def _receive_existing_data(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ReceiveDataFrameData)
-        stream = self._streams[data.stream_id]
-        self._apply_data_frame(ctx, stream, data)
+        self._apply_data_frame(ctx, data)
 
-    def _apply_data_frame(self, ctx: hsm.Context, stream: Stream, data: ReceiveDataFrameData) -> None:
+    def _apply_data_frame(self, ctx: hsm.Context, data: ReceiveDataFrameData) -> None:
         flags = _flags(data.flags)
+        stream_id = data.stream_id
         if flags & Flag.RST:
-            stream.reset()
+            self._drive_stream_reset(stream_id)
             self._dispatch_drained_if_ready(ctx)
             return
         if flags & Flag.ACK:
-            stream.acknowledge()
+            self._drive_stream_acknowledge(stream_id)
         if data.payload or bool(flags & Flag.FIN):
-            stream.receive(data.payload, end_stream=bool(flags & Flag.FIN))
+            self._drive_stream_receive(stream_id, data.payload, end_stream=bool(flags & Flag.FIN))
         self._dispatch_drained_if_ready(ctx)
 
     def _fail_receive_data_protocol(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
@@ -968,7 +1069,7 @@ class Session(hsm.Instance):
     def _receive_new_window(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ReceiveWindowUpdateFrameData)
-        stream = self._new_stream(
+        _ = self._new_stream(
             ctx,
             data.stream_id,
             locally_initiated=False,
@@ -976,33 +1077,35 @@ class Session(hsm.Instance):
         )
         delta = max(0, self._initial_stream_window - INITIAL_STREAM_WINDOW)
         self._write_input(FrameData.window_update(stream_id=data.stream_id, delta=delta, flags=Flag.ACK))
-        self._apply_window_frame(ctx, stream, data, already_applied_delta=True)
+        self._apply_window_frame(ctx, data, already_applied_delta=True)
 
     def _receive_existing_window(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ReceiveWindowUpdateFrameData)
-        stream = self._streams[data.stream_id]
-        self._apply_window_frame(ctx, stream, data, already_applied_delta=False)
+        self._apply_window_frame(ctx, data, already_applied_delta=False)
 
     def _apply_window_frame(
         self,
         ctx: hsm.Context,
-        stream: Stream,
         data: ReceiveWindowUpdateFrameData,
         *,
         already_applied_delta: bool,
     ) -> None:
         flags = _flags(data.flags)
+        stream_id = data.stream_id
         if flags & Flag.RST:
-            stream.reset()
+            self._drive_stream_reset(stream_id)
             self._dispatch_drained_if_ready(ctx)
             return
         if flags & Flag.ACK:
-            stream.acknowledge()
+            self._drive_stream_acknowledge(stream_id)
         if data.delta and not already_applied_delta:
-            stream.update_send_window(data.delta)
+            self._drive_stream_update_send_window(stream_id, data.delta)
+        elif data.delta and already_applied_delta:
+            # New-stream path baked the delta into initial send window construction.
+            pass
         if flags & Flag.FIN:
-            stream.remote_fin()
+            self._drive_stream_remote_fin(stream_id)
         self._dispatch_drained_if_ready(ctx)
 
     def _fail_receive_window_protocol(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
@@ -1051,8 +1154,7 @@ class Session(hsm.Instance):
         del ctx
         data = event.data
         assert isinstance(data, _WindowConsumedData)
-        stream = self._streams[data.stream_id]
-        stream.grant_receive_window(data.byte_count)
+        self._drive_stream_grant_receive_window(data.stream_id, data.byte_count)
         self._write_input(FrameData.window_update(stream_id=data.stream_id, delta=data.byte_count))
 
     def _send_goaway(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
@@ -1080,9 +1182,9 @@ class Session(hsm.Instance):
             self._outstanding_ping = None
 
     def _reset_after_stream_failure(self, stage: SessionStage, failure_kind: FailureKind, stream_id: int) -> None:
-        stream = self._streams.get(stream_id)
-        if stream is not None and not _stream_is_terminal(stream):
-            stream.reset()
+        admission = self._stream_admission.get(stream_id)
+        if admission is not None and not _admission_is_terminal(admission):
+            self._drive_stream_reset(stream_id)
         self._write_input(FrameData.data(stream_id=stream_id, flags=Flag.RST))
         self._record_failure(stage, failure_kind, stream_id=stream_id)
 
@@ -1091,9 +1193,9 @@ class Session(hsm.Instance):
         self._closed_goaway_code = GoAwayCode.PROTOCOL_ERROR
         self._outstanding_ping = None
         if stream_id is not None:
-            stream = self._streams.get(stream_id)
-            if stream is not None and not _stream_is_terminal(stream):
-                stream.reset()
+            admission = self._stream_admission.get(stream_id)
+            if admission is not None and not _admission_is_terminal(admission):
+                self._drive_stream_reset(stream_id)
             self._write_input(FrameData.data(stream_id=stream_id, flags=Flag.RST))
         self._record_failure(stage, "protocol_error", stream_id=stream_id)
         self._write_input(FrameData.go_away(code=GoAwayCode.PROTOCOL_ERROR))
@@ -1118,7 +1220,7 @@ class Session(hsm.Instance):
         _ = self.dispatch(ctx, SessionDrainedEvent.with_data(SessionDrainedData(code=code)))
 
     def _active_streams_exist(self) -> bool:
-        return any(not _stream_is_terminal(stream) for stream in self._streams.values())
+        return any(not _admission_is_terminal(admission) for admission in self._stream_admission.values())
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Session",

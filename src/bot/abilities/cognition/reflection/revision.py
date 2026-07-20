@@ -1094,6 +1094,7 @@ class Revision(processing.Processing):
         ),
         hsm.state(
             "authoring",
+            hsm.initial(hsm.target("/Revision/authoring/attempt_0")),
             # Any leave from authoring (idle, starting, starting_cancel, detaching) drops attempt index.
             hsm.exit(_clear_active_attempt),
             hsm.defer(input_event),

@@ -815,6 +815,7 @@ class Reading(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "Focused",
+            hsm.initial(hsm.target("/Reading/Focused/Classifying/Applying")),
             hsm.transition(
                 hsm.on(_ReadingStageFailedEvent),
                 hsm.guard(_has_reading_stage_failure),
