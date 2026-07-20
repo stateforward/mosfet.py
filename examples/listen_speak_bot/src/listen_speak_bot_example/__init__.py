@@ -1,12 +1,12 @@
-"""Device-free listen → speak bot example (macOS ``say`` + Gemini cognition).
+"""Device-free listen → speak bot example (macOS ``say`` + mixed cognition).
 
 Flow:
 
 1. macOS ``say`` renders *Hey I'm Gabe how are you* into a WAV asset.
 2. ``world.sound`` carries that audio into bot **input** (Listening).
 3. Offline VAD + fixed STT hand a transcript stimulus to cognition.
-4. Gemini intuition (``gemini-3.1-flash-lite``) / reasoning (``gemini-3.5-flash``)
-   select ``bot.ability.speaking.input``.
+4. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning select
+   ``bot.ability.speaking.input``.
 5. Speaking encodes the reply with ``say`` again and writes a reply WAV.
 """
 
@@ -39,7 +39,10 @@ from bot.abilities import speaking
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
 from bot.bot import Bot
-from bot.providers.gemini import ChatClient, Processor
+from bot.providers.gemini import ChatClient as GeminiChatClient
+from bot.providers.gemini import Processor as GeminiProcessor
+from bot.providers.openai_compat import ChatClient as OpenAIChatClient
+from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.world import SoundData, SoundEvent, World
 
 # Capture before any local named ``cognition`` shadows the package (constructor param).
@@ -48,13 +51,16 @@ _Cognition = cognition.Cognition
 _LOG = logging.getLogger("listen_speak_bot_example")
 
 _EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_REPO_ROOT = _EXAMPLE_ROOT.parent.parent
 _ASSETS_DIR = _EXAMPLE_ROOT / "assets"
 _DEFAULT_ENV_PATH = _EXAMPLE_ROOT / ".env"
+_REPO_ENV_PATH = _REPO_ROOT / ".env"
 _HEARD_PHRASE = "Hey I'm Gabe how are you"
 _DEFAULT_SAMPLE_RATE_HZ = 22_050
 _DEFAULT_CHANNELS = 1
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-DEFAULT_GEMINI_INTUITION_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_MERCURY_MODEL = "mercury-2"
+DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 
 
 def _configure_logging(*, verbose: bool = False) -> None:
@@ -144,9 +150,11 @@ def _env_first(env: collections.abc.Mapping[str, str], *names: str) -> str | Non
 
 
 def _merged_env(path: pathlib.Path | None) -> dict[str, str]:
-    """Process environment as base; keys defined in an env file win (local credentials)."""
+    """Process env as base; repo/.env then example/.env win (local credentials)."""
 
     values = {key: value for key, value in os.environ.items() if value}
+    if _REPO_ENV_PATH.exists():
+        values.update(load_env(_REPO_ENV_PATH))
     if path is not None and path.exists():
         values.update(load_env(path))
     return values
@@ -154,8 +162,13 @@ def _merged_env(path: pathlib.Path | None) -> dict[str, str]:
 
 @dataclasses.dataclass(frozen=True)
 class CognitionConfig:
+    """Reasoning stays on Gemini; intuition defaults to Mercury 2 (OpenAI-compatible)."""
+
     model: str = DEFAULT_GEMINI_MODEL
     api_key: str | None = None
+    intuition_model: str = DEFAULT_MERCURY_MODEL
+    intuition_api_key: str | None = None
+    intuition_base_url: str = DEFAULT_MERCURY_BASE_URL
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
@@ -168,10 +181,30 @@ class CognitionConfig:
                 "GOOGLE_API_KEY",
                 "VA_GEMINI_API_KEY",
             ),
+            intuition_model=_env_first(
+                env,
+                "BOT_MERCURY_MODEL",
+                "BOT_INTUITION_MODEL",
+                "MERCURY_MODEL",
+            )
+            or DEFAULT_MERCURY_MODEL,
+            intuition_api_key=_env_first(
+                env,
+                "BOT_MERCURY_API_KEY",
+                "MERCURY_API_KEY",
+                "INCEPTION_API_KEY",
+            ),
+            intuition_base_url=_env_first(
+                env,
+                "BOT_MERCURY_BASE_URL",
+                "MERCURY_BASE_URL",
+                "INCEPTION_BASE_URL",
+            )
+            or DEFAULT_MERCURY_BASE_URL,
         )
 
     def can_process(self) -> bool:
-        return self.api_key is not None
+        return self.api_key is not None and self.intuition_api_key is not None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,28 +315,38 @@ class SayEncoder(encoding.Encoder[bytes, bytes]):
         return audio
 
 
-def _chat_client(config: CognitionConfig, *, model: str | None = None) -> ChatClient:
-    return ChatClient(model=model or config.model, api_key=config.api_key)
+def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
+    return GeminiChatClient(model=model or config.model, api_key=config.api_key)
+
+
+def _mercury_intuition_client(config: CognitionConfig) -> OpenAIChatClient:
+    if not config.intuition_api_key:
+        raise ValueError("intuition_api_key is required for Mercury 2 (set BOT_MERCURY_API_KEY).")
+    return OpenAIChatClient(
+        model=config.intuition_model,
+        api_key=config.intuition_api_key,
+        base_url=config.intuition_base_url,
+    )
 
 
 def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
-    """Fast intuition on Flash-Lite; deliberate reasoning on the configured cognition model."""
+    """Mercury 2 intuition (fast OpenAI-compat); Gemini for reasoning/reflection."""
 
     intuition_ability = cognition.Intuition(
-        processor=Processor(
-            client=_chat_client(config, model=DEFAULT_GEMINI_INTUITION_MODEL),
-            provider="gemini_fast_intuition",
+        processor=OpenAIProcessor(
+            client=_mercury_intuition_client(config),
+            provider="mercury2_intuition",
         ),
     )
-    deliberate_processor = Processor(
-        client=_chat_client(config),
+    deliberate_processor = GeminiProcessor(
+        client=_gemini_client(config),
         provider="gemini_slow_reasoning",
     )
     reasoning_ability = cognition.Reasoning(processor=deliberate_processor)
     _log_ability_terminals(
         intuition_ability,
         name="intuition",
-        model=DEFAULT_GEMINI_INTUITION_MODEL,
+        model=config.intuition_model,
     )
     _log_ability_terminals(
         reasoning_ability,
@@ -311,8 +354,9 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
         model=config.model,
     )
     _LOG.info(
-        "cognition wired intuition_model=%s reasoning_model=%s",
-        DEFAULT_GEMINI_INTUITION_MODEL,
+        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
+        config.intuition_model,
+        config.intuition_base_url,
         config.model,
     )
     return cognition.Cognition(
@@ -446,7 +490,8 @@ async def run(
     app_config = config or AppConfig.from_env_file(_DEFAULT_ENV_PATH if _DEFAULT_ENV_PATH.exists() else None)
     if not app_config.cognition.can_process():
         raise RuntimeError(
-            "Missing Gemini API key. Set BOT_GEMINI_API_KEY / GEMINI_API_KEY or pass --env with that key."
+            "Missing cognition credentials. Need BOT_GEMINI_API_KEY (reasoning) and "
+            "BOT_MERCURY_API_KEY (intuition), e.g. in repo .env or examples/listen_speak_bot/.env."
         )
 
     assets = assets_dir if assets_dir is not None else _ASSETS_DIR
@@ -475,7 +520,7 @@ async def run(
     _LOG.info(
         "dispatching world.sound bytes=%s intuition_model=%s reasoning_model=%s",
         len(heard_audio),
-        DEFAULT_GEMINI_INTUITION_MODEL,
+        app_config.cognition.intuition_model,
         app_config.cognition.model,
     )
     await body.dispatch(world.context, sound)
@@ -521,8 +566,12 @@ async def run(
         "heard_wav": str(heard_wav),
         "heard_bytes": len(heard_audio),
         "cognition_model": app_config.cognition.model,
-        "intuition_model": DEFAULT_GEMINI_INTUITION_MODEL,
-        "cognition_client": f"ChatClient({app_config.cognition.model})",
+        "intuition_model": app_config.cognition.intuition_model,
+        "intuition_base_url": app_config.cognition.intuition_base_url,
+        "cognition_client": (
+            f"mercury={app_config.cognition.intuition_model}@{app_config.cognition.intuition_base_url} "
+            f"gemini={app_config.cognition.model}"
+        ),
         "stt_calls": len(body.decoder().calls),
         "listening_handoffs": len(body.listening_handoffs()),
         "spoken_text": spoken,
@@ -545,7 +594,7 @@ async def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Device-free listen→speak bot with Gemini intuition/reasoning (macOS say)."
+        description="Device-free listen→speak bot with Mercury 2 intuition + Gemini reasoning (macOS say)."
     )
     _ = parser.add_argument(
         "--play",

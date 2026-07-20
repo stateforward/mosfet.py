@@ -15,11 +15,12 @@ uv run --project examples/phone_bot phone-bot-example
 `listen_speak_bot` is its own example package (macOS only, device-free). It uses
 `say` and `afconvert` to render *Hey I'm Gabe how are you* into a WAV, injects
 that audio as `world.sound` into a bot with no devices, runs **Listening** →
-Gemini **intuition** (`gemini-3.1-flash-lite`) / **reasoning** (`gemini-3.5-flash`,
-same provider path as `phone_bot`) → **Speaking**, and writes a reply WAV under
+**Mercury 2** intuition (OpenAI-compatible) / Gemini **reasoning**
+(`gemini-3.5-flash`) → **Speaking**, and writes a reply WAV under
 `examples/listen_speak_bot/assets/`. STT is a fixed offline transcript and TTS is
-macOS `say`; judgment requires `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY`. No
-LiveKit or phone device. Pass `--play` to `afplay` the heard and reply audio.
+macOS `say`; judgment requires `BOT_MERCURY_API_KEY` (intuition) and
+`BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or phone device.
+Pass `--play` to `afplay` the heard and reply audio.
 
 `phone_bot` is its own example package because it depends on real provider
 packages: LiveKit for the phone device and room audio, OpenAI-compatible

@@ -108,6 +108,20 @@ def test_processor_returns_empty_events_without_schemas() -> None:
     assert generator.inputs[0].tool_selection == text.ToolSelectionPolicy.NONE
 
 
+def test_processor_user_content_serializes_speech_event_stimulus() -> None:
+    stimulus = hsm.Event[bytes](
+        name="bot.ability.hearing.speech.decoding.output",
+        data=b"Hey I'm Gabe how are you",
+        kind=hsm.CompletionEventKind,
+    )
+    input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
+    content = Processor._user_content(input)
+    assert "Hey I'm Gabe how are you" in content
+    assert "bot.ability.hearing.speech.decoding.output" in content
+    assert "phone.answer_call" in content
+    assert "TypeAdapter" not in content
+
+
 def test_processor_maps_tool_calls_to_events() -> None:
     generator = RecordingGenerator(
         content="",

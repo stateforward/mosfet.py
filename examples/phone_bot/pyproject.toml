@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
   "stateforward.bot",
   "bot-provider-gemini",
+  "bot-provider-openai-compat",
   "bot-provider-livekit",
   "bot-provider-sqlite-memory",
 ]
@@ -18,6 +19,7 @@ mint-livekit-token = "phone_bot_example.token_cli:main"
 [tool.uv.sources]
 stateforward-bot = { path = "../..", editable = true }
 bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
+bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 bot-provider-livekit = { path = "../../src/providers/livekit", editable = true }
 bot-provider-sqlite-memory = { path = "../../src/providers/sqlite_memory", editable = true }
 
@@ -43,7 +45,7 @@ docstring-code-format = true
 
 [tool.basedpyright]
 include = ["src"]
-extraPaths = ["src", "../../src/providers/gemini/src", "../../src/providers/livekit/src", "../../src/providers/sqlite_memory/src", "../../src"]
+extraPaths = ["src", "../../src/providers/gemini/src", "../../src/providers/openai_compat/src", "../../src/providers/livekit/src", "../../src/providers/sqlite_memory/src", "../../src"]
 pythonVersion = "3.13"
 reportMissingModuleSource = "none"
 reportPrivateUsage = "error"

@@ -27,9 +27,12 @@ from bot.bot import Bot
 
 from bot.devices import audio
 from bot.devices import phone as phone_device
-from bot.providers.gemini import ChatClient, Processor
+from bot.providers.gemini import ChatClient as GeminiChatClient
+from bot.providers.gemini import Processor as GeminiProcessor
 from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
 from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
+from bot.providers.openai_compat import ChatClient as OpenAIChatClient
+from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
 from bot.providers.livekit.audio import PcmWavDecoder, VoiceDecoder
 from bot.telemetry import observed_event, observed_occurrence
@@ -37,8 +40,13 @@ from bot.world import World
 
 _LOG = logging.getLogger("phone_bot_example.hsm")
 
+_EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_REPO_ROOT = _EXAMPLE_ROOT.parent.parent
+_REPO_ENV_PATH = _REPO_ROOT / ".env"
+
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-DEFAULT_GEMINI_INTUITION_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_MERCURY_MODEL = "mercury-2"
+DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 DEFAULT_GEMINI_STT_MODEL = "gemini-3.5-flash"
 DEFAULT_GEMINI_VOICE_NAME = "Kore"
@@ -176,11 +184,16 @@ class LiveKitConfig:
 
 @dataclasses.dataclass(frozen=True)
 class CognitionConfig:
+    """Reasoning/reflection on Gemini; intuition defaults to Mercury 2 (OpenAI-compatible)."""
+
     model: str = DEFAULT_GEMINI_MODEL
     api_key: str | None = None
+    intuition_model: str = DEFAULT_MERCURY_MODEL
+    intuition_api_key: str | None = None
+    intuition_base_url: str = DEFAULT_MERCURY_BASE_URL
 
     def can_process(self) -> bool:
-        return self.api_key is not None
+        return self.api_key is not None and self.intuition_api_key is not None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,7 +280,12 @@ class AppConfig:
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
-        env = load_env(path) if path is not None else {}
+        # Repo root .env then example .env (example wins).
+        env: dict[str, str] = {}
+        if _REPO_ENV_PATH.exists():
+            env.update(load_env(_REPO_ENV_PATH))
+        if path is not None and path.exists():
+            env.update(load_env(path))
         gemini_api_key = _env_first(
             env,
             "BOT_GEMINI_API_KEY",
@@ -280,6 +298,21 @@ class AppConfig:
             cognition=CognitionConfig(
                 model=_env_first(env, "BOT_GEMINI_MODEL", "GEMINI_MODEL", "VA_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
                 api_key=gemini_api_key,
+                intuition_model=_env_first(env, "BOT_MERCURY_MODEL", "BOT_INTUITION_MODEL", "MERCURY_MODEL")
+                or DEFAULT_MERCURY_MODEL,
+                intuition_api_key=_env_first(
+                    env,
+                    "BOT_MERCURY_API_KEY",
+                    "MERCURY_API_KEY",
+                    "INCEPTION_API_KEY",
+                ),
+                intuition_base_url=_env_first(
+                    env,
+                    "BOT_MERCURY_BASE_URL",
+                    "MERCURY_BASE_URL",
+                    "INCEPTION_BASE_URL",
+                )
+                or DEFAULT_MERCURY_BASE_URL,
             ),
             livekit=LiveKitConfig.from_env(env),
             speech=SpeechConfig.from_env(env),
@@ -295,10 +328,20 @@ class AppConfig:
         )
 
 
-def _chat_client(config: CognitionConfig, *, model: str | None = None) -> ChatClient:
-    return ChatClient(
+def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
+    return GeminiChatClient(
         model=model or config.model,
         api_key=config.api_key,
+    )
+
+
+def _mercury_intuition_client(config: CognitionConfig) -> OpenAIChatClient:
+    if not config.intuition_api_key:
+        raise ValueError("intuition_api_key is required for Mercury 2 (set BOT_MERCURY_API_KEY).")
+    return OpenAIChatClient(
+        model=config.intuition_model,
+        api_key=config.intuition_api_key,
+        base_url=config.intuition_base_url,
     )
 
 
@@ -309,16 +352,22 @@ def _phone_cognition(
 ) -> cognition.Cognition:
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
-    # Fast intuition on Flash-Lite; reasoning/reflection on the configured cognition model.
+    # Mercury 2 intuition (OpenAI-compat); reasoning/reflection on Gemini.
     # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
     # execute capability as injected collaborators without attaching it again.
-    intuition = Processor(
-        client=_chat_client(config, model=DEFAULT_GEMINI_INTUITION_MODEL),
-        provider="gemini_fast_intuition",
+    intuition = OpenAIProcessor(
+        client=_mercury_intuition_client(config),
+        provider="mercury2_intuition",
     )
-    deliberate = Processor(
-        client=_chat_client(config),
+    deliberate = GeminiProcessor(
+        client=_gemini_client(config),
         provider="gemini",
+    )
+    _LOG.info(
+        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
+        config.intuition_model,
+        config.intuition_base_url,
+        config.model,
     )
     return cognition.Cognition(
         autonomy=cognition.Autonomy(memory=store),
@@ -416,12 +465,12 @@ class PcmListeningSpeechDecoder(speech.SpeechDecoder):
         return await self.speech_decoder.decode(wav)
 
 
-def _gemini_client(*, api_key: str | None, model: str) -> ChatClient:
-    return ChatClient(api_key=api_key, model=model)
+def _gemini_speech_client(*, api_key: str | None, model: str) -> GeminiChatClient:
+    return GeminiChatClient(api_key=api_key, model=model)
 
 
 def _gemini_speech_decoder(config: SpeechConfig) -> GeminiSpeechDecoder:
-    client = _gemini_client(api_key=config.api_key, model=config.stt_model)
+    client = _gemini_speech_client(api_key=config.api_key, model=config.stt_model)
     return GeminiSpeechDecoder(
         client=client,
         model=config.stt_model,
@@ -437,7 +486,7 @@ def _voice_decoder(config: SpeechConfig) -> VoiceDecoder:
 
 
 def _voice_encoder(config: SpeechConfig) -> ExampleVoiceEncoder:
-    client = _gemini_client(api_key=config.api_key, model=config.tts_model)
+    client = _gemini_speech_client(api_key=config.api_key, model=config.tts_model)
     return ExampleVoiceEncoder(
         speech_encoder=GeminiSpeechEncoder(
             client=client,
@@ -477,7 +526,7 @@ def _speaking(
     """Bot output ability: Gemini TTS + phone speaker playout (world.sound elevation)."""
 
     config = speech_config or SpeechConfig()
-    client = _gemini_client(api_key=config.api_key, model=config.tts_model)
+    client = _gemini_speech_client(api_key=config.api_key, model=config.tts_model)
     encoder = GeminiSpeechEncoder(
         client=client,
         model=config.tts_model,
@@ -841,7 +890,11 @@ def _summary_for(
         "bot_state": body.state(),
         "phone_component": "bot.devices.phone.Phone",
         "phone_service_component": "bot.providers.livekit.PhoneService",
-        "cognition_client": f"ChatClient({app_config.cognition.model})",
+        "cognition_client": (
+            f"mercury={app_config.cognition.intuition_model}@"
+            f"{app_config.cognition.intuition_base_url} "
+            f"gemini={app_config.cognition.model}"
+        ),
         "livekit_room_audio_attempted": room_attempted,
         "livekit_room_audio_configured": app_config.livekit.can_connect_room(),
         "livekit_room_audio_connected": room_connected,

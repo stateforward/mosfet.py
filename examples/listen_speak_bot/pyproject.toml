@@ -1,11 +1,12 @@
 [project]
 name = "bot-example-listen-speak-bot"
 version = "0.1.0"
-description = "Device-free listen→speak stateforward.bot example with Gemini cognition (macOS say)."
+description = "Device-free listen→speak stateforward.bot example with Mercury 2 intuition + Gemini reasoning (macOS say)."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.bot",
   "bot-provider-gemini",
+  "bot-provider-openai-compat",
 ]
 
 [project.scripts]
@@ -15,6 +16,7 @@ listen-speak-bot-example = "listen_speak_bot_example:main"
 [tool.uv.sources]
 stateforward-bot = { path = "../..", editable = true }
 bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
+bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 
 [dependency-groups]
 dev = [
@@ -38,7 +40,7 @@ docstring-code-format = true
 
 [tool.basedpyright]
 include = ["src"]
-extraPaths = ["src", "../../src/providers/gemini/src", "../../src"]
+extraPaths = ["src", "../../src/providers/gemini/src", "../../src/providers/openai_compat/src", "../../src"]
 pythonVersion = "3.13"
 reportMissingModuleSource = "none"
 reportPrivateUsage = "error"

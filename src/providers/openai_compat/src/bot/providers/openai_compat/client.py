@@ -71,6 +71,31 @@ def jsonable(value: object) -> object:
         return typing.cast(object, value.model_dump(mode="json"))
     if isinstance(value, enum.Enum):
         return typing.cast(object, value.value)
+    if isinstance(value, (bytes, bytearray)):
+        # Prefer UTF-8 text for speech/transcript bytes; fall back to base64 for binary.
+        raw = bytes(value)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            import base64
+
+            return base64.b64encode(raw).decode("ascii")
+    # HSM events are dataclasses whose ``schema`` field holds a TypeAdapter; project fields only.
+    try:
+        import hsm
+    except ImportError:  # pragma: no cover - provider always runs with hsm installed
+        hsm = None  # type: ignore[assignment]
+    if hsm is not None and isinstance(value, hsm.Event):
+        event = typing.cast(hsm.Event[object], value)
+        return {
+            "name": event.name,
+            "data": jsonable(event.data),
+            "kind": event.kind,
+            "id": event.id or "",
+            "source": event.source or "",
+            "target": event.target or "",
+            "metadata": jsonable(dict(event.metadata)) if event.metadata else {},
+        }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return jsonable(dataclasses.asdict(value))
     if isinstance(value, collections.abc.Mapping):
