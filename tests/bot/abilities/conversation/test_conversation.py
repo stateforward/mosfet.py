@@ -424,6 +424,7 @@ def test_thin_conversation_ends_after_participation() -> None:
     assert len(participating_inputs) == 1
     assert len(outputs) == 1
     assert outputs[0].content is None
+    assert outputs[0].decoded_text == "hello"
     assert outputs[0].conversation_ref == "support-call"
     assert participated.decoded_text == "hello"
     assert state.endswith("/silent")
@@ -445,6 +446,7 @@ def test_voice_conversation_contribution_is_thin() -> None:
     assert decoding_inputs == [b"\x01\x00"]
     assert len(outputs) == 1
     assert outputs[0].content is None
+    assert outputs[0].decoded_text == "hello"
     assert participated.decoded_text == "hello"
 
 

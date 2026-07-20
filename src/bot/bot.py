@@ -1,4 +1,5 @@
 from bot.abilities import cognition
+from bot.abilities import conversation
 from bot.abilities import processing
 
 import abc
@@ -291,20 +292,6 @@ def _instance_id(instance: hsm.Instance) -> str:
     return hsm.id(instance)
 
 
-def _event_map_for_model(model: object) -> dict[str, hsm.Event[typing.Any]]:
-    events = getattr(model, "events", None)
-    if not isinstance(events, collections.abc.Mapping):
-        return {}
-    event_map = typing.cast(collections.abc.Mapping[object, object], events)
-    return {str(name): event for name, event in event_map.items() if isinstance(event, hsm.Event)}
-
-
-def _device_event_map(device: Device) -> dict[str, hsm.Event[typing.Any]]:
-    event_map = _event_map_for_model(getattr(device, "model", None))
-    event_map.update(_event_map_for_model(getattr(device, "firmware_model", None)))
-    return event_map
-
-
 class Bot(hsm.Instance, abc.ABC):
     """Interrupt-driven bot that observes and processes events while active."""
 
@@ -347,17 +334,17 @@ class Bot(hsm.Instance, abc.ABC):
     async def attach(self, world: World) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
         try:
-            _ = await hsm.started(world.context, self, self.model)
+            _ = await hsm.started(world, self, self.model)
         except hsm.ErrorValidatingModel as error:
             if not _is_already_running_error(error):
                 raise
-        await self.dispatch(world.context, events.ActivateEvent.with_data(events.ActivateEventData()))
+        await self.dispatch(world, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
     async def detach(self, world: World) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
         try:
-            await self.dispatch(world.context, events.DeactivateEvent.with_data(events.DeactivateEventData()))
+            await self.dispatch(world, events.DeactivateEvent.with_data(events.DeactivateEventData()))
         except RuntimeError as error:
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
             if not _is_not_started_error(error):
@@ -474,10 +461,10 @@ class Bot(hsm.Instance, abc.ABC):
                         metadata=dict(event.metadata),
                     ),
                 )
-            await hsm.stop(instance._attachments, world.context)
+            await hsm.stop(instance._attachments, world)
             instance._attachments = attachment.Group(*Bot._lifecycle_attachment_members(instance))
         elif cleanup is None:
-            await hsm.stop(instance._attachments, world.context)
+            await hsm.stop(instance._attachments, world)
             for ability in Bot._lifecycle_abilities(instance):
                 # Cognition's required composite tree remains detached under Bot lifetime;
                 # stopping it cancels the child contexts needed by a later activation.
@@ -519,12 +506,12 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _device_references_for_event(instance: "Bot", event: hsm.Event[typing.Any]) -> tuple[str, ...]:
+        """Map stimulus provenance to configured device refs via envelope source id only."""
+
         source_reference = Bot._device_reference_for_source(instance, event.source) if event.source else None
         if source_reference is not None:
             return (source_reference,)
-        return tuple(
-            reference for reference, device in instance._devices.items() if event.name in _device_event_map(device)
-        )
+        return ()
 
     @staticmethod
     def _target_device_reference(instance: "Bot", input: events.BotInputData) -> str | None:
@@ -698,11 +685,34 @@ class Bot(hsm.Instance, abc.ABC):
         return actors
 
     @staticmethod
+    def _is_conversation_contribution(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """True when the delivered event is a contribution-only conversation Response.
+
+        Transition is already ``hsm.on(conversation.OutputEvent)``; guard is payload-only.
+        Delivery is the gate — no event.name / target re-admission.
+        """
+
+        del ctx, instance
+        response = event.data
+        if not isinstance(response, conversation.Response):
+            return False
+        # Contribution-only: no host-encoded channel payload. decoded_text may be empty
+        # (silence / partial voice) so cognition can still decide; None is not a contribution.
+        return response.content is None and response.decoded_text is not None
+
+    @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         if isinstance(event.data, events.InputEventData):
             stimulus = event.data
         elif isinstance(event.data, cognition.InputData):
             stimulus = event.data.stimulus
+        elif isinstance(event.data, conversation.Response):
+            # Contribution terminal is the stimulus product (Listening-style ObservedBotEvent path).
+            stimulus = event
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
         focus_candidates = Bot._processing_device_references(instance, stimulus)
@@ -773,9 +783,9 @@ class Bot(hsm.Instance, abc.ABC):
         del ctx
         ability = instance._cognition
         turn_id = _active_bot_turn_id(instance, event)
+        # Topology is hsm.on(cognition.OutputEvent); correlate by turn id + envelope identity.
         return (
-            event.name == ability.output_event.name
-            and turn_id is not None
+            turn_id is not None
             and event.id == turn_id
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
@@ -786,9 +796,9 @@ class Bot(hsm.Instance, abc.ABC):
         del ctx
         ability = instance._cognition
         turn_id = _active_bot_turn_id(instance, event)
+        # Topology is hsm.on(abilities.FailedEvent); correlate by turn id + envelope identity.
         return (
-            event.name == ability.failed_event.name
-            and turn_id is not None
+            turn_id is not None
             and event.id == turn_id
             and event.target == hsm.id(instance)
             and event.source == hsm.id(ability)
@@ -880,14 +890,13 @@ class Bot(hsm.Instance, abc.ABC):
     def _matches_cognition_cancelled(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         ability = instance._cognition
-        cancelled_event = ability.cancelled_event or processing.CancelledEvent
         data = event.data
         if not isinstance(data, (cognition.CancelledData, processing.CancelledData)):
             return False
         cancel_id = _bot_cancel_operation_id(data.operation_id, data.token, instance)
+        # Topology is hsm.on(cognition.CancelledEvent, processing.CancelledEvent); payload + envelope.
         return (
-            event.name == cancelled_event.name
-            and event.id == data.operation_id
+            event.id == data.operation_id
             and processing.active_operation(instance, cancel_id) is not None
             and event.source == hsm.id(ability)
             and event.target == hsm.id(instance)
@@ -961,7 +970,7 @@ class Bot(hsm.Instance, abc.ABC):
                 if model is None:
                     raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
                 try:
-                    _ = await hsm.started(world.context, device, model)
+                    _ = await hsm.started(world, device, model)
                 except hsm.ErrorValidatingModel as error:
                     if not _is_already_running_error(error):
                         raise
@@ -977,7 +986,7 @@ class Bot(hsm.Instance, abc.ABC):
                     # private scope (idempotent reactivation), but raise when an injected
                     # ability runs under the world scope, where it would receive world
                     # broadcasts directly. Removing this needs typed errors from hsm.
-                    shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.context.value(
+                    shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.value(
                         hsm.Keys.Instances
                     )
                     if not _is_already_running_error(error) or shares_world_instances:
@@ -1070,11 +1079,11 @@ class Bot(hsm.Instance, abc.ABC):
         # incrementally-started ownership set. Cleanup therefore owns the complete
         # configured lifecycle surface; stopping an actor that never started is
         # intentionally idempotent at this boundary.
-        await hsm.stop(instance._attachments, world.context)
+        await hsm.stop(instance._attachments, world)
         for ability in reversed(Bot._lifecycle_abilities(instance)):
             await hsm.stop(ability, lifetime)
         for device in reversed(_device_tree(*instance._devices.values())):
-            await device.stop(world.context)
+            await device.stop(world)
         terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(
             ctx,
@@ -1285,6 +1294,12 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
+                # Acquired Conversation contribution → body-enriched cognition (not host_turn).
+                hsm.transition(
+                    hsm.on(conversation.OutputEvent),
+                    hsm.guard(_is_conversation_contribution),
+                    hsm.target("../processing"),
+                ),
             ),
             hsm.state(
                 "focused",
@@ -1297,12 +1312,18 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.on(cognition.InputEvent),
                     hsm.target("../processing"),
                 ),
+                hsm.transition(
+                    hsm.on(conversation.OutputEvent),
+                    hsm.guard(_is_conversation_contribution),
+                    hsm.target("../processing"),
+                ),
             ),
             hsm.state(
                 "processing",
                 hsm.activity(_dispatch_bot_processing),
                 hsm.defer(events.InputEvent),
                 hsm.defer(cognition.InputEvent),
+                hsm.defer(conversation.OutputEvent),
                 hsm.transition(
                     hsm.on(cognition.OutputEvent),
                     hsm.guard(_matches_bot_processing_output),
@@ -1359,6 +1380,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.activity(_cancelling_processing_activity),
                 hsm.defer(events.InputEvent),
                 hsm.defer(cognition.InputEvent),
+                hsm.defer(conversation.OutputEvent),
                 hsm.transition(
                     hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
                     hsm.guard(_matches_cognition_cancelled),

@@ -419,7 +419,7 @@ def _live_habit_answers_phone_call(
         world = World()
         phone = phone_device.Phone()
         autonomy = cognition.Autonomy(memory=store)
-        shared = shared_hsm_context(world.context)
+        shared = shared_hsm_context(world)
         await start_abilities_for_test(shared, autonomy)
         _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
 

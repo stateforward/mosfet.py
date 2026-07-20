@@ -42,18 +42,17 @@ class BroadcastRecorder(hsm.Instance):
 
 
 def test_world_is_hsm_context() -> None:
-    async def run() -> tuple[bool, list[tuple[str, str | None]]]:
+    async def run() -> list[tuple[str, str | None]]:
         world = World()
         inside = BroadcastRecorder()
+        assert isinstance(world, hsm.Context)
 
         _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
         await hsm.dispatch_all(world, OBSERVED_EVENT.with_data("hello"))
 
-        return world.context is world, inside.seen
+        return inside.seen
 
-    context_is_world, inside_seen = asyncio.run(run())
-
-    assert context_is_world
+    inside_seen = asyncio.run(run())
     assert inside_seen == [("hello", "inside")]
 
 
@@ -63,7 +62,7 @@ def test_world_broadcast_dispatches_to_started_instances_in_scope() -> None:
         inside = BroadcastRecorder()
         outside = BroadcastRecorder()
 
-        _ = await hsm.started(world.context, inside, inside.model, hsm.Config(id="inside"))
+        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside"))
 
         await world.broadcast(OBSERVED_EVENT.with_data("hello"))
@@ -80,9 +79,9 @@ def test_world_from_done_context_preserves_broadcast_scope() -> None:
     async def run() -> list[tuple[str, str | None]]:
         world = World()
         inside = BroadcastRecorder()
-        done_context = world.context.with_value("probe", "done")
+        done_context = world.with_value("probe", "done")
 
-        _ = await hsm.started(world.context, inside, inside.model, hsm.Config(id="inside"))
+        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
         done_context.cancel()
 
         await World.from_context(done_context).broadcast(OBSERVED_EVENT.with_data("hello"))

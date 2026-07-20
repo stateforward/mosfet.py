@@ -18,6 +18,7 @@ from .. import processing
 import collections.abc
 import typing
 
+
 class DecisionInputFactory(typing.Protocol):
     """Build the processing decision input for one participated conversation turn.
 
@@ -38,6 +39,7 @@ class DecisionInputFactory(typing.Protocol):
     ) -> processing.InputData:
         """Return the decision input cognitive processing should receive."""
         ...
+
 
 def agent_conversation_decision_input(
     participated: object,
@@ -86,6 +88,7 @@ def agent_conversation_decision_input(
         schemas=tuple(schemas),
         actors=actor_map,
     )
+
 
 __all__ = [
     "DecisionInputFactory",

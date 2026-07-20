@@ -523,7 +523,7 @@ async def run(
         app_config.cognition.intuition_model,
         app_config.cognition.model,
     )
-    await body.dispatch(world.context, sound)
+    await body.dispatch(world, sound)
 
     await _wait_until(
         lambda: (

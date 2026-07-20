@@ -43,7 +43,7 @@ async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: 
 
 async def start_device_in_world(device: Device) -> World:
     world = World()
-    _ = await hsm.started(world.context, device, device.model)
+    _ = await hsm.started(world, device, device.model)
     return world
 
 
@@ -252,7 +252,7 @@ def test_device_attach_rejects_started_device_from_another_world() -> None:
         device = Device()
         bot_instance = hsm.Instance()
 
-        _ = await hsm.started(first_world.context, device, device.model)
+        _ = await hsm.started(first_world, device, device.model)
 
         with pytest.raises(RuntimeError, match="Device is already started in another world"):
             await device.attach(second_world, attach_event(bot_instance))
@@ -267,7 +267,7 @@ def test_device_attach_dispatches_deferred_attach_during_firmware_initialization
         device = SlowInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -291,7 +291,7 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
         device = SlowInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(bot_instance))
         await device.detach(world, detach_event(bot_instance))
 
@@ -324,7 +324,7 @@ def test_device_ignores_uncorrelated_firmware_initialization_results(event: hsm.
         device = SlowInitializingDevice(release)
         world = await start_device_in_world(device)
 
-        await device.dispatch(world.context, event)
+        await device.dispatch(world, event)
 
         assert device.state() == "/Device/initializing"
 
@@ -367,11 +367,11 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         stale_result = device.results[0]
         first_firmware = device_firmware(device)
         assert first_firmware is not None
-        instances = world.context.value(hsm.Keys.Instances)
+        instances = world.value(hsm.Keys.Instances)
         assert isinstance(instances, collections.abc.Mapping)
         first_firmware_id = hsm.id(first_firmware)
 
-        _ = await device.restart(world.context)
+        _ = await device.restart(world)
 
         assert device.state() == "/Device/initializing"
         # hsm 1.3.2: stopped firmware has empty state and cannot take_snapshot / id.
@@ -383,7 +383,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
             pass
         del first_firmware_id, instances
 
-        await device.dispatch(world.context, stale_result)
+        await device.dispatch(world, stale_result)
 
         assert device.state() == "/Device/initializing"
 
@@ -422,7 +422,7 @@ def test_device_attach_does_not_raise_when_firmware_initialization_fails() -> No
         device = ReleasableFailingInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -448,7 +448,7 @@ def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> 
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(first_bot))
         await device.attach(world, attach_event(second_bot))
 
@@ -471,12 +471,12 @@ def test_device_deferred_attach_preserves_completion_correlation() -> None:
         release = asyncio.Event()
         device = SlowInitializingDevice(release)
         requester = AttachmentRecorder()
-        _ = await hsm.started(world.context, requester, requester.model)
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, requester, requester.model)
+        _ = await hsm.started(world, device, device.model)
 
         await hsm.Instance.dispatch(
             device,
-            world.context,
+            world,
             dataclasses.replace(
                 attachment.AttachEvent.with_data_and_id(
                     attachment.AttachData(actor=requester),
@@ -502,7 +502,7 @@ def test_device_attach_dispatch_returns_before_firmware_initialization_times_out
         device = HangingInitializingDevice()
         bot_instance = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -523,7 +523,7 @@ def test_device_firmware_initialization_timeout_stops_started_firmware_child() -
         world = World()
         device = HangingAfterFirmwareStartedDevice()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await asyncio.sleep(0.02)
         await wait_until(lambda: device.state() == "/Device/failed")
 
@@ -542,17 +542,17 @@ def test_device_retains_live_firmware_ownership_when_cleanup_does_not_complete()
         world = World()
         device = StopHangingStartedFirmwareDevice()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await asyncio.sleep(0.05)
         await wait_until(lambda: device.state() == "/Device/initialization_failing")
         await asyncio.sleep(0.05)
 
         firmware = device.started_firmware
         assert firmware is not None
-        instances = world.context.value(hsm.Keys.Instances)
+        instances = world.value(hsm.Keys.Instances)
 
         await device.dispatch(
-            world.context,
+            world,
             hsm.Event(name="device.firmware.initializing.cleaned_up", kind=hsm.CompletionEventKind),
         )
 
@@ -572,7 +572,7 @@ def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await device.attach(world, attach_event(first_bot))
         await device.attach(world, attach_event(second_bot))
 
@@ -590,7 +590,7 @@ def test_device_attach_event_is_ignored_after_firmware_initialization_failed() -
         world = World()
         device = FailingInitializingDevice()
 
-        _ = await hsm.started(world.context, device, device.model)
+        _ = await hsm.started(world, device, device.model)
         await asyncio.sleep(0)
 
         assert device.state() == "/Device/failed"
@@ -1078,7 +1078,7 @@ def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
         )
 
         world = await start_device_in_world(device)
-        _ = await hsm.started(world.context, bot_instance, agent_model, hsm.Config(id="bot-device-owner"))
+        _ = await hsm.started(world, bot_instance, agent_model, hsm.Config(id="bot-device-owner"))
         await device.attach(world, attach_event(bot_instance))
         await device.dispatch(
             device.context(),

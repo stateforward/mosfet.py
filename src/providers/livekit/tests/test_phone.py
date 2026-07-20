@@ -174,7 +174,7 @@ class RecordingPhoneService:
             await self.service.attach(world, target)
             return
         forwarding_target = RecordingPhoneEventTarget(target=target, events=self.forwarded_events)
-        _ = await hsm.started(world.context, forwarding_target, forwarding_target.model)
+        _ = await hsm.started(world, forwarding_target, forwarding_target.model)
         self.forwarding_target = forwarding_target
         await self.service.attach(world, forwarding_target)
 
@@ -605,7 +605,7 @@ def test_livekit_phone_service_attach_starts_fresh_service() -> None:
             hsm.state("active"),
         )
 
-        _ = await hsm.started(world.context, target, target_model, hsm.Config(id="phone-service-target"))
+        _ = await hsm.started(world, target, target_model, hsm.Config(id="phone-service-target"))
         await service.attach(world, target)
 
         assert service.state() == "/PhoneService/ready"
@@ -653,91 +653,74 @@ def test_livekit_phone_rejects_forged_service_originating_phone_event() -> None:
     asyncio.run(run())
 
 
-def test_livekit_phone_service_rejects_unstamped_or_mistargeted_provider_request() -> None:
+def test_livekit_phone_service_ingress_is_topology_not_envelope_admission() -> None:
+    """publish dispatches into HSM; envelope target/source are not re-checked at the door.
+
+    Delivery is the gate. Payload-typed transitions fire when data matches; envelope fields
+    are for correlation/telemetry, not imperative admission.
+    """
+
     async def run() -> None:
         phone, service, _recording_service = await _start_livekit_phone_service()
         assert device_firmware(phone) is not None
 
+        # Unstamped answer request: typed payload matches → transition runs.
         service.publish(
             service.context(),
             phone_device.ServiceAnswerRequestedEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
         )
-        await asyncio.sleep(0)
+        await _wait_until(lambda: service.answer_requests == [phone_device.AnswerCallData(call_id="call-123")])
+        await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
+        # Mistargeted envelope still delivers via publish→dispatch; HSM does not re-check target.
         service.publish(
             service.context(),
             dataclasses.replace(
-                phone_device.ServiceAnswerRequestedEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
+                phone_device.ServiceAnswerRequestedEvent.with_data(phone_device.AnswerCallData(call_id="call-456")),
                 source=hsm.id(phone),
                 target="not-this-service",
             ),
         )
-        await asyncio.sleep(0)
+        await _wait_until(
+            lambda: service.answer_requests
+            == [
+                phone_device.AnswerCallData(call_id="call-123"),
+                phone_device.AnswerCallData(call_id="call-456"),
+            ]
+        )
+        await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
+        # Hung-up without an active request: provider-terminal hang-up guard fails (call correlation).
         service.publish(
             service.context(),
             phone_device.HungUpEvent.with_data(
-                phone_device.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
+                phone_device.PhoneHungUpData(call_id="no-active-op", outcome="remote_hang_up")
             ),
         )
         await asyncio.sleep(0)
+        assert service.state() == "/PhoneService/ready"
 
-        service.publish(
-            service.context(),
-            dataclasses.replace(
-                phone_device.HungUpEvent.with_data(
-                    phone_device.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
-                ),
-                source=hsm.id(phone),
-                target="not-this-service",
-            ),
-        )
-        await asyncio.sleep(0)
-
-        service.publish(
-            service.context(),
-            dataclasses.replace(
-                phone_device.HungUpEvent.with_data(
-                    phone_device.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
-                ),
-                source="not-the-attached-phone",
-                target=hsm.id(service),
-            ),
-        )
-        await asyncio.sleep(0)
-
+        # Transfer terminals without active transfer: correlation guard fails → no state change.
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         service.publish(
             service.context(),
-            dataclasses.replace(
-                phone_device.CallTransferCompletedEvent.with_data(
-                    phone_device.PhoneTransferData(call_id="call-123", transfer_id="transfer-123", target=target)
-                ),
-                source="not-the-attached-phone",
-                target=hsm.id(service),
+            phone_device.CallTransferCompletedEvent.with_data(
+                phone_device.PhoneTransferData(call_id="call-123", transfer_id="transfer-123", target=target)
             ),
         )
-        await asyncio.sleep(0)
-
         service.publish(
             service.context(),
-            dataclasses.replace(
-                phone_device.CallTransferFailedEvent.with_data(
-                    phone_device.PhoneTransferFailedData(
-                        call_id="call-123",
-                        transfer_id="transfer-123",
-                        target=target,
-                        failure_kind="transfer_rejected",
-                    )
-                ),
-                source="not-the-attached-phone",
-                target=hsm.id(service),
+            phone_device.CallTransferFailedEvent.with_data(
+                phone_device.PhoneTransferFailedData(
+                    call_id="call-123",
+                    transfer_id="transfer-123",
+                    target=target,
+                    failure_kind="transfer_rejected",
+                )
             ),
         )
         await asyncio.sleep(0)
-
         assert service.state() == "/PhoneService/ready"
-        assert service.answer_requests == []
 
     asyncio.run(run())
 
@@ -834,10 +817,10 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
         attached_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachedEvent"))
         rejected_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachmentRejectedEvent"))
 
-        _ = await hsm.started(world.context, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
-        _ = await hsm.started(world.context, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
-        _ = await hsm.started(world.context, first_target, first_target.model, hsm.Config(id="first-target"))
-        _ = await hsm.started(world.context, second_target, second_target.model, hsm.Config(id="second-target"))
+        _ = await hsm.started(world, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
+        _ = await hsm.started(world, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
+        _ = await hsm.started(world, first_target, first_target.model, hsm.Config(id="first-target"))
+        _ = await hsm.started(world, second_target, second_target.model, hsm.Config(id="second-target"))
         await service.attach(world, first_target)
 
         recorded_events.clear()
@@ -1965,6 +1948,66 @@ def test_livekit_phone_service_drops_remote_audio_without_media_call_id() -> Non
         assert snapshot.remote_audio_dropped_bytes == 2
 
     asyncio.run(run())
+
+
+def test_livekit_phone_service_clears_media_on_any_hung_up_including_transferred() -> None:
+    """HungUp with any outcome (including transferred) clears media session even if op already retired."""
+
+    async def run() -> str | None:
+        phone, service, _recording = await _start_livekit_phone_service()
+        await service.dispatch(
+            service.context(),
+            ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
+        )
+        await phone.dispatch(
+            phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
+        )
+        await _wait_until(lambda: _is_answered(phone))
+        await _mark_media_ready(phone, service)
+        assert service._media_call_id == "call-123"
+        # Simulate active-op already cleared (e.g. transfer completion path) then hang-up arrives.
+        service.publish(
+            service.context(),
+            phone_device.HungUpEvent.with_data(
+                phone_device.PhoneHungUpData(call_id="call-123", outcome="transferred")
+            ),
+        )
+        await asyncio.sleep(0)
+        return service._media_call_id
+
+    assert asyncio.run(run()) is None
+
+
+def test_livekit_phone_service_clears_media_on_hung_up_while_answering() -> None:
+    """Active-op states must clear _media_call_id on terminal HungUp (not only ready)."""
+
+    async def run() -> tuple[str | None, str | None]:
+        phone, service, _recording = await _start_livekit_phone_service()
+        await service.dispatch(
+            service.context(),
+            ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
+        )
+        assert service._media_call_id == "call-123"
+        # Enter answering with an active AnswerCall op — do not wait for answer completion.
+        await phone.dispatch(
+            phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
+        )
+        await _wait_until(lambda: service.state() == "/PhoneService/answering")
+        assert service._media_call_id == "call-123"
+        service.publish(
+            service.context(),
+            phone_device.HungUpEvent.with_data(
+                phone_device.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
+            ),
+        )
+        await _wait_until(lambda: service.state() == "/PhoneService/ready")
+        return service.state(), service._media_call_id
+
+    state, media_call_id = asyncio.run(run())
+    assert state == "/PhoneService/ready"
+    assert media_call_id is None
 
 
 def test_livekit_phone_service_drops_remote_audio_without_phone_target() -> None:

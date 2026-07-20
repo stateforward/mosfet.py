@@ -152,8 +152,9 @@ class Response(Message[str | bytes | None]):
         val_json_bytes="base64",
         json_schema_extra={
             "description": (
-                "Response message for one completed turn. Contribution-only turns leave content unset; hosts that "
-                "encode a reply set content to the channel payload."
+                "Response message for one completed turn. Contribution-only turns leave content unset and set "
+                "decoded_text so a Bot can re-enter cognition; hosts that encode a reply set content to the channel "
+                "payload."
             ),
             "examples": [
                 {
@@ -166,8 +167,22 @@ class Response(Message[str | bytes | None]):
                             "state": {"presence": "present", "attention": "available", "turn": "listening"},
                         }
                     ],
+                    "content": None,
+                    "decoded_text": "hello",
+                },
+                {
+                    "conversation_ref": "support-call",
+                    "self_participant_ref": "bot",
+                    "participants": [
+                        {
+                            "ref": "bot",
+                            "kind": "bot",
+                            "state": {"presence": "present", "attention": "available", "turn": "listening"},
+                        }
+                    ],
                     "content": "SSBjYW4gaGVscCB3aXRoIHRoYXQu",
-                }
+                    "decoded_text": None,
+                },
             ],
         },
     )
@@ -176,6 +191,14 @@ class Response(Message[str | bytes | None]):
         default=None,
         description="Encoded channel response when a host completed encoding; null for contribution-only turns.",
         examples=["SSBjYW4gaGVscCB3aXRoIHRoYXQu"],
+    )
+    decoded_text: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Readable contribution text when this is a contribution-only terminal (content is null). "
+            "Null when a host already encoded a channel reply into content."
+        ),
+        examples=["hello", "How can I help?"],
     )
 
 
@@ -642,6 +665,7 @@ class Conversation(
             self_participant_ref=input.self_participant_ref,
             participants=tuple(instance._participants_by_ref.values()),
             content=None,
+            decoded_text=participated.decoded_text,
         )
 
     @staticmethod
@@ -1030,6 +1054,85 @@ def define_conversation_model(
     return Conversation.define_model(root_name, input_event=input_event, input_guard=input_guard)
 
 
+def default_pair_participants(
+    *,
+    self_participant_ref: str = "bot",
+    source_participant_ref: str = "caller",
+) -> tuple[participating.ParticipantSnapshot, ...]:
+    """Minimal bot + remote participant snapshots for product ingress builders."""
+
+    return (
+        participating.ParticipantSnapshot(
+            ref=self_participant_ref,
+            kind="bot",
+            state=participating.ParticipantStateSnapshot(
+                presence="present",
+                attention="available",
+                turn="listening",
+            ),
+        ),
+        participating.ParticipantSnapshot(
+            ref=source_participant_ref,
+            kind="human",
+            state=participating.ParticipantStateSnapshot(
+                presence="present",
+                attention="available",
+                turn="holding",
+            ),
+        ),
+    )
+
+
+def text_turn(
+    text: str,
+    *,
+    conversation_ref: str = "conversation",
+    self_participant_ref: str = "bot",
+    source_participant_ref: str = "caller",
+    participants: tuple[participating.ParticipantSnapshot, ...] | None = None,
+) -> TextMessage:
+    """Build a text conversation Message for Bot/product ingress (no I/O)."""
+
+    room = participants or default_pair_participants(
+        self_participant_ref=self_participant_ref,
+        source_participant_ref=source_participant_ref,
+    )
+    return TextMessage(
+        conversation_ref=conversation_ref,
+        self_participant_ref=self_participant_ref,
+        participants=room,
+        content=participating.TextStimulus(
+            source_participant_ref=source_participant_ref,
+            content=text,
+        ),
+    )
+
+
+def voice_turn(
+    audio: bytes,
+    *,
+    conversation_ref: str = "conversation",
+    self_participant_ref: str = "bot",
+    source_participant_ref: str = "caller",
+    participants: tuple[participating.ParticipantSnapshot, ...] | None = None,
+) -> VoiceMessage:
+    """Build a voice conversation Message for Bot/product ingress (no I/O)."""
+
+    room = participants or default_pair_participants(
+        self_participant_ref=self_participant_ref,
+        source_participant_ref=source_participant_ref,
+    )
+    return VoiceMessage(
+        conversation_ref=conversation_ref,
+        self_participant_ref=self_participant_ref,
+        participants=room,
+        content=participating.AudioStimulus(
+            source_participant_ref=source_participant_ref,
+            content=audio,
+        ),
+    )
+
+
 __all__ = [
     "FailedEvent",
     "InputEvent",
@@ -1050,6 +1153,9 @@ __all__ = [
     "TextMessage",
     "VoiceMessage",
     "conversation_event_with_operation",
+    "default_pair_participants",
     "define_conversation_model",
     "matches_conversation_output_contract",
+    "text_turn",
+    "voice_turn",
 ]

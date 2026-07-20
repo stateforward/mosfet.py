@@ -63,15 +63,15 @@ def test_speaker_dispatches_audio_output_to_world_scope() -> None:
         speaker = audio.Speaker()
         inside = RecordingDevice()
         outside = RecordingDevice()
-        _ = await hsm.started(world.context, speaker, speaker.model, hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(world.context, inside, inside.model, hsm.Config(id="inside-speaker"))
+        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside-speaker"))
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside-speaker"))
         inside.events.clear()
         outside.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
         await speaker.dispatch_audio_output_to_world(
-            world.context,
+            world,
             data,
             metadata={"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"},
         )

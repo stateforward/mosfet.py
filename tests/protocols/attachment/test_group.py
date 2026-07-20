@@ -1716,3 +1716,64 @@ def test_group_dispatches_recursively_to_all_attachments() -> None:
         return first.count, second.count
 
     assert asyncio.run(run()) == (1, 1)
+
+
+def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination() -> None:
+    """Coordination vs fan-out is typed-payload, not ``event.name in model.events``.
+
+    An event that forges a group model event name but carries a non-coordination payload
+    must still fan out to members. Name-only admission would have swallowed it on the
+    coordinator without rewriting to members.
+    """
+
+    class AnyEventRecorder(hsm.Instance, attachment.Attachment):
+        received: list[hsm.Event[typing.Any]]
+        _attachments: list[hsm.Instance]
+        _attachment_timeout: datetime.timedelta
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._attachments = []
+            self._attachment_timeout = datetime.timedelta(seconds=30)
+            self.received = []
+
+        @typing.override
+        def attach(
+            self,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.AttachData],
+        ) -> collections.abc.Awaitable[None]:
+            return hsm.dispatch(ctx, self, event)
+
+        @typing.override
+        def detach(
+            self,
+            ctx: hsm.Context,
+            event: hsm.Event[attachment.DetachData],
+        ) -> collections.abc.Awaitable[None]:
+            return hsm.dispatch(ctx, self, event)
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+            self.received.append(event)
+            return super().dispatch(ctx, event)
+
+        model: typing.ClassVar[hsm.Model] = hsm.define(
+            "AttachmentGroupAnyEventRecorder",
+            hsm.initial(hsm.target("recording")),
+            hsm.state("recording"),
+        )
+
+    async def run() -> list[str]:
+        ctx = hsm.Context()
+        first = AnyEventRecorder()
+        group = attachment.Group(first)
+        _ = await hsm.started(ctx, first, first.model)
+        _ = await hsm.started(ctx, group, group.model)
+
+        forged = dataclasses.replace(BroadcastEvent, name="attachment.group.member.attach.complete")
+        await group.dispatch(ctx, forged)
+        await asyncio.sleep(0)
+        return [event.name for event in first.received]
+
+    assert asyncio.run(run()) == ["attachment.group.member.attach.complete"]

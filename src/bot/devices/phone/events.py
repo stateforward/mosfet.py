@@ -280,6 +280,15 @@ class TransferFailedData(CallIdData):
 class PhoneCallData(CallIdData):
     """Committed public phone state for a specific call."""
 
+
+class RingingData(PhoneCallData):
+    """Committed public phone state that a call is ringing.
+
+    Distinct from :class:`PhoneCallData` used by answered/media-ready so world elevation
+    can select ring acoustics by payload type without ``event.name`` discrimination.
+    """
+
+
 class PhoneHungUpData(CallIdData):
     """Committed public phone state that the call ended."""
 
@@ -422,9 +431,9 @@ ServiceTransferRequestedEvent = hsm.Event[TransferCallData](
     schema=TransferCallData,
 )
 
-RingingEvent = hsm.Event[PhoneCallData](
+RingingEvent = hsm.Event[RingingData](
     name="phone.ringing",
-    schema=PhoneCallData,
+    schema=RingingData,
 )
 AnsweredEvent = hsm.Event[PhoneCallData](
     name="phone.answered",

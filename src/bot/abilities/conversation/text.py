@@ -15,6 +15,7 @@ from .conversation import (
     define_conversation_model,
 )
 
+
 def _has_text_message(
     ctx: hsm.Context,
     instance: Conversation[typ.Any, typ.Any],
@@ -22,6 +23,7 @@ def _has_text_message(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, Message) and isinstance(event.data.content, participating.TextStimulus)
+
 
 class TextConversation(Conversation[TextMessage, typ.Any]):
     """Thin text conversation coordinator (decode + participate).
@@ -73,5 +75,6 @@ class TextConversation(Conversation[TextMessage, typ.Any]):
         input_event=input_event,
         input_guard=_has_text_message,
     )
+
 
 __all__ = ["TextConversation", "TextMessage"]

@@ -117,7 +117,7 @@ def test_phone_command_events_are_separate_from_provider_request_contracts() -> 
     assert phone.ServiceTransferRequestedEvent.name == "phone.service.transfer_requested"
 
 def test_phone_public_events_describe_committed_firmware_state() -> None:
-    ringing = phone.PhoneCallData(call_id="call-123")
+    ringing = phone.RingingData(call_id="call-123")
     hung_up = phone.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
     transfer = phone.PhoneTransferData(
         call_id="call-123",
@@ -132,11 +132,12 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
     )
 
     assert ringing.call_id == "call-123"
+    assert isinstance(ringing, phone.PhoneCallData)
     assert hung_up.outcome == "remote_hang_up"
     assert transfer.target.kind == "address"
     assert transfer_failed.failure_kind == "timeout"
     assert phone.RingingEvent.name == "phone.ringing"
-    assert object_dict(phone.RingingEvent.schema) == phone.PhoneCallData.model_json_schema()
+    assert object_dict(phone.RingingEvent.schema) == phone.RingingData.model_json_schema()
     assert phone.AnsweredEvent.name == "phone.answered"
     assert object_dict(phone.AnsweredEvent.schema) == phone.PhoneCallData.model_json_schema()
     assert phone.MediaReadyEvent.name == "phone.media_ready"

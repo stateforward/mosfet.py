@@ -78,8 +78,8 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
 
         speaker.dispatch_audio_output_to_world = capture_world  # type: ignore[method-assign]
 
-        await start_ability_tree(world.context, speaking_ability)
-        _ = await hsm.started(world.context, speaker, speaker.model)
+        await start_ability_tree(world, speaking_ability)
+        _ = await hsm.started(world, speaker, speaker.model)
 
         outputs: list[speaking.OutputData] = []
         original = speaking_ability.dispatch
@@ -95,7 +95,7 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
 
         speaking_ability.dispatch = capture_terminal  # type: ignore[method-assign]
         try:
-            _ = await speaking_ability.apply(speaking.InputData(text="  Hello there.  "), ctx=world.context)
+            _ = await speaking_ability.apply(speaking.InputData(text="  Hello there.  "), ctx=world)
             await _wait_until(lambda: bool(outputs))
         finally:
             speaking_ability.dispatch = original  # type: ignore[method-assign]
@@ -116,7 +116,7 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
     async def run() -> str:
         speaking_ability = speaking.Speaking(encoder=FailingEncoder(), speaker=audio.Speaker())
         world = World()
-        await start_ability_tree(world.context, speaking_ability)
+        await start_ability_tree(world, speaking_ability)
         failures: list[str] = []
         original = speaking_ability.dispatch
 
@@ -131,7 +131,7 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
 
         speaking_ability.dispatch = capture  # type: ignore[method-assign]
         try:
-            _ = await speaking_ability.apply(speaking.InputData(text="hi"), ctx=world.context)
+            _ = await speaking_ability.apply(speaking.InputData(text="hi"), ctx=world)
             await _wait_until(lambda: bool(failures))
         finally:
             speaking_ability.dispatch = original  # type: ignore[method-assign]
@@ -204,7 +204,7 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
         assert (speaking_ability.state() or "").endswith("/idle")
 
         await probe.dispatch(
-            world.context,
+            world,
             bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=0)),
         )
         await _wait_until(lambda: bool(encoder.calls))

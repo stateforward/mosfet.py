@@ -26,7 +26,7 @@ def test_phone_service_production_stop_unstarts_machine() -> None:
         service = PhoneService()
         target = hsm.Instance()
         await hsm.started(
-            world.context,
+            world,
             target,
             hsm.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
@@ -49,7 +49,7 @@ def test_phone_service_attach_after_stop_restarts_machine() -> None:
         service = PhoneService()
         target = hsm.Instance()
         await hsm.started(
-            world.context,
+            world,
             target,
             hsm.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )

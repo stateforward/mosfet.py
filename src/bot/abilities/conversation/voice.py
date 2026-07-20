@@ -18,6 +18,7 @@ from .conversation import (
     define_conversation_model,
 )
 
+
 def _has_voice_message(
     ctx: hsm.Context,
     instance: Conversation[typ.Any, typ.Any],
@@ -26,12 +27,14 @@ def _has_voice_message(
     del ctx, instance
     return isinstance(event.data, Message) and isinstance(event.data.content, participating.AudioStimulus)
 
+
 class VoiceDecoder(decoding.Decoder[participating.AudioStimulus, str], abc.ABC):
     """Decoder for a voice conversation turn.
 
     Implementations receive the accepted audio stimulus for the current voice turn and return decoded readable text
     used by participation and host-owned cognition, memory, and response encoding.
     """
+
 
 class EncodeData(pydantic.BaseModel):
     """Public input contract for encoding a completed voice conversation turn."""
@@ -107,12 +110,14 @@ class EncodeData(pydantic.BaseModel):
         ),
     )
 
+
 class VoiceEncoder(encoding.Encoder[EncodeData, str | bytes], abc.ABC):
     """Encoder for a completed voice conversation turn.
 
     Implementations receive the public voice encoding input and produce the channel response bytes or text to publish.
     Hosts own encoding after cognition and memory complete.
     """
+
 
 class VoiceConversation(Conversation[VoiceMessage, typ.Any]):
     """Thin voice conversation coordinator (decode + participate).
@@ -138,9 +143,7 @@ class VoiceConversation(Conversation[VoiceMessage, typ.Any]):
             raise ValueError("VoiceConversation requires decoder.")
         if encoder is None:
             raise ValueError("VoiceConversation requires encoder.")
-        stimulus_decoding = decoding.Decoding(
-            decoder=typ.cast(decoding.Decoder[ParticipationStimulus, str], decoder)
-        )
+        stimulus_decoding = decoding.Decoding(decoder=typ.cast(decoding.Decoder[ParticipationStimulus, str], decoder))
         self._encoding = encoding.Encoding(encoder=encoder)
         super().__init__(
             decoding=stimulus_decoding,
@@ -162,5 +165,6 @@ class VoiceConversation(Conversation[VoiceMessage, typ.Any]):
         input_event=input_event,
         input_guard=_has_voice_message,
     )
+
 
 __all__ = ["VoiceConversation", "VoiceMessage", "VoiceDecoder", "VoiceEncoder", "EncodeData"]

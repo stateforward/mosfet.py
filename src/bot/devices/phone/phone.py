@@ -42,6 +42,7 @@ from .events import (
     PhoneTransferFailedData,
     RemoteHangUpData,
     RemoteHangUpEvent,
+    RingingData,
     RingingEvent,
     ServiceAnswerRequestedEvent,
     ServiceAudioData,
@@ -65,41 +66,6 @@ from .events import (
 
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
-_PHONE_SERVICE_ORIGINATING_EVENT_NAMES = frozenset(
-    {
-        IncomingCallEvent.name,
-        CallConnectedEvent.name,
-        CallFailedEvent.name,
-        ServiceMediaReadyEvent.name,
-        RemoteHangUpEvent.name,
-        ServiceAudioReceivedEvent.name,
-        TransferAcceptedEvent.name,
-        ServiceTransferCompletedEvent.name,
-        ServiceTransferFailedEvent.name,
-    }
-)
-_PHONE_OWNER_COMMAND_EVENTS = (
-    DialEvent,
-    AnswerCallEvent,
-    DeclineCallEvent,
-    HangUpCallEvent,
-    TransferCallEvent,
-)
-_PHONE_OWNER_COMMAND_EVENTS_BY_NAME: collections.abc.Mapping[str, hsm.Event[typing.Any]] = {
-    event.name: event for event in _PHONE_OWNER_COMMAND_EVENTS
-}
-_PHONE_OWNER_COMMAND_EVENT_NAMES = frozenset(_PHONE_OWNER_COMMAND_EVENTS_BY_NAME)
-_PHONE_OBSERVATION_EVENT_NAMES = frozenset(
-    {
-        RingingEvent.name,
-        AnsweredEvent.name,
-        MediaReadyEvent.name,
-        HungUpEvent.name,
-        TransferStartedEvent.name,
-        CallTransferCompletedEvent.name,
-        CallTransferFailedEvent.name,
-    }
-)
 
 
 def _load_ring_sound_wav() -> bytes:
@@ -111,10 +77,10 @@ def _load_ring_sound_wav() -> bytes:
 # Real short ring WAV (see assets/SOURCES.md). Sensory classifiers match this acoustic payload;
 # Listening does not special-case phone.
 RING_SOUND_WAV = _load_ring_sound_wav()
-_RingingCommittedEvent = hsm.Event[PhoneCallData](
+_RingingCommittedEvent = hsm.Event[RingingData](
     name="bot.phone.ringing.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneCallData,
+    schema=RingingData,
 )
 _AnsweredCommittedEvent = hsm.Event[PhoneCallData](
     name="bot.phone.answered.committed",
@@ -189,29 +155,28 @@ class _PhoneObservationService:
         return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        if event.name == audio.OutputEvent.name:
-            data = event.data
-            assert isinstance(data, audio.AudioOutputData)
-            _ = self.speaker.dispatch_audio_output_to_world(ctx, data, metadata=event.metadata)
-            # Offer speaker audio to the provider for call uplink (providers suppress remote-delivery echoes).
-            target = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
+        # Typed side channel: local speaker playout elevates to world and offers provider uplink.
+        # Exact AudioOutputData only — ServiceAudioData subclasses it and must not take this path.
+        if type(event.data) is audio.AudioOutputData:
+            _ = self.speaker.dispatch_audio_output_to_world(ctx, event.data, metadata=event.metadata)
+            service_id = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
             self.service.publish(
                 ctx,
                 dataclasses.replace(
                     event,
                     source=hsm.id(self.target) if self.target is not None else hsm.id(self.owner),
-                    target=target,
+                    target=service_id,
                     metadata=dict(event.metadata),
                 ),
             )
             return
-        target = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
+        service_id = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
         self.service.publish(
             ctx,
             dataclasses.replace(
                 event,
                 source=hsm.id(self.target) if self.target is not None else hsm.id(self.owner),
-                target=target,
+                target=service_id,
                 metadata=dict(event.metadata),
             ),
         )
@@ -259,14 +224,15 @@ class PhoneEventRecorder:
     def receive(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
         """Emit one provider-originating event into the attached phone firmware."""
 
-        if self._target is None or event.name not in _PHONE_SERVICE_ORIGINATING_EVENT_NAMES:
+        if self._target is None:
             return _completed_phone_service_event()
+        # Delivery is the gate; firmware topology ignores unmatched triggers.
         return self._target.dispatch(ctx, event)
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         del ctx
-        # Speaker uplink offers are for live providers; the in-memory recorder ignores them.
-        if event.name == audio.OutputEvent.name:
+        # Ignore local speaker uplink offers only (exact AudioOutputData; ServiceAudioData records).
+        if type(event.data) is audio.AudioOutputData:
             return
         self._events.append(event)
 
@@ -281,36 +247,40 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
 
     Ringing is heard as ``world.sound`` with ``source`` = the phone instance id. Device-plane
     ``phone.ringing`` still flows on the service/firmware path; bots do not receive it as a
-    raw cognitive stimulus.
+    raw cognitive stimulus. Ring elevation selects on :class:`RingingData` payload type.
     """
 
-    if event.name != RingingEvent.name:
+    data = event.data
+    if isinstance(data, RingingData):
         return dataclasses.replace(
-            event,
+            SoundEvent.with_data(
+                SoundData(
+                    audio=RING_SOUND_WAV,
+                    media_type="audio/wav",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    kind="ring",
+                )
+            ),
+            id=data.call_id,
             source=hsm.id(owner),
             metadata=dict(event.metadata),
         )
-    data = event.data
-    assert isinstance(data, PhoneCallData)
-    # Call identity rides the elevated event id (not event.metadata).
     return dataclasses.replace(
-        SoundEvent.with_data(
-            SoundData(
-                audio=RING_SOUND_WAV,
-                media_type="audio/wav",
-                sample_rate_hz=16_000,
-                channels=1,
-                kind="ring",
-            )
-        ),
-        id=data.call_id,
+        event,
         source=hsm.id(owner),
         metadata=dict(event.metadata),
     )
 
 
 def _broadcast_observation(owner: "Phone", ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-    if event.name not in _PHONE_OBSERVATION_EVENT_NAMES:
+    # Elevate committed public observation payloads only — not service-request payloads
+    # (MediaReadyData / DialData etc.) which must not re-enter the phone shell via world dispatch_all.
+    # Committed media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
+    if not isinstance(
+        event.data,
+        PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
+    ):
         return
     _ = hsm.dispatch_all(World.from_context(ctx), _world_observation_event(owner, event))
 
@@ -550,7 +520,7 @@ class PhoneFirmware(hsm.Instance):
             ctx,
             instance,
             event,
-            _RingingCommittedEvent.with_data(PhoneCallData(call_id=data.call_id)),
+            _RingingCommittedEvent.with_data(RingingData(call_id=data.call_id)),
         )
 
     @staticmethod
@@ -722,7 +692,7 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _publish_committed_ringing(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneCallData)
+        assert isinstance(data, RingingData)
         PhoneFirmware._publish(ctx, instance, event, RingingEvent.with_data(data))
 
     @staticmethod
@@ -1178,21 +1148,50 @@ class Phone(bot.device.Device):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name in self.model.events:
-            return super().dispatch(ctx, event)
-        if event.name in _PHONE_SERVICE_ORIGINATING_EVENT_NAMES:
-            return _completed_phone_service_event()
-        command_event = _PHONE_OWNER_COMMAND_EVENTS_BY_NAME.get(event.name)
-        if command_event is not None and self._firmware is not None:
-            try:
-                data = validate_event_data(command_event, event.data or {})
-            except ValueError:
-                return _completed_phone_service_event()
-            return self._firmware.dispatch(
-                ctx,
-                dataclasses.replace(event, data=data, kind=command_event.kind, schema=command_event.schema),
-            )
-        return super().dispatch(ctx, event)
+        """Firmware-only for owner call-control payloads; shell for lifecycle/other.
+
+        Owner commands enter firmware only — not dual-delivered and not name-routed. Typed
+        command payloads pass through; dict/None payloads whose event schema is a command
+        model are coerced via ``validate_event_data`` (JSON/API ingress). Device shell
+        lifecycle and other events stay on the shell HSM. Service observations enter
+        firmware via the service attach target, not through this shell ingress.
+        """
+
+        async def _deliver() -> None:
+            firmware = self._firmware
+            command = Phone._coerce_owner_command(event)
+            if command is not None:
+                if firmware is not None:
+                    await firmware.dispatch(ctx, command)
+                return
+            # Device shell lifecycle / other events.
+            await hsm.Instance.dispatch(self, ctx, event)
+
+        return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
+
+    @staticmethod
+    def _coerce_owner_command(event: hsm.Event) -> hsm.Event | None:
+        """Return a firmware-bound owner command event, or None when not a command ingress.
+
+        Already-typed command payloads pass through. Unvalidated dict/None payloads are
+        coerced only when the event's declared schema is an owner command model (schema
+        identity, not event.name). Invalid payloads are dropped (no shell fall-through).
+        """
+
+        command_schemas = (DialData, AnswerCallData, DeclineCallData, HangUpCallData, TransferCallData)
+        data = event.data
+        if isinstance(data, command_schemas):
+            return event
+        schema = event.schema
+        if schema is not DialData and schema is not AnswerCallData and schema is not DeclineCallData and schema is not HangUpCallData and schema is not TransferCallData:
+            return None
+        try:
+            validated = validate_event_data(event, {} if data is None else data)
+        except ValueError:
+            return None
+        if not isinstance(validated, command_schemas):
+            return None
+        return dataclasses.replace(event, data=validated)
 
     @typing.override
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:

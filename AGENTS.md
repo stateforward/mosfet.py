@@ -100,6 +100,12 @@
   probed-state early return. When starting/attaching actors that must outlive an activity, parent them under
   `instance.context()` / `owner.context()` (or `World.from_context(instance.context())`), not the activity `ctx`.
   See `rules/hsm.rules.md` HSM-CONTEXT-001.
+- ALWAYS treat delivery as the gate: address actors with `hsm.dispatch` / `hsm.dispatch_to` / `hsm.dispatch_all`
+  (prefer `dispatch_to` when the recipient id is known). NEVER re-admit production ingress with `event.name` or
+  `event.target` door filters or transition guards for delivery/admission; NEVER source-id proxy re-dispatch
+  (lookup `event.source` in Instances and NACK/route elsewhere). Select transitions with topology (`hsm.on`) and
+  typed payloads; reserve envelope `id` / `source` / `target` for post-delivery correlation only. See
+  `rules/hsm.rules.md` HSM-DELIVERY-001.
 - NEVER store transient event data on an HSM instance (`instance.set` / `hsm.attribute`, machine fields, or similar).
   That includes whole events, payloads, audio/bytes, intermediate stage results, and operation scratch tied to an
   in-flight run. ALWAYS carry transient operation results, failures, classifications, apply-operation identity, and
@@ -212,10 +218,11 @@
 
 ### World, devices, composition
 
-- ALWAYS keep `World` as an HSM context and broadcast scope, not a service locator, registry, factory, or discovery
-  API. Pass dependencies explicitly at construction or attachment boundaries. `World.from_context(ctx)` parents the
-  World to `ctx` when that context is not already done; if `ctx` is an activity context, World (and machines started
-  under it) will cancel when the activity state exits—see HSM-CONTEXT-001.
+- ALWAYS keep `World` as an `hsm.Context` subclass and broadcast scope, not a service locator, registry, factory, or
+  discovery API. Pass `world` directly to `hsm.started` / `hsm.dispatch` / `hsm.dispatch_to` / `hsm.dispatch_all` —
+  do not invent a `.context` alias. Pass dependencies explicitly at construction or attachment boundaries.
+  `World.from_context(ctx)` parents the World to `ctx` when that context is not already done; if `ctx` is an activity
+  context, World (and machines started under it) will cancel when the activity state exits—see HSM-CONTEXT-001.
 - ALWAYS keep devices bot-agnostic; devices may notify, interrupt, or expose affordances, but they must not assume or force bot behavior.
 - ALWAYS treat devices as environment-facing actors that can serve humans, agents, other devices, services, or operator runtimes.
 - ALWAYS model ownership and control separately: devices own identity, lifecycle, and peripherals; firmware or OS-like

@@ -66,11 +66,11 @@ class AttachablePhoneService:
     target: hsm.Instance | None = None
 
     async def attach(self, world: World, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is world.context.value(hsm.Keys.Instances)
+        assert target.context().value(hsm.Keys.Instances) is world.value(hsm.Keys.Instances)
         self.target = target
 
     async def detach(self, world: World, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is world.context.value(hsm.Keys.Instances)
+        assert target.context().value(hsm.Keys.Instances) is world.value(hsm.Keys.Instances)
         if self.target is target:
             self.target = None
 
@@ -421,8 +421,8 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> No
         inside = PhoneObservationRecorder()
         outside = PhoneObservationRecorder()
 
-        _ = await hsm.started(world.context, phone, phone.model)
-        _ = await hsm.started(world.context, inside, inside.model, hsm.Config(id="inside"))
+        _ = await hsm.started(world, phone, phone.model)
+        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside"))
         phone_id = hsm.id(phone)
 
@@ -749,9 +749,9 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
         )
 
         speaker = phone_speaker(phone)
-        _ = await hsm.started(world.context, phone, phone.model)
-        _ = await hsm.started(world.context, speaker, speaker.model, hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(world.context, observer, observer.model, hsm.Config(id="observer"))
+        _ = await hsm.started(world, phone, phone.model)
+        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -814,8 +814,8 @@ def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audi
             channels=1,
         )
 
-        _ = await hsm.started(world.context, phone, phone.model)
-        _ = await hsm.started(world.context, observer, observer.model, hsm.Config(id="observer"))
+        _ = await hsm.started(world, phone, phone.model)
+        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -869,9 +869,9 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
         )
 
         speaker = phone_speaker(phone)
-        _ = await hsm.started(world.context, phone, phone.model)
-        _ = await hsm.started(world.context, speaker, speaker.model, hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(world.context, observer, observer.model, hsm.Config(id="observer"))
+        _ = await hsm.started(world, phone, phone.model)
+        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -1329,9 +1329,144 @@ def test_public_phone_events_do_not_route_back_into_phone_firmware() -> None:
         _ = await hsm.started(None, phone, phone.model)
         assert device_firmware(phone) is not None
 
-        await phone.dispatch(phone.context(), phone_device.RingingEvent.with_data(phone_device.PhoneCallData(call_id="call-123")))
+        await phone.dispatch(
+            phone.context(),
+            phone_device.RingingEvent.with_data(phone_device.RingingData(call_id="call-123")),
+        )
 
         assert device_firmware(phone).state() == "/Phone/hung_up"
         assert phone_current_call_id(_phone_firmware(phone)) is None
 
     asyncio.run(run())
+
+
+def test_phone_dispatch_coerces_dict_command_payload_to_firmware() -> None:
+    """Owner DialEvent with raw dict data is coerced and reaches firmware (JSON/API ingress)."""
+
+    async def run() -> str:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, phone.model)
+        raw = dataclasses.replace(
+            phone_device.DialEvent,
+            data={
+                "call_id": "call-dict",
+                "target": {"kind": "address", "value": "sip:desk@example.com"},
+            },
+        )
+        await phone.dispatch(phone.context(), raw)
+        await _wait_until(lambda: phone_current_call_id(_phone_firmware(phone)) == "call-dict")
+        return device_firmware(phone).state() or ""
+
+    assert asyncio.run(run()).endswith("/dialing")
+
+
+def test_phone_dispatch_drops_invalid_dict_command_without_shell_fallthrough() -> None:
+    """Invalid owner-command dict does not reach firmware and is not shell-admitted."""
+
+    async def run() -> str | None:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, phone.model)
+        before = phone_current_call_id(_phone_firmware(phone))
+        raw = dataclasses.replace(phone_device.DialEvent, data={"not": "a dial"})
+        await phone.dispatch(phone.context(), raw)
+        await asyncio.sleep(0.05)
+        assert phone_current_call_id(_phone_firmware(phone)) == before
+        return device_firmware(phone).state()
+
+    assert asyncio.run(run()) == "/Phone/hung_up"
+
+
+def test_phone_event_recorder_ignores_local_audio_output_not_service_audio() -> None:
+    """Recorder skips exact AudioOutputData uplink offers; ServiceAudioData still records."""
+
+    recorder = phone_device.PhoneEventRecorder()
+    local = audio_device.OutputEvent.with_data(
+        audio_device.AudioOutputData(audio=b"local", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+    )
+    service = phone_device.ServiceAudioReceivedEvent.with_data(
+        phone_device.ServiceAudioData(
+            call_id="call-1",
+            audio=b"remote",
+            media_type="audio/pcm",
+            sample_rate_hz=16_000,
+            channels=1,
+        )
+    )
+    recorder.publish(hsm.Context(), local)
+    recorder.publish(hsm.Context(), service)
+    assert [event.name for event in recorder.events] == [phone_device.ServiceAudioReceivedEvent.name]
+    assert isinstance(recorder.events[0].data, phone_device.ServiceAudioData)
+
+
+def test_observation_service_audio_does_not_elevate_as_local_uplink() -> None:
+    """ServiceAudioData must not take the local speaker world-elevation side channel."""
+
+    async def run() -> tuple[int, int, list[str]]:
+        from bot.devices.phone.phone import _PhoneObservationService
+
+        class TrackingSpeaker(audio_device.Speaker):
+            elevated: list[audio_device.AudioOutputData]
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.elevated = []
+
+            @typing.override
+            def dispatch_audio_output_to_world(
+                self,
+                ctx: hsm.Context,
+                data: audio_device.AudioOutputData,
+                *,
+                metadata: collections.abc.Mapping[str, object] | None = None,
+            ) -> collections.abc.Awaitable[None]:
+                del ctx, metadata
+                self.elevated.append(data)
+                # Schedule so fire-and-forget publish does not leak an unawaited coroutine.
+                return asyncio.ensure_future(asyncio.sleep(0))
+
+        class TrackingService:
+            events: list[hsm.Event[typing.Any]]
+
+            def __init__(self) -> None:
+                self.events = []
+
+            async def attach(self, world: World, target: hsm.Instance) -> None:
+                del world, target
+
+            async def detach(self, world: World, target: hsm.Instance) -> None:
+                del world, target
+
+            def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+                del ctx
+                self.events.append(event)
+
+        speaker = TrackingSpeaker()
+        inner = TrackingService()
+        owner = hsm.Instance()
+        target = hsm.Instance()
+        observation = _PhoneObservationService(owner=owner, service=inner, speaker=speaker)
+        observation.target = target
+        ctx = hsm.Context()
+        _ = await hsm.started(ctx, owner, hsm.define("Owner", hsm.initial(hsm.target("s")), hsm.state("s")))
+        _ = await hsm.started(ctx, target, hsm.define("Target", hsm.initial(hsm.target("s")), hsm.state("s")))
+
+        local = audio_device.OutputEvent.with_data(
+            audio_device.AudioOutputData(audio=b"local", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+        )
+        service_audio = phone_device.ServiceAudioReceivedEvent.with_data(
+            phone_device.ServiceAudioData(
+                call_id="call-1",
+                audio=b"remote",
+                media_type="audio/pcm",
+                sample_rate_hz=16_000,
+                channels=1,
+            )
+        )
+        observation.publish(ctx, local)
+        observation.publish(ctx, service_audio)
+        return len(speaker.elevated), len(inner.events), [event.name for event in inner.events]
+
+    elevated, published, names = asyncio.run(run())
+    assert elevated == 1
+    assert published == 2
+    assert names == [audio_device.OutputEvent.name, phone_device.ServiceAudioReceivedEvent.name]

@@ -1,7 +1,13 @@
-"""Host-owned conversation respond composition.
-Conversation coordinates decode → participate only. Hosts that need a full
-voice/text reply wire contribute → decide → remember → encode here (or in an
-equivalent runtime boundary).
+"""Standalone host composition for conversation turns (tests / non-Bot hosts).
+
+Conversation coordinates decode → participate only and does not know its
+attachment owner. These helpers wire contribute → decide → remember → encode
+for **standalone** composition where no Bot body bridge is in play.
+
+Product path when Conversation is on ``Bot(acquired_abilities=…)``: the Bot
+observes contribution terminals and runs body-enriched cognition → Speaking.
+Do not call ``run_host_*_respond_turn`` on that path — it would double-drive
+cognition. Conversation never inspects who attached it.
 """
 
 from __future__ import annotations
@@ -134,7 +140,7 @@ async def run_host_voice_respond_turn(
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Run attached host abilities through contribute → decide → remember → encode."""
+    """Standalone contribute → decide → remember → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
 
@@ -218,7 +224,7 @@ async def run_host_text_respond_turn(
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Run attached host abilities through contribute → decide → remember → generate → encode."""
+    """Standalone contribute → decide → remember → generate → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
 

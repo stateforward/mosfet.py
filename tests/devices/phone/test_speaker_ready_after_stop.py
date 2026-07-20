@@ -18,13 +18,13 @@ def test_speaker_ready_requires_attach_and_started_speaker() -> None:
         owner = hsm.Instance()
         target = hsm.Instance()
         service = _PhoneObservationService(owner=owner, service=object(), speaker=speaker)  # type: ignore[arg-type]
-        unattached = service.speaker_ready_in_world(world.context)
+        unattached = service.speaker_ready_in_world(world)
         service.target = target
-        attached_unstarted = service.speaker_ready_in_world(world.context)
-        await hsm.started(world.context, speaker, speaker.model)
-        ready = service.speaker_ready_in_world(world.context)
+        attached_unstarted = service.speaker_ready_in_world(world)
+        await hsm.started(world, speaker, speaker.model)
+        ready = service.speaker_ready_in_world(world)
         await hsm.stop(speaker)
-        after_stop = service.speaker_ready_in_world(world.context)
+        after_stop = service.speaker_ready_in_world(world)
         return unattached, attached_unstarted, ready, after_stop
 
     unattached, attached_unstarted, ready, after_stop = asyncio.run(run())

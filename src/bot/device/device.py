@@ -13,7 +13,9 @@ from bot.protocols import attachment
 
 from bot.device.events import (
     ActivateEvent,
+    ActivateEventData,
     DeactivateEvent,
+    DeactivateEventData,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
@@ -61,7 +63,7 @@ _FirmwareInitializingCleanupFailedEvent = hsm.Event[_FirmwareInitializingCleanup
 
 def _require_attach_world_scope(world: World, instance: "Device") -> None:
     instance_scope = instance.context().value(hsm.Keys.Instances)
-    world_scope = world.context.value(hsm.Keys.Instances)
+    world_scope = world.value(hsm.Keys.Instances)
     if instance_scope is world_scope:
         return
     if instance_scope is None:
@@ -89,6 +91,9 @@ class Device(hsm.Instance, attachment.Attachment):
     ) -> None:
         super().__init_subclass__(**kwargs)
         cls.required_bot_abilities = required_bot_abilities
+
+    _attachments: list[hsm.Instance]
+    _attachment_timeout: datetime.timedelta
 
     def __init__(
         self,
@@ -124,43 +129,46 @@ class Device(hsm.Instance, attachment.Attachment):
         return tuple(ordered)
 
     @typing.override
-    async def start(self, ctx: hsm.Context, data: typing.Any = None) -> typing.Self | None:
-        return await hsm.Instance.start(self, ctx, data)
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        return await super().start(ctx, data)
 
+    @typing.override
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
         world = World.from_context(ctx)
         _require_attach_world_scope(world, self)
         await hsm.Instance.dispatch(self, ctx, event)
 
+    @typing.override
     async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
         # hsm 1.3.2+: id fails when stopped/unstarted — surface typed failure when a reply sink exists.
         try:
             _ = hsm.id(self)
         except hsm.ErrorValidatingModel:
             data = event.data
-            reply_to = data.reply_to if data.reply_to is not None else data.actor
-            if reply_to is not None:
-                try:
-                    reply_id = hsm.id(reply_to)
-                except hsm.ErrorValidatingModel:
-                    reply_id = ""
-                await hsm.Instance.dispatch(
-                    reply_to,
-                    ctx,
-                    dataclasses.replace(
-                        attachment.DetachFailedEvent.with_data(
-                            attachment.FailedData(
-                                actor=data.actor,
-                                kind=attachment.FailureKind.DISPATCH,
-                                message=f"{type(self).__name__} is stopped or not started; detach refused.",
-                            )
-                        ),
-                        id=event.id,
-                        source=event.source or "",
-                        target=reply_id,
-                        metadata=dict(event.metadata),
+            if not isinstance(data, attachment.DetachData):
+                return
+            reply_to: hsm.Instance = data.reply_to if data.reply_to is not None else data.actor
+            try:
+                reply_id = hsm.id(reply_to)
+            except hsm.ErrorValidatingModel:
+                reply_id = ""
+            await hsm.Instance.dispatch(
+                reply_to,
+                ctx,
+                dataclasses.replace(
+                    attachment.DetachFailedEvent.with_data(
+                        attachment.FailedData(
+                            actor=data.actor,
+                            kind=attachment.FailureKind.DISPATCH,
+                            message=f"{type(self).__name__} is stopped or not started; detach refused.",
+                        )
                     ),
-                )
+                    id=event.id,
+                    source=event.source or "",
+                    target=reply_id,
+                    metadata=dict(event.metadata),
+                ),
+            )
             return
         require_world_scope(World.from_context(ctx), self, participant="Device")
         await hsm.Instance.dispatch(self, ctx, event)
@@ -190,17 +198,15 @@ class Device(hsm.Instance, attachment.Attachment):
             pass
         else:
             raise RuntimeError("Device firmware remained started after Device stop.")
-        if (
-            firmware_id
-            and isinstance(firmware_instances, collections.abc.MutableMapping)
-            and firmware_instances.get(firmware_id) is firmware
-        ):
-            _ = firmware_instances.pop(firmware_id, None)
+        if firmware_id and isinstance(firmware_instances, collections.abc.MutableMapping):
+            typed_map = typing.cast(collections.abc.MutableMapping[str, object], firmware_instances)
+            if typed_map.get(firmware_id) is firmware:
+                _ = typed_map.pop(firmware_id, None)
         if self._firmware is firmware:
             self._firmware = None
 
     @typing.override
-    async def restart(self, ctx: hsm.Context, data: typing.Any = None) -> typing.Self | None:
+    async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:
         restart_ctx = ctx
         if ctx is self.context():
             values: dict[typing.Hashable, object] = {}
@@ -214,21 +220,39 @@ class Device(hsm.Instance, attachment.Attachment):
         if restart_ctx.is_done():
             return None
         await self.stop(restart_ctx)
-        _ = await hsm.Instance.start(self, restart_ctx, data)
+        _ = await super().start(restart_ctx, data)
         return self
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name in self.model.events:
-            return super().dispatch(ctx, event)
-        firmware_events = getattr(self.firmware_model, "events", None)
-        if (
-            self._firmware is not None
-            and isinstance(firmware_events, collections.abc.Mapping)
-            and event.name in firmware_events
-        ):
-            return self._firmware.dispatch(ctx, event)
-        return super().dispatch(ctx, event)
+        """Deliver into device shell and firmware. No event-name routing table.
+
+        Shell-only lifecycle payloads (attach/detach/activate/deactivate) stay on the shell.
+        Other events also reach firmware when present; unmatched triggers are ignored by
+        normal HSM semantics. Dual delivery is intentional for shared device/firmware
+        observations; subclasses (e.g. Phone) may override with narrower routing.
+        """
+
+        async def _deliver() -> None:
+            await hsm.Instance.dispatch(self, ctx, event)
+            firmware = self._firmware
+            if firmware is None:
+                return
+            # Shell-only lifecycle (typed payload, not event.name).
+            if isinstance(
+                event.data,
+                (
+                    attachment.AttachData,
+                    attachment.DetachData,
+                    ActivateEventData,
+                    DeactivateEventData,
+                ),
+            ):
+                return
+            await firmware.dispatch(ctx, event)
+
+        # Match hsm.Instance.dispatch: eager Task so fire-and-forget effect paths still run.
+        return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
 
     @typing.override
     def take_snapshot(self) -> hsm.Snapshot:

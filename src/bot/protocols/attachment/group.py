@@ -130,23 +130,26 @@ class _Reply(hsm.Instance):
     ) -> None:
         del instance
         result = event.data
-        if event.name == events.AttachCompleteEvent.name and isinstance(result, events.AttachCompleteData):
+        # Topology already selected the terminal trigger; classify by payload (+ operation kind
+        # for shared FailedData) — no event.name discrimination.
+        if isinstance(result, events.AttachCompleteData):
             forwarded = _MemberAttachCompleteEvent.with_data(
                 _MemberAttachCompleteData(operation=operation, index=index, result=result)
             )
-        elif event.name == events.AttachFailedEvent.name and isinstance(result, events.FailedData):
-            forwarded = _MemberAttachFailedEvent.with_data(
-                _MemberAttachFailedData(operation=operation, index=index, result=result)
-            )
-        elif event.name == events.DetachedEvent.name and isinstance(result, events.DetachedData):
+        elif isinstance(result, events.DetachedData):
             forwarded = _MemberDetachedEvent.with_data(
                 _MemberDetachedData(operation=operation, index=index, result=result)
             )
         else:
-            assert event.name == events.DetachFailedEvent.name and isinstance(result, events.FailedData)
-            forwarded = _MemberDetachFailedEvent.with_data(
-                _MemberDetachFailedData(operation=operation, index=index, result=result)
-            )
+            assert isinstance(result, events.FailedData)
+            if operation.kind is _OperationKind.ATTACH:
+                forwarded = _MemberAttachFailedEvent.with_data(
+                    _MemberAttachFailedData(operation=operation, index=index, result=result)
+                )
+            else:
+                forwarded = _MemberDetachFailedEvent.with_data(
+                    _MemberDetachFailedData(operation=operation, index=index, result=result)
+                )
         _ = hsm.dispatch(
             ctx,
             operation.coordinator,
@@ -1138,11 +1141,29 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == events.AttachEvent.name and isinstance(event.data, events.AttachData):
+        """Attach/detach by typed payload; group HSM vs member fan-out for the rest.
+
+        AttachData/DetachData select lifecycle methods (not event.name). Group
+        coordination payloads (operation/member outcomes) use Instance.dispatch; other
+        events fan out to members. No ``event.name`` admission door.
+        """
+
+        data = event.data
+        if isinstance(data, events.AttachData):
             return self.attach(ctx, event)
-        if event.name == events.DetachEvent.name and isinstance(event.data, events.DetachData):
+        if isinstance(data, events.DetachData):
             return self.detach(ctx, event)
-        if event.name in self.model.events:
+        # Coordination payloads stay on the group machine (typed, not event.name).
+        if isinstance(
+            data,
+            (
+                _OperationData,
+                _MemberAttachCompleteData,
+                _MemberAttachFailedData,
+                _MemberDetachedData,
+                _MemberDetachFailedData,
+            ),
+        ):
             return hsm.Instance.dispatch(self, ctx, event)
 
         async def dispatch_all() -> None:

@@ -16,7 +16,10 @@ from .conversation import (
     Stage,
     TextMessage,
     VoiceMessage,
+    default_pair_participants,
     define_conversation_model,
+    text_turn,
+    voice_turn,
 )
 from .decision_input import DecisionInputFactory, agent_conversation_decision_input
 from .host_turn import (
@@ -52,9 +55,12 @@ __all__ = [
     "EncodeData",
     "agent_conversation_decision_input",
     "contribute_conversation_turn",
+    "default_pair_participants",
     "define_conversation_model",
     "run_host_text_respond_turn",
     "run_host_voice_respond_turn",
+    "text_turn",
+    "voice_turn",
     "conversation",
     "decision_input",
     "host_turn",

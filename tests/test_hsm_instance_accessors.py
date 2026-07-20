@@ -24,7 +24,6 @@ _ALLOWED_NON_HSM_PROPERTIES = {
     "src/bot/protocols/yamux/frame.py:FrameData.is_rst",
     "src/bot/protocols/yamux/frame.py:FrameData.is_syn",
     "src/bot/devices/phone/phone.py:PhoneEventRecorder.events",
-    "src/bot/world/world.py:World.context",
 }
 # HSM instances may own private runtime data, including mutable mappings.
 # This guard blocks public member surfaces that invite direct caller mutation

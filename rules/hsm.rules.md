@@ -214,6 +214,52 @@ Asynchronous dispatch, set, restart, stop, fanout, and directed dispatch operati
 
 Callers MUST use cancellation-aware waits when waiting.
 
+# HSM-DELIVERY-001 MUST Treat Delivery As The Gate
+
+See:
+- [HSM-EVENT-001](#hsm-event-001-must-use-explicit-triggers)
+- [HSM-EVENT-002](#hsm-event-002-must-treat-events-as-the-boundary-contract)
+- [HSM-OWNERSHIP-001](#hsm-ownership-001-must-preserve-instance-state-ownership)
+- [HSM-CORRELATION-001](#hsm-correlation-001-must-correlate-delayed-results-before-effects)
+- [PAT-ACTOR-001](patterns.rules.md#pat-actor-001-must-actor-state-ownership)
+
+Delivery is the gate. Address an actor with `hsm.dispatch`, `hsm.dispatch_to`, or `hsm.dispatch_all` (or the
+owning machine's `dispatch` when it is the intentional dual-shell / fan-out boundary). Do **not** invent a second
+admission layer that re-routes, NACK-proxies, or drops events by re-checking envelope fields after delivery.
+
+## MUST
+
+- MUST deliver behavioral events to the intended actor with HSM dispatch APIs (`hsm.dispatch` /
+  `hsm.dispatch_to` / `hsm.dispatch_all` / machine `dispatch`). Prefer directed `hsm.dispatch_to` when the
+  recipient id is known rather than broadcasting and filtering.
+- MUST select transitions with topology (`hsm.on(...)` / multi-trigger) and, when needed, **typed payload**
+  (`isinstance` / exact type / validated schema) or other domain data already on the event.
+- MUST keep post-delivery **correlation** (operation id, active turn, reply identity) on the modeled envelope
+  fields `id`, `source`, and `target` plus typed event data — only after topology has already selected the
+  transition. That is correlation, not ingress admission.
+
+## MUST NOT
+
+- MUST NOT re-admit production ingress by reading `event.name` as a door filter (name allowlists, name maps to
+  route tables, `event.name in model.events` as coordinator-vs-fan-out admission, publish-path name gates).
+- MUST NOT re-admit production ingress by reading `event.target` as a second delivery check (if the event was
+  delivered to this machine, do not refuse it because `target` does not match a local probe).
+- MUST NOT implement source-id **proxy re-dispatch**: looking up `event.source` in `hsm.Keys.Instances` (or similar)
+  and dispatching a NACK/failure/reply to that instance instead of handling the event on the machine that received
+  it. Delivery already chose the recipient; double-routing by external `source` is forbidden.
+- MUST NOT put `event.name` or `event.target` checks in transition **guards** for the purpose of delivery or
+  admission. Guards that run under an already topology-selected trigger may still correlate with `id` / `source` /
+  `target` against the observer's own operation bookkeeping.
+- MUST NOT use `event.name` to discriminate shared payloads when a typed payload (or dedicated event schema)
+  can express the same distinction at the world/device boundary (prefer payload type over name elevation doors).
+
+## Allowed residual patterns (not admission)
+
+- Documented world-boundary **elevation** that maps one committed observation to another domain event MAY use a
+  typed payload (preferred) or a documented residual when payloads are unavoidably shared; never as a general
+  ingress router.
+- Tests, telemetry, and snapshots MAY inspect `name` / `target` for assertions and diagnostics.
+
 # HSM-CATCHALL-001 SHOULD Keep Catch-All Transitions Lowest Priority
 
 Catch-all transitions SHOULD be lowest priority.

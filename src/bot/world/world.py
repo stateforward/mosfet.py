@@ -10,10 +10,11 @@ def _instance_scope(instance: hsm.Instance) -> object | None:
 
 
 class World(hsm.Context):
-    """Broadcast scope backed by an HSM context.
+    """HSM context used as a broadcast scope.
 
-    World intentionally exposes scope operations only. The internal instance map exists so the HSM runtime can
-    deliver `dispatch_all`; it is not a public registry or discovery surface.
+    World *is* an ``hsm.Context`` — pass it directly to ``hsm.started``, ``hsm.dispatch``,
+    ``hsm.dispatch_to``, and ``hsm.dispatch_all``. The internal instance map exists so the HSM
+    runtime can deliver those operations; it is not a public registry or discovery surface.
     """
 
     _instances: weakref.WeakValueDictionary[str, hsm.Instance]
@@ -38,15 +39,11 @@ class World(hsm.Context):
 
     @classmethod
     def from_context(cls, context: hsm.Context) -> "World":
-        """Create a world view over an existing HSM context."""
+        """Create a World scope over an existing HSM context (or return it if already a World)."""
 
+        if isinstance(context, cls):
+            return context
         return cls(context)
-
-    @property
-    def context(self) -> typing.Self:
-        """HSM context that carries this world's broadcast scope."""
-
-        return self
 
     async def broadcast(self, event: hsm.Event[typing.Any]) -> None:
         """Broadcast an event to every started HSM instance in this world."""
