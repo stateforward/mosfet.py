@@ -73,7 +73,8 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder" in source
     assert "from bot.devices import phone as phone_device" in source
     assert "from bot.providers.livekit import PhoneService" in source
-    assert "from bot.providers.livekit.audio import PcmWavDecoder, VoiceDecoder" in source
+    assert "from bot.providers.livekit.audio import PcmWavDecoder" in source
+    assert "VoiceDecoder" not in source
     assert "RoomAudioEndpoint" not in source
     assert "RoomAudioConnectData" not in source
     assert "create_audio_bridge" not in source
@@ -85,7 +86,8 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert 'DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"' in source
     assert "ShortTermMemory()" in source
     assert "class LiveKitVoiceDecoder" not in source
-    assert "return VoiceDecoder(" in source
+    assert "class ExampleTextConversation" in source
+    assert "ExampleVoiceConversation" not in source
     assert "PhoneService(" in source
     assert "create_phone_gateway" not in source
 
@@ -213,7 +215,7 @@ def test_phone_bot_example_start_bot_returns_active_bot() -> None:
     assert _run_phone_bot_python(code) == "\n".join(
         [
             "/PhoneBot/active/unfocused",
-            "/ExampleVoiceConversationLifecycle/attached/behavior/silent",
+            "/ExampleTextConversationLifecycle/attached/behavior/silent",
         ]
     )
 

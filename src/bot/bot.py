@@ -1,6 +1,7 @@
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import processing
+from bot.abilities.hearing import speech
 
 import abc
 import asyncio
@@ -8,6 +9,7 @@ import collections.abc
 import dataclasses
 import datetime
 import typing
+import uuid
 import weakref
 
 import hsm
@@ -705,10 +707,124 @@ class Bot(hsm.Instance, abc.ABC):
         return response.content is None and response.decoded_text is not None
 
     @staticmethod
+    def _acquired_conversation(instance: "Bot") -> conversation.Conversation[typing.Any, typing.Any] | None:
+        """Return the first acquired Conversation ability, if any."""
+
+        for ability in instance._acquired_abilities:
+            if isinstance(ability, conversation.Conversation):
+                return ability
+        return None
+
+    @staticmethod
+    def _listening_speech_bytes(event: hsm.Event[typing.Any]) -> bytes | None:
+        """Return Listening speech-decoding product bytes when event is a sensory speech handoff."""
+
+        data = event.data
+        if not isinstance(data, cognition.InputData):
+            return None
+        stimulus = data.stimulus
+        if not isinstance(stimulus, hsm.Event):
+            return None
+        if not isinstance(stimulus.data, bytes):
+            return None
+        # SpeechDecoding public output identity (delivery already selected this event type on Listening).
+        if stimulus.name != speech.SpeechDecoding.output_event.name:
+            return None
+        return stimulus.data
+
+    @staticmethod
+    def _conversation_message_from_speech(
+        conversation_ability: conversation.Conversation[typing.Any, typing.Any],
+        speech_bytes: bytes,
+    ) -> conversation.TextMessage | conversation.VoiceMessage | None:
+        """Map Listening speech product into a Conversation Message for the acquired ability.
+
+        Listening STT typically yields UTF-8 transcript → ``text_turn`` for TextConversation.
+        VoiceConversation requires acoustic payload (non-UTF-8 speech product); UTF-8 STT text
+        is refused for VoiceMessage so STT text is not mislabeled as audio.
+
+        Total fail-closed helper: returns ``None`` for modality mismatch, empty transcript, or any
+        Message construction/validation failure. HSM effects must drop without raising so a bad
+        product never bricks the Bot actor.
+        """
+
+        input_type = conversation_ability.input_data_type
+        try:
+            if input_type is conversation.VoiceMessage:
+                try:
+                    _ = speech_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    return conversation.voice_turn(speech_bytes)
+                # UTF-8 STT transcript must not be mislabeled as acoustic VoiceMessage payload.
+                return None
+            try:
+                text = speech_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                # Non-UTF-8 product is not a TextConversation transcript.
+                return None
+            if not text:
+                # Empty STT is not a TextStimulus (min_length=1); drop rather than raise in effect.
+                return None
+            return conversation.text_turn(text)
+        except (pydantic.ValidationError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _should_bridge_speech_to_conversation(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """True when Listening speech should enter Conversation instead of deliberative cognition."""
+
+        del ctx
+        if Bot._acquired_conversation(instance) is None:
+            return False
+        return Bot._listening_speech_bytes(event) is not None
+
+    @staticmethod
+    def _should_process_cognition_input(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """Process sensory cognition.InputEvent only when not bridged to Conversation."""
+
+        return not Bot._should_bridge_speech_to_conversation(ctx, instance, event)
+
+    @staticmethod
+    def _dispatch_speech_to_conversation(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Bridge Listening speech product into acquired Conversation as a Message turn.
+
+        Mismatched product shapes fail closed by dropping the bridge (no HSM effect raise).
+        The exclusive bridge guard already kept the product out of deliberative cognition.
+        """
+
+        conversation_ability = Bot._acquired_conversation(instance)
+        speech_bytes = Bot._listening_speech_bytes(event)
+        assert conversation_ability is not None and speech_bytes is not None
+        message = Bot._conversation_message_from_speech(conversation_ability, speech_bytes)
+        if message is None:
+            return
+        operation_id = event.id or uuid.uuid4().hex
+        input_event = dataclasses.replace(
+            conversation_ability.input_event.with_data_and_id(message, operation_id),
+            source=hsm.id(instance),
+            target=hsm.id(conversation_ability),
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(ctx, conversation_ability, input_event)
+
+    @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         if isinstance(event.data, events.InputEventData):
             stimulus = event.data
         elif isinstance(event.data, cognition.InputData):
+            # Speech→Conversation is handled on dedicated unfocused/focused transitions before processing.
             stimulus = event.data.stimulus
         elif isinstance(event.data, conversation.Response):
             # Contribution terminal is the stimulus product (Listening-style ObservedBotEvent path).
@@ -1289,8 +1405,16 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.target("../processing"),
                 ),
                 # Sensory products: explicit cognition.InputEvent handoff (never raw world media).
+                # Speech products with acquired Conversation bridge to Message (not deliberative yet).
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
+                    hsm.guard(_should_bridge_speech_to_conversation),
+                    hsm.effect(_focus_event_target),
+                    hsm.effect(_dispatch_speech_to_conversation),
+                ),
+                hsm.transition(
+                    hsm.on(cognition.InputEvent),
+                    hsm.guard(_should_process_cognition_input),
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
@@ -1310,6 +1434,12 @@ class Bot(hsm.Instance, abc.ABC):
                 ),
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
+                    hsm.guard(_should_bridge_speech_to_conversation),
+                    hsm.effect(_dispatch_speech_to_conversation),
+                ),
+                hsm.transition(
+                    hsm.on(cognition.InputEvent),
+                    hsm.guard(_should_process_cognition_input),
                     hsm.target("../processing"),
                 ),
                 hsm.transition(

@@ -948,6 +948,18 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._terminal_waiters = {}
 
+    @property
+    def attachment_owner(self) -> hsm.Instance | None:
+        """First attachment owner (Bot body or host), if any.
+
+        Public surface for host_turn fail-closed checks and owner-targeted delivery without
+        reading private ``_attachments`` from outside Ability.
+        """
+
+        if not self._attachments:
+            return None
+        return self._attachments[0]
+
     @typing.override
     def attach(
         self,

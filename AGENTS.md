@@ -150,6 +150,14 @@
   body fields. The Bot owns an explicit transition on `cognition.InputEvent` that enriches abilities/actors/focus
   and dispatches the same event type into the cognition ability. Input abilities never fill deliberative processing input;
   cognition never receives raw world/device events from the input path.
+- ALWAYS keep **Bot-acquired stage abilities** (e.g. Conversation) on the product path when they own multi-party or
+  turn structure that sensory products alone must not skip: the Bot may bridge a typed sensory product into that
+  ability’s public input and, on contribution-style terminals, re-enter body-enriched cognition so effectors
+  (e.g. Speaking) stay cognition-selected. NEVER dual-run a host/test composition helper against the same
+  Bot-acquired ability for one turn. NEVER raise inside a Bot HSM effect for an invalid product shape — drop,
+  keep the actor live, and do not force the product into deliberative cognition when the stage bridge owns it.
+  Sensory products that are not stage-bridged still enter deliberative cognition from the normal
+  `cognition.InputEvent` handoff.
 - ALWAYS elevate hearable device playout into `world.sound` at the speaker/world boundary
   (`Speaker.dispatch_audio_output_to_world`). Keep `devices.audio.output` for targeted device playout/uplink. ALWAYS
   elevate phone ringing into `world.sound` (`kind="ring"`, `source` = phone instance id) at the phone observation

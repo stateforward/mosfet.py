@@ -239,6 +239,13 @@ def _dispatch_speech_cognition_input(
     instance: "Listening",
     event: hsm.Event[typing.Any],
 ) -> None:
+    """Hand off speech-decoding product bytes (typically UTF-8 transcript after STT).
+
+    Speech decoding must succeed before this terminal fires. When Conversation is
+    Bot-acquired, Bot bridges this product into a Conversation Message (``text_turn`` for
+    TextConversation, ``voice_turn`` for VoiceConversation with acoustic payload).
+    """
+
     completion = event.data
     assert isinstance(completion, _SpeechDecodingCompletedEventData)
     _dispatch_listening_cognition_input(

@@ -4,9 +4,10 @@ from bot import abilities
 import bot
 from bot.abilities import ability
 from bot.abilities import cognition
-from bot.abilities import conversation
+from bot.abilities import decoding
 from bot.abilities import listening
 from bot.abilities import memory
+from bot.abilities import participating
 from bot.abilities import speaking
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -34,7 +35,7 @@ from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
-from bot.providers.livekit.audio import PcmWavDecoder, VoiceDecoder
+from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
 from bot.world import World
 
@@ -377,28 +378,38 @@ def _phone_cognition(
     )
 
 
-class ExampleVoiceConversation(abilities.VoiceConversation):
-    """Thin voice conversation that records contribution terminals for the runnable example."""
+class TranscriptTextDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
+    """Decode TextStimulus (Listening STT transcript) for conversation participation."""
+
+    @typing.override
+    async def decode(self, input: participating.ParticipationStimulus) -> str:
+        if isinstance(input, participating.TextStimulus):
+            return input.content
+        if isinstance(input, participating.EventStimulus):
+            text = input.payload.get("text")
+            if isinstance(text, str):
+                return text
+        raise AssertionError(f"unexpected conversation stimulus {input!r}")
+
+
+class ExampleTextConversation(abilities.TextConversation):
+    """Thin text conversation for product path: Listening STT → Message → contribution → Bot → Speaking."""
 
     _outputs: list[abilities.Response]
     _failures: list[abilities.FailureData]
-    _host_responses: list[abilities.Response]
 
     def __init__(
         self,
         *,
         participating: abilities.Participating,
-        decoder: abilities.VoiceDecoder,
-        encoder: conversation.voice.VoiceEncoder,
+        decoder: decoding.Decoder[participating.ParticipationStimulus, str] | None = None,
     ) -> None:
         super().__init__(
             participating=participating,
-            decoder=decoder,
-            encoder=encoder,
+            decoding=decoding.Decoding(decoder=decoder if decoder is not None else TranscriptTextDecoder()),
         )
         self._outputs = []
         self._failures = []
-        self._host_responses = []
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
@@ -423,24 +434,6 @@ class ExampleVoiceConversation(abilities.VoiceConversation):
 
     def failures(self) -> tuple[abilities.FailureData, ...]:
         return tuple(self._failures)
-
-    def record_host_response(self, response: abilities.Response) -> None:
-        self._host_responses.append(response)
-
-    def host_responses(self) -> tuple[abilities.Response, ...]:
-        return tuple(self._host_responses)
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class ExampleVoiceEncoder(conversation.voice.VoiceEncoder):
-    """Host voice encoder that renders turn text through Gemini TTS."""
-
-    speech_encoder: GeminiSpeechEncoder
-
-    @typing.override
-    async def encode(self, input: abilities.EncodeData) -> str | bytes:
-        text = input.result.reason or ("\n".join(input.memory_context) if input.memory_context else input.decoded_text)
-        return await self.speech_encoder.encode(text.encode("utf-8"))
 
 
 class AlwaysVoiceDetector(voice.detection.VoiceDetector):
@@ -478,33 +471,14 @@ def _gemini_speech_decoder(config: SpeechConfig) -> GeminiSpeechDecoder:
     )
 
 
-def _voice_decoder(config: SpeechConfig) -> VoiceDecoder:
-    return VoiceDecoder(
-        pcm_decoder=PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels),
-        speech_decoder=_gemini_speech_decoder(config),
-    )
+def _conversation(speech_config: SpeechConfig | None = None) -> ExampleTextConversation:
+    """Acquired Conversation for product path: Listening STT transcript → text Message → Speaking.
 
+    TTS remains on Bot Speaking (not host_turn / Conversation encoder).
+    """
 
-def _voice_encoder(config: SpeechConfig) -> ExampleVoiceEncoder:
-    client = _gemini_speech_client(api_key=config.api_key, model=config.tts_model)
-    return ExampleVoiceEncoder(
-        speech_encoder=GeminiSpeechEncoder(
-            client=client,
-            model=config.tts_model,
-            voice_name=config.voice_name,
-            sample_rate_hz=config.output_sample_rate_hz,
-            output_format="pcm",
-        )
-    )
-
-
-def _conversation(speech_config: SpeechConfig | None = None) -> ExampleVoiceConversation:
-    config = speech_config or SpeechConfig()
-    return ExampleVoiceConversation(
-        decoder=_voice_decoder(config),
-        encoder=_voice_encoder(config),
-        participating=abilities.Participating(),
-    )
+    del speech_config
+    return ExampleTextConversation(participating=abilities.Participating())
 
 
 def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening:
@@ -649,7 +623,7 @@ class PhoneBot(Bot):
     _phone: phone_device.Phone
     _listening: listening.Listening
     _speaking: speaking.Speaking
-    _conversation: ExampleVoiceConversation
+    _conversation: ExampleTextConversation
     _memory: memory.Memory
     _outputs: list[cognition.types.OutputData]
     _failures: list[bot.ProcessingFailedEventData]
@@ -668,7 +642,7 @@ class PhoneBot(Bot):
         cognition: cognition.Cognition | None = None,
         listening: listening.Listening | None = None,
         speaking: speaking.Speaking | None = None,
-        conversation: ExampleVoiceConversation | None = None,
+        conversation: ExampleTextConversation | None = None,
         memory: memory.Memory | None = None,
     ) -> None:
         self._label = label
@@ -738,7 +712,7 @@ class PhoneBot(Bot):
     def phone(self) -> phone_device.Phone:
         return self._phone
 
-    def conversation(self) -> ExampleVoiceConversation:
+    def conversation(self) -> ExampleTextConversation:
         return self._conversation
 
     def speaking(self) -> speaking.Speaking:
@@ -804,7 +778,7 @@ async def start_bot(
     cognition: cognition.Cognition | None = None,
     listening: listening.Listening | None = None,
     speaking: speaking.Speaking | None = None,
-    conversation: ExampleVoiceConversation | None = None,
+    conversation: ExampleTextConversation | None = None,
     memory: memory.Memory | None = None,
 ) -> PhoneBot:
     app_config = config or AppConfig.from_env_file()
@@ -1029,8 +1003,8 @@ def main() -> None:
 __all__ = [
     "AppConfig",
     "CognitionConfig",
-    "ExampleVoiceConversation",
-    "ExampleVoiceEncoder",
+    "ExampleTextConversation",
+    "TranscriptTextDecoder",
     "LiveKitConfig",
     "SpeechConfig",
     "PhoneBot",

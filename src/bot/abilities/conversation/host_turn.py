@@ -103,6 +103,21 @@ async def _apply_and_await_output(
     return terminal.data
 
 
+def _refuse_bot_acquired_host_turn(conversation: ability.Ability[typing.Any, typing.Any]) -> None:
+    """Fail closed when Conversation is Bot-acquired (product path is body contribution → cognition)."""
+
+    # Import locally to avoid host_turn ↔ bot import cycles at module load.
+    from bot.bot import Bot
+
+    owner = conversation.attachment_owner
+    if isinstance(owner, Bot):
+        message = (
+            "host_turn is refused when Conversation is Bot-acquired; use the Bot "
+            "contribution body path (cognition then Speaking)."
+        )
+        raise RuntimeError(message)
+
+
 async def contribute_conversation_turn(
     conversation: ability.Ability[typing.Any, Response],
     message: TextMessage | VoiceMessage,
@@ -111,13 +126,14 @@ async def contribute_conversation_turn(
 ) -> ParticipatedTurn:
     """Run an attached conversation through decode → participate for host composition."""
 
+    _refuse_bot_acquired_host_turn(conversation)
     context = conversation.context() if ctx is None else ctx
     operation_id = uuid.uuid4().hex
     result: asyncio.Future[object] = asyncio.get_running_loop().create_future()
     register = getattr(conversation, "register_contribution_waiter", None)
     if not callable(register):
         raise TypeError("Conversation must support register_contribution_waiter for host composition.")
-    register(operation_id, result)
+    _ = register(operation_id, result)
     input_event = conversation.input_event.with_data_and_id(message, operation_id)
     try:
         _ = await hsm.dispatch(context, conversation, input_event)
@@ -125,7 +141,7 @@ async def contribute_conversation_turn(
     finally:
         clear = getattr(conversation, "clear_contribution_waiter", None)
         if callable(clear):
-            clear(operation_id)
+            _ = clear(operation_id)
     if not isinstance(participated, ParticipatedTurn):
         raise RuntimeError("Conversation produced no participated turn.")
     return participated
@@ -142,6 +158,7 @@ async def run_host_voice_respond_turn(
 ) -> Response:
     """Standalone contribute → decide → remember → encode (not the Bot body product path)."""
 
+    _refuse_bot_acquired_host_turn(conversation)
     context = conversation.context() if ctx is None else ctx
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
@@ -226,6 +243,7 @@ async def run_host_text_respond_turn(
 ) -> Response:
     """Standalone contribute → decide → remember → generate → encode (not the Bot body product path)."""
 
+    _refuse_bot_acquired_host_turn(conversation)
     context = conversation.context() if ctx is None else ctx
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
