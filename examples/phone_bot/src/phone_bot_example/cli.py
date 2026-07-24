@@ -208,7 +208,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Provider env file (default: examples/phone_bot/.env).",
     )
     _ = parser.add_argument("--json", action="store_true", help="Print JSON summary and exit (smoke).")
-    _ = parser.add_argument("--gemini-model", default=None, help="Override Gemini cognition model.")
+    _ = parser.add_argument(
+        "--reasoning-model",
+        default=None,
+        help="Override OpenAI Terra reasoning model (default gpt-5.6-terra).",
+    )
     _ = parser.add_argument(
         "--once",
         action="store_true",
@@ -239,7 +243,7 @@ def main(argv: list[str] | None = None) -> None:
 
     base_config = AppConfig.from_env_file(env_path)
     base_config = base_config.with_cognition_overrides(
-        model=typing.cast(str | None, args.gemini_model),
+        model=typing.cast(str | None, args.reasoning_model),
     )
     livekit_env = _resolved_livekit_env(base_config)
     merged_env = _merge_env_file(env_path, livekit_env)
@@ -263,7 +267,7 @@ def main(argv: list[str] | None = None) -> None:
     async def _run_session() -> dict[str, object]:
         config = AppConfig.from_env_file(merged_env)
         config = config.with_cognition_overrides(
-            model=typing.cast(str | None, args.gemini_model),
+            model=typing.cast(str | None, args.reasoning_model),
         )
         if not config.livekit.can_connect_room():
             raise RuntimeError("LiveKit URL/token still missing after phone-bot setup.")

@@ -1,14 +1,15 @@
 [project]
 name = "bot-example-phone-bot"
 version = "0.1.0"
-description = "Phone-capable stateforward.bot bots backed by LiveKit and Gemini."
+description = "Phone-capable stateforward.bot bots backed by LiveKit, Silero VAD, OpenAI Terra, and Gemini STT/TTS."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.bot",
-  "bot-provider-gemini",
   "bot-provider-openai-compat",
   "bot-provider-livekit",
   "bot-provider-sqlite-memory",
+  "bot-provider-gemini",
+  "bot-provider-mlx-audio",
 ]
 
 [project.scripts]
@@ -18,10 +19,11 @@ mint-livekit-token = "phone_bot_example.token_cli:main"
 
 [tool.uv.sources]
 stateforward-bot = { path = "../..", editable = true }
-bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
 bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 bot-provider-livekit = { path = "../../src/providers/livekit", editable = true }
 bot-provider-sqlite-memory = { path = "../../src/providers/sqlite_memory", editable = true }
+bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
+bot-provider-mlx-audio = { path = "../../src/providers/mlx_audio", editable = true }
 
 [dependency-groups]
 dev = [
@@ -45,7 +47,15 @@ docstring-code-format = true
 
 [tool.basedpyright]
 include = ["src"]
-extraPaths = ["src", "../../src/providers/gemini/src", "../../src/providers/openai_compat/src", "../../src/providers/livekit/src", "../../src/providers/sqlite_memory/src", "../../src"]
+extraPaths = [
+  "src",
+  "../../src/providers/openai_compat/src",
+  "../../src/providers/livekit/src",
+  "../../src/providers/sqlite_memory/src",
+  "../../src/providers/gemini/src",
+  "../../src/providers/mlx_audio/src",
+  "../../src",
+]
 pythonVersion = "3.13"
 reportMissingModuleSource = "none"
 reportPrivateUsage = "error"

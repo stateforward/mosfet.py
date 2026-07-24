@@ -1,7 +1,8 @@
 # phone_bot example
 
 stateforward.bot phone bot against a real LiveKit SFU: core `Phone` + LiveKit `PhoneService`,
-with Gemini cognition (Interactions-ready Processing) and Gemini TTS/STT for a full stack.
+with Mercury 2 intuition, OpenAI Terra reasoning/reflection, **local Silero VAD**, and
+**off-device Gemini** STT/TTS.
 
 ## Local run (turnkey)
 
@@ -23,7 +24,8 @@ Exit code `2` if the room join did not get a local track SID.
 
 - Docker (only if LiveKit is not already running)  
 - `uv` + Python 3.13  
-- Optional for full `can_talk`: `BOT_GEMINI_API_KEY` in `.env`
+- Optional for full `can_talk`: `BOT_OPENAI_API_KEY`, `BOT_MERCURY_API_KEY`, and
+  `BOT_GEMINI_API_KEY` in `.env` (speech is off-device Gemini)
 
 ### Manual pieces (optional)
 
@@ -49,7 +51,7 @@ Open that URL on **this machine** (local SFU is not reachable from other devices
 Bare `https://meet.livekit.io/custom` shows “Missing LiveKit URL” — Meet reads the query params only.
 
 When you join the room, LiveKit `participant_connected` maps to a phone **incoming call**
-(`call_id=livekit:<identity>`). The phone **rings** as `world.sound` (`kind=ring`,
+(`call_id=livekit:<identity>`). The phone **rings** as `world.sound` (`kind=phone.ringing`,
 `source` = phone id) into **Listening** input — not raw `phone.ringing` into cognition.
 After answer, room media can flow `ServiceAudioReceived` → speaker → `world.sound` →
 Listening. Local speaker uplink is published to the LiveKit track (remote delivery is
@@ -61,9 +63,12 @@ suppressed to avoid echo).
 |---|---|
 | `livekit_room_audio_attempted` | `--connect-livekit` and URL+token present |
 | `livekit_room_audio_connected` | Local audio track SID assigned after room join |
-| `can_talk` | Room connected **and** Gemini API key configured for cognition + speech |
+| `can_talk` | Room connected **and** OpenAI + Mercury cognition keys **and** Gemini speech key |
 
-Room join alone does not require Gemini; full agent speech does.
+Room join alone does not require model keys; full agent talk does. VAD is local Silero
+(`mlx-community/silero-vad` via `bot-provider-mlx-audio`). STT/TTS stay off-device Gemini
+(`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
+`BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL`).
 
 ## Layout
 
@@ -74,6 +79,36 @@ Room join alone does not require Gemini; full agent speech does.
 | `scripts/mint_livekit_token.py` | JWT mint (no extra deps) |
 | `scripts/phone-bot.sh` | Thin wrapper around `uv run phone-bot` |
 | `src/phone_bot_example/` | Example app |
+
+## Blackbox dual agent (LiveKit only)
+
+Two agents meet **only** on the local SFU — no shared World and no direct `world.sound` wiring.
+Both sides use **off-device Gemini** for speech so dual talk does not load local MLX STT/TTS:
+
+| Side | Process | Speech |
+|---|---|---|
+| Agent A | `phone-bot` | Silero VAD (local) + Gemini STT + Gemini TTS |
+| Agent B | blackbox / `caller_agent` | Gemini TTS (default; `--tts say` for offline) |
+
+```bash
+# terminal 1
+uv run phone-bot -v
+
+# terminal 2 — agent B publishes Gemini TTS audio via LiveKit RTC
+uv run python scripts/blackbox_livekit_dual_agent.py \
+  --line "Hello agent A, can you hear me through LiveKit?"
+```
+
+Or one-shot (spawns agent A):
+
+```bash
+uv run python scripts/blackbox_livekit_dual_agent.py --start-phone-bot \
+  --line "Hello agent A, can you hear me through LiveKit?"
+```
+
+Requires `BOT_GEMINI_API_KEY` in `.env` (plus cognition keys for full agent A replies).
+Verdict uses LiveKit media plus optional scrapes of `/tmp/phone-bot-live.log`
+(DecodingSpeech). Silero VAD loads are expected; local Whisper/Qwen STT/TTS loads fail the harness.
 
 ## Unit tests (no LiveKit)
 

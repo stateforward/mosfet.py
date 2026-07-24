@@ -9,6 +9,7 @@ from bot.abilities import listening
 from bot.abilities import memory
 from bot.abilities import participating
 from bot.abilities import speaking
+from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
 
@@ -29,9 +30,9 @@ from bot.bot import Bot
 from bot.devices import audio
 from bot.devices import phone as phone_device
 from bot.providers.gemini import ChatClient as GeminiChatClient
-from bot.providers.gemini import Processor as GeminiProcessor
 from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
 from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
+from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
@@ -45,14 +46,19 @@ _EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _REPO_ROOT = _EXAMPLE_ROOT.parent.parent
 _REPO_ENV_PATH = _REPO_ROOT / ".env"
 
-DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_MERCURY_MODEL = "mercury-2"
 DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
-DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+DEFAULT_OPENAI_REASONING_MODEL = "gpt-5.6-terra"
+DEFAULT_OPENAI_REFLECTION_MODEL = "gpt-5.6-terra"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+# Local Silero VAD (cheap) + off-device Gemini STT/TTS (no local whisper/Qwen).
 DEFAULT_GEMINI_STT_MODEL = "gemini-3.5-flash"
-DEFAULT_GEMINI_VOICE_NAME = "Kore"
+DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+DEFAULT_GEMINI_TTS_VOICE = "Kore"
+DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
 DEFAULT_LIVEKIT_TRACK_NAME = "bot-phone-bot"
 DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ = 48_000
+# Gemini TTS default playout rate (speaker / LiveKit metadata).
 DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ = 24_000
 DEFAULT_AUDIO_CHANNELS = 1
 
@@ -185,24 +191,32 @@ class LiveKitConfig:
 
 @dataclasses.dataclass(frozen=True)
 class CognitionConfig:
-    """Reasoning/reflection on Gemini; intuition defaults to Mercury 2 (OpenAI-compatible)."""
+    """Intuition on Mercury 2 (OpenAI-compatible); reasoning and reflection on OpenAI Terra."""
 
-    model: str = DEFAULT_GEMINI_MODEL
+    model: str = DEFAULT_OPENAI_REASONING_MODEL
     api_key: str | None = None
+    base_url: str = DEFAULT_OPENAI_BASE_URL
     intuition_model: str = DEFAULT_MERCURY_MODEL
     intuition_api_key: str | None = None
     intuition_base_url: str = DEFAULT_MERCURY_BASE_URL
+    reflection_model: str = DEFAULT_OPENAI_REFLECTION_MODEL
+    reflection_api_key: str | None = None
+    reflection_base_url: str = DEFAULT_OPENAI_BASE_URL
 
     def can_process(self) -> bool:
-        return self.api_key is not None and self.intuition_api_key is not None
+        reflection_key = self.reflection_api_key if self.reflection_api_key is not None else self.api_key
+        return self.api_key is not None and self.intuition_api_key is not None and reflection_key is not None
 
 
 @dataclasses.dataclass(frozen=True)
 class SpeechConfig:
+    """Silero VAD (local) + off-device Gemini STT/TTS."""
+
     api_key: str | None = None
-    voice_name: str = DEFAULT_GEMINI_VOICE_NAME
+    voice_name: str = DEFAULT_GEMINI_TTS_VOICE
     tts_model: str = DEFAULT_GEMINI_TTS_MODEL
     stt_model: str = DEFAULT_GEMINI_STT_MODEL
+    vad_model_id: str = DEFAULT_SILERO_VAD_MODEL
     input_sample_rate_hz: int = DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ
     input_channels: int = DEFAULT_AUDIO_CHANNELS
     output_sample_rate_hz: int = DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ
@@ -216,29 +230,35 @@ class SpeechConfig:
                 "BOT_GEMINI_API_KEY",
                 "GEMINI_API_KEY",
                 "GOOGLE_API_KEY",
-                "VA_GEMINI_API_KEY",
             ),
             voice_name=_env_first(
                 env,
-                "BOT_GEMINI_VOICE_NAME",
-                "GEMINI_VOICE_NAME",
-                "VA_GEMINI_VOICE_NAME",
+                "BOT_GEMINI_TTS_VOICE",
+                "GEMINI_TTS_VOICE",
+                "BOT_TTS_VOICE",
             )
-            or DEFAULT_GEMINI_VOICE_NAME,
+            or DEFAULT_GEMINI_TTS_VOICE,
             tts_model=_env_first(
                 env,
                 "BOT_GEMINI_TTS_MODEL",
                 "GEMINI_TTS_MODEL",
-                "VA_GEMINI_TTS_MODEL",
+                "BOT_TTS_MODEL",
             )
             or DEFAULT_GEMINI_TTS_MODEL,
             stt_model=_env_first(
                 env,
                 "BOT_GEMINI_STT_MODEL",
                 "GEMINI_STT_MODEL",
-                "VA_GEMINI_STT_MODEL",
+                "BOT_STT_MODEL",
             )
             or DEFAULT_GEMINI_STT_MODEL,
+            vad_model_id=_env_first(
+                env,
+                "BOT_SILERO_VAD_MODEL",
+                "BOT_VAD_MODEL",
+                "SILERO_VAD_MODEL",
+            )
+            or DEFAULT_SILERO_VAD_MODEL,
             input_sample_rate_hz=_env_int(
                 env,
                 DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ,
@@ -268,8 +288,11 @@ class SpeechConfig:
     def can_encode_speech(self) -> bool:
         return self.api_key is not None
 
+    def can_decode_speech(self) -> bool:
+        return self.api_key is not None
+
     def can_publish_livekit_audio(self) -> bool:
-        return self.can_encode_speech()
+        return self.can_encode_speech() and self.can_decode_speech()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -287,25 +310,32 @@ class AppConfig:
             env.update(load_env(_REPO_ENV_PATH))
         if path is not None and path.exists():
             env.update(load_env(path))
-        gemini_api_key = _env_first(
-            env,
-            "BOT_GEMINI_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "VA_GEMINI_API_KEY",
-        )
+        openai_api_key = _env_first(env, "BOT_OPENAI_API_KEY", "OPENAI_API_KEY")
+        openai_base_url = _env_first(env, "BOT_OPENAI_BASE_URL", "OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
         return cls(
             env_path=path,
             cognition=CognitionConfig(
-                model=_env_first(env, "BOT_GEMINI_MODEL", "GEMINI_MODEL", "VA_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
-                api_key=gemini_api_key,
-                intuition_model=_env_first(env, "BOT_MERCURY_MODEL", "BOT_INTUITION_MODEL", "MERCURY_MODEL")
+                model=_env_first(
+                    env,
+                    "BOT_REASONING_MODEL",
+                    "BOT_OPENAI_REASONING_MODEL",
+                )
+                or DEFAULT_OPENAI_REASONING_MODEL,
+                api_key=openai_api_key,
+                base_url=openai_base_url,
+                intuition_model=_env_first(
+                    env,
+                    "BOT_INTUITION_MODEL",
+                    "BOT_MERCURY_MODEL",
+                    "MERCURY_MODEL",
+                )
                 or DEFAULT_MERCURY_MODEL,
                 intuition_api_key=_env_first(
                     env,
                     "BOT_MERCURY_API_KEY",
                     "MERCURY_API_KEY",
                     "INCEPTION_API_KEY",
+                    "BOT_INTUITION_API_KEY",
                 ),
                 intuition_base_url=_env_first(
                     env,
@@ -314,6 +344,10 @@ class AppConfig:
                     "INCEPTION_BASE_URL",
                 )
                 or DEFAULT_MERCURY_BASE_URL,
+                reflection_model=_env_first(env, "BOT_REFLECTION_MODEL", "BOT_OPENAI_REFLECTION_MODEL")
+                or DEFAULT_OPENAI_REFLECTION_MODEL,
+                reflection_api_key=openai_api_key,
+                reflection_base_url=openai_base_url,
             ),
             livekit=LiveKitConfig.from_env(env),
             speech=SpeechConfig.from_env(env),
@@ -329,20 +363,29 @@ class AppConfig:
         )
 
 
-def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
-    return GeminiChatClient(
-        model=model or config.model,
-        api_key=config.api_key,
+def _mercury_intuition_client(config: CognitionConfig) -> OpenAIChatClient:
+    # Missing keys stay constructible so smoke runs can report blocked; live calls fail closed.
+    return OpenAIChatClient(
+        model=config.intuition_model,
+        api_key=config.intuition_api_key or "",
+        base_url=config.intuition_base_url,
     )
 
 
-def _mercury_intuition_client(config: CognitionConfig) -> OpenAIChatClient:
-    if not config.intuition_api_key:
-        raise ValueError("intuition_api_key is required for Mercury 2 (set BOT_MERCURY_API_KEY).")
+def _openai_reasoning_client(config: CognitionConfig) -> OpenAIChatClient:
     return OpenAIChatClient(
-        model=config.intuition_model,
-        api_key=config.intuition_api_key,
-        base_url=config.intuition_base_url,
+        model=config.model,
+        api_key=config.api_key or "",
+        base_url=config.base_url,
+    )
+
+
+def _openai_reflection_client(config: CognitionConfig) -> OpenAIChatClient:
+    reflection_key = config.reflection_api_key if config.reflection_api_key is not None else config.api_key
+    return OpenAIChatClient(
+        model=config.reflection_model,
+        api_key=reflection_key or "",
+        base_url=config.reflection_base_url or config.base_url,
     )
 
 
@@ -353,28 +396,35 @@ def _phone_cognition(
 ) -> cognition.Cognition:
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
-    # Mercury 2 intuition (OpenAI-compat); reasoning/reflection on Gemini.
+    # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
     # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
     # execute capability as injected collaborators without attaching it again.
     intuition = OpenAIProcessor(
         client=_mercury_intuition_client(config),
         provider="mercury2_intuition",
     )
-    deliberate = GeminiProcessor(
-        client=_gemini_client(config),
-        provider="gemini",
+    deliberate = OpenAIProcessor(
+        client=_openai_reasoning_client(config),
+        provider="openai_terra_reasoning",
+    )
+    reflection_processor = OpenAIProcessor(
+        client=_openai_reflection_client(config),
+        provider="openai_terra_reflection",
     )
     _LOG.info(
-        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
+        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s "
+        "reasoning_base_url=%s reflection_model=%s",
         config.intuition_model,
         config.intuition_base_url,
         config.model,
+        config.base_url,
+        config.reflection_model,
     )
     return cognition.Cognition(
         autonomy=cognition.Autonomy(memory=store),
         intuition=cognition.Intuition(processor=intuition),
         reasoning=cognition.Reasoning(processor=deliberate, memory=store),
-        reflection=cognition.Reflection(processor=deliberate, memory=store),
+        reflection=cognition.Reflection(processor=reflection_processor, memory=store),
     )
 
 
@@ -436,39 +486,64 @@ class ExampleTextConversation(abilities.TextConversation):
         return tuple(self._failures)
 
 
-class AlwaysVoiceDetector(voice.detection.VoiceDetector):
-    """Example VAD that treats every acoustic chunk as voice (no local ML dependency)."""
+def _is_wav_container(audio: bytes) -> bool:
+    """True when bytes already look like a RIFF/WAVE container (e.g. ring clip)."""
+
+    return len(audio) >= 12 and audio.startswith(b"RIFF") and audio[8:12] == b"WAVE"
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PcmAwareVoiceDetector(voice.detection.VoiceDetector):
+    """Silero VAD with PCM→WAV wrap for LiveKit chunks; pass through real WAV (ring)."""
+
+    pcm_decoder: PcmWavDecoder
+    voice_detector: voice.detection.VoiceDetector
 
     @typing.override
     async def classify(self, input: bytes) -> voice.detection.OutputData:
-        del input
-        return voice.detection.OutputData(is_voice=True, confidence=1.0)
+        wav = input if _is_wav_container(input) else await self.pcm_decoder.decode(input)
+        return await self.voice_detector.classify(wav)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PcmListeningSpeechDecoder(speech.SpeechDecoder):
-    """Wrap LiveKit PCM call audio as WAV before Gemini STT for Listening."""
+    """Cloud Gemini STT: wrap LiveKit PCM as WAV; leave WAV (ring clip) alone."""
 
     pcm_decoder: PcmWavDecoder
     speech_decoder: speech.SpeechDecoder
 
     @typing.override
     async def decode(self, input: bytes) -> bytes:
-        wav = await self.pcm_decoder.decode(input)
+        wav = input if _is_wav_container(input) else await self.pcm_decoder.decode(input)
         return await self.speech_decoder.decode(wav)
 
 
-def _gemini_speech_client(*, api_key: str | None, model: str) -> GeminiChatClient:
-    return GeminiChatClient(api_key=api_key, model=model)
+def _gemini_speech_client(config: SpeechConfig) -> GeminiChatClient:
+    return GeminiChatClient(api_key=config.api_key, model=config.stt_model)
 
 
 def _gemini_speech_decoder(config: SpeechConfig) -> GeminiSpeechDecoder:
-    client = _gemini_speech_client(api_key=config.api_key, model=config.stt_model)
     return GeminiSpeechDecoder(
-        client=client,
+        client=_gemini_speech_client(config),
         model=config.stt_model,
         mime_type="audio/wav",
     )
+
+
+def _gemini_speech_encoder(config: SpeechConfig) -> GeminiSpeechEncoder:
+    return GeminiSpeechEncoder(
+        client=_gemini_speech_client(config),
+        model=config.tts_model,
+        voice_name=config.voice_name,
+        sample_rate_hz=config.output_sample_rate_hz,
+        output_format="wav",
+    )
+
+
+def _silero_voice_detector(config: SpeechConfig) -> SileroVoiceDetector:
+    """Cheap local Silero VAD (MLX Audio). STT/TTS remain off-device Gemini."""
+
+    return SileroVoiceDetector(model_id=config.vad_model_id)
 
 
 def _conversation(speech_config: SpeechConfig | None = None) -> ExampleTextConversation:
@@ -483,10 +558,16 @@ def _conversation(speech_config: SpeechConfig | None = None) -> ExampleTextConve
 
 def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening:
     config = speech_config or SpeechConfig()
+    pcm_decoder = PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels)
     return listening.Listening(
-        voice_detector=AlwaysVoiceDetector(),
+        voice_detector=PcmAwareVoiceDetector(
+            pcm_decoder=pcm_decoder,
+            voice_detector=_silero_voice_detector(config),
+        ),
+        # Non-voice world.sound with SoundData.kind (e.g. ring) becomes cognition.InputEvent.
+        sound_classifier=sound_hearing.classification.KindSoundClassifier(),
         speech_decoder=PcmListeningSpeechDecoder(
-            pcm_decoder=PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels),
+            pcm_decoder=pcm_decoder,
             speech_decoder=_gemini_speech_decoder(config),
         ),
     )
@@ -500,20 +581,12 @@ def _speaking(
     """Bot output ability: Gemini TTS + phone speaker playout (world.sound elevation)."""
 
     config = speech_config or SpeechConfig()
-    client = _gemini_speech_client(api_key=config.api_key, model=config.tts_model)
-    encoder = GeminiSpeechEncoder(
-        client=client,
-        model=config.tts_model,
-        voice_name=config.voice_name,
-        sample_rate_hz=config.output_sample_rate_hz,
-        output_format="pcm",
-    )
     return speaking.Speaking(
-        encoder=encoder,
+        encoder=_gemini_speech_encoder(config),
         speaker=speaker,
         sample_rate_hz=config.output_sample_rate_hz,
         channels=config.output_channels,
-        media_type="audio/pcm",
+        media_type="audio/wav",
     )
 
 
@@ -833,7 +906,21 @@ def _warnings(config: AppConfig, *, connect_livekit: bool) -> list[str]:
     elif not config.env_path.exists():
         warnings.append("Provider env file was not found; using example defaults.")
     if not config.cognition.api_key:
-        warnings.append("BOT_GEMINI_API_KEY / GEMINI_API_KEY is missing; Gemini cognition will fail.")
+        warnings.append("BOT_OPENAI_API_KEY / OPENAI_API_KEY is missing; OpenAI Terra reasoning will fail.")
+    if not config.cognition.intuition_api_key:
+        warnings.append("BOT_MERCURY_API_KEY / MERCURY_API_KEY is missing; Mercury intuition will fail.")
+    reflection_key = (
+        config.cognition.reflection_api_key
+        if config.cognition.reflection_api_key is not None
+        else config.cognition.api_key
+    )
+    if not reflection_key:
+        warnings.append("BOT_OPENAI_API_KEY / OPENAI_API_KEY is missing; OpenAI Terra reflection will fail.")
+    if not config.speech.api_key:
+        warnings.append(
+            "BOT_GEMINI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY is missing; "
+            "off-device Gemini STT/TTS will fail (VAD stays local Silero)."
+        )
     if not config.livekit.can_connect_room():
         warnings.append(
             "BOT_LIVEKIT_URL/VA_LIVEKIT_URL and BOT_LIVEKIT_TOKEN/VA_LIVEKIT_TOKEN are missing; "
@@ -841,8 +928,6 @@ def _warnings(config: AppConfig, *, connect_livekit: bool) -> list[str]:
         )
     if config.livekit.can_connect_room() and not connect_livekit:
         warnings.append("LiveKit room config is loaded but connection is opt-in; pass --connect-livekit to attempt it.")
-    if not config.speech.api_key:
-        warnings.append("BOT_GEMINI_API_KEY / GEMINI_API_KEY is missing; Gemini speech encode/decode will fail.")
     return warnings
 
 
@@ -867,20 +952,34 @@ def _summary_for(
         "cognition_client": (
             f"mercury={app_config.cognition.intuition_model}@"
             f"{app_config.cognition.intuition_base_url} "
-            f"gemini={app_config.cognition.model}"
+            f"openai_terra_reasoning={app_config.cognition.model}@"
+            f"{app_config.cognition.base_url} "
+            f"openai_terra_reflection={app_config.cognition.reflection_model}"
         ),
+        "mercury_intuition": {
+            "model": app_config.cognition.intuition_model,
+            "base_url": app_config.cognition.intuition_base_url,
+            "api_key_loaded": bool(app_config.cognition.intuition_api_key),
+        },
         "livekit_room_audio_attempted": room_attempted,
         "livekit_room_audio_configured": app_config.livekit.can_connect_room(),
         "livekit_room_audio_connected": room_connected,
         "livekit_remote_audio_chunks": snapshot.remote_audio_chunks,
         "livekit_remote_audio_bytes": snapshot.remote_audio_bytes,
         "warnings": _warnings(app_config, connect_livekit=connect_livekit),
-        "gemini": {
+        "openai_reasoning": {
             "model": app_config.cognition.model,
             "api_key_loaded": bool(app_config.cognition.api_key),
-            "tts_model": app_config.speech.tts_model,
-            "stt_model": app_config.speech.stt_model,
-            "voice_name": app_config.speech.voice_name,
+            "base_url": app_config.cognition.base_url,
+        },
+        "openai_reflection": {
+            "model": app_config.cognition.reflection_model,
+            "api_key_loaded": bool(
+                app_config.cognition.reflection_api_key
+                if app_config.cognition.reflection_api_key is not None
+                else app_config.cognition.api_key
+            ),
+            "base_url": app_config.cognition.reflection_base_url,
         },
         "livekit": {
             "url_loaded": bool(app_config.livekit.url),
@@ -891,10 +990,14 @@ def _summary_for(
             "track_name": app_config.livekit.track_name,
         },
         "speech": {
-            "api_key_loaded": bool(app_config.speech.api_key),
             "voice_name": app_config.speech.voice_name,
             "tts_model": app_config.speech.tts_model,
             "stt_model": app_config.speech.stt_model,
+            "vad_model_id": app_config.speech.vad_model_id,
+            "api_key_loaded": bool(app_config.speech.api_key),
+            "stt_provider": "gemini",
+            "vad_provider": "silero",
+            "tts_provider": "gemini",
             "input_sample_rate_hz": app_config.speech.input_sample_rate_hz,
             "input_channels": app_config.speech.input_channels,
             "output_sample_rate_hz": app_config.speech.output_sample_rate_hz,
@@ -923,7 +1026,18 @@ async def run(
     )
     speaker = audio.Speaker()
     phone = phone_device.Phone(service=phone_service, speaker=speaker)
+    # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).
+    listening_ability = _listening(app_config.speech)
     speaking_ability = _speaking(speaker=speaker, speech_config=app_config.speech)
+    _LOG.info(
+        "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
+        "tts_voice=%s vad_provider=silero vad_model_id=%s api_key_loaded=%s",
+        app_config.speech.stt_model,
+        app_config.speech.tts_model,
+        app_config.speech.voice_name,
+        app_config.speech.vad_model_id,
+        bool(app_config.speech.api_key),
+    )
     body = await start_bot(
         "alice",
         config=app_config,
@@ -931,6 +1045,7 @@ async def run(
         phone=phone,
         phone_service=phone_service,
         cognition=cognition_ability,
+        listening=listening_ability,
         speaking=speaking_ability,
         conversation=conversation,
         memory=store,
@@ -979,14 +1094,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     _ = parser.add_argument("--json", action="store_true", help="Print the compact machine-readable summary.")
     _ = parser.add_argument("--env", default=None, help="Provider env file.")
-    _ = parser.add_argument("--gemini-model", default=None, help="Override the Gemini cognition model.")
+    _ = parser.add_argument(
+        "--reasoning-model",
+        default=None,
+        help="Override the OpenAI Terra reasoning model (default gpt-5.6-terra).",
+    )
     _ = parser.add_argument("--connect-livekit", action="store_true", help="Attempt the configured LiveKit room join.")
     args = parser.parse_args()
     env_arg = typing.cast(str | None, getattr(args, "env", None))
     env_path = pathlib.Path(env_arg).expanduser() if env_arg is not None else None
     config = AppConfig.from_env_file(env_path)
     config = config.with_cognition_overrides(
-        model=typing.cast(str | None, getattr(args, "gemini_model", None)),
+        model=typing.cast(str | None, getattr(args, "reasoning_model", None)),
     )
     summary = asyncio.run(
         run(

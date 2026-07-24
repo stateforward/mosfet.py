@@ -24,10 +24,9 @@ Pass `--play` to `afplay` the heard and reply audio.
 
 `phone_bot` is its own example package because it depends on real provider
 packages: LiveKit for the phone device and room audio, OpenAI-compatible
-cognition, ElevenLabs speech output, MLX Audio speech-to-text, and SQLite memory
-codecs. Its package metadata declares `bot-provider-livekit`,
-`bot-provider-openai-compat`, `bot-provider-elevenlabs`,
-`bot-provider-mlx-audio`, and `bot-provider-sqlite-memory`. It can read a
+cognition, Gemini STT/TTS, and SQLite memory codecs. Its package metadata
+declares `bot-provider-livekit`, `bot-provider-openai-compat`,
+`bot-provider-gemini`, and `bot-provider-sqlite-memory`. It can read a
 local provider env file passed with `--env`, constructs one phone-capable agent,
 and reports which provider credentials were loaded without printing secret
 values. The JSON summary separates constructed provider components from
@@ -43,16 +42,13 @@ uv run --project examples/phone_bot phone-bot-example --env path/to/provider.env
 
 Passing `--connect-livekit` explicitly attempts the configured LiveKit room
 join; the default command only constructs the bot and reports configuration
-state. The example reports `can_talk` only after a LiveKit room is connected, a
-remote PCM audio chunk reaches the HSM voice bridge, `VoiceConversation`
-produces a provider-backed speech response, and that response is published back
-through the LiveKit room audio endpoint. Unit tests cover the HSM handoff and a
-local LiveKit SDK audio-source boundary; they are not live room proof.
+state. The example reports `can_talk` when the LiveKit room is connected and
+cognition + Gemini speech credentials are loaded. Unit tests cover package
+contracts and configuration summaries; they are not live room proof.
 
-The current stateforward.bot library still needs modeled turn segmentation for remote
-LiveKit PCM frames, a separate ElevenLabs speech-to-text provider if that backend
-is required, and a LiveKit SIP call-control gateway. The ElevenLabs provider used
-by this example is speech output only.
+Remote LiveKit PCM frames are batched into utterance-sized chunks at the LiveKit
+provider boundary before Listening. A LiveKit SIP call-control gateway remains
+out of scope for this example.
 
 Executable examples use this shebang:
 
