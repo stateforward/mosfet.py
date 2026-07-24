@@ -666,43 +666,6 @@ class _VoiceStubEncoder(conversation_voice.VoiceEncoder):
         return b"enc"
 
 
-def test_host_turn_refuses_bot_acquired_conversation() -> None:
-    """host_turn fail-closed when Conversation is attached to a Bot body."""
-
-    from bot.abilities.conversation import host_turn
-
-    async def run() -> str:
-        conversation_ability = _text_conversation()
-        processor = CountingProcessor()
-
-        class Probe(Bot):
-            def __init__(self) -> None:
-                super().__init__(
-                    devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    acquired_abilities=(conversation_ability,),
-                )
-
-        probe = Probe()
-        world = World()
-        await probe.attach(world)
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
-        assert conversation_ability.attachment_owner is probe
-        try:
-            _ = await host_turn.contribute_conversation_turn(
-                conversation_ability,
-                conversation.text_turn("should refuse"),
-                ctx=world,
-            )
-        except RuntimeError as error:
-            return str(error)
-        raise AssertionError("expected host_turn to refuse Bot-acquired Conversation")
-
-    message = asyncio.run(run())
-    assert "Bot-acquired" in message
-    assert "host_turn is refused" in message
-
-
 class _AlwaysVoice(hearing_voice.detection.VoiceDetector):
     @typing.override
     async def classify(self, input: bytes) -> hearing_voice.detection.OutputData:

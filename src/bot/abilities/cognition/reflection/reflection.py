@@ -612,7 +612,7 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        processing.dispatch_reboot(
+        processing.request_reboot(
             ctx,
             instance,
             event,

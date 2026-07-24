@@ -603,19 +603,6 @@ class Conversation(
         self._active_turn_id = None
         self._contribution_waiters = {}
 
-    def is_acquired_by_body(self) -> bool:
-        """True when this conversation is attached under a Bot body product path.
-
-        Bot-acquired conversations use the body bridge (contribution → cognition → Speaking).
-        Standalone host_turn composition must not run on those instances (double cognition).
-        """
-
-        if not self._attachments:
-            return False
-        owner = self._attachments[0]
-        # Avoid importing bot (cycle); Bot is the only body machine class name.
-        return any(cls.__name__ == "Bot" for cls in type(owner).mro())
-
     def register_contribution_waiter(self, operation_id: str, waiter: asyncio.Future[object]) -> None:
         """Register a host Future completed with ParticipatedTurn for ``operation_id``."""
 

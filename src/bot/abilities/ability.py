@@ -251,6 +251,12 @@ TerminalErrorEvent = hsm.Event[hsm.Event[typing.Any]](
     kind=hsm.ErrorEventKind,
     schema=hsm.Event[typing.Any],
 )
+# Self-dispatched by an ability that cannot recover on its own. Carries the built reboot event so
+# the reason stays typed in the domain that owns it; Ability lifecycle forwards it to the owner.
+RebootRequestEvent = hsm.Event[hsm.Event[typing.Any]](
+    name="bot.ability.reboot.request",
+    schema=hsm.Event[typing.Any],
+)
 
 
 def ability_input_event(
@@ -380,7 +386,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             child.clear_terminal_waiter(operation_id)
 
     @staticmethod
-    def _has_terminal_event(
+    def _carries_event(
         ctx: hsm.Context,
         instance: "Ability[typing.Any, typing.Any]",
         event: hsm.Event[typing.Any],
@@ -411,6 +417,34 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 source=hsm.id(instance),
                 target=hsm.id(owner),
                 metadata=dict(terminal.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _forward_reboot_to_owner(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Forward a self-requested reboot to this ability's attachment owner.
+
+        No owner attached means nothing can act on the request, so nothing is sent.
+        """
+
+        reboot = event.data
+        assert isinstance(reboot, hsm.Event)
+        if not instance._attachments:
+            return
+        owner = instance._attachments[0]
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                reboot,
+                id=reboot.id or event.id or uuid.uuid4().hex,
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=dict(event.metadata),
             ),
         )
 
@@ -799,13 +833,18 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             ),
             hsm.transition(
                 hsm.on(TerminalOutputEvent),
-                hsm.guard(_has_terminal_event),
+                hsm.guard(_carries_event),
                 hsm.effect(_forward_terminal_event),
             ),
             hsm.transition(
                 hsm.on(TerminalErrorEvent),
-                hsm.guard(_has_terminal_event),
+                hsm.guard(_carries_event),
                 hsm.effect(_forward_terminal_event),
+            ),
+            hsm.transition(
+                hsm.on(RebootRequestEvent),
+                hsm.guard(_carries_event),
+                hsm.effect(_forward_reboot_to_owner),
             ),
         ),
         hsm.observe(observer),
@@ -915,13 +954,18 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 ),
                 hsm.transition(
                     hsm.on(TerminalOutputEvent),
-                    hsm.guard(Ability._has_terminal_event),
+                    hsm.guard(Ability._carries_event),
                     hsm.effect(Ability._forward_terminal_event),
                 ),
                 hsm.transition(
                     hsm.on(TerminalErrorEvent),
-                    hsm.guard(Ability._has_terminal_event),
+                    hsm.guard(Ability._carries_event),
                     hsm.effect(Ability._forward_terminal_event),
+                ),
+                hsm.transition(
+                    hsm.on(RebootRequestEvent),
+                    hsm.guard(Ability._carries_event),
+                    hsm.effect(Ability._forward_reboot_to_owner),
                 ),
             ),
             hsm.observe(observer),
@@ -946,18 +990,6 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._terminal_waiters = {}
-
-    @property
-    def attachment_owner(self) -> hsm.Instance | None:
-        """First attachment owner (Bot body or host), if any.
-
-        Public surface for host_turn fail-closed checks and owner-targeted delivery without
-        reading private ``_attachments`` from outside Ability.
-        """
-
-        if not self._attachments:
-            return None
-        return self._attachments[0]
 
     @typing.override
     def attach(
@@ -1054,6 +1086,7 @@ __all__ = [
     "FailedEvent",
     "InputEvent",
     "OutputEvent",
+    "RebootRequestEvent",
     "TerminalErrorEvent",
     "TerminalOutputEvent",
     "Ability",

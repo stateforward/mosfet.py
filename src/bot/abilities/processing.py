@@ -781,30 +781,31 @@ def dispatch_terminal_failure(
         finish_operation(ctx, instance, operation_id)
 
 
-def dispatch_reboot(
+def request_reboot(
     ctx: hsm.Context,
     instance: ability.Ability[typing.Any, typing.Any],
     event: Event[typing.Any],
     *,
     reason: "bot.RebootReason",
 ) -> None:
-    """Ask the attachment owner for a clean robot lifecycle restart.
+    """Ask this ability for a clean robot lifecycle restart.
 
     ``reason`` is the calling ability's own domain-scoped failure category; this helper owns only
-    the envelope. No owner attached means nothing can act on the request, so nothing is sent.
+    the envelope. Ability lifecycle forwards the carried reboot to whichever owner is attached.
     """
 
-    owner = instance.attachment_owner
-    if owner is None:
-        return
+    request_id = event.id or uuid.uuid4().hex
     _ = hsm.dispatch(
         ctx,
-        owner,
+        instance,
         dataclasses.replace(
-            bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
-            id=event.id or uuid.uuid4().hex,
-            source=hsm.id(instance),
-            target=hsm.id(owner),
+            ability.RebootRequestEvent.with_data(
+                dataclasses.replace(
+                    bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
+                    id=request_id,
+                )
+            ),
+            id=request_id,
             metadata=dict(event.metadata),
         ),
     )
@@ -1625,7 +1626,6 @@ __all__ = [
     "cancellation_operation_id",
     "coerce_event_selections",
     "dispatch_child_cancel",
-    "dispatch_reboot",
     "dispatch_selected_events",
     "dispatch_terminal_failure",
     "dispatch_terminal_output",
@@ -1641,6 +1641,7 @@ __all__ = [
     "normalize_confidence",
     "patch_field_names",
     "patched_event_data_model",
+    "request_reboot",
     "selection_confidence",
     "start_operation",
     "unpatch_event_data",

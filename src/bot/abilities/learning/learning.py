@@ -1222,7 +1222,7 @@ class Learning(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
-        processing.dispatch_reboot(
+        processing.request_reboot(
             ctx,
             instance,
             event,
