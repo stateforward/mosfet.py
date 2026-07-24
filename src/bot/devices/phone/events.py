@@ -1,4 +1,5 @@
 from bot.devices import audio
+from bot.world import SoundData
 
 import typing
 
@@ -11,9 +12,12 @@ CallId = typing.Annotated[
         min_length=1,
         description=(
             "Provider-neutral identifier for one phone call. Firmware uses this value to reject stale service "
-            "callbacks and commands for a previous call."
+            "callbacks and commands for a previous call. "
+            "When answering or declining a ring elevated as world.sound, copy this from the stimulus "
+            "event.data.call_id (also mirrored on event.id for correlation) — never a documentation "
+            "example such as call-123."
         ),
-        examples=["call-123"],
+        examples=["livekit:caller", "sip:session-9f3a"],
     ),
 ]
 TransferId = typing.Annotated[
@@ -45,7 +49,7 @@ class CallIdData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"call_id": "call-123"}],
+            "examples": [{"call_id": "livekit:caller"}],
         },
     )
 
@@ -287,6 +291,45 @@ class RingingData(PhoneCallData):
     Distinct from :class:`PhoneCallData` used by answered/media-ready so world elevation
     can select ring acoustics by payload type without ``event.name`` discrimination.
     """
+
+
+class PhoneSoundData(SoundData):
+    """``world.sound`` payload elevated from phone ringing (or call-scoped acoustic energy).
+
+    Subclasses :class:`~bot.world.SoundData` with a typed ``call_id`` so models copy
+    ``event.data.call_id`` into answer/decline tools instead of inferring from ``event.id``.
+    Elevation also mirrors ``call_id`` onto ``event.id`` for HSM correlation.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+        json_schema_extra={
+            "description": (
+                "Phone-elevated acoustic stimulus for world.sound. Includes call_id so tool "
+                "arguments can copy event.data.call_id directly."
+            ),
+            "examples": [
+                {
+                    "audio": "YXVkaW8tY2h1bms=",
+                    "media_type": "audio/wav",
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "kind": "phone.ringing",
+                    "call_id": "livekit:caller",
+                }
+            ],
+        },
+    )
+
+    call_id: CallId = pydantic.Field(
+        description=(
+            "Live provider-neutral call identifier for this elevated phone sound. When kind is "
+            "phone.ringing or phone.call, answer/decline tools must use this value as call_id."
+        ),
+        examples=["livekit:caller", "sip:session-9f3a"],
+    )
 
 
 class PhoneHungUpData(CallIdData):

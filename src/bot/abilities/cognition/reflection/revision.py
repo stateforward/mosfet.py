@@ -1,4 +1,4 @@
-"""Typed habit revision actor owned by post-output reflection."""
+"""Typed behavior revision actor owned by post-output reflection."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from ... import processing
 
 import dataclasses
 import datetime
-import functools
 import typing
 import uuid
 
@@ -18,14 +17,14 @@ from pydantic.json_schema import SkipJsonSchema
 import pydantic
 from sqlalchemy.sql import Executable
 
-from bot.habit import ChangeData
-from bot.habit import ChangeEvent
-from bot.habit import CreateData
-from bot.habit import diagnostic as habit_diagnostic
-from bot.habit import storage as habit_storage
-from bot.habit.instance import STATUS_REASON_VALIDATION
-from bot.habit.instance import Instance
-from bot.habit.source import STARLARK_API
+from bot.behavior import ChangeData
+from bot.behavior import ChangeEvent
+from bot.behavior import CreateData
+from bot.behavior import diagnostic as behavior_diagnostic
+from bot.behavior import storage as behavior_storage
+from bot.behavior.instance import STATUS_REASON_VALIDATION
+from bot.behavior.instance import Instance
+from bot.behavior.source import STARLARK_API
 from bot.protocols import attachment
 from bot.telemetry import observer
 
@@ -34,21 +33,21 @@ from .. import input
 from .. import types
 
 CHANGE_INSTRUCTIONS = (
-    "You are in the changing phase: author or revise Starlark for the stored habit. "
-    "existing_habit is the current inventory row (source may be empty for a new create stub; "
-    "status may be DRAFT or BROKEN for unfinished or retired habits). "
-    "Select the offered bot.habit.change event once with the same name and required `source`. "
-    "If existing_habit.source is empty, write a full new program from this turn, prior_episodes, "
+    "You are in the changing phase: author or revise Starlark for the stored behavior. "
+    "existing_behavior is the current inventory row (source may be empty for a new create stub; "
+    "status may be DRAFT or BROKEN for unfinished or retired behaviors). "
+    "Select the offered bot.behavior.change event once with the same name and required `source`. "
+    "If existing_behavior.source is empty, write a full new program from this turn, prior_episodes, "
     "and intent — invent event contracts, guards, and effects from the observed pattern only. "
     "If source is non-empty, rewrite or patch it so it better fits this turn and prior_episodes. "
-    "Keep the model name stable unless the intent clearly renames the habit.\n"
-    "Habit terminal output must be a cognition event selection object (keys: event, target?, data?, reason?) "
+    "Keep the model name stable unless the intent clearly renames the behavior.\n"
+    "Behavior terminal output must be a cognition event selection object (keys: event, target?, data?, reason?) "
     "or a list of such objects, matching the shape of prior episode / this-turn outputs. "
     "output_event JSON schema root must be type object. "
     "Derive input fields, guards, and selection field names from the observed pattern. "
     "At runtime, fill selection data from the live event data — "
     "never hardcode identifier values copied from episode examples. "
-    "Set triggers to the stimulus names that should propose the habit. "
+    "Set triggers to the stimulus names that should propose the behavior. "
     "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
     "Starlark only: no Python docstrings, type annotations, or imports; callbacks are def name(event): ...\n"
     "If diagnostics is present, prior source failed validation: revise `source` to clear every error "
@@ -59,11 +58,10 @@ CHANGE_INSTRUCTIONS = (
 
 _CHANGE_ID_SUFFIX = ":change"
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
-_MAX_FIX_ATTEMPTS = 2
 
 
 class ProcessorFactory(typing.Protocol):
-    """Build the provider-neutral processor used to author habit source."""
+    """Build the provider-neutral processor used to author behavior source."""
 
     def __call__(self) -> processing.Processor: ...
 
@@ -105,7 +103,7 @@ class InputData(pydantic.BaseModel):
 
 
 class OutputData(pydantic.BaseModel):
-    """Applied habit revision and the turn needed by Reflection to store its episode."""
+    """Applied behavior revision and the turn needed by Reflection to store its episode."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -115,7 +113,7 @@ class OutputData(pydantic.BaseModel):
 
     input: InputData = pydantic.Field(description="Immutable revision input and parent-turn correlation.")
     applied: CreateData | ChangeData = pydantic.Field(
-        description="Validated create or change payload persisted to habit inventory."
+        description="Validated create or change payload persisted to behavior inventory."
     )
 
 
@@ -132,12 +130,12 @@ class FailureData(pydantic.BaseModel):
     message: str = pydantic.Field(
         min_length=1,
         description="Actionable revision failure suitable for the parent ability terminal.",
-        examples=["Reflection change abandoned: retry budget exhausted."],
+        examples=["Reflection change abandoned: same diagnostic message after fix."],
     )
 
 
 class ChangeWriteInput(pydantic.BaseModel):
-    """Changing-phase input: turn context, change intent, and the stored existing habit."""
+    """Changing-phase input: turn context, change intent, and the stored existing behavior."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -145,8 +143,8 @@ class ChangeWriteInput(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Author or revise executable habit Starlark. existing_habit may be an empty DRAFT "
-                "create stub or an ACTIVE/DRAFT/BROKEN installed habit. Return ChangeData with source. "
+                "Author or revise executable behavior Starlark. existing_behavior may be an empty DRAFT "
+                "create stub or an ACTIVE/DRAFT/BROKEN installed behavior. Return ChangeData with source. "
                 "When diagnostics is set, revise failed_source."
             ),
         },
@@ -163,14 +161,14 @@ class ChangeWriteInput(pydantic.BaseModel):
         description="Prior cognition episodes recalled for this reflection.",
     )
     intent: ChangeData = pydantic.Field(
-        description="Change payload naming the habit to author or revise.",
+        description="Change payload naming the behavior to author or revise.",
     )
-    existing_habit: Instance = pydantic.Field(
+    existing_behavior: Instance = pydantic.Field(
         description=(
-            "Current inventory habit: empty DRAFT stub (create) or ACTIVE/DRAFT/BROKEN row (including source)."
+            "Current inventory behavior: empty DRAFT stub (create) or ACTIVE/DRAFT/BROKEN row (including source)."
         ),
     )
-    diagnostics: habit_diagnostic.Report | None = pydantic.Field(
+    diagnostics: behavior_diagnostic.Report | None = pydantic.Field(
         default=None,
         description="Structured validation failures from a prior change attempt, if any.",
     )
@@ -181,7 +179,13 @@ class ChangeWriteInput(pydantic.BaseModel):
     )
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
-    attempt: int = pydantic.Field(ge=0, le=_MAX_FIX_ATTEMPTS)
+    attempt: int = pydantic.Field(
+        ge=0,
+        description=(
+            "Zero-based authoring attempt index for child correlation. Retries continue while "
+            "diagnostic messages change; same messages twice abandons (no fixed attempt budget)."
+        ),
+    )
     create_intent: CreateData | None = None
     previous_messages: tuple[str, ...] | None = None
 
@@ -199,8 +203,8 @@ class _CheckedData(pydantic.BaseModel):
     write: ChangeWriteInput
     generation: str = pydantic.Field(min_length=1)
     written: ChangeData
-    habit_instance: Instance | None = None
-    report: habit_diagnostic.Report = pydantic.Field(default_factory=habit_diagnostic.Report)
+    behavior_instance: Instance | None = None
+    report: behavior_diagnostic.Report = pydantic.Field(default_factory=behavior_diagnostic.Report)
     existing: Instance | None = None
 
 
@@ -209,7 +213,7 @@ class _StartedData(pydantic.BaseModel):
 
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
-    attempt: int = pydantic.Field(ge=0, le=_MAX_FIX_ATTEMPTS)
+    attempt: int = pydantic.Field(ge=0)
 
 
 class _FailedData(pydantic.BaseModel):
@@ -264,25 +268,25 @@ def _compile_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, 
     return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
 
 
-def _load_habit(store: memory.Memory, name: str) -> Instance | None:
+def _load_behavior(store: memory.Memory, name: str) -> Instance | None:
     output = store.execute(
-        memory.InputData(statements=_compile_statements(habit_storage.select_habit_by_name_clauses(name)))
+        memory.InputData(statements=_compile_statements(behavior_storage.select_behavior_by_name_clauses(name)))
     )
     if len(output.results) < 2:
         return None
-    habits = habit_storage.instances_from_habit_results(
+    behaviors = behavior_storage.instances_from_behavior_results(
         tuple(row.as_mapping() for row in output.results[0].rows),
         tuple(row.as_mapping() for row in output.results[1].rows),
     )
-    return habits[0] if habits else None
+    return behaviors[0] if behaviors else None
 
 
-def _store_habit(store: memory.Memory, habit: Instance) -> None:
-    _ = store.execute(memory.InputData(statements=_compile_statements(habit_storage.replace_habit_clauses(habit))))
+def _store_behavior(store: memory.Memory, behavior: Instance) -> None:
+    _ = store.execute(memory.InputData(statements=_compile_statements(behavior_storage.replace_behavior_clauses(behavior))))
 
 
 def _draft(intent: CreateData) -> Instance:
-    return habit_storage.mark_draft(
+    return behavior_storage.mark_draft(
         Instance(
             name=intent.name,
             source="",
@@ -298,32 +302,36 @@ def _coerce_change(value: object) -> ChangeData:
     selections = processing.coerce_event_selections(value)
     if selections is not None:
         if len(selections) != 1 or selections[0].event != ChangeEvent.name:
-            raise TypeError("Revision must return exactly one bot.habit.change event.")
+            raise TypeError("Revision must return exactly one bot.behavior.change event.")
         return ChangeData.model_validate(selections[0].data or {})
     return ChangeData.model_validate(value)
 
 
-def _check(write: ChangeWriteInput, written: ChangeData) -> habit_diagnostic.Checked[Instance]:
-    from bot.habit.verify import verify_apply
+def _check(write: ChangeWriteInput, written: ChangeData) -> behavior_diagnostic.Checked[Instance]:
+    from bot.behavior.verify import verify_apply
     from .. import autonomy
 
     if written.source is None or not written.source.strip():
-        report = habit_diagnostic.report_of(
-            habit_diagnostic.diagnostic(
-                code=habit_diagnostic.E0001_EMPTY,
-                message="Executable habit write requires non-empty starlark source.",
-                stage=habit_diagnostic.Stage.INVENTORY,
-                help=habit_diagnostic.help_for(habit_diagnostic.E0001_EMPTY),
+        report = behavior_diagnostic.report_of(
+            behavior_diagnostic.diagnostic(
+                code=behavior_diagnostic.E0001_EMPTY,
+                message="Executable behavior write requires non-empty starlark source.",
+                stage=behavior_diagnostic.Stage.INVENTORY,
+                help=behavior_diagnostic.help_for(behavior_diagnostic.E0001_EMPTY),
             )
         )
-        return habit_diagnostic.Checked[Instance](value=None, report=report)
+        return behavior_diagnostic.Checked[Instance](value=None, report=report)
+    event_id, source, target = autonomy.behavior_event_fields(write.cognition_input)
     return verify_apply(
         written.source,
         name=written.name,
         triggers=written.triggers if written.triggers else None,
         description=written.description,
-        input_data=autonomy.habit_input_payload(write.cognition_input),
+        input_data=autonomy.behavior_input_payload(write.cognition_input),
         metadata={},
+        event_id=event_id,
+        source=source,
+        target=target,
     )
 
 
@@ -333,12 +341,12 @@ def _inventory_instance(
     existing: Instance | None,
 ) -> Instance | None:
     if checked is not None:
-        return habit_storage.preserve_usage(habit_storage.mark_active(checked), existing)
+        return behavior_storage.preserve_usage(behavior_storage.mark_active(checked), existing)
     if written.source is None or not written.source.strip():
         return None
     triggers = written.triggers or (existing.triggers if existing is not None else ())
     description = written.description or (existing.description if existing is not None else "")
-    draft = habit_storage.mark_draft(
+    draft = behavior_storage.mark_draft(
         Instance(
             name=written.name,
             source=written.source.strip(),
@@ -347,7 +355,7 @@ def _inventory_instance(
         ),
         reason=STATUS_REASON_VALIDATION,
     )
-    return habit_storage.preserve_usage(draft, existing)
+    return behavior_storage.preserve_usage(draft, existing)
 
 
 def _revision_input(write: ChangeWriteInput) -> InputData:
@@ -362,7 +370,7 @@ def _revision_input(write: ChangeWriteInput) -> InputData:
 
 
 class Revision(processing.Processing):
-    """Create or change one habit through typed author, validate, retry, and persist states."""
+    """Create or change one behavior through typed author, validate, retry, and persist states."""
 
     instructions: typing.ClassVar[str] = CHANGE_INSTRUCTIONS
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -370,12 +378,12 @@ class Revision(processing.Processing):
     input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
         "bot.ability.reflection.revision.input",
         InputData,
-        description="Create or revise one installed habit from a reflected cognition turn.",
+        description="Create or revise one installed behavior from a reflected cognition turn.",
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
         "bot.ability.reflection.revision.output",
         OutputData,
-        description="A validated habit revision persisted to inventory.",
+        description="A validated behavior revision persisted to inventory.",
     )
     failed_event: typing.ClassVar[hsm.Event[FailureData]] = hsm.Event[FailureData](
         name=ability.FailedEvent.name,
@@ -387,7 +395,7 @@ class Revision(processing.Processing):
     _change_processing: processing.Processing
     _memory: memory.Memory
     # Authoring attempt index for child correlation (HSM-CORRELATION-001 / HSM-CONTEXT-001).
-    # Set by attempt-state entry effects — never parsed from instance.state().
+    # Set from write.attempt in _dispatch_change — never parsed from instance.state().
     _active_attempt: int | None
 
     @staticmethod
@@ -435,17 +443,6 @@ class Revision(processing.Processing):
         return Revision._child_id(operation_id, attempt, hsm.id(operation))
 
     @staticmethod
-    def _set_active_attempt(
-        ctx: hsm.Context,
-        instance: "Revision",
-        event: hsm.Event[typing.Any],
-        *,
-        attempt: int,
-    ) -> None:
-        del ctx, event
-        instance._active_attempt = attempt
-
-    @staticmethod
     def _clear_active_attempt(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
         instance._active_attempt = None
@@ -490,10 +487,10 @@ class Revision(processing.Processing):
         try:
             if isinstance(data.intent, CreateData):
                 create_intent = data.intent
-                existing = _load_habit(instance._memory, create_intent.name)
+                existing = _load_behavior(instance._memory, create_intent.name)
                 if existing is None:
                     existing = _draft(create_intent)
-                    _store_habit(instance._memory, existing)
+                    _store_behavior(instance._memory, existing)
                 intent = ChangeData(
                     name=create_intent.name,
                     triggers=create_intent.triggers,
@@ -503,9 +500,9 @@ class Revision(processing.Processing):
             else:
                 create_intent = None
                 intent = data.intent
-                existing = _load_habit(instance._memory, intent.name)
+                existing = _load_behavior(instance._memory, intent.name)
                 if existing is None:
-                    raise ValueError(f"Revision selected unknown habit: {intent.name}.")
+                    raise ValueError(f"Revision selected unknown behavior: {intent.name}.")
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -531,7 +528,7 @@ class Revision(processing.Processing):
             cognition_output=data.cognition_output,
             prior_episodes=data.prior_episodes,
             intent=intent,
-            existing_habit=existing,
+            existing_behavior=existing,
             operation_id=operation_id,
             generation=data.parent_generation,
             attempt=0,
@@ -559,6 +556,8 @@ class Revision(processing.Processing):
         data = event.data
         assert isinstance(data, _RequestedData)
         write = data.write
+        # Correlation uses free-running attempt index (no fixed attempt substates / budget).
+        instance._active_attempt = write.attempt
         request = processing.InputData(
             input=write,
             schemas=(ChangeEvent,),
@@ -594,24 +593,6 @@ class Revision(processing.Processing):
     def _has_started(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         return isinstance(event.data, _StartedData) and Revision._matches_private_operation(instance, event)
-
-    @staticmethod
-    def _attempt_is(
-        ctx: hsm.Context,
-        instance: "Revision",
-        event: hsm.Event[typing.Any],
-        attempt: int,
-    ) -> bool:
-        del ctx, instance
-        return isinstance(event.data, _StartedData) and event.data.attempt == attempt
-
-    @staticmethod
-    def _attempt_is_0(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
-        return Revision._attempt_is(ctx, instance, event, 0)
-
-    @staticmethod
-    def _attempt_is_1(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
-        return Revision._attempt_is(ctx, instance, event, 1)
 
     @staticmethod
     def _matches_change_output(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
@@ -651,14 +632,14 @@ class Revision(processing.Processing):
         generation = hsm.id(operation)
         try:
             written = _coerce_change(completion.output)
-            existing = _load_habit(instance._memory, write.existing_habit.name)
+            existing = _load_behavior(instance._memory, write.existing_behavior.name)
             checked = _check(write, written)
             inventory = _inventory_instance(written, checked.value, existing)
             data = _CheckedData(
                 write=write,
                 generation=generation,
                 written=written,
-                habit_instance=inventory,
+                behavior_instance=inventory,
                 report=checked.report,
                 existing=existing,
             )
@@ -691,7 +672,7 @@ class Revision(processing.Processing):
             isinstance(event.data, _CheckedData)
             and Revision._matches_private_operation(instance, event)
             and event.data.report.ok
-            and event.data.habit_instance is not None
+            and event.data.behavior_instance is not None
         )
 
     @staticmethod
@@ -700,10 +681,11 @@ class Revision(processing.Processing):
         if not isinstance(event.data, _CheckedData) or not Revision._matches_private_operation(instance, event):
             return False
         data = event.data
+        if data.report.ok:
+            return False
         messages = tuple(item.message for item in data.report.errors)
-        return (
-            not data.report.ok and data.write.attempt < _MAX_FIX_ATTEMPTS and messages != data.write.previous_messages
-        )
+        # No fixed attempt budget: keep fixing while diagnostics change.
+        return messages != data.write.previous_messages
 
     @staticmethod
     def _abandoned(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
@@ -711,31 +693,32 @@ class Revision(processing.Processing):
         if not isinstance(event.data, _CheckedData) or not Revision._matches_private_operation(instance, event):
             return False
         data = event.data
+        if data.report.ok:
+            return False
         messages = tuple(item.message for item in data.report.errors)
-        return not data.report.ok and (
-            data.write.attempt >= _MAX_FIX_ATTEMPTS or messages == data.write.previous_messages
-        )
+        # Same diagnostic messages twice → stop (prevents infinite repair loops).
+        return data.write.previous_messages is not None and messages == data.write.previous_messages
 
     @staticmethod
     def _persist_draft(instance: "Revision", data: _CheckedData) -> Instance:
-        habit = data.habit_instance
-        if habit is None:
-            habit = habit_storage.mark_draft(data.write.existing_habit, reason=STATUS_REASON_VALIDATION)
-        _store_habit(instance._memory, habit)
-        return habit
+        behavior = data.behavior_instance
+        if behavior is None:
+            behavior = behavior_storage.mark_draft(data.write.existing_behavior, reason=STATUS_REASON_VALIDATION)
+        _store_behavior(instance._memory, behavior)
+        return behavior
 
     @staticmethod
     def _accept(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _CheckedData)
-        assert data.habit_instance is not None
-        _store_habit(instance._memory, data.habit_instance)
+        assert data.behavior_instance is not None
+        _store_behavior(instance._memory, data.behavior_instance)
         written = data.written.model_copy(
             update={
-                "name": data.habit_instance.name,
-                "triggers": data.habit_instance.triggers,
-                "description": data.habit_instance.description or None,
-                "source": data.habit_instance.source,
+                "name": data.behavior_instance.name,
+                "triggers": data.behavior_instance.triggers,
+                "description": data.behavior_instance.description or None,
+                "source": data.behavior_instance.source,
             }
         )
         applied: CreateData | ChangeData
@@ -766,7 +749,7 @@ class Revision(processing.Processing):
         messages = tuple(item.message for item in data.report.errors)
         write = data.write.model_copy(
             update={
-                "existing_habit": existing,
+                "existing_behavior": existing,
                 "diagnostics": data.report,
                 "failed_source": data.written.source,
                 "attempt": data.write.attempt + 1,
@@ -807,18 +790,12 @@ class Revision(processing.Processing):
         data = event.data
         assert isinstance(data, _CheckedData)
         _ = Revision._persist_draft(instance, data)
-        messages = tuple(item.message for item in data.report.errors)
-        reason = (
-            "same diagnostic message after fix"
-            if data.write.previous_messages is not None and messages == data.write.previous_messages
-            else "retry budget exhausted"
-        )
         Revision._fail(
             ctx,
             instance,
             _revision_input(data.write),
             data.write.operation_id,
-            f"Reflection change abandoned: {reason}:\n{data.report.render()}",
+            f"Reflection change abandoned: same diagnostic message after fix:\n{data.report.render()}",
             dict(event.metadata),
         )
 
@@ -1077,7 +1054,7 @@ class Revision(processing.Processing):
             hsm.transition(
                 hsm.on(_StartedEvent),
                 hsm.guard(_has_started),
-                hsm.target("/Revision/attempt"),
+                hsm.target("/Revision/authoring"),
             ),
             hsm.transition(
                 hsm.on(_FailedEvent),
@@ -1086,16 +1063,10 @@ class Revision(processing.Processing):
                 hsm.target("/Revision/idle"),
             ),
         ),
-        hsm.choice(
-            "attempt",
-            hsm.transition(hsm.guard(_attempt_is_0), hsm.target("/Revision/authoring/attempt_0")),
-            hsm.transition(hsm.guard(_attempt_is_1), hsm.target("/Revision/authoring/attempt_1")),
-            hsm.transition(hsm.target("/Revision/authoring/attempt_2")),
-        ),
         hsm.state(
             "authoring",
-            hsm.initial(hsm.target("/Revision/authoring/attempt_0")),
-            # Any leave from authoring (idle, starting, starting_cancel, detaching) drops attempt index.
+            # Attempt index lives on the write payload / _active_attempt (set in _dispatch_change).
+            # Leave authoring clears it so idle cannot match stale child terminals.
             hsm.exit(_clear_active_attempt),
             hsm.defer(input_event),
             hsm.transition(
@@ -1126,18 +1097,6 @@ class Revision(processing.Processing):
                 hsm.on(_CancelRequestedEvent),
                 hsm.guard(_has_cancel_requested),
                 hsm.target("/Revision/starting_cancel"),
-            ),
-            hsm.state(
-                "attempt_0",
-                hsm.entry(functools.partial(_set_active_attempt, attempt=0)),
-            ),
-            hsm.state(
-                "attempt_1",
-                hsm.entry(functools.partial(_set_active_attempt, attempt=1)),
-            ),
-            hsm.state(
-                "attempt_2",
-                hsm.entry(functools.partial(_set_active_attempt, attempt=2)),
             ),
         ),
         hsm.state(

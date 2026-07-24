@@ -9,7 +9,7 @@ import weakref
 import hsm
 
 from bot import abilities
-from bot import habit
+from bot import behavior
 from bot.abilities import cognition
 from bot.protocols import attachment
 
@@ -186,5 +186,5 @@ def phone_service(firmware: phone_device.PhoneFirmware) -> phone_device.PhoneSer
     return typing.cast(phone_device.PhoneService, object.__getattribute__(firmware, "_service"))
 
 
-def habit_spec(instance: object) -> habit.source.Source:
-    return typing.cast(habit.source.Source, object.__getattribute__(instance, "_spec"))
+def behavior_spec(instance: object) -> behavior.source.Source:
+    return typing.cast(behavior.source.Source, object.__getattribute__(instance, "_spec"))

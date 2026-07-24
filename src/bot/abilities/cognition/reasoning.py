@@ -13,13 +13,13 @@ import pydantic
 
 from bot.telemetry import observer
 
-from bot.habit import BreakData, ChangeData, CreateData
+from bot.behavior import BreakData, ChangeData, CreateData
 from . import episodes
 from . import types
 
 DEFAULT_INSTRUCTIONS = (
     "Return the best typed result for the input; use prior_episodes when present; "
-    "set create/change/break only for clear repeated habit patterns; else omit them."
+    "set create/change/break only for clear repeated behavior patterns; else omit them."
 )
 _InitializingCompleteEvent = hsm.Event[object](
     name="bot.ability.reasoning.initializing.complete",
@@ -93,7 +93,7 @@ class ProcessorInput(pydantic.BaseModel):
 
 
 class OutputData(pydantic.BaseModel):
-    """Deliberate cognitive selection plus optional habit create/change/break."""
+    """Deliberate cognitive selection plus optional behavior create/change/break."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -102,7 +102,7 @@ class OutputData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Deliberate cognitive decision produced by reasoning. result is applied by the host; "
-                "set at most one of create, change, or break to record a habit inventory event with the episode."
+                "set at most one of create, change, or break to record a behavior inventory event with the episode."
             ),
             "examples": [
                 {
@@ -125,7 +125,7 @@ class OutputData(pydantic.BaseModel):
                         }
                     ],
                     "create": {
-                        "event": "bot.habit.create",
+                        "event": "bot.behavior.create",
                         "name": "AnswerIncomingRing",
                         "triggers": ["world.sound"],
                         "reason": "Same ring→answer pattern across recalled episodes.",
@@ -162,26 +162,26 @@ class OutputData(pydantic.BaseModel):
     )
     create: CreateData | None = pydantic.Field(
         default=None,
-        description="When set, bot.habit.create payload retained with the episode.",
+        description="When set, bot.behavior.create payload retained with the episode.",
     )
     change: ChangeData | None = pydantic.Field(
         default=None,
-        description="When set, bot.habit.change payload retained with the episode.",
+        description="When set, bot.behavior.change payload retained with the episode.",
     )
     break_: BreakData | None = pydantic.Field(
         default=None,
         alias="break",
-        description="When set, bot.habit.break payload retained with the episode.",
+        description="When set, bot.behavior.break payload retained with the episode.",
     )
 
     @pydantic.model_validator(mode="after")
-    def validate_single_habit_event(self) -> typing.Self:
+    def validate_single_behavior_event(self) -> typing.Self:
         selected = [value for value in (self.create, self.change, self.break_) if value is not None]
         if len(selected) > 1:
             raise ValueError("Set at most one of create, change, or break.")
         return self
 
-    def habit_data(self) -> CreateData | ChangeData | BreakData | None:
+    def behavior_data(self) -> CreateData | ChangeData | BreakData | None:
         if self.create is not None:
             return self.create
         if self.change is not None:
@@ -232,7 +232,7 @@ class _ReasonedEventData(pydantic.BaseModel):
 
 
 class _RetainedEventData(pydantic.BaseModel):
-    """Private completion: episode (and habit learning) written to memory when required."""
+    """Private completion: episode (and behavior learning) written to memory when required."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
@@ -314,12 +314,12 @@ def _episode_from_reasoning(
         focus=_context_ref_from_input(input),
         stimulus_name=episodes.stimulus_name(stimulus),
         output=reasoned.result,
-        habit=reasoned.habit_data(),
+        behavior=reasoned.behavior_data(),
     )
 
 
 def _should_retain_episode(reasoned: OutputData) -> bool:
-    """Retain when habit learnings; still store the episode for future similarity on any success."""
+    """Retain when behavior learnings; still store the episode for future similarity on any success."""
 
     del reasoned
     return True
@@ -661,6 +661,7 @@ class Reasoning(processing.Processing):
                     operation_id=operation_id,
                     source=instance,
                     focus_candidates=data.turn.input.focus_candidates,
+                    focused_device=data.turn.input.focus,
                     metadata=_public_metadata(metadata),
                 )
             except Exception as error:

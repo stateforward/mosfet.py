@@ -87,20 +87,27 @@ def build_processing_input(
     extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
     authority: hsm.Instance | None = None,
 ) -> processing.InputData:
-    """Build the deliberative input and callable schemas for one cognition turn."""
+    """Build the deliberative input and callable schemas for one cognition turn.
+
+    Offered tools are deduced from each actor's live HSM transition snapshot
+    (``enabled_call_events``). Body attention (``bot.focus_device`` /
+    ``bot.clear_focus``) appears when the bot actor's active topology enables
+    those CallEventKind transitions — never via a parallel hard-coded schema
+    allowlist. The cognition host itself is included when ``authority`` is the
+    live Cognition instance so host CallEventKind events such as
+    ``bot.ability.cognition.ignore`` appear only when that topology enables them.
+    """
 
     actors: dict[str, hsm.Instance] = dict(cognition_input.actors)
     if extra_actors:
         actors.update(extra_actors)
+    if authority is not None and not any(actor is authority for actor in actors.values()):
+        # Host call surface (ignore, …) comes from Cognition's snapshot, not a schema allowlist.
+        actors = {**actors, "cognition": authority}
     schemas: list[processing.Event[typing.Any]] = []
     seen: set[str] = set()
     for instance in actors.values():
         for event in processing.enabled_call_events(instance):
-            if event.name not in seen:
-                seen.add(event.name)
-                schemas.append(event)
-    if "bot" in actors:
-        for event in (bot.FocusDeviceEvent, bot.ClearFocusEvent):
             if event.name not in seen:
                 seen.add(event.name)
                 schemas.append(event)

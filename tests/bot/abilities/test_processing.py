@@ -695,6 +695,48 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     )
 
 
+def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
+    """Nested Pydantic models must not leave document-root $defs refs under anyOf branches."""
+
+    from bot.devices import phone
+    from bot.event_schema import json_schema_is_embeddable
+
+    tool = processing.dispatch_tool(
+        (
+            phone.DialEvent,
+            phone.TransferCallEvent,
+            phone.AnswerCallEvent,
+            phone.DeclineCallEvent,
+        )
+    )
+    parameters = tool["function"]["parameters"]
+    assert json_schema_is_embeddable(parameters)
+    assert "$defs" not in parameters
+
+    items = parameters["properties"]["events"]["items"]
+    branches = items["anyOf"]
+    assert isinstance(branches, list)
+    by_name = {
+        branch["properties"]["event"]["const"]: branch["properties"]["data"]
+        for branch in branches
+    }
+    dial_data = by_name["phone.dial"]
+    assert json_schema_is_embeddable(dial_data)
+    assert "$defs" not in dial_data
+    target = dial_data["properties"]["target"]
+    assert isinstance(target, dict)
+    assert "$ref" not in target
+    assert target.get("type") == "object"
+    assert set(target["properties"]) >= {"kind", "value"}
+
+    transfer_data = by_name["phone.transfer_call"]
+    assert json_schema_is_embeddable(transfer_data)
+    transfer_target = transfer_data["properties"]["target"]
+    assert isinstance(transfer_target, dict)
+    assert "$ref" not in transfer_target
+    assert transfer_target.get("type") == "object"
+
+
 def test_events_from_dispatch_args_parses_canonical_names() -> None:
     selections = processing.events_from_dispatch_args(
         {

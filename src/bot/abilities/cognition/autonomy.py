@@ -1,8 +1,8 @@
-"""Autonomy: practiced automatic habit invocation before deliberative abilities.
+"""Autonomy: practiced automatic behavior invocation before deliberative abilities.
 
-Outside deliberative ``Processing``. On attach, loads installed habits from memory.
-Each turn matches those habits by stimulus trigger, runs compiled ``Behavior``,
-dispatches selected events when a habit handles, or leaves the input unhandled so
+Outside deliberative ``Processing``. On attach, loads installed behaviors from memory.
+Each turn matches those behaviors by stimulus trigger, runs compiled ``Behavior``,
+dispatches selected events when a behavior handles, or leaves the input unhandled so
 Cognition continues to Intuition.
 """
 
@@ -24,9 +24,9 @@ from bot.protocols import attachment
 import pydantic
 from sqlalchemy.sql import Executable
 
-from bot import habit
-from bot.habit.instance import Instance
-from bot.habit import storage as habit_storage
+from bot import behavior
+from bot.behavior.instance import Instance
+from bot.behavior import storage as behavior_storage
 from bot.telemetry import observer
 
 from . import episodes
@@ -34,28 +34,28 @@ from . import input
 from . import types
 
 _AUTONOMY_ID_MARKER = ":autonomy:"
-_HABIT_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
-_HABIT_ATTACH_TIMEOUT = datetime.timedelta(seconds=1)
-_HABIT_DETACH_TIMEOUT = datetime.timedelta(seconds=1)
+_BEHAVIOR_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
+_BEHAVIOR_ATTACH_TIMEOUT = datetime.timedelta(seconds=1)
+_BEHAVIOR_DETACH_TIMEOUT = datetime.timedelta(seconds=1)
 _InitializingCompleteEvent = hsm.Event[object](
     name="bot.ability.autonomy.initializing.complete",
     kind=hsm.CompletionEventKind,
     schema=pydantic.TypeAdapter(object),
 )
-_HabitsLoadedEvent = hsm.Event[memory.OutputData](
-    name="bot.ability.autonomy.habits.loaded",
+_BehaviorsLoadedEvent = hsm.Event[memory.OutputData](
+    name="bot.ability.autonomy.behaviors.loaded",
     kind=hsm.CompletionEventKind,
     schema=memory.OutputData,
 )
-_HabitsLoadFailedEvent = hsm.Event[ability.FailureData](
-    name="bot.ability.autonomy.habits.load.failed",
+_BehaviorsLoadFailedEvent = hsm.Event[ability.FailureData](
+    name="bot.ability.autonomy.behaviors.load.failed",
     kind=hsm.ErrorEventKind,
     schema=ability.FailureData,
 )
 
 
 class _MatchedEventData(pydantic.BaseModel):
-    """Private completion: candidate habit instances for this stimulus."""
+    """Private completion: candidate behavior instances for this stimulus."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -74,7 +74,7 @@ _MatchedEvent = hsm.Event[_MatchedEventData](
 
 
 class _StartCandidateEventData(pydantic.BaseModel):
-    """Private: start (or advance to) candidate habit at index."""
+    """Private: start (or advance to) candidate behavior at index."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -243,7 +243,7 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> datetime.timedelta:
             del ctx, instance, event
-            return _HABIT_SILENCE_TIMEOUT
+            return _BEHAVIOR_SILENCE_TIMEOUT
 
         def detach_delay(
             ctx: hsm.Context,
@@ -251,7 +251,7 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> datetime.timedelta:
             del ctx, instance, event
-            return _HABIT_DETACH_TIMEOUT
+            return _BEHAVIOR_DETACH_TIMEOUT
 
         def attach_delay(
             ctx: hsm.Context,
@@ -259,7 +259,7 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> datetime.timedelta:
             del ctx, instance, event
-            return _HABIT_ATTACH_TIMEOUT
+            return _BEHAVIOR_ATTACH_TIMEOUT
 
         def attach_behavior(
             ctx: hsm.Context,
@@ -297,19 +297,23 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> None:
             del ctx, event
-            payload = habit_input_payload(cognition_input)
+            payload = behavior_input_payload(cognition_input)
             if processing.active_operation(behavior, child_id) is None:
                 _ = await processing.start_operation(behavior, child_id)
-            await hsm.dispatch(
-                instance.context(),
-                behavior,
-                dataclasses.replace(
-                    behavior.input_event.with_data_and_id(payload, child_id),
-                    source=hsm.id(instance),
-                    target=hsm.id(behavior),
-                    metadata=dict(metadata),
-                ),
+            # Operation correlation stays on processing.start_operation(child_id).
+            # Build the behavior input as a full event: data + the turn event's id/source/target
+            # so Starlark event["id"]/["source"]/["target"] match the live turn event
+            # (e.g. phone call_id on a ring), not a reassigned child operation id.
+            event_id, event_source, event_target = behavior_event_fields(cognition_input)
+            input_event = behavior.input_event.with_data(payload)
+            input_event = dataclasses.replace(
+                input_event,
+                id=event_id or child_id,
+                source=event_source or hsm.id(instance),
+                target=event_target or hsm.id(behavior),
+                metadata=dict(metadata),
             )
+            await hsm.dispatch(instance.context(), behavior, input_event)
 
         def is_behavior_output(
             ctx: hsm.Context,
@@ -351,7 +355,7 @@ class _CandidateRun(hsm.Instance):
 
         def result_for(instance: _CandidateRun, event: hsm.Event[typing.Any]) -> _CandidateResultData:
             if is_behavior_output(hsm.Context(), instance, event):
-                output = _coerce_habit_output(event.data)
+                output = _coerce_behavior_output(event.data)
                 return candidate_result(
                     "handled" if output is not None else "unhandled",
                     output=output,
@@ -359,7 +363,7 @@ class _CandidateRun(hsm.Instance):
             if is_behavior_failure(hsm.Context(), instance, event):
                 return candidate_result(
                     "failed",
-                    message=getattr(event.data, "message", "Autonomy habit failed."),
+                    message=getattr(event.data, "message", "Autonomy behavior failed."),
                 )
             if isinstance(event.data, _CandidateCancelData):
                 return candidate_result(
@@ -380,7 +384,7 @@ class _CandidateRun(hsm.Instance):
             del event
             result = candidate_result(
                 "attach_timeout",
-                message=(f"Autonomy habit attach timed out after {_HABIT_ATTACH_TIMEOUT.total_seconds():g} seconds."),
+                message=(f"Autonomy behavior attach timed out after {_BEHAVIOR_ATTACH_TIMEOUT.total_seconds():g} seconds."),
             )
             _ = behavior.detach(
                 instance.context(),
@@ -389,7 +393,7 @@ class _CandidateRun(hsm.Instance):
                         attachment.DetachData(
                             actor=instance,
                             reply_to=instance,
-                            timeout=_HABIT_DETACH_TIMEOUT,
+                            timeout=_BEHAVIOR_DETACH_TIMEOUT,
                         )
                     ),
                     id=child_id,
@@ -424,7 +428,7 @@ class _CandidateRun(hsm.Instance):
                         attachment.DetachData(
                             actor=instance,
                             reply_to=instance,
-                            timeout=_HABIT_DETACH_TIMEOUT,
+                            timeout=_BEHAVIOR_DETACH_TIMEOUT,
                         )
                     ),
                     id=child_id,
@@ -506,7 +510,7 @@ class _CandidateRun(hsm.Instance):
                         result.model_copy(
                             update={
                                 "outcome": "detach_failed",
-                                "message": "Autonomy habit detach failed.",
+                                "message": "Autonomy behavior detach failed.",
                             }
                         )
                     ),
@@ -533,8 +537,8 @@ class _CandidateRun(hsm.Instance):
                             update={
                                 "outcome": "detach_timeout",
                                 "message": (
-                                    "Autonomy habit detach timed out after "
-                                    f"{_HABIT_DETACH_TIMEOUT.total_seconds():g} seconds."
+                                    "Autonomy behavior detach timed out after "
+                                    f"{_BEHAVIOR_DETACH_TIMEOUT.total_seconds():g} seconds."
                                 ),
                             }
                         )
@@ -553,7 +557,7 @@ class _CandidateRun(hsm.Instance):
         ) -> None:
             result = candidate_result(
                 "failed",
-                message=getattr(event.data, "message", "Autonomy habit attach failed."),
+                message=getattr(event.data, "message", "Autonomy behavior attach failed."),
             )
             _ = hsm.dispatch(
                 ctx,
@@ -680,22 +684,22 @@ def _child_operation_id(parent_operation_id: str, index: int) -> str:
     return f"{parent_operation_id}{_AUTONOMY_ID_MARKER}{index}"
 
 
-def _habit_select_input() -> memory.InputData:
-    """Memory ability input: SELECT ACTIVE habits + triggers (skip DRAFT/BROKEN)."""
+def _behavior_select_input() -> memory.InputData:
+    """Memory ability input: SELECT ACTIVE behaviors + triggers (skip DRAFT/BROKEN)."""
 
-    clauses = typing.cast(tuple[Executable, ...], habit_storage.select_active_habits_clauses())
+    clauses = typing.cast(tuple[Executable, ...], behavior_storage.select_active_behaviors_clauses())
     return memory.InputData(statements=memory.compile_statements(*clauses))
 
 
-def _habits_from_memory_output(output: memory.OutputData) -> tuple[Instance, ...]:
+def _behaviors_from_memory_output(output: memory.OutputData) -> tuple[Instance, ...]:
     if len(output.results) < 2:
         return ()
-    habit_rows = tuple(row.as_mapping() for row in output.results[0].rows)
+    behavior_rows = tuple(row.as_mapping() for row in output.results[0].rows)
     trigger_rows = tuple(row.as_mapping() for row in output.results[1].rows)
-    return habit_storage.instances_from_habit_results(habit_rows, trigger_rows)
+    return behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
 
 
-def _habit_at_index(
+def _behavior_at_index(
     candidates: tuple[Instance, ...] | None,
     index: int | None,
 ) -> Instance | None:
@@ -704,31 +708,49 @@ def _habit_at_index(
     return candidates[index]
 
 
-def _replace_habit_in_tuple(habits: tuple[Instance, ...], updated: Instance) -> tuple[Instance, ...]:
-    return tuple(updated if item.name == updated.name else item for item in habits)
+def _replace_behavior_in_tuple(behaviors: tuple[Instance, ...], updated: Instance) -> tuple[Instance, ...]:
+    return tuple(updated if item.name == updated.name else item for item in behaviors)
 
 
-def _stimulus_payload(stimulus: object) -> object:
-    """Build the JSON-like habit input payload from typed stimulus data."""
+def _event_data_payload(event: object) -> object:
+    """Build the JSON-like behavior input *data* payload from a turn event or model."""
 
-    if isinstance(stimulus, hsm.Event):
-        payload = _json_like(stimulus.data)
-        return payload
-    if isinstance(stimulus, pydantic.BaseModel):
-        return stimulus.model_dump(mode="json")
-    return _json_like(stimulus)
+    if isinstance(event, hsm.Event):
+        return _json_like(event.data)
+    if isinstance(event, pydantic.BaseModel):
+        return event.model_dump(mode="json")
+    return _json_like(event)
 
 
-def habit_input_payload(cognition_input: input.InputData) -> object:
-    """Stimulus payload plus live focus context for habit guards and effects.
+def behavior_event_fields(
+    cognition_input: input.InputData,
+) -> tuple[str | None, str | None, str | None]:
+    """Return ``(id, source, target)`` from the turn's ``hsm.Event`` when present.
 
-    Public so Reflection (and other cognitive abilities) can dry-run the same habit input shape
-    Autonomy uses at runtime without reaching into Autonomy private helpers.
+    Part of building the behavior input **event** (with :func:`behavior_input_payload` for
+    ``data``). Starlark sees one ``event`` with name/data/id/source/target/kind —
+    not a separate "envelope" object. Metadata is never included.
     """
 
-    payload = _stimulus_payload(cognition_input.stimulus)
+    event = cognition_input.stimulus
+    if not isinstance(event, hsm.Event):
+        return None, None, None
+    event_id = event.id if event.id else None
+    source = event.source if event.source else None
+    target = event.target if event.target else None
+    return event_id, source, target
+
+
+def behavior_input_payload(cognition_input: input.InputData) -> object:
+    """Turn event **data** plus live focus context (becomes Starlark ``event["data"]``).
+
+    Id/source/target come from :func:`behavior_event_fields` and are set on the same
+    behavior input event. Public so Reflection can dry-run the same shape.
+    """
+
+    payload = _event_data_payload(cognition_input.stimulus)
     if not isinstance(payload, dict):
-        payload = {"stimulus": payload}
+        payload = {"event": payload}
     else:
         payload = dict(typing.cast(dict[str, object], payload))
     if cognition_input.focus is not None:
@@ -754,16 +776,16 @@ def _json_like(value: object) -> object:
     return str(value)
 
 
-def _matches_trigger(habit: Instance, stimulus: str | None) -> bool:
-    if not habit.triggers:
+def _matches_trigger(behavior: Instance, stimulus: str | None) -> bool:
+    if not behavior.triggers:
         return False
     if stimulus is None:
         return False
-    return stimulus in habit.triggers
+    return stimulus in behavior.triggers
 
 
-def _coerce_habit_output(data: object) -> types.OutputData | None:
-    """Coerce habit terminal payload to cognition selections; None means unhandled by this habit."""
+def _coerce_behavior_output(data: object) -> types.OutputData | None:
+    """Coerce behavior terminal payload to cognition selections; None means unhandled by this behavior."""
 
     if data is None:
         return None
@@ -771,7 +793,7 @@ def _coerce_habit_output(data: object) -> types.OutputData | None:
         result = typing.cast(processing.Result[object], data)
         if not result.is_handled:
             return None
-        return _coerce_habit_output(result.output)
+        return _coerce_behavior_output(result.output)
     if types.is_output(data):
         return data
     selections = processing.coerce_event_selections(data)
@@ -793,11 +815,11 @@ def _coerce_habit_output(data: object) -> types.OutputData | None:
 
 
 class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
-    """Practiced automatic habit use: load on attach, then match → run Behavior.
+    """Practiced automatic behavior use: load on attach, then match → run Behavior.
 
     Chart states are lifecycle phases only. Turn product rides the event chain
     (match / start-candidate payloads and child request metadata → child terminal)
-    (HSM-COMPLETION-001). ``_habits`` holds installed habits loaded at attach;
+    (HSM-COMPLETION-001). ``_behaviors`` holds installed behaviors loaded at attach;
     Candidate identity remains on the scoped operation actor and typed capability events.
     """
 
@@ -817,30 +839,30 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         schema=types.FailureData,
     )
     _memory: memory.Memory | None
-    _habits: tuple[Instance, ...]
+    _behaviors: tuple[Instance, ...]
 
     @staticmethod
-    def _persist_habit_usage(
+    def _persist_behavior_usage(
         instance: "Autonomy",
-        habit: Instance,
+        behavior: Instance,
         *,
         outcome: typing.Literal["used", "failed"],
     ) -> Instance:
-        """Write used/failed practice telemetry for one habit; update in-memory inventory.
+        """Write used/failed practice telemetry for one behavior; update in-memory inventory.
 
         Returns the updated inventory Instance.
         """
 
-        updated = habit_storage.mark_used(habit) if outcome == "used" else habit_storage.mark_failed(habit)
+        updated = behavior_storage.mark_used(behavior) if outcome == "used" else behavior_storage.mark_failed(behavior)
         store = instance._memory
         if store is not None:
             try:
-                clauses = typing.cast(tuple[Executable, ...], habit_storage.replace_habit_clauses(updated))
+                clauses = typing.cast(tuple[Executable, ...], behavior_storage.replace_behavior_clauses(updated))
                 _ = store.execute(memory.InputData(statements=memory.compile_statements(*clauses)))
             except Exception:
                 # Practice telemetry must not fail the turn; inventory may lag until next attach load.
                 pass
-        instance._habits = _replace_habit_in_tuple(instance._habits, updated)
+        instance._behaviors = _replace_behavior_in_tuple(instance._behaviors, updated)
         return updated
 
     @staticmethod
@@ -849,38 +871,38 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Load installed habits through the injected Memory capability."""
+        """Load installed behaviors through the injected Memory capability."""
 
         del event
         store = instance._memory
         if store is None:
-            instance._habits = ()
+            instance._behaviors = ()
             _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
             return
         try:
-            output = store.execute(_habit_select_input())
+            output = store.execute(_behavior_select_input())
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                _HabitsLoadFailedEvent.with_data(ability.FailureData(message=str(error))),
+                _BehaviorsLoadFailedEvent.with_data(ability.FailureData(message=str(error))),
             )
             return
-        _ = hsm.dispatch(ctx, instance, _HabitsLoadedEvent.with_data(output))
+        _ = hsm.dispatch(ctx, instance, _BehaviorsLoadedEvent.with_data(output))
 
     @staticmethod
-    def _on_load_habits_output(
+    def _on_load_behaviors_output(
         ctx: hsm.Context,
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
         output = event.data
         assert isinstance(output, memory.OutputData)
-        instance._habits = _habits_from_memory_output(output)
+        instance._behaviors = _behaviors_from_memory_output(output)
         _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
-    def _on_load_habits_failure(
+    def _on_load_behaviors_failure(
         ctx: hsm.Context,
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
@@ -889,9 +911,9 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         failure = (
             event.data
             if isinstance(event.data, ability.FailureData)
-            else ability.FailureData(message="Autonomy habit load failed.")
+            else ability.FailureData(message="Autonomy behavior load failed.")
         )
-        raise RuntimeError(f"Autonomy habit load failed: {failure.message}")
+        raise RuntimeError(f"Autonomy behavior load failed: {failure.message}")
 
     @staticmethod
     def _detach_on_detach(
@@ -902,7 +924,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         if event.name != attachment.DetachEvent.name:
             return
         Autonomy._cancel_active_candidate(ctx, instance, reason="Autonomy detached.")
-        instance._habits = ()
+        instance._behaviors = ()
 
     @staticmethod
     def _cancel_active_candidate(
@@ -976,7 +998,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             await processing.start_operation(instance, event.id)
         cognition_input = data.input
         stimulus = episodes.stimulus_name(cognition_input.stimulus)
-        candidates = tuple(item for item in instance._habits if _matches_trigger(item, stimulus))
+        candidates = tuple(item for item in instance._behaviors if _matches_trigger(item, stimulus))
         matched = _MatchedEventData(
             turn=data,
             candidates=candidates,
@@ -1117,11 +1139,11 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             return
         compiled = data.candidates[data.index]
         try:
-            behavior = habit.build(compiled.source)
+            program = behavior.build(compiled.source)
         except Exception:
             # Unbuildable inventory is a runtime failure for this candidate; skip to next.
-            updated = Autonomy._persist_habit_usage(instance, compiled, outcome="failed")
-            updated_candidates = _replace_habit_in_tuple(data.candidates, updated)
+            updated = Autonomy._persist_behavior_usage(instance, compiled, outcome="failed")
+            updated_candidates = _replace_behavior_in_tuple(data.candidates, updated)
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -1155,7 +1177,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             coordinator,
             _CandidateRun.model_for(
                 owner=instance,
-                behavior=behavior,
+                behavior=program,
                 capability=capability,
                 turn=data.turn,
                 candidates=data.candidates,
@@ -1288,20 +1310,23 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         index = result.capability.index
         cognition_input = result.turn.input
         candidates = result.candidates
-        compiled = _habit_at_index(candidates, index)
+        compiled = _behavior_at_index(candidates, index)
         public_metadata = _public_metadata(dict(event.metadata))
         try:
             output = result.output
             if output is None:
-                raise TypeError("Autonomy habit output is unhandled.")
+                raise TypeError("Autonomy behavior output is unhandled.")
             processing_input = input.build_processing_input(
                 cognition_input,
                 authority=instance._attachments[0] if instance._attachments else instance,
             )
-            if processing_input.actors and output:
+            # Deliver only when the turn already provides host actors (bot/devices). A
+            # judgment-only actor map (e.g. authority injected as "cognition") is not a
+            # body/device delivery surface — still complete with the selection product.
+            if cognition_input.actors and output:
                 selections = processing.coerce_event_selections(output)
                 if selections is None:
-                    raise TypeError("Autonomy habit output does not match event selections.")
+                    raise TypeError("Autonomy behavior output does not match event selections.")
                 await types.dispatch_selected_events(
                     ctx,
                     processing_input,
@@ -1309,11 +1334,12 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     operation_id=parent_id,
                     source=instance,
                     focus_candidates=result.turn.input.focus_candidates,
+                    focused_device=result.turn.input.focus,
                     metadata=public_metadata,
                 )
         except Exception as error:
             if compiled is not None:
-                _ = Autonomy._persist_habit_usage(instance, compiled, outcome="failed")
+                _ = Autonomy._persist_behavior_usage(instance, compiled, outcome="failed")
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -1325,7 +1351,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             )
             return
         if compiled is not None:
-            _ = Autonomy._persist_habit_usage(instance, compiled, outcome="used")
+            _ = Autonomy._persist_behavior_usage(instance, compiled, outcome="used")
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1350,10 +1376,10 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         parent_id = result.capability.operation_id
         index = result.capability.index
         candidates = result.candidates
-        failed_habit = _habit_at_index(candidates, index) if result.outcome == "failed" else None
-        if failed_habit is not None:
-            updated = Autonomy._persist_habit_usage(instance, failed_habit, outcome="failed")
-            candidates = _replace_habit_in_tuple(candidates or (), updated)
+        failed_behavior = _behavior_at_index(candidates, index) if result.outcome == "failed" else None
+        if failed_behavior is not None:
+            updated = Autonomy._persist_behavior_usage(instance, failed_behavior, outcome="failed")
+            candidates = _replace_behavior_in_tuple(candidates or (), updated)
         next_index = index + 1
         _ = hsm.dispatch(
             ctx,
@@ -1382,7 +1408,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             operation_id=result.capability.operation_id,
             metadata=dict(event.metadata),
             failure=types.FailureData(
-                message=result.message or "Autonomy habit teardown failed.",
+                message=result.message or "Autonomy behavior teardown failed.",
                 turn=result.turn,
             ),
         )
@@ -1473,12 +1499,12 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             hsm.activity(_initialize_activity),
             hsm.exit(_detach_on_detach),
             hsm.transition(
-                hsm.on(_HabitsLoadedEvent),
-                hsm.effect(_on_load_habits_output),
+                hsm.on(_BehaviorsLoadedEvent),
+                hsm.effect(_on_load_behaviors_output),
             ),
             hsm.transition(
-                hsm.on(_HabitsLoadFailedEvent),
-                hsm.effect(_on_load_habits_failure),
+                hsm.on(_BehaviorsLoadFailedEvent),
+                hsm.effect(_on_load_behaviors_failure),
             ),
             hsm.transition(
                 hsm.on(_InitializingCompleteEvent),
@@ -1688,7 +1714,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     ) -> None:
         super().__init__()
         self._memory = memory
-        self._habits = ()
+        self._behaviors = ()
 
 
 InputEvent = Autonomy.input_event
@@ -1698,5 +1724,6 @@ __all__ = [
     "InputEvent",
     "OutputEvent",
     "Autonomy",
-    "habit_input_payload",
+    "behavior_input_payload",
+    "behavior_event_fields",
 ]

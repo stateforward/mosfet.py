@@ -979,6 +979,16 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
         )
 
+    @staticmethod
+    def _accept_ignore(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Acknowledge an explicit ignore selection; judgment only (no body/device work)."""
+
+        del ctx, instance, event
+
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Cognition",
         hsm.initial(hsm.target("/Cognition/initializing")),
@@ -995,6 +1005,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "idle",
+            # Call surface for deliberative tools (snapshot-offered when host is an actor).
+            hsm.transition(
+                hsm.on(types.IgnoreEvent),
+                hsm.effect(_accept_ignore),
+            ),
             hsm.transition(
                 hsm.on(bot.RebootEvent),
                 hsm.guard(_is_reflection_reboot),
@@ -1027,6 +1042,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "processing",
             hsm.initial(hsm.target("/Cognition/processing/intuition")),
             hsm.defer(input_event),
+            # Enabled while a child stage runs so ignore stays snapshot-offered mid-turn.
+            hsm.transition(
+                hsm.on(types.IgnoreEvent),
+                hsm.effect(_accept_ignore),
+            ),
             hsm.transition(
                 hsm.on(bot.RebootEvent),
                 hsm.guard(_is_reflection_reboot),

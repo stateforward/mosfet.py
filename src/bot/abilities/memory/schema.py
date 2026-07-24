@@ -39,8 +39,8 @@ memory_table = Table(
     Index("bot_memory_scope_idx", "scope", "created_at"),
 )
 
-# Register habit tables on the same MetaData so create_all materializes them.
-from bot.habit import storage as _habit_storage  # noqa: E402, F401
+# Register behavior tables on the same MetaData so create_all materializes them.
+from bot.behavior import storage as _behavior_storage  # noqa: E402, F401
 
 __all__ = [
     "MEMORY_TABLE",

@@ -51,7 +51,7 @@ from bot.events import (
     RebootEventData,
     RebootReason,
 )
-from bot import abilities, habit, skills
+from bot import abilities, behavior, skills
 
 if TYPE_CHECKING:
     from bot.bot import Bot
@@ -92,7 +92,7 @@ __all__ = [
     "RebootEventData",
     "RebootReason",
     "abilities",
-    "habit",
+    "behavior",
     "skills",
     "__version__",
 ]

@@ -1,9 +1,10 @@
 """Live e2e Reflection tests against real model providers.
 
-Providers (skipped unless keys are available):
+Primary Reflection model: OpenAI **gpt-5.6-terra** (override with ``BOT_REFLECTION_MODEL``).
 
-- Gemini: ``BOT_GEMINI_API_KEY`` / ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY``
-- OpenAI-compatible: ``BOT_OPENAI_API_KEY`` / ``OPENAI_API_KEY``
+Provider keys (skipped unless available):
+
+- OpenAI: ``BOT_OPENAI_API_KEY`` / ``OPENAI_API_KEY``
 
 Run::
 
@@ -12,11 +13,6 @@ Run::
 
 from __future__ import annotations
 
-import bot
-from bot import habit as habit_events
-from bot.abilities import cognition
-from bot.abilities import memory
-from bot.abilities import processing
 import asyncio
 import collections.abc
 import dataclasses
@@ -27,9 +23,18 @@ from pathlib import Path
 import hsm
 import pytest
 
+import bot
+from bot import behavior as behavior_events
+from bot.abilities import cognition
+from bot.abilities import memory
+from bot.abilities import processing
+from bot.devices import phone as phone_device
+from bot.behavior import storage as behavior_storage
+from bot.world import SoundData, SoundEvent, World
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.hsm_instance_state import phone_firmware
+
 # Optional provider packages — skip collection when not installed in this env.
-GeminiChatClient = pytest.importorskip("bot.providers.gemini", reason="bot-provider-gemini not installed").ChatClient
-GeminiProcessor = pytest.importorskip("bot.providers.gemini", reason="bot-provider-gemini not installed").Processor
 OpenAIChatClient = pytest.importorskip(
     "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
 ).ChatClient
@@ -37,17 +42,32 @@ OpenAIProcessor = pytest.importorskip(
     "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
 ).Processor
 
-from bot.habit import storage as habit_storage
-from bot.devices import phone as phone_device
-from bot.world import SoundData, SoundEvent, World
-from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
-from tests.hsm_instance_state import phone_firmware
-
 # Live calls are slower than unit tests.
 _LIVE_TIMEOUT_S = 90.0
-_DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
-_DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
+_DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
+_DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 _ProcessorFactory = collections.abc.Callable[..., processing.Processor]
+
+
+def _openai_model() -> str:
+    # Prefer explicit reflection override; default Luna (not a global chat-completions model).
+    return os.environ.get("BOT_REFLECTION_MODEL") or _DEFAULT_OPENAI_MODEL
+
+
+def _openai_base_url() -> str:
+    return (
+        os.environ.get("BOT_OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or _DEFAULT_OPENAI_BASE_URL
+    )
+
+
+def _openai_reflection_processor() -> processing.Processor:
+    api_key = _openai_api_key()
+    assert api_key is not None
+    model = _openai_model()
+    client = OpenAIChatClient(model=model, api_key=api_key, base_url=_openai_base_url())
+    return OpenAIProcessor(client=client, provider="openai_terra_reflection_live")
 
 
 
@@ -122,15 +142,6 @@ def _load_dotenv() -> None:
         _load_dotenv_file(path)
 
 
-def _gemini_api_key() -> str | None:
-    _load_dotenv()
-    for name in ("BOT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "VA_GEMINI_API_KEY"):
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
-
-
 def _openai_api_key() -> str | None:
     _load_dotenv()
     for name in ("BOT_OPENAI_API_KEY", "OPENAI_API_KEY"):
@@ -139,11 +150,6 @@ def _openai_api_key() -> str | None:
             return value
     return None
 
-
-requires_gemini = pytest.mark.skipif(
-    _gemini_api_key() is None,
-    reason="Gemini API key not set (BOT_GEMINI_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY)",
-)
 
 requires_openai = pytest.mark.skipif(
     _openai_api_key() is None,
@@ -190,17 +196,17 @@ async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) ->
             focus_candidates=("phone",),
             stimulus_name="world.sound",
             output=_answer_call_output(f"call-{index}", f"answered incoming ring episode {index}"),
-            habit=None,
+            behavior=None,
         )
         insert = cognition.episodes.episode_insert_input(episode, context_ref="phone")
         _ = store.execute(insert)
 
 
-async def _habit_contents(store: memory.Memory) -> tuple[str, ...]:
-    from bot.habit import storage as habit_storage
+async def _behavior_contents(store: memory.Memory) -> tuple[str, ...]:
+    from bot.behavior import storage as behavior_storage
 
     select = memory.InputData(
-        statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
+        statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
     )
     out = store.execute(select)
     if not out.results:
@@ -225,116 +231,99 @@ async def _start_reflection(reflection: cognition.Reflection) -> object:
     return ctx
 
 
-@requires_gemini
+@requires_openai
 @pytest.mark.live
-def test_live_reflection_writes_habit_from_repeated_ring_pattern() -> None:
-    """Real Gemini: repeated ring→answer episodes → Reflection creates executable Starlark habit."""
+def test_live_reflection_writes_behavior_from_repeated_ring_pattern() -> None:
+    """Real OpenAI Terra: repeated ring→answer episodes → Reflection creates executable Starlark behavior."""
 
-    api_key = _gemini_api_key()
+    api_key = _openai_api_key()
     assert api_key is not None
-    model = os.environ.get("BOT_GEMINI_MODEL") or _DEFAULT_GEMINI_MODEL
-    client = GeminiChatClient(model=model, api_key=api_key)
-
-    def reflection_processor() -> processing.Processor:
-        return GeminiProcessor(
-            client=client,
-            provider="gemini_reflection_live",
-        )
+    print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
     async def run() -> tuple[None, tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
         store = memory.Memory()
         await _seed_ring_answer_episodes(store, count=3)
-        reflection = cognition.Reflection(processor=reflection_processor, memory=store)
+        reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ctx = await _start_reflection(reflection)
-        input = processing.InputData(
-            input=cognition.reflection.InputData(
-                cognition_input=_cognition_input(focus="phone"),
-                cognition_output=_answer_call_output("call-live", "answered another incoming ring"),
-            )
+        input = cognition.reflection.InputData(
+            cognition_input=_cognition_input(focus="phone"),
+            cognition_output=_answer_call_output("call-live", "answered another incoming ring"),
         )
         result = await asyncio.wait_for(
             dispatch_ability_for_test(reflection, ctx, input, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
         assert result is None
-        return result, await _habit_contents(store), await _episodes(store)
+        return result, await _behavior_contents(store), await _episodes(store)
 
-    _result, stored_habits, episodes = asyncio.run(run())
+    _result, stored_behaviors, episodes = asyncio.run(run())
 
     assert len(episodes) >= 1, "Reflection should store this turn as a cognitive episode"
     latest = episodes[-1]
     assert latest.focus == "phone"
-    # Habit create is the point of this e2e: inventory must gain an executable habit row.
-    assert len(stored_habits) >= 1, f"expected habit inventory row(s), got {stored_habits!r}"
-    joined = "\n".join(stored_habits)
+    # Behavior create is the point of this e2e: inventory must gain an executable behavior row.
+    assert len(stored_behaviors) >= 1, f"expected behavior inventory row(s), got {stored_behaviors!r}"
+    joined = "\n".join(stored_behaviors)
     assert any(
         key in joined.lower()
-        for key in ("answer", "ring", "phone", "sound", "call", "triggers", "description", "hsm.define", "habit")
-    ), f"habit contents look empty or malformed: {stored_habits!r}"
-    # Episode should carry the habit payload when create succeeded.
-    assert latest.habit is not None, f"latest episode missing habit payload: {latest!r}"
-    assert isinstance(latest.habit, habit_events.CreateData)
-    assert latest.habit.name
-    assert latest.habit.event == habit_events.CreateEvent.name
-    assert latest.habit.source, f"create must install starlark source, got {latest.habit!r}"
-    # Source must parse/compile as real executable habit behavior.
-    habit = habit_events.start(latest.habit.source, name=latest.habit.name)
-    compiled = habit_events.build(habit.source)
+        for key in ("answer", "ring", "phone", "sound", "call", "triggers", "description", "hsm.define", "behavior")
+    ), f"behavior contents look empty or malformed: {stored_behaviors!r}"
+    # Episode should carry the behavior payload when create succeeded.
+    assert latest.behavior is not None, f"latest episode missing behavior payload: {latest!r}"
+    assert isinstance(latest.behavior, behavior_events.CreateData)
+    assert latest.behavior.name
+    assert latest.behavior.event == behavior_events.CreateEvent.name
+    assert latest.behavior.source, f"create must install starlark source, got {latest.behavior!r}"
+    # Source must parse/compile as real executable behavior.
+    behavior = behavior_events.start(latest.behavior.source, name=latest.behavior.name)
+    compiled = behavior_events.build(behavior.source)
     assert compiled.input_event.name
-    assert "hsm.define" in latest.habit.source or "habit_behavior" in latest.habit.source
+    assert "hsm.define" in latest.behavior.source or "behavior_program" in latest.behavior.source
 
 
-@requires_gemini
+@requires_openai
 @pytest.mark.live
 def test_live_reflection_empty_when_no_repeated_pattern() -> None:
-    """Real Gemini: one-off turn with no priors should not invent a habit."""
+    """Real OpenAI Terra: one-off turn with no priors should not invent a behavior."""
 
-    api_key = _gemini_api_key()
+    api_key = _openai_api_key()
     assert api_key is not None
-    model = os.environ.get("BOT_GEMINI_MODEL") or _DEFAULT_GEMINI_MODEL
-    client = GeminiChatClient(model=model, api_key=api_key)
-
-    def reflection_processor() -> processing.Processor:
-        return GeminiProcessor(
-            client=client,
-            provider="gemini_reflection_live",
-        )
+    print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
     async def run() -> tuple[tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
         store = memory.Memory()
         # No prior episodes seeded.
-        reflection = cognition.Reflection(processor=reflection_processor, memory=store)
+        reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ctx = await _start_reflection(reflection)
-        input = processing.InputData(
-            input=cognition.reflection.InputData(
-                cognition_input=_cognition_input(focus="phone"),
-                cognition_output=_focus_output("phone", "one-off focus, no pattern"),
-            )
+        input = cognition.reflection.InputData(
+            cognition_input=_cognition_input(focus="phone"),
+            cognition_output=_focus_output("phone", "one-off focus, no pattern"),
         )
         _ = await asyncio.wait_for(
             dispatch_ability_for_test(reflection, ctx, input, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
-        return await _habit_contents(store), await _episodes(store)
+        return await _behavior_contents(store), await _episodes(store)
 
-    habits, episodes = asyncio.run(run())
+    behaviors, episodes = asyncio.run(run())
 
     assert len(episodes) == 1
-    # Prefer empty habit inventory; if the model still creates one, fail loudly so we can tighten prompts.
-    assert habits == (), f"expected no habit for one-off turn, got {habits!r}"
-    assert episodes[0].habit is None
+    # Prefer empty behavior inventory; if the model still creates one, fail loudly so we can tighten prompts.
+    assert behaviors == (), f"expected no behavior for one-off turn, got {behaviors!r}"
+    assert episodes[0].behavior is None
 
 
-def _live_habit_answers_phone_call(
+def _live_behavior_answers_phone_call(
     *,
     label: str,
     reflection_processor: _ProcessorFactory,
 ) -> None:
-    """Generate habit via Reflection processor, run Autonomy, assert phone answers."""
+    """Generate behavior via Reflection processor, run Autonomy, assert phone answers."""
 
-    async def generate_habit() -> habit_events.Instance:
+    async def generate_behavior() -> behavior_events.Instance:
         errors: list[str] = []
-        # Dry-run install uses this same cognition_input as Autonomy will at runtime.
+        # Dry-run install uses the same event shape Autonomy sees at runtime
+        # (call_id on event id, not metadata).
         ring_stimulus = dataclasses.replace(
             SoundEvent.with_data(
                 SoundData(
@@ -342,10 +331,10 @@ def _live_habit_answers_phone_call(
                     media_type="audio/wav",
                     sample_rate_hz=16_000,
                     channels=1,
-                    kind="ring",
+                    kind="phone.ringing",
                 )
             ),
-            metadata={"bot.phone.call_id": "call-live"},
+            id="call-live",
         )
         reflection_turn_input = cognition.InputData(
             stimulus=ring_stimulus,
@@ -358,14 +347,12 @@ def _live_habit_answers_phone_call(
             await _seed_ring_answer_episodes(store, count=3)
             reflection = cognition.Reflection(processor=reflection_processor, memory=store)
             ctx = await _start_reflection(reflection)
-            input = processing.InputData(
-                input=cognition.reflection.InputData(
-                    cognition_input=reflection_turn_input,
-                    cognition_output=_answer_call_output(
-                        "call-live",
-                        "answered another incoming ring",
-                    ),
-                )
+            input = cognition.reflection.InputData(
+                cognition_input=reflection_turn_input,
+                cognition_output=_answer_call_output(
+                    "call-live",
+                    "answered another incoming ring",
+                ),
             )
             try:
                 _ = await asyncio.wait_for(
@@ -375,44 +362,44 @@ def _live_habit_answers_phone_call(
             except Exception as error:  # noqa: BLE001 — live model flakiness; retry
                 errors.append(f"attempt {attempt + 1}: {error}")
                 continue
-            habits = await _habit_contents(store)
-            if not habits:
-                errors.append(f"attempt {attempt + 1}: no habit inventory row")
+            behaviors = await _behavior_contents(store)
+            if not behaviors:
+                errors.append(f"attempt {attempt + 1}: no behavior inventory row")
                 continue
             episodes = await _episodes(store)
             latest = episodes[-1]
-            if latest.habit is None or not isinstance(latest.habit, habit_events.CreateData):
+            if latest.behavior is None or not isinstance(latest.behavior, behavior_events.CreateData):
                 errors.append(f"attempt {attempt + 1}: episode missing create payload")
                 continue
-            if not latest.habit.source:
+            if not latest.behavior.source:
                 errors.append(f"attempt {attempt + 1}: create missing source")
                 continue
             try:
-                return habit_events.start(
-                    latest.habit.source,
-                    name=latest.habit.name,
-                    triggers=latest.habit.triggers or None,
-                    description=latest.habit.description,
+                return behavior_events.start(
+                    latest.behavior.source,
+                    name=latest.behavior.name,
+                    triggers=latest.behavior.triggers or None,
+                    description=latest.behavior.description,
                 )
             except Exception as error:  # noqa: BLE001
                 errors.append(f"attempt {attempt + 1}: start failed: {error}")
                 continue
-        raise AssertionError(f"{label} failed to install a valid habit after retries:\n" + "\n".join(errors))
+        raise AssertionError(f"{label} failed to install a valid behavior after retries:\n" + "\n".join(errors))
 
-    installed = asyncio.run(generate_habit())
-    print(f"\n--- {label} habit {installed.name!r} triggers={installed.triggers!r} ---\n{installed.source}\n---")
+    installed = asyncio.run(generate_behavior())
+    print(f"\n--- {label} behavior {installed.name!r} triggers={installed.triggers!r} ---\n{installed.source}\n---")
 
-    assert installed.triggers, f"habit must declare triggers from the observed pattern, got {installed.triggers!r}"
-    compiled = habit_events.build(installed.source)
+    assert installed.triggers, f"behavior must declare triggers from the observed pattern, got {installed.triggers!r}"
+    compiled = behavior_events.build(installed.source)
     assert compiled.input_event.name
     assert compiled.output_event.name
 
-    async def run_habit_and_answer() -> tuple[object, tuple[str, ...], str]:
+    async def run_behavior_and_answer() -> tuple[object, tuple[str, ...], str]:
         call_id = "livekit:caller"
         store = memory.Memory()
         _ = store.execute(
             memory.InputData(
-                statements=memory.compile_statements(*habit_storage.insert_habit_clauses(installed))
+                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
             )
         )
 
@@ -438,6 +425,7 @@ def _live_habit_answers_phone_call(
             await asyncio.sleep(0.01)
         assert "ringing" in firmware.state(), f"phone did not enter ringing: {firmware.state()}"
 
+        # Elevation contract: call_id is the ring event id (not metadata / SoundData).
         ring = dataclasses.replace(
             SoundEvent.with_data(
                 SoundData(
@@ -445,11 +433,11 @@ def _live_habit_answers_phone_call(
                     media_type="audio/wav",
                     sample_rate_hz=16_000,
                     channels=1,
-                    kind="ring",
+                    kind="phone.ringing",
                 )
             ),
+            id=call_id,
             source=hsm.id(phone),
-            metadata={"bot.phone.call_id": call_id},
         )
         cognition_input = cognition.InputData(
             stimulus=ring,
@@ -458,26 +446,32 @@ def _live_habit_answers_phone_call(
             focus="phone",
             focus_candidates=("phone",),
         )
+        turn = cognition.types.TurnData(
+            input=cognition_input,
+            operation_id="live-behavior-answer-turn",
+            generation="operation-token",
+        )
         output = await asyncio.wait_for(
-            dispatch_ability_for_test(autonomy, shared, cognition_input, timeout=_LIVE_TIMEOUT_S),
+            dispatch_ability_for_test(autonomy, shared, turn, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
         await asyncio.sleep(0.3)
         published = tuple(event.name for event in firmware.event_recorder().events)
         return output, published, firmware.state()
 
-    output, published, phone_state = asyncio.run(run_habit_and_answer())
+    output, published, phone_state = asyncio.run(run_behavior_and_answer())
     print(f"autonomy output={output!r}")
     print(f"phone published={published!r}")
     print(f"phone_state={phone_state!r}")
 
-    selections = processing.coerce_event_selections(output)
-    assert selections is not None and selections, f"habit/autonomy produced no selections: {output!r}"
+    assert isinstance(output, cognition.types.CompletionData), f"expected CompletionData, got {output!r}"
+    selections = processing.coerce_event_selections(output.output)
+    assert selections is not None and selections, f"behavior/autonomy produced no selections: {output!r}"
     answer_selections = [item for item in selections if item.event == "phone.answer_call"]
     assert answer_selections, f"expected phone.answer_call selection, got {selections!r}"
     assert answer_selections[0].data is not None
     assert answer_selections[0].data.get("call_id") == "livekit:caller", (
-        f"habit must use the ringing call_id, got {answer_selections[0].data!r}"
+        f"behavior must use the ringing call_id from event['id'], got {answer_selections[0].data!r}"
     )
     assert phone_device.ServiceAnswerRequestedEvent.name in published, (
         f"phone never requested answer; published={published!r} state={phone_state!r}"
@@ -487,49 +481,165 @@ def _live_habit_answers_phone_call(
     )
 
 
-@requires_gemini
+@requires_openai
 @pytest.mark.live
-def test_live_gemini_habit_answers_phone_call() -> None:
-    """Real Gemini: generate habit from episodes, run via Autonomy, phone receives answer_call."""
+def test_live_openai_terra_behavior_answers_phone_call() -> None:
+    """Real OpenAI Terra: generate behavior from episodes, Autonomy answers phone."""
 
-    api_key = _gemini_api_key()
+    api_key = _openai_api_key()
     assert api_key is not None
-    model = os.environ.get("BOT_GEMINI_MODEL") or _DEFAULT_GEMINI_MODEL
-    client = GeminiChatClient(model=model, api_key=api_key)
-
-    def reflection_processor() -> processing.Processor:
-        return GeminiProcessor(
-            client=client,
-            provider="gemini_reflection_live",
-        )
-
-    _live_habit_answers_phone_call(label="Gemini", reflection_processor=reflection_processor)
+    model = _openai_model()
+    print(f"\nUsing OpenAI Terra reflection model={model!r} base_url={_openai_base_url()!r}")
+    _live_behavior_answers_phone_call(
+        label=f"OpenAI/{model}",
+        reflection_processor=_openai_reflection_processor,
+    )
 
 
 @requires_openai
 @pytest.mark.live
-def test_live_openai_gpt54mini_habit_answers_phone_call() -> None:
-    """Real OpenAI gpt-5.4-mini: generate habit from episodes, Autonomy answers phone."""
+def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
+    """No pre-seeded episodes: run N real ring→answer cognition turns until Reflection installs a behavior.
+
+    Deliberative reasoning answers every call. Reflection runs after each turn on shared Memory.
+    Reports the first N where ACTIVE behavior inventory appears.
+    """
 
     api_key = _openai_api_key()
     assert api_key is not None
-    model = (
-        os.environ.get("BOT_OPENAI_MODEL")
-        or os.environ.get("CHAT_COMPLETIONS_MODEL")
-        or _DEFAULT_OPENAI_MODEL
-    )
-    base_url = (
-        os.environ.get("BOT_OPENAI_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or "https://api.openai.com/v1"
-    )
-    client = OpenAIChatClient(model=model, api_key=api_key, base_url=base_url)
+    model = _openai_model()
+    print(f"\nNatural behavior formation model={model!r} base_url={_openai_base_url()!r}")
 
-    def reflection_processor() -> processing.Processor:
-        return OpenAIProcessor(
-            client=client,
-            provider="openai_gpt54mini_reflection_live",
+    max_calls = int(os.environ.get("BOT_BEHAVIOR_NATURAL_MAX_CALLS", "10"))
+
+    class _EscalateIntuition(processing.Processor):
+        @typing.override
+        async def process(self, input: processing.InputData) -> processing.Events:
+            del input
+            # Unhandled → Cognition cascades to reasoning.
+            return processing.Result[processing.Events].unhandled()
+
+    class _AnswerRingReasoning(processing.Processor):
+        answered: list[str]
+
+        def __init__(self) -> None:
+            self.answered = []
+
+        @typing.override
+        async def process(self, input: processing.InputData) -> processing.Events:
+            # Reasoning wraps the deliberative host input; the live ring is an hsm.Event.
+            event = input.input
+            host = getattr(event, "host_input", None)
+            if host is not None:
+                event = getattr(host, "input", event)
+            call_id: str
+            if isinstance(event, hsm.Event) and isinstance(event.id, str) and event.id:
+                call_id = event.id
+            else:
+                call_id = "missing-call-id"
+            self.answered.append(call_id)
+            return (
+                processing.SelectedEvent(
+                    event="phone.answer_call",
+                    target="phone",
+                    data={"call_id": call_id},
+                    reason=f"deliberative answer for call {call_id}",
+                ),
+            )
+
+    async def wait_idle(ability: hsm.Instance, *, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            state = ability.state() or ""
+            if state.endswith("/idle") or state.endswith("/behavior/idle"):
+                return
+            await asyncio.sleep(0.05)
+        raise TimeoutError(f"{type(ability).__name__} not idle: {ability.state()!r}")
+
+    async def run() -> tuple[int | None, tuple[str, ...], list[str]]:
+        store = memory.Memory()
+        reasoning = _AnswerRingReasoning()
+        reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
+        ability = cognition.Cognition(
+            autonomy=cognition.Autonomy(memory=store),
+            intuition=cognition.Intuition(processor=_EscalateIntuition()),
+            reasoning=cognition.Reasoning(processor=reasoning, memory=store),
+            reflection=reflection,
         )
+        world = World()
+        shared = shared_hsm_context(world)
+        phone = phone_device.Phone()
+        await start_abilities_for_test(shared, ability)
+        _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        await wait_idle(ability, timeout=30.0)
+        await wait_idle(reflection, timeout=30.0)
 
-    print(f"\nUsing OpenAI-compatible model={model!r} base_url={base_url!r}")
-    _live_habit_answers_phone_call(label=f"OpenAI/{model}", reflection_processor=reflection_processor)
+        formed_at: int | None = None
+        for n in range(1, max_calls + 1):
+            call_id = f"call-{n}"
+            # Fresh ringing call each turn (phone may still be answering previous).
+            firmware = phone_firmware(phone)
+            assert firmware is not None
+            # Prefer a clean phone when possible; ignore if still mid-call from prior answer.
+            try:
+                await firmware.event_recorder().receive(
+                    phone.context(),
+                    phone_device.IncomingCallEvent.with_data(
+                        phone_device.IncomingCallData(call_id=call_id, display_hint="caller")
+                    ),
+                )
+            except Exception as error:  # noqa: BLE001 — phone may reject while busy
+                print(f"call {n}: phone incoming skipped ({error!r}); still running cognition turn")
+
+            ring = dataclasses.replace(
+                SoundEvent.with_data(
+                    SoundData(
+                        audio=phone_device.RING_SOUND_WAV,
+                        media_type="audio/wav",
+                        sample_rate_hz=16_000,
+                        channels=1,
+                        kind="phone.ringing",
+                    )
+                ),
+                id=call_id,
+                source=hsm.id(phone),
+            )
+            cognition_input = cognition.InputData(
+                stimulus=ring,
+                abilities=(),
+                actors={"phone": phone},
+                focus="phone",
+                focus_candidates=("phone",),
+            )
+            print(f"\n--- natural call {n}/{max_calls} id={call_id!r} ---")
+            result = await asyncio.wait_for(
+                dispatch_ability_for_test(ability, shared, cognition_input, timeout=_LIVE_TIMEOUT_S),
+                timeout=_LIVE_TIMEOUT_S + 30.0,
+            )
+            print(f"cognition output={result!r}")
+            # Reflection is fire-and-forget after cognition terminal; wait until it settles.
+            await wait_idle(reflection, timeout=_LIVE_TIMEOUT_S + 30.0)
+            await wait_idle(ability, timeout=30.0)
+
+            behaviors = await _behavior_contents(store)
+            episodes = await _episodes(store)
+            print(f"after call {n}: behaviors={len(behaviors)} episodes={len(episodes)}")
+            if behaviors and formed_at is None:
+                formed_at = n
+                print(f"\n*** behavior formed after {n} natural call(s) ***\n{behaviors[0][:800]}\n")
+                break
+
+        final_behaviors = await _behavior_contents(store)
+        return formed_at, final_behaviors, list(reasoning.answered)
+
+    formed_at, behaviors, answered = asyncio.run(run())
+    print(f"\nformed_at={formed_at} answered={answered} behavior_count={len(behaviors)}")
+    assert answered, "reasoning never answered a call"
+    assert formed_at is not None, (
+        f"no behavior after {max_calls} natural ring→answer turns (no preload); "
+        f"answered={answered!r} behaviors={behaviors!r}"
+    )
+    assert formed_at >= 1
+    assert len(behaviors) >= 1
+    assert "hsm.define" in behaviors[0] or "behavior" in behaviors[0].lower()
+

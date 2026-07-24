@@ -11,6 +11,10 @@ import typing
 from ._audio_file import temporary_audio_file
 from ._mlx import SpeechDecodingModel, SpeechDecodingModelLoader, load_speech_decoding_model
 
+# Process-local warm cache: frozen SpeechDecoder cannot store a loaded model after first use.
+_SPEECH_DECODING_MODEL_CACHE: dict[str, SpeechDecodingModel] = {}
+
+
 class SpeechDecodingError(RuntimeError):
     """Raised when MLX Audio speech decoding fails."""
 
@@ -40,7 +44,7 @@ class SpeechDecoder(speech.SpeechDecoder):
 
     def _decode_blocking(self, audio: bytes) -> bytes:
         try:
-            model = self.model if self.model is not None else self.load_model(self.model_id)
+            model = self._resolve_model()
             with temporary_audio_file(audio, suffix=self.audio_file_suffix) as audio_path:
                 result = model.generate(
                     str(audio_path),
@@ -57,6 +61,19 @@ class SpeechDecoder(speech.SpeechDecoder):
         except Exception as error:
             message = "MLX Audio speech decoding failed."
             raise SpeechDecodingError(message) from error
+
+    def _resolve_model(self) -> SpeechDecodingModel:
+        if self.model is not None:
+            return self.model
+        # Only warm-cache the default loader so injected load_model seams stay testable.
+        if self.load_model is not load_speech_decoding_model:
+            return self.load_model(self.model_id)
+        cached = _SPEECH_DECODING_MODEL_CACHE.get(self.model_id)
+        if cached is not None:
+            return cached
+        loaded = self.load_model(self.model_id)
+        _SPEECH_DECODING_MODEL_CACHE[self.model_id] = loaded
+        return loaded
 
 def _accepted_generate_kwargs(
     model: SpeechDecodingModel,

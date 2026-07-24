@@ -16,6 +16,7 @@ import hsm
 import pydantic
 
 from bot import abilities
+from bot import lifecycle
 from bot.protocols import attachment
 from . import events
 
@@ -28,20 +29,35 @@ _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
 
-# hsm surfaces idempotency conditions only as exception messages ("already has a running HSM"
-# on start, "dispatch requires a started HSM" on dispatch). The predicates below implement
-# idempotent attach/detach and canonical-inventory reactivation; they are not peer-state
-# gating (HSM-CONTEXT-001).
-_HSM_ALREADY_RUNNING_MESSAGE = "already has a running HSM"
-_HSM_NOT_STARTED_MESSAGE = "dispatch requires a started HSM"
+# Lifecycle idempotency for attach/detach/activate (not peer-state gating; HSM-CONTEXT-001).
+# Prefer typed HSM errors when present. Stock stateforward-hsm still often surfaces these
+# conditions as fixed exception prose (ErrorAlreadyStarted / ErrorMissingHSM are exported
+# but not always raised). All residual message detection is confined to these two predicates
+# — call sites must not open-code hsm exception text.
 
 
-def _is_already_running_error(error: Exception) -> bool:
-    return isinstance(error, hsm.ErrorValidatingModel) and _HSM_ALREADY_RUNNING_MESSAGE in str(error)
+def _is_already_running_error(error: BaseException) -> bool:
+    if isinstance(error, hsm.ErrorAlreadyStarted):
+        return True
+    if isinstance(error, hsm.ErrorValidatingModel | RuntimeError):
+        message = str(error)
+        return "already has a running HSM" in message or "already started HSM" in message
+    return False
 
 
-def _is_not_started_error(error: Exception) -> bool:
-    return isinstance(error, RuntimeError) and _HSM_NOT_STARTED_MESSAGE in str(error)
+def _is_not_started_error(error: BaseException) -> bool:
+    if isinstance(error, hsm.ErrorMissingHSM):
+        return True
+    if isinstance(error, RuntimeError):
+        message = str(error)
+        return (
+            "dispatch requires a started HSM" in message
+            or "take snapshot requires a started HSM" in message
+            or "operation requires a started HSM" in message
+            or "restart requires a started HSM" in message
+            or "set requires a started HSM" in message
+        )
+    return False
 
 
 class _BotLifecycleTerminalData(pydantic.BaseModel):
@@ -303,6 +319,9 @@ class Bot(hsm.Instance, abc.ABC):
     _devices: dict[str, Device]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
     _focused_device: str | None
+    # Turn-scoped attention policy for the active processing operation (body-owned).
+    # Set when the processing activity starts; cleared when the turn retires.
+    _processing_focus_candidates: tuple[str, ...]
     _innate_ability_instances: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
@@ -327,6 +346,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._devices = dict(devices)
         self._cognition = cognition
         self._focused_device = None
+        self._processing_focus_candidates = ()
         self._innate_ability_instances = tuple(ability_type() for ability_type in self._innate_abilities)
         self._input = tuple(input)
         self._output = tuple(output)
@@ -337,7 +357,7 @@ class Bot(hsm.Instance, abc.ABC):
         require_world_scope(world, self, participant="Bot")
         try:
             _ = await hsm.started(world, self, self.model)
-        except hsm.ErrorValidatingModel as error:
+        except Exception as error:
             if not _is_already_running_error(error):
                 raise
         await self.dispatch(world, events.ActivateEvent.with_data(events.ActivateEventData()))
@@ -347,7 +367,7 @@ class Bot(hsm.Instance, abc.ABC):
         require_world_scope(world, self, participant="Bot")
         try:
             await self.dispatch(world, events.DeactivateEvent.with_data(events.DeactivateEventData()))
-        except RuntimeError as error:
+        except Exception as error:
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
             if not _is_not_started_error(error):
                 raise
@@ -569,11 +589,10 @@ class Bot(hsm.Instance, abc.ABC):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
-        try:
-            cognition_id = hsm.id(instance._cognition)
-        except hsm.ErrorValidatingModel:
-            # Cognition is not started yet (early activation); it cannot have requested reboot.
+        # Cognition not started yet (early activation) cannot have requested reboot.
+        if not lifecycle.is_started(instance._cognition):
             return False
+        cognition_id = hsm.id(instance._cognition)
         return (
             isinstance(event.data, events.RebootEventData)
             and event.source == cognition_id
@@ -588,6 +607,7 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> bool:
         del ctx
         turn_id = _active_bot_turn_id(instance, event)
+        candidates = instance._processing_focus_candidates
         return (
             isinstance(event.data, events.FocusDeviceEventData)
             and turn_id is not None
@@ -595,6 +615,9 @@ class Bot(hsm.Instance, abc.ABC):
             and event.source == hsm.id(instance._cognition)
             and event.target == hsm.id(instance)
             and event.data.device in instance._devices
+            # Fail-closed: empty turn candidates means no legal focus target (match
+            # attention_selection_error). Never accept any configured device when candidates is ().
+            and event.data.device in candidates
         )
 
     @staticmethod
@@ -613,6 +636,38 @@ class Bot(hsm.Instance, abc.ABC):
             and event.target == hsm.id(instance)
             and instance._focused_device is not None
         )
+
+    @staticmethod
+    def attention_selection_error(
+        selection: processing.SelectedEvent,
+        *,
+        focus_candidates: tuple[str, ...],
+        configured_device_names: frozenset[str],
+        enforce_candidates: bool,
+        focused_device: str | None = None,
+    ) -> str | None:
+        """Return a fail-closed error for illegal body-attention selections, else None.
+
+        Body owns attention policy. Judgment calls this before dispatch so illegal
+        focus/clear selections fail the turn instead of silently dropping at a guard.
+        """
+
+        if selection.event == events.FocusDeviceEvent.name:
+            if selection.target is not None and selection.target != "bot":
+                return "Processing selected focus_device outside available device candidates."
+            data = events.FocusDeviceEventData.model_validate(selection.data or {})
+            if enforce_candidates and data.device not in focus_candidates:
+                return "Processing selected focus_device outside available device candidates."
+            if configured_device_names and data.device not in configured_device_names:
+                return "Processing selected focus_device outside available device candidates."
+            return None
+        if selection.event == events.ClearFocusEvent.name:
+            if selection.target not in (None, "bot"):
+                return "Processing selected clear_focus for a non-bot target."
+            if not focused_device:
+                return "Processing selected clear_focus with no focused device."
+            return None
+        return None
 
     @staticmethod
     def _processing_completed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
@@ -832,6 +887,7 @@ class Bot(hsm.Instance, abc.ABC):
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
         focus_candidates = Bot._processing_device_references(instance, stimulus)
+        instance._processing_focus_candidates = focus_candidates
         cognition_input = cognition.InputData(
             stimulus=stimulus,
             abilities=Bot._lifecycle_abilities(instance),
@@ -944,6 +1000,7 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _retire_bot_turn(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
         del event
+        instance._processing_focus_candidates = ()
         # Successful terminals never consume the cancel token; retire every Bot-owned capability.
         processing.finish_operations(ctx, instance)
 
@@ -958,6 +1015,7 @@ class Bot(hsm.Instance, abc.ABC):
             token = data.token
         else:
             raise AssertionError(f"unsupported processing timeout event data: {type(data)!r}")
+        instance._processing_focus_candidates = ()
         cancel_id = _bot_cancel_operation_id(request_id, token, instance)
         if processing.active_operation(instance, cancel_id) is not None:
             processing.finish_operation(ctx, instance, cancel_id)
@@ -1076,7 +1134,7 @@ class Bot(hsm.Instance, abc.ABC):
             group_scope = _private_scope(lifetime)
             try:
                 _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
-            except hsm.ErrorValidatingModel as error:
+            except Exception as error:
                 if not _is_already_running_error(error):
                     raise
 
@@ -1087,7 +1145,7 @@ class Bot(hsm.Instance, abc.ABC):
                     raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
                 try:
                     _ = await hsm.started(world, device, model)
-                except hsm.ErrorValidatingModel as error:
+                except Exception as error:
                     if not _is_already_running_error(error):
                         raise
             ability_scope = _private_scope(lifetime)
@@ -1097,11 +1155,10 @@ class Bot(hsm.Instance, abc.ABC):
                     raise RuntimeError(f"{type(ability).__name__} has no lifecycle model.")
                 try:
                     _ = await hsm.started(ability_scope, ability, model)
-                except hsm.ErrorValidatingModel as error:
-                    # Residual peer inspection: skip abilities already running under our
-                    # private scope (idempotent reactivation), but raise when an injected
-                    # ability runs under the world scope, where it would receive world
-                    # broadcasts directly. Removing this needs typed errors from hsm.
+                except Exception as error:
+                    # Idempotent when already running under private scope; raise when the
+                    # ability is already running under the world instance map (would receive
+                    # world broadcasts directly).
                     shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.value(
                         hsm.Keys.Instances
                     )
@@ -1395,6 +1452,16 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.effect(_clear_focus),
                 hsm.target("../deactivating"),
             ),
+            # Focus lives on active so menus built during processing entry still see it:
+            # the processing activity nested-dispatches cognition before enter finishes, so a
+            # processing-only snapshot still reads as unfocused/focused. Clear lives only on
+            # focused + processing so idle unfocused snapshots do not offer clear_focus.
+            # Acceptance stays turn-gated by the guards (active bot turn + cognition source).
+            hsm.transition(
+                hsm.on(events.FocusDeviceEvent),
+                hsm.guard(_ability_selected_configured_focus_device),
+                hsm.effect(_dispatch_focus_device_action),
+            ),
             hsm.state(
                 "unfocused",
                 hsm.entry(_clear_focus),
@@ -1428,6 +1495,11 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.state(
                 "focused",
                 hsm.transition(
+                    hsm.on(events.ClearFocusEvent),
+                    hsm.guard(_ability_selected_clear_focus),
+                    hsm.effect(_dispatch_clear_focus_action),
+                ),
+                hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
                     hsm.target("../processing"),
@@ -1455,6 +1527,11 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.defer(cognition.InputEvent),
                 hsm.defer(conversation.OutputEvent),
                 hsm.transition(
+                    hsm.on(events.ClearFocusEvent),
+                    hsm.guard(_ability_selected_clear_focus),
+                    hsm.effect(_dispatch_clear_focus_action),
+                ),
+                hsm.transition(
                     hsm.on(cognition.OutputEvent),
                     hsm.guard(_matches_bot_processing_output),
                     hsm.effect(_complete_bot_processing),
@@ -1463,16 +1540,6 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.on(abilities.FailedEvent),
                     hsm.guard(_matches_bot_processing_failure),
                     hsm.effect(_fail_bot_processing),
-                ),
-                hsm.transition(
-                    hsm.on(events.ClearFocusEvent),
-                    hsm.guard(_ability_selected_clear_focus),
-                    hsm.effect(_dispatch_clear_focus_action),
-                ),
-                hsm.transition(
-                    hsm.on(events.FocusDeviceEvent),
-                    hsm.guard(_ability_selected_configured_focus_device),
-                    hsm.effect(_dispatch_focus_device_action),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),

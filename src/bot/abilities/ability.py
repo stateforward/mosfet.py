@@ -10,6 +10,7 @@ import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
+from bot import lifecycle
 from bot.protocols import attachment
 from bot.telemetry import observer
 
@@ -428,10 +429,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 parent=instance.context(),
                 values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
             )
-            # hsm 1.3.2+: id fails after stop, so this is a valid start gate again.
-            try:
-                _ = hsm.id(instance._attachment_group)
-            except hsm.ErrorValidatingModel:
+            # Start the group when it is not live yet, then attach members.
+            if not lifecycle.is_started(instance._attachment_group):
                 try:
                     _ = await hsm.started(
                         private_scope, instance._attachment_group, instance._attachment_group.model
@@ -973,10 +972,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         async def start_and_dispatch() -> None:
             if model is None:
                 return
-            # hsm 1.3.2+: id fails after stop — restart when not started.
-            try:
-                _ = hsm.id(self)
-            except hsm.ErrorValidatingModel:
+            # Restart when not live.
+            if not lifecycle.is_started(self):
                 _ = await hsm.started(ctx, self, model)
             _ = await hsm.dispatch(ctx, self, event)
 
@@ -997,16 +994,11 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         """Dispatch this ability's detach request."""
 
         async def detach_or_fail() -> None:
-            try:
-                _ = hsm.id(self)
-            except hsm.ErrorValidatingModel:
+            if not lifecycle.is_started(self):
                 data = event.data
                 reply_to = data.reply_to if data.reply_to is not None else data.actor
                 if reply_to is not None:
-                    try:
-                        reply_id = hsm.id(reply_to)
-                    except hsm.ErrorValidatingModel:
-                        reply_id = ""
+                    reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""
                     await hsm.dispatch(
                         ctx,
                         reply_to,
@@ -1044,9 +1036,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         if not isinstance(group, attachment.Group):
             return
         # Group is started lazily on attach; do not hsm.stop an unstarted machine.
-        try:
-            _ = hsm.id(group)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(group):
             return
         await hsm.stop(group, ctx)
 

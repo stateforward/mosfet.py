@@ -23,14 +23,22 @@ _DEFAULT_TUNER_WARMUP = 8
 _DEFAULT_TUNER_VAR_FLOOR = 100.0
 _DEFAULT_TUNER_MEAN = 70.0
 DEFAULT_INSTRUCTIONS = (
-    "Select zero or more modeled events from the offered schemas. Multiple events may run in one "
+    "Select one or more modeled events from the offered schemas. Multiple events may run in one "
     "turn (for example speaking together with another offered ability). Every offered event schema "
     "includes integer confidence 0–100: always set it on each selected event (whole number only, "
     "never a fraction). Use high confidence (80–100) when the match is clear, mid (40–70) when "
     "plausible but incomplete, and low (0–35) when guessing or the host likely cannot fulfill the "
     "request—low confidence may still run world actions while Cognition escalates an unhandled "
-    "turn to deliberation. Leave the turn unhandled when no offered event should run or when the "
-    "stimulus requires slower deliberative reasoning."
+    "turn to deliberation. "
+    "When no device, body, or speech action should run, select "
+    "bot.ability.cognition.ignore (with optional reason) for a deliberate handled pass. "
+    "An empty events list is treated as unhandled and falls through to deliberative reasoning. "
+    "Do not invent focus/answer/clear_focus as a stand-in for ignore. "
+    "Prefer ignore for ambient or non-actionable stimuli. "
+    "When stimulus event.data.kind is phone.ringing and call_id is present, do not ignore — "
+    "select phone.answer_call or phone.decline_call (and focus if needed). "
+    "Select deliberative reasoning only when the stimulus needs slower System-2 thought, or leave "
+    "events empty to force that cascade."
 )
 
 
@@ -274,10 +282,17 @@ def _world_actions(
     *,
     current_input: processing.InputData,
 ) -> types.OutputData:
-    """Action events safe to fire before handing an uncertain turn to deliberate reasoning."""
+    """Action events safe to fire before handing an uncertain turn to deliberate reasoning.
+
+    Cognition ignore is judgment-only (not a world action) and is never pre-fired on escalate.
+    """
 
     schemas = {event.name: event for event in current_input.schemas}
-    return tuple(item for item in output if not _is_deliberative_input_event(item.event, schemas))
+    return tuple(
+        item
+        for item in output
+        if not _is_deliberative_input_event(item.event, schemas) and not types.is_ignore_event(item.event)
+    )
 
 
 def _selections_from_output(
@@ -304,8 +319,10 @@ class Intuition(processing.Processing):
 
     Processor-reported ``confidence`` updates a per-instance baseline. When confidence is
     low relative to that baseline, world actions still dispatch, but the terminal is
-    unhandled so Cognition cascades to reasoning. High confidence terminals with the
-    selection list (no cascade). Explicit unhandled (``result is None``) always cascades.
+    unhandled so Cognition cascades to reasoning. High confidence non-empty terminals keep
+    the selection list (no cascade). Empty selections and explicit unhandled
+    (``result is None``) cascade to reasoning by default; deliberate pass uses
+    ``bot.ability.cognition.ignore``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -422,9 +439,10 @@ class Intuition(processing.Processing):
         escalate = instance._confidence_tuner.should_escalate(confidence)
         # Tuner state drives escalate choice only; do not put it in event.metadata.
 
-        # Explicit unhandled, or low confidence → Cognition cascade (System 2).
+        # Unhandled cascade (System 2): explicit None, empty dispatch, or low confidence.
+        # Empty events: [] is not a deliberate pass — use cognition.ignore for that.
         # On escalate with selections: fire world actions first, then terminal None.
-        if product is None:
+        if product is None or len(product) == 0:
             terminal: types.OutputData | None = None
             to_dispatch: types.OutputData = ()
         elif escalate or any(
@@ -446,6 +464,7 @@ class Intuition(processing.Processing):
                     operation_id=operation_id,
                     source=instance,
                     focus_candidates=data.turn.input.focus_candidates,
+                    focused_device=data.turn.input.focus,
                     metadata=metadata,
                 )
             except Exception as error:

@@ -28,6 +28,7 @@ from . import (
     generative,
     hearing,
     language,
+    learning,
     listening,
     memory,
     participating,
@@ -93,6 +94,7 @@ if typing.TYPE_CHECKING:
         TextStimulus,
     )
     from .reading import Reading, ReadingOutputKind, ReadingStage
+    from .learning import Learning
 
 _LAZY_EXPORT_MODULES = {
     "Classifying": ".classifying",
@@ -141,6 +143,7 @@ _LAZY_EXPORT_MODULES = {
     "Reading": ".reading",
     "ReadingOutputKind": ".reading",
     "ReadingStage": ".reading",
+    "Learning": ".learning",
 }
 
 __all__ = [
@@ -166,6 +169,7 @@ __all__ = [
     "Generative",
     "Generator",
     "ImageStimulus",
+    "Learning",
     "Listening",
     "ListeningStage",
     "Speaking",
@@ -206,6 +210,7 @@ __all__ = [
     "generative",
     "hearing",
     "language",
+    "learning",
     "listening",
     "memory",
     "participating",

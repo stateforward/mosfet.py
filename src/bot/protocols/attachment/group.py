@@ -12,6 +12,8 @@ import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
+from bot import lifecycle
+
 from . import events
 from .attachment import Attachment
 
@@ -1045,12 +1047,8 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         async def start_members_and_dispatch() -> None:
             for member in self._attachments:
                 model = typing.cast(_Modeled, typing.cast(object, member)).model
-                # hsm 1.3.2+: id fails after stop — start only when not started.
-                try:
-                    _ = hsm.id(member)
+                if lifecycle.is_started(member):
                     continue
-                except hsm.ErrorValidatingModel:
-                    pass
                 assert model is not None
                 try:
                     _ = await hsm.started(ctx, member, model)

@@ -1,0 +1,52 @@
+"""Single source of truth for "is this HSM instance started?".
+
+``stateforward-hsm`` (pinned ``>=1.3.2,<1.4``) exposes no predicate for this. ``hsm.started``
+is a constructor (``New`` + ``Start``), not a question, and the only observable that separates
+a started machine from an unstarted or stopped one is ``Instance.take_snapshot()``:
+
+* never handed to ``hsm.new`` — ``Instance.take_snapshot`` returns an empty ``hsm.Snapshot``;
+* started — returns a populated snapshot;
+* stopped — ``HSM.take_snapshot`` raises ``"take snapshot requires a started HSM"``.
+
+BOTH arms of the ``except`` below are load-bearing — do not delete either. The exception
+*type* for that third case changes across the supported range, verified against the sdists
+on PyPI:
+
+* 1.3.2 raises ``hsm.ErrorValidatingModel`` (``hsm.py`` lines 4166 and 4757); it has no
+  ``_runtime_error`` helper at all.
+* 1.3.3 raises a plain ``RuntimeError`` built by ``_runtime_error`` (``hsm.py`` line 131)
+  at ``hsm.py`` lines 4161 and 4748.
+
+``ErrorValidatingModel`` derives from ``Exception``, not ``RuntimeError``, so neither arm
+subsumes the other. ``uv.lock`` currently resolves 1.3.2, which means on a locked checkout
+the ``RuntimeError`` arm never fires and looks like removable dead code — it is not, because
+``pyproject.toml`` permits ``>=1.3.2,<1.4`` and 1.3.3 is published. Re-verify with a scratch
+install of each version before touching this.
+
+Both versions carry the same message, so the message — not the type — is the only reliable
+discriminator. A bare ``except RuntimeError`` here would swallow unrelated runtime failures
+raised from ``take_snapshot`` overrides or HSM callbacks and report them as "not started";
+hence the message check plus re-raise.
+
+This is deliberately the only place in the tree that inspects ``hsm`` exception prose for
+liveness. It answers a question about a machine's own lifecycle; it is not a substitute for
+``hsm.Context.is_done()``, ``instance.state()`` probing, or delivery gating — dispatch is
+still the gate (HSM-DELIVERY-001), and cross-machine coordination stays on typed events.
+"""
+
+import hsm
+
+_NOT_STARTED = "take snapshot requires a started HSM"
+
+
+def is_started(instance: hsm.Instance) -> bool:
+    """True when ``instance`` has a running HSM and can therefore be addressed by ``hsm.id``."""
+
+    try:
+        snapshot = instance.take_snapshot()
+    except (hsm.ErrorValidatingModel, RuntimeError) as error:
+        if _NOT_STARTED not in str(error):
+            raise
+        return False
+    # Mirrors hsm.TakeSnapshot: an all-empty snapshot means the instance was never started.
+    return bool(snapshot.ID or snapshot.QualifiedName or snapshot.State)

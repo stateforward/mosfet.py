@@ -1,0 +1,153 @@
+"""Batch remote LiveKit PCM frames into Listening-sized utterances.
+
+LiveKit delivers ~10 ms frames. Silero/Whisper need longer windows; elevating each
+frame as ``world.sound`` never reaches speech decoding. This assembler is an
+ingress-only batcher at the provider boundary (no shared World / direct wiring).
+"""
+
+from __future__ import annotations
+
+from bot.devices import audio
+
+import array
+import asyncio
+import collections.abc
+import dataclasses
+
+
+def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
+    if sample_rate_hz <= 0 or channels <= 0 or not pcm:
+        return 0.0
+    samples = len(pcm) // (2 * channels)
+    return 1000.0 * samples / float(sample_rate_hz)
+
+
+def pcm_peak_abs(pcm: bytes) -> int:
+    if len(pcm) < 2:
+        return 0
+    usable = pcm if len(pcm) % 2 == 0 else pcm[:-1]
+    if not usable:
+        return 0
+    samples = array.array("h")
+    samples.frombytes(usable)
+    return max((abs(sample) for sample in samples), default=0)
+
+
+@dataclasses.dataclass(slots=True)
+class RemotePcmBatcher:
+    """Accumulate remote PCM and emit utterance-sized ``AudioInputData`` chunks.
+
+    Flush rules (first match):
+    - buffered duration >= ``max_utterance_ms``
+    - idle for ``idle_ms`` with a non-empty buffer (end of talkspurts / single frames)
+    """
+
+    emit: collections.abc.Callable[[audio.AudioInputData], collections.abc.Awaitable[None]]
+    max_utterance_ms: float = 1_200.0
+    idle_ms: float = 250.0
+    loop: asyncio.AbstractEventLoop | None = None
+
+    _buffer: bytearray = dataclasses.field(default_factory=bytearray, init=False, repr=False)
+    _sample_rate_hz: int | None = dataclasses.field(default=None, init=False)
+    _channels: int | None = dataclasses.field(default=None, init=False)
+    _media_type: str = dataclasses.field(default="audio/pcm", init=False)
+    _idle_handle: asyncio.TimerHandle | None = dataclasses.field(default=None, init=False, repr=False)
+    _lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock, init=False, repr=False)
+    _closed: bool = dataclasses.field(default=False, init=False)
+
+    async def push(self, data: audio.AudioInputData) -> None:
+        if self._closed or not data.audio:
+            return
+        to_emit: list[audio.AudioInputData] = []
+        async with self._lock:
+            if self._closed:
+                return
+            format_changed = (
+                self._sample_rate_hz is not None
+                and (
+                    data.sample_rate_hz != self._sample_rate_hz
+                    or data.channels != self._channels
+                    or data.media_type != self._media_type
+                )
+            )
+            if format_changed and self._buffer:
+                to_emit.append(self._snapshot_unlocked())
+                self._clear_unlocked()
+            self._sample_rate_hz = data.sample_rate_hz
+            self._channels = data.channels
+            self._media_type = data.media_type
+            self._buffer.extend(data.audio)
+            duration_ms = pcm_duration_ms(
+                bytes(self._buffer),
+                sample_rate_hz=data.sample_rate_hz,
+                channels=data.channels,
+            )
+            if duration_ms >= self.max_utterance_ms:
+                to_emit.append(self._snapshot_unlocked())
+                self._clear_unlocked()
+                self._cancel_idle_unlocked()
+            else:
+                self._reschedule_idle_unlocked()
+        for chunk in to_emit:
+            await self.emit(chunk)
+
+    async def flush(self) -> None:
+        async with self._lock:
+            pending = self._snapshot_unlocked() if self._buffer else None
+            self._clear_unlocked()
+            self._cancel_idle_unlocked()
+        if pending is not None:
+            await self.emit(pending)
+
+    async def aclose(self) -> None:
+        async with self._lock:
+            self._closed = True
+            pending = self._snapshot_unlocked() if self._buffer else None
+            self._clear_unlocked()
+            self._cancel_idle_unlocked()
+        if pending is not None:
+            await self.emit(pending)
+
+    def _snapshot_unlocked(self) -> audio.AudioInputData:
+        assert self._sample_rate_hz is not None
+        assert self._channels is not None
+        return audio.AudioInputData(
+            audio=bytes(self._buffer),
+            media_type=self._media_type,
+            sample_rate_hz=self._sample_rate_hz,
+            channels=self._channels,
+        )
+
+    def _clear_unlocked(self) -> None:
+        self._buffer.clear()
+
+    def _cancel_idle_unlocked(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+
+    def _reschedule_idle_unlocked(self) -> None:
+        self._cancel_idle_unlocked()
+        loop = self.loop or asyncio.get_running_loop()
+        delay = max(self.idle_ms, 1.0) / 1000.0
+
+        def _on_idle() -> None:
+            self._idle_handle = None
+            _ = asyncio.ensure_future(self._idle_flush(), loop=loop)
+
+        self._idle_handle = loop.call_later(delay, _on_idle)
+
+    async def _idle_flush(self) -> None:
+        async with self._lock:
+            if self._closed or not self._buffer:
+                return
+            pending = self._snapshot_unlocked()
+            self._clear_unlocked()
+        await self.emit(pending)
+
+
+__all__ = [
+    "RemotePcmBatcher",
+    "pcm_duration_ms",
+    "pcm_peak_abs",
+]

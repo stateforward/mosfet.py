@@ -66,15 +66,6 @@ def _tool_to_openai(tool: object) -> dict[str, object]:
 def _tools_to_openai(tools: collections.abc.Sequence[object]) -> tuple[dict[str, object], ...]:
     return tuple(_tool_to_openai(tool) for tool in tools)
 
-def _extra_body_for_input(
-    input: text.InputData,
-    extra_body: collections.abc.Mapping[str, object],
-) -> dict[str, object]:
-    body = dict(extra_body)
-    if input.tools:
-        body["tool_choice"] = str(input.tool_selection)
-    return body
-
 def _mapping(value: object, message: str) -> collections.abc.Mapping[str, object]:
     if not isinstance(value, collections.abc.Mapping):
         raise TextGenerationError(message)
@@ -169,6 +160,9 @@ def _extra_body_for_input(
     body = dict(extra_body)
     if input.tools:
         body["tool_choice"] = str(input.tool_selection)
+        # GPT-5.6 Luna rejects function tools on chat completions unless reasoning is off.
+        # (API: set reasoning_effort to "none", or use /v1/responses.)
+        body.setdefault("reasoning_effort", "none")
     return body
 
 def _validate_tool_selection(input: text.InputData, tool_calls: tuple[text.TextToolCall, ...]) -> None:

@@ -17,6 +17,7 @@ members = [
     "bot-provider-livekit",
     "bot-provider-mlx-audio",
     "bot-provider-mlx-vlm",
+    "bot-provider-moonshine",
     "bot-provider-openai-compat",
     "bot-provider-postgres-memory",
     "bot-provider-sqlite-memory",
@@ -257,6 +258,32 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = ">=0.6.3,<0.7.0" },
+    { name = "stateforward-bot", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "bot-provider-moonshine"
+source = { editable = "src/providers/moonshine" }
+dependencies = [
+    { name = "moonshine-voice" },
+    { name = "stateforward-bot" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "moonshine-voice", specifier = ">=0.0.70,<0.1.0" },
     { name = "stateforward-bot", editable = "." },
 ]
 
@@ -1063,6 +1090,26 @@ wheels = [
 ]
 
 [[package]]
+name = "moonshine-voice"
+version = "0.0.73"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "filelock" },
+    { name = "numpy" },
+    { name = "platformdirs" },
+    { name = "requests" },
+    { name = "sounddevice" },
+    { name = "tqdm" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/a3/af1e1f0aaef7175727f9fedfec6863f551c0e00159a796b11a6579c6611d/moonshine_voice-0.0.73-py3-none-macosx_15_0_arm64.whl", hash = "sha256:fb4c81f2fa96674d336530bc1cf2f86b6a4fc8b3c02e138a7a5c768c283f8bc7", size = 54373469, upload-time = "2026-07-24T01:41:08.643Z" },
+    { url = "https://files.pythonhosted.org/packages/09/53/39440fef122417b48dd94bec38749970d60cfd57b411dc810f3c8d27f8c7/moonshine_voice-0.0.73-py3-none-manylinux_2_31_aarch64.manylinux_2_39_aarch64.whl", hash = "sha256:d01e1343bfeb436a59f7d8562566d4b2f2a526297328d776a13d1544887aec61", size = 55048900, upload-time = "2026-07-24T04:38:29.431Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/1a/f32fe9d27851a6c88bdea75891c1d5f0bac11ee5ab72517b9c42657c0262/moonshine_voice-0.0.73-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:c56de7614b18bbc65d8f4f2cb7432d8a258311aef38a49e9e16c8d06df8085f0", size = 55105425, upload-time = "2026-07-24T01:54:17.609Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/7a/245402af9a56879cf24f36ba86087240ef8d5f807064fdd510c58de88947/moonshine_voice-0.0.73-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:6461c8097ed78d054c46b4c821143008a07b5fa1f4169674493ccfa06c1407db", size = 56320672, upload-time = "2026-07-24T01:50:09.7Z" },
+    { url = "https://files.pythonhosted.org/packages/42/14/51f5813cd4cb1a172885e5b6e7f8a50ca2462cb418b67773d8bf8ab1dcf5/moonshine_voice-0.0.73-py3-none-win_amd64.whl", hash = "sha256:fd9895bec46f929ac3747fb83bede3826f7a32c3d0c9559b4b2840fa5e6d2bcd", size = 50504986, upload-time = "2026-07-24T06:10:12.213Z" },
+]
+
+[[package]]
 name = "multidict"
 version = "6.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1258,6 +1305,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/8c/1a9e46228571de18f8e28f16fabdfc20212a5d019f3e3303452b3f0a580d/pillow-12.2.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:80b2da48193b2f33ed0c32c38140f9d3186583ce7d516526d462645fd98660ae", size = 4695386, upload-time = "2026-04-01T14:44:58.663Z" },
     { url = "https://files.pythonhosted.org/packages/b6/ab/1b426a3974cb0e7da5c29ccff4807871d48110933a57207b5a676cccc155/pillow-12.2.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:57850958fe9c751670e49b2cecf6294acc99e562531f4bd317fa5ddee2068463", size = 5314225, upload-time = "2026-04-01T14:45:25.637Z" },
     { url = "https://files.pythonhosted.org/packages/19/1e/dce46f371be2438eecfee2a1960ee2a243bbe5e961890146d2dee1ff0f12/pillow-12.2.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:d5d38f1411c0ed9f97bcb49b7bd59b6b7c314e0e27420e34d99d844b9ce3b6f3", size = 4698541, upload-time = "2026-04-01T14:45:28.355Z" },
+]
+
+[[package]]
+name = "platformdirs"
+version = "4.11.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/9b/560e4be8e26f6fd133a03630a8df0c663b9e8d61b4ade152b72005aec83b/platformdirs-4.11.0.tar.gz", hash = "sha256:0555d18370482847566ffabcaa53ad7c6c1c29f195989ae1ed634a05f76ea1e0", size = 31953, upload-time = "2026-07-21T13:09:36.565Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/68/d8d58938dfb1370b266a1a729e6d77a985be23689a0496498ee17b2cbf90/platformdirs-4.11.0-py3-none-any.whl", hash = "sha256:360ccded2b7fce0af0ff80cc8f5942a1c5d99b0e856033acb030bfc634709e74", size = 23247, upload-time = "2026-07-21T13:09:35.422Z" },
 ]
 
 [[package]]
@@ -1635,12 +1691,15 @@ name = "sounddevice"
 version = "0.5.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "cffi" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2a/f9/2592608737553638fca98e21e54bfec40bf577bb98a61b2770c912aab25e/sounddevice-0.5.5.tar.gz", hash = "sha256:22487b65198cb5bf2208755105b524f78ad173e5ab6b445bdab1c989f6698df3", size = 143191, upload-time = "2026-01-23T18:36:43.529Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/0a/478e441fd049002cf308520c0d62dd8333e7c6cc8d997f0dda07b9fbcc46/sounddevice-0.5.5-py3-none-any.whl", hash = "sha256:30ff99f6c107f49d25ad16a45cacd8d91c25a1bcdd3e81a206b921a3a6405b1f", size = 32807, upload-time = "2026-01-23T18:36:35.649Z" },
     { url = "https://files.pythonhosted.org/packages/56/f9/c037c35f6d0b6bc3bc7bfb314f1d6f1f9a341328ef47cd63fc4f850a7b27/sounddevice-0.5.5-py3-none-macosx_10_6_x86_64.macosx_10_6_universal2.whl", hash = "sha256:05eb9fd6c54c38d67741441c19164c0dae8ce80453af2d8c4ad2e7823d15b722", size = 108557, upload-time = "2026-01-23T18:36:37.41Z" },
+    { url = "https://files.pythonhosted.org/packages/88/a1/d19dd9889cd4bce2e233c4fac007cd8daaf5b9fe6e6a5d432cf17be0b807/sounddevice-0.5.5-py3-none-win32.whl", hash = "sha256:1234cc9b4c9df97b6cbe748146ae0ec64dd7d6e44739e8e42eaa5b595313a103", size = 317765, upload-time = "2026-01-23T18:36:39.047Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/0e/002ed7c4c1c2ab69031f78989d3b789fee3a7fba9e586eb2b81688bf4961/sounddevice-0.5.5-py3-none-win_amd64.whl", hash = "sha256:cfc6b2c49fb7f555591c78cb8ecf48d6a637fd5b6e1db5fec6ed9365d64b3519", size = 365324, upload-time = "2026-01-23T18:36:40.496Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/39/a61d4b83a7746b70d23d9173be688c0c6bfc7173772344b7442c2c155497/sounddevice-0.5.5-py3-none-win_arm64.whl", hash = "sha256:3861901ddd8230d2e0e8ae62ac320cdd4c688d81df89da036dcb812f757bb3e6", size = 317115, upload-time = "2026-01-23T18:36:42.235Z" },
 ]
 
 [[package]]

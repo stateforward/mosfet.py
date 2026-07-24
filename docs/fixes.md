@@ -20,8 +20,8 @@ Stores injected listening/reading abilities. Move to private instance fields. Sa
 _READING_STATES
 Stores injected classifier/decoders/encoder. Move to private instance fields. Same.
 
-_HABIT_BEHAVIOR_STATES
-Stores compiled habit spec and callback runtime (event-only; no ability bindings). Move to private instance fields if they are immutable after construction. If callback runtime has lifecycle state, inspect separately.
+_BEHAVIOR_STATES
+Removed. The compiled behavior spec and callback runtime (event-only; no ability bindings) are private instance fields on `Behavior` (`src/bot/behavior/behavior.py`). Renamed from `_HABIT_BEHAVIOR_STATES` with the `habit` → `behavior` package rehome.
 
 _ATTACH_WAITERS
 Removed. Device.attach is now a thin dispatch wrapper for the modeled attach event, and LiveKit PhoneService.attach dispatches its attach event without a private waiter/completion bridge. Device initialization queues pending attach requests through owning HSM transitions, and bot activation advances from modeled device events instead of waiting on a hidden Future bridge. The old generic instance-method wrappers were also removed so HSM behaviors that touch private state live directly on the owning class as static callbacks.

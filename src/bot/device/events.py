@@ -7,28 +7,6 @@ TInput = typing.TypeVar("TInput", bound=pydantic.BaseModel)
 TOutput = typing.TypeVar("TOutput", bound=pydantic.BaseModel)
 
 
-class ActivateEventData(pydantic.BaseModel):
-    """No-payload command that requests active use of an attached device."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "examples": [{}],
-        },
-    )
-
-
-class DeactivateEventData(pydantic.BaseModel):
-    """No-payload command that returns a device to inactive use."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "examples": [{}],
-        },
-    )
-
-
 class InputEventData(pydantic.BaseModel, typing.Generic[TInput]):
     """Payload that contains input data for an event."""
 
@@ -79,15 +57,6 @@ class FirmwareInitializingFailedEventData(pydantic.BaseModel):
         examples=["firmware-init-1"],
     )
 
-
-ActivateEvent = hsm.Event[ActivateEventData](
-    name="device.activate",
-    schema=ActivateEventData,
-)
-DeactivateEvent = hsm.Event[DeactivateEventData](
-    name="device.deactivate",
-    schema=DeactivateEventData,
-)
 
 FirmwareInitializingDoneEvent = hsm.Event[FirmwareInitializingDoneEventData](
     name="device.firmware.initializing.done",

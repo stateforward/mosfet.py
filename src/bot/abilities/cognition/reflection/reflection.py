@@ -1,4 +1,4 @@
-"""Post-output reflection: recall, select habit inventory, break, and store.
+"""Post-output reflection: recall, select behavior inventory, break, and store.
 
 HSM phases (children attached; never call child ``_process`` / ``_apply``):
 1. recall priors
@@ -8,12 +8,12 @@ HSM phases (children attached; never call child ``_process`` / ``_apply``):
 5. store cognitive episode; complete with no host product
 
 Inventory policy:
-- ``bot.habit.create`` delegates DRAFT seeding and authoring to ``Revision``.
-- ``bot.habit.change`` delegates existing-row loading and authoring to ``Revision``.
+- ``bot.behavior.create`` delegates DRAFT seeding and authoring to ``Revision``.
+- ``bot.behavior.change`` delegates existing-row loading and authoring to ``Revision``.
 - Changing always upserts; status=ACTIVE only when checks pass (usage counters preserved), else
   status=DRAFT with status_reason=validation.
-- ``bot.habit.break`` sets status=BROKEN with status_reason / status_updated_at; row stays for later change.
-- Autonomy loads only status=ACTIVE habits; it writes ``used_*`` / ``failed_*`` practice telemetry.
+- ``bot.behavior.break`` sets status=BROKEN with status_reason / status_updated_at; row stays for later change.
+- Autonomy loads only status=ACTIVE behaviors; it writes ``used_*`` / ``failed_*`` practice telemetry.
 
 Revision owns the HSM-visible author, validate, retry, and inventory persistence policy.
 """
@@ -36,7 +36,7 @@ from sqlalchemy.sql import Executable
 from bot.protocols import attachment
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
-from bot.habit import (
+from bot.behavior import (
     BreakData,
     BreakEvent,
     ChangeData,
@@ -45,8 +45,8 @@ from bot.habit import (
     CreateEvent,
     event_for_data,
 )
-from bot.habit import storage as habit_storage
-from bot.habit.instance import Instance
+from bot.behavior import storage as behavior_storage
+from bot.behavior.instance import Instance
 from bot.telemetry import observer
 
 from .. import episodes
@@ -58,14 +58,14 @@ CognitiveEpisode = episodes.CognitiveEpisode
 stimulus_name = episodes.stimulus_name
 
 SELECT_INSTRUCTIONS = (
-    "Select at most one offered habit inventory event (bot.habit.create, change, or break) "
+    "Select at most one offered behavior inventory event (bot.behavior.create, change, or break) "
     "when a clear repeated pattern across this turn and prior_episodes should improve future behavior. "
     "Otherwise return an empty selection. Use only offered events; data must match the event schema. "
-    "habits lists installed inventory with status (ACTIVE|DRAFT|BROKEN), status_reason, status_updated_at, "
+    "behaviors lists installed inventory with status (ACTIVE|DRAFT|BROKEN), status_reason, status_updated_at, "
     "and usage: used_count / last_used_at (handled Autonomy runs) and failed_count / last_failed_at. "
     "Prefer change over break when used_count is low (not enough practice evidence). "
     "Prefer break when failures or harm outweigh practice value; include reason. "
-    "create delegates a DRAFT habit revision; change revises an existing habit; "
+    "create delegates a DRAFT behavior revision; change revises an existing behavior; "
     "break sets status=BROKEN (keeps inventory for later change; Autonomy will not run it). "
     "Select intent may omit source — do not invent source here."
 )
@@ -112,8 +112,8 @@ class SelectInput(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Select step input. Choose one offered habit inventory event or an empty selection. "
-                "habits carries installed inventory including used/failed practice telemetry."
+                "Select step input. Choose one offered behavior inventory event or an empty selection. "
+                "behaviors carries installed inventory including used/failed practice telemetry."
             ),
         },
     )
@@ -126,12 +126,12 @@ class SelectInput(pydantic.BaseModel):
     )
     prior_episodes: tuple[CognitiveEpisode, ...] = pydantic.Field(
         default=(),
-        description="Prior cognition episodes recalled from memory for similar-turn habit work.",
+        description="Prior cognition episodes recalled from memory for similar-turn behavior work.",
     )
-    habits: tuple[Instance, ...] = pydantic.Field(
+    behaviors: tuple[Instance, ...] = pydantic.Field(
         default=(),
         description=(
-            "Installed habit inventory (any status) with status, status_reason, status_updated_at, "
+            "Installed behavior inventory (any status) with status, status_reason, status_updated_at, "
             "used_count, last_used_at, failed_count, and last_failed_at."
         ),
     )
@@ -161,7 +161,7 @@ class _RecalledEventData(pydantic.BaseModel):
 
 
 class _AppliedEventData(pydantic.BaseModel):
-    """Habit inventory side effects done; ready to store the episode."""
+    """Behavior inventory side effects done; ready to store the episode."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -169,7 +169,7 @@ class _AppliedEventData(pydantic.BaseModel):
     )
 
     turn: InputData
-    habit: CreateData | ChangeData | BreakData | None = None
+    behavior: CreateData | ChangeData | BreakData | None = None
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
 
@@ -233,8 +233,8 @@ _StageFailedEvent = hsm.Event[_StageFailedData](
 )
 
 
-def habit_events() -> tuple[processing.Event[typing.Any], ...]:
-    """Habit inventory HSM events offered on the select input."""
+def behavior_events() -> tuple[processing.Event[typing.Any], ...]:
+    """Behavior inventory HSM events offered on the select input."""
 
     return (CreateEvent, ChangeEvent, BreakEvent)
 
@@ -242,7 +242,7 @@ def habit_events() -> tuple[processing.Event[typing.Any], ...]:
 def episode_from_turn(
     cognition_turn: InputData,
     *,
-    habit: CreateData | ChangeData | BreakData | None = None,
+    behavior: CreateData | ChangeData | BreakData | None = None,
 ) -> CognitiveEpisode:
     """Build a recallable episode from the reflection turn just handled."""
 
@@ -251,12 +251,8 @@ def episode_from_turn(
         focus_candidates=cognition_turn.cognition_input.focus_candidates,
         stimulus_name=stimulus_name(cognition_turn.cognition_input.stimulus),
         output=cognition_turn.cognition_output,
-        habit=habit,
+        behavior=behavior,
     )
-
-
-def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return dict(metadata)
 
 
 def _coerce_output_data(value: object) -> types.OutputData:
@@ -277,7 +273,7 @@ def _coerce_output_data(value: object) -> types.OutputData:
 
 
 def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any]:
-    """Build a habit inventory HSM event from one select-step selection."""
+    """Build a behavior inventory HSM event from one select-step selection."""
 
     raw = dict(item.data or {})
     if item.event == CreateEvent.name:
@@ -289,46 +285,46 @@ def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any
     raise TypeError(f"Reflection select returned unsupported event: {item.event}.")
 
 
-def _compile_habit_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
+def _compile_behavior_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
     return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
 
 
-def _load_habit(store: memory.Memory, *, name: str) -> Instance | None:
+def _load_behavior(store: memory.Memory, *, name: str) -> Instance | None:
     out = store.execute(
-        memory.InputData(statements=_compile_habit_statements(habit_storage.select_habit_by_name_clauses(name)))
+        memory.InputData(statements=_compile_behavior_statements(behavior_storage.select_behavior_by_name_clauses(name)))
     )
     if len(out.results) < 2:
         return None
-    habit_rows = tuple(row.as_mapping() for row in out.results[0].rows)
+    behavior_rows = tuple(row.as_mapping() for row in out.results[0].rows)
     trigger_rows = tuple(row.as_mapping() for row in out.results[1].rows)
-    loaded = habit_storage.instances_from_habit_results(habit_rows, trigger_rows)
+    loaded = behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
     return loaded[0] if loaded else None
 
 
-def _load_all_habits(store: memory.Memory) -> tuple[Instance, ...]:
-    """Load full habit inventory (any status) for Reflection select context."""
+def _load_all_behaviors(store: memory.Memory) -> tuple[Instance, ...]:
+    """Load full behavior inventory (any status) for Reflection select context."""
 
     out = store.execute(
-        memory.InputData(statements=_compile_habit_statements(habit_storage.select_all_habits_clauses()))
+        memory.InputData(statements=_compile_behavior_statements(behavior_storage.select_all_behaviors_clauses()))
     )
     if len(out.results) < 2:
         return ()
-    habit_rows = tuple(row.as_mapping() for row in out.results[0].rows)
+    behavior_rows = tuple(row.as_mapping() for row in out.results[0].rows)
     trigger_rows = tuple(row.as_mapping() for row in out.results[1].rows)
-    return habit_storage.instances_from_habit_results(habit_rows, trigger_rows)
+    return behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
 
 
-def _store_habit(
+def _store_behavior(
     store: memory.Memory,
     *,
-    habit: Instance,
+    behavior: Instance,
     context_ref: str | None,
 ) -> None:
-    """Upsert habit inventory row."""
+    """Upsert behavior inventory row."""
 
     del context_ref
     _ = store.execute(
-        memory.InputData(statements=_compile_habit_statements(habit_storage.replace_habit_clauses(habit)))
+        memory.InputData(statements=_compile_behavior_statements(behavior_storage.replace_behavior_clauses(behavior)))
     )
 
 
@@ -349,12 +345,12 @@ def _store_episode(
 def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | None) -> BreakData:
     """Set status=BROKEN in inventory; do not delete (change can revive it later)."""
 
-    existing = _load_habit(store, name=data.name)
+    existing = _load_behavior(store, name=data.name)
     if existing is None:
-        raise ValueError(f"Reflection break selected unknown habit: {data.name}.")
+        raise ValueError(f"Reflection break selected unknown behavior: {data.name}.")
     reason = data.reason.strip() if data.reason and data.reason.strip() else None
-    retired = habit_storage.mark_broken(existing, reason=reason)
-    _store_habit(store, habit=retired, context_ref=context_ref)
+    retired = behavior_storage.mark_broken(existing, reason=reason)
+    _store_behavior(store, behavior=retired, context_ref=context_ref)
     return data
 
 
@@ -374,7 +370,7 @@ class Reflection(processing.Processing):
     output_event: typing.ClassVar[hsm.Event[None]] = ability.ability_output_event(
         "bot.ability.reflection.output",
         type(None),
-        description="Reflection completes with no product; habit work is applied as side effects only.",
+        description="Reflection completes with no product; behavior work is applied as side effects only.",
     )
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
@@ -410,18 +406,7 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _matches_operation(instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
-        operation = Reflection._operation(event)
-        if operation is None:
-            return False
-        operation_id, generation = operation
-        active = processing.active_operation(instance, operation_id)
-        return (
-            active is not None
-            and generation == hsm.id(active)
-            and event.id == operation_id
-            and event.source == hsm.id(instance)
-            and event.target == hsm.id(instance)
-        )
+        return processing.matches_private_terminal(instance, event, Reflection._operation(event))
 
     @staticmethod
     def _private_event(
@@ -452,90 +437,44 @@ class Reflection(processing.Processing):
         return processing.Processing._is_cancel_request(ctx, instance, event)
 
     @staticmethod
-    def _cancel_child(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-        child: processing.Processing,
-        request_id: str,
-    ) -> None:
+    def _cancel_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, processing.CancelData)
-        _ = hsm.dispatch(
-            ctx,
-            child,
-            dataclasses.replace(
-                processing.CancelEvent.with_data(
-                    processing.CancelData(
-                        operation_id=request_id,
-                        token=data.token,
-                        parent_operation_id=data.operation_id,
-                    )
-                ),
-                id=request_id,
-                source=hsm.id(instance),
-                target=hsm.id(child),
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    def _cancel_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        Reflection._cancel_child(
+        processing.dispatch_child_cancel(
             ctx,
             instance,
-            event,
             instance._select_processing,
-            Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+            event,
+            request_id=Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+            parent_operation_id=data.operation_id,
+            token=data.token,
         )
 
     @staticmethod
     def _cancel_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, processing.CancelData)
-        Reflection._cancel_child(
+        processing.dispatch_child_cancel(
             ctx,
             instance,
-            event,
             instance._revision,
-            data.operation_id,
-        )
-
-    @staticmethod
-    def _cancel_timed_out_child(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        event: hsm.Event[typing.Any],
-        child: processing.Processing,
-        request_id: str,
-    ) -> None:
-        token = uuid.uuid4().hex
-        _ = hsm.dispatch(
-            ctx,
-            child,
-            dataclasses.replace(
-                processing.CancelEvent.with_data(
-                    processing.CancelData(
-                        operation_id=request_id,
-                        token=token,
-                        parent_operation_id=event.id or request_id,
-                    )
-                ),
-                id=request_id,
-                source=hsm.id(instance),
-                target=hsm.id(child),
-                metadata=dict(event.metadata),
-            ),
+            event,
+            request_id=data.operation_id,
+            parent_operation_id=data.operation_id,
+            token=data.token,
         )
 
     @staticmethod
     def _cancel_select_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        Reflection._cancel_timed_out_child(
+        request_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
+        processing.dispatch_child_cancel(
             ctx,
             instance,
-            event,
             instance._select_processing,
-            Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+            event,
+            request_id=request_id,
+            parent_operation_id=event.id or request_id,
+            token=uuid.uuid4().hex,
         )
 
     @staticmethod
@@ -543,12 +482,14 @@ class Reflection(processing.Processing):
         operation_id = processing.active_operation_id(instance)
         if operation_id is None:
             return
-        Reflection._cancel_timed_out_child(
+        processing.dispatch_child_cancel(
             ctx,
             instance,
-            dataclasses.replace(event, id=operation_id),
             instance._revision,
-            operation_id,
+            event,
+            request_id=operation_id,
+            parent_operation_id=operation_id,
+            token=uuid.uuid4().hex,
         )
 
     @staticmethod
@@ -633,47 +574,10 @@ class Reflection(processing.Processing):
         return isinstance(event.data, _StageFailedData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
-    def _dispatch_failure(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        *,
-        operation_id: str | None,
-        metadata: dict[str, object],
-        failure: ability.FailureData,
-    ) -> None:
-        terminal = dataclasses.replace(
-            instance.failed_event.with_data(failure),
-            id=operation_id,
-            metadata=_public_metadata(metadata),
-            source=hsm.id(instance),
-        )
-        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
-        if operation_id is not None:
-            processing.finish_operation(ctx, instance, operation_id)
-
-    @staticmethod
-    def _dispatch_output(
-        ctx: hsm.Context,
-        instance: "Reflection",
-        *,
-        operation_id: str | None,
-        metadata: dict[str, object],
-    ) -> None:
-        terminal = dataclasses.replace(
-            instance.output_event.with_data(None),
-            id=operation_id,
-            metadata=_public_metadata(metadata),
-            source=hsm.id(instance),
-        )
-        _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
-        if operation_id is not None:
-            processing.finish_operation(ctx, instance, operation_id)
-
-    @staticmethod
     def _fail_from_stage(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _StageFailedData)
-        Reflection._dispatch_failure(
+        processing.dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=event.id or None,
@@ -687,7 +591,7 @@ class Reflection(processing.Processing):
         assert isinstance(data, processing.FailureData)
         child_input = data.input.input
         assert isinstance(child_input, SelectInput)
-        Reflection._dispatch_failure(
+        processing.dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=child_input.operation_id,
@@ -698,7 +602,7 @@ class Reflection(processing.Processing):
     @staticmethod
     def _fail_cancel_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         operation_id = processing.active_operation_id(instance)
-        Reflection._dispatch_failure(
+        processing.dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=operation_id,
@@ -708,23 +612,14 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        if not instance._attachments:
-            return
-        reason: bot.RebootReason = (
-            "cognition_detach_rollback_failed"
-            if event.name == ability.Ability._composite_attachment_terminal_event.name
-            else "cognition_child_teardown_failed"
-        )
-        owner = instance._attachments[0]
-        _ = hsm.dispatch(
+        processing.dispatch_reboot(
             ctx,
-            owner,
-            dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
-                id=event.id or uuid.uuid4().hex,
-                source=hsm.id(instance),
-                target=hsm.id(owner),
-                metadata=_public_metadata(dict(event.metadata)),
+            instance,
+            event,
+            reason=(
+                "cognition_detach_rollback_failed"
+                if event.name == ability.Ability._composite_attachment_terminal_event.name
+                else "cognition_child_teardown_failed"
             ),
         )
 
@@ -800,19 +695,19 @@ class Reflection(processing.Processing):
         turn = data.turn
         operation_id = data.operation_id
         try:
-            habits = _load_all_habits(instance._memory)
+            behaviors = _load_all_behaviors(instance._memory)
         except Exception:
-            habits = ()
+            behaviors = ()
         select_input = processing.InputData(
             input=SelectInput(
                 cognition_input=turn.cognition_input,
                 cognition_output=turn.cognition_output,
                 prior_episodes=data.prior_episodes,
-                habits=habits,
+                behaviors=behaviors,
                 operation_id=operation_id,
                 generation=data.generation,
             ),
-            schemas=habit_events(),
+            schemas=behavior_events(),
             actors={},
         )
         input_event = dataclasses.replace(
@@ -830,61 +725,68 @@ class Reflection(processing.Processing):
         child = instance._select_processing
         completion = event.data
         select_input = completion.input.input if isinstance(completion, processing.CompletionData) else None
-        return (
-            isinstance(select_input, SelectInput)
-            and processing.matches_operation(instance, select_input.operation_id, select_input.generation)
-            and event.name == child.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(child)
-            and event.id == Reflection._child_id(instance, _SELECT_ID_SUFFIX)
+        if not isinstance(select_input, SelectInput):
+            return False
+        return processing.matches_child_terminal(
+            instance,
+            child,
+            event,
+            name=child.output_event.name,
+            request_id=Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+            operation_id=select_input.operation_id,
+            generation=select_input.generation,
         )
 
     @staticmethod
     def _matches_select_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
+        child = instance._select_processing
         failure = event.data
         select_input = failure.input.input if isinstance(failure, processing.FailureData) else None
-        return (
-            isinstance(select_input, SelectInput)
-            and processing.matches_operation(instance, select_input.operation_id, select_input.generation)
-            and event.name == instance._select_processing.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(instance._select_processing)
-            and event.id == Reflection._child_id(instance, _SELECT_ID_SUFFIX)
+        if not isinstance(select_input, SelectInput):
+            return False
+        return processing.matches_child_terminal(
+            instance,
+            child,
+            event,
+            name=child.failed_event.name,
+            request_id=Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+            operation_id=select_input.operation_id,
+            generation=select_input.generation,
         )
 
     @staticmethod
     def _matches_revision_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
+        child = instance._revision
         data = event.data
-        return (
-            isinstance(data, revision.OutputData)
-            and processing.matches_operation(
-                instance,
-                data.input.parent_operation_id,
-                data.input.parent_generation,
-            )
-            and event.name == instance._revision.output_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(instance._revision)
-            and event.id == data.input.parent_operation_id
+        if not isinstance(data, revision.OutputData):
+            return False
+        return processing.matches_child_terminal(
+            instance,
+            child,
+            event,
+            name=child.output_event.name,
+            request_id=data.input.parent_operation_id,
+            operation_id=data.input.parent_operation_id,
+            generation=data.input.parent_generation,
         )
 
     @staticmethod
     def _matches_revision_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
+        child = instance._revision
         data = event.data
-        return (
-            isinstance(data, revision.FailureData)
-            and processing.matches_operation(
-                instance,
-                data.input.parent_operation_id,
-                data.input.parent_generation,
-            )
-            and event.name == instance._revision.failed_event.name
-            and event.target == hsm.id(instance)
-            and event.source == hsm.id(instance._revision)
-            and event.id == data.input.parent_operation_id
+        if not isinstance(data, revision.FailureData):
+            return False
+        return processing.matches_child_terminal(
+            instance,
+            child,
+            event,
+            name=child.failed_event.name,
+            request_id=data.input.parent_operation_id,
+            operation_id=data.input.parent_operation_id,
+            generation=data.input.parent_generation,
         )
 
     @staticmethod
@@ -904,7 +806,7 @@ class Reflection(processing.Processing):
                 _AppliedEvent,
                 _AppliedEventData(
                     turn=turn,
-                    habit=data.applied,
+                    behavior=data.applied,
                     operation_id=data.input.parent_operation_id,
                     generation=data.input.parent_generation,
                 ),
@@ -915,7 +817,7 @@ class Reflection(processing.Processing):
     def _fail_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, revision.FailureData)
-        Reflection._dispatch_failure(
+        processing.dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=data.input.parent_operation_id,
@@ -960,7 +862,7 @@ class Reflection(processing.Processing):
                     _AppliedEvent,
                     _AppliedEventData(
                         turn=turn,
-                        habit=None,
+                        behavior=None,
                         operation_id=operation_id,
                         generation=select_input.generation,
                     ),
@@ -975,7 +877,7 @@ class Reflection(processing.Processing):
                     instance,
                     event,
                     _StageFailedEvent,
-                    ability.FailureData(message="Reflection select must return at most one habit event."),
+                    ability.FailureData(message="Reflection select must return at most one behavior event."),
                 ),
             )
             return
@@ -1108,7 +1010,7 @@ class Reflection(processing.Processing):
                 _AppliedEvent,
                 _AppliedEventData(
                     turn=turn,
-                    habit=applied,
+                    behavior=applied,
                     operation_id=selected.operation_id,
                     generation=selected.generation,
                 ),
@@ -1124,7 +1026,7 @@ class Reflection(processing.Processing):
         data = event.data
         assert isinstance(data, _AppliedEventData)
         try:
-            episode = episode_from_turn(data.turn, habit=data.habit)
+            episode = episode_from_turn(data.turn, behavior=data.behavior)
             _store_episode(instance._memory, episode, context_ref=data.turn.cognition_input.focus)
         except Exception as error:
             _ = hsm.dispatch(
@@ -1156,11 +1058,12 @@ class Reflection(processing.Processing):
     def _complete_from_stored(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _StoredEventData)
-        Reflection._dispatch_output(
+        processing.dispatch_terminal_output(
             ctx,
             instance,
             operation_id=data.operation_id,
             metadata=dict(event.metadata),
+            output=None,
         )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
@@ -1413,7 +1316,7 @@ class Reflection(processing.Processing):
             self._revision,
             self._memory,
         )
-        self._events = habit_events()
+        self._events = behavior_events()
 
 
 InputEvent = Reflection.input_event
@@ -1433,6 +1336,6 @@ __all__ = [
     "SelectInput",
     "Reflection",
     "episode_from_turn",
-    "habit_events",
+    "behavior_events",
     "stimulus_name",
 ]

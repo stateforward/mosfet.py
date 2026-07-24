@@ -2,10 +2,6 @@
 
 from bot.device.device import Device
 from bot.device.events import (
-    ActivateEvent,
-    ActivateEventData,
-    DeactivateEvent,
-    DeactivateEventData,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEvent,
@@ -23,10 +19,6 @@ from bot.device.sandbox import Sandbox
 
 __all__ = [
     "Device",
-    "ActivateEvent",
-    "ActivateEventData",
-    "DeactivateEvent",
-    "DeactivateEventData",
     "FirmwareInitializingDoneEvent",
     "FirmwareInitializingDoneEventData",
     "FirmwareInitializingFailedEvent",

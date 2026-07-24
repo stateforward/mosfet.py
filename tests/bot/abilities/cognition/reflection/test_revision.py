@@ -6,7 +6,7 @@ import json
 import hsm
 import pytest
 
-from bot import habit
+from bot import behavior
 from bot.abilities import memory
 from bot.abilities.cognition.reflection import revision
 from tests.bot.abilities.cognition.test_cognition import FixedProcessor
@@ -14,14 +14,14 @@ from tests.bot.abilities.cognition.test_cognition import cognition_input
 from tests.bot.abilities.cognition.test_cognition import focus_output
 from tests.bot.abilities.support import dispatch_ability_for_test
 
-ANSWER_RING_HABIT_SOURCE = """
+ANSWER_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
-    name = "bot.habit.answer_incoming_ring.input",
+    name = "bot.behavior.answer_incoming_ring.input",
     schema = {"type": "object", "additionalProperties": True},
-    description = "Live habit input.",
+    description = "Live behavior input.",
 )
 output_event = hsm.event(
-    name = "bot.habit.answer_incoming_ring.output",
+    name = "bot.behavior.answer_incoming_ring.output",
     schema = {
         "type": "object",
         "properties": {"event": {"type": "string"}},
@@ -36,7 +36,7 @@ description = "Answer an incoming ring."
 def select_focus(event):
     hsm.dispatch(output_event, {"event": "bot.focus_device"})
 
-habit = hsm.define(
+behavior = hsm.define(
     "AnswerIncomingRing",
     hsm.initial(hsm.target("/AnswerIncomingRing/idle")),
     hsm.state(
@@ -57,8 +57,8 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     write = revision.ChangeWriteInput(
         cognition_input=cognition_input(),
         cognition_output=focus_output("phone", "answered"),
-        intent=habit.ChangeData(name="AnswerIncomingRing"),
-        existing_habit=habit.Instance(name="AnswerIncomingRing"),
+        intent=behavior.ChangeData(name="AnswerIncomingRing"),
+        existing_behavior=behavior.Instance(name="AnswerIncomingRing"),
         operation_id="turn-42",
         generation="parent-generation",
         attempt=0,
@@ -70,7 +70,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
         "cognition_output",
         "create_intent",
         "diagnostics",
-        "existing_habit",
+        "existing_behavior",
         "failed_source",
         "generation",
         "intent",
@@ -90,7 +90,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
         "cognition_output",
         "create_intent",
         "diagnostics",
-        "existing_habit",
+        "existing_behavior",
         "failed_source",
         "generation",
         "intent",
@@ -101,7 +101,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "1c202047495a147580a0efd77be3c823a098d2379465c1016ad804d5f40c51a9"
+        == "e5085b840a8a895b92c09ebd7082f1c701f70e4f6fc3359e013e85ce1d3090b9"
     )
 
 
@@ -116,18 +116,18 @@ def test_revision_rejects_forged_private_checked_event(monkeypatch: pytest.Monke
     write = revision.ChangeWriteInput(
         cognition_input=cognition_input(),
         cognition_output=focus_output("phone", "answered"),
-        intent=habit.ChangeData(name="AnswerIncomingRing"),
-        existing_habit=habit.Instance(name="AnswerIncomingRing"),
+        intent=behavior.ChangeData(name="AnswerIncomingRing"),
+        existing_behavior=behavior.Instance(name="AnswerIncomingRing"),
         operation_id="private-turn",
         generation="revision-generation",
         attempt=0,
     )
-    written = habit.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_HABIT_SOURCE)
+    written = behavior.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE)
     checked = revision._CheckedData(
         write=write,
         generation="revision-generation",
         written=written,
-        habit_instance=habit.Instance(name="AnswerIncomingRing", source=ANSWER_RING_HABIT_SOURCE),
+        behavior_instance=behavior.Instance(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE),
     )
     monkeypatch.setattr(revision.processing, "matches_operation", lambda *args: True)
     monkeypatch.setattr(revision.hsm, "id", lambda instance: "revision" if instance is actor else "other")
@@ -147,8 +147,8 @@ def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pyte
     write = revision.ChangeWriteInput(
         cognition_input=cognition_input(),
         cognition_output=focus_output("phone", "answered"),
-        intent=habit.ChangeData(name="AnswerIncomingRing"),
-        existing_habit=habit.Instance(name="AnswerIncomingRing"),
+        intent=behavior.ChangeData(name="AnswerIncomingRing"),
+        existing_behavior=behavior.Instance(name="AnswerIncomingRing"),
         operation_id="retry-turn",
         generation="parent-generation",
         attempt=0,
@@ -164,7 +164,7 @@ def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pyte
         source="change-processing",
         target="revision",
     )
-    monkeypatch.setattr(actor, "state", lambda: "/Revision/authoring/attempt_0")
+    monkeypatch.setattr(actor, "state", lambda: "/Revision/authoring")
     monkeypatch.setattr(revision.processing, "active_operation_id", lambda instance: "retry-turn")
     monkeypatch.setattr(revision.processing, "active_operation", lambda instance, operation_id: current_operation)
     monkeypatch.setattr(
@@ -183,13 +183,13 @@ def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pyte
 
 
 def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
-    existing = habit.Instance(
+    existing = behavior.Instance(
         name="AnswerIncomingRing",
         source="old source",
         triggers=("world.sound",),
         description="keep me",
     )
-    written = habit.ChangeData(name="AnswerIncomingRing", source="invalid replacement")
+    written = behavior.ChangeData(name="AnswerIncomingRing", source="invalid replacement")
 
     draft = revision._inventory_instance(written, None, existing)
 
@@ -198,11 +198,11 @@ def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
     assert draft.description == "keep me"
 
 
-def test_revision_creates_validates_and_persists_a_habit() -> None:
+def test_revision_creates_validates_and_persists_a_behavior() -> None:
     async def run() -> revision.OutputData:
-        written = habit.ChangeData(
+        written = behavior.ChangeData(
             name="AnswerIncomingRing",
-            source=ANSWER_RING_HABIT_SOURCE,
+            source=ANSWER_RING_BEHAVIOR_SOURCE,
         )
         actor = revision.Revision(
             processor=FixedProcessor(write=written),
@@ -214,7 +214,7 @@ def test_revision_creates_validates_and_persists_a_habit() -> None:
             revision.InputData(
                 cognition_input=cognition_input(),
                 cognition_output=focus_output("phone", "answered"),
-                intent=habit.CreateData(
+                intent=behavior.CreateData(
                     name="AnswerIncomingRing",
                     triggers=("world.sound",),
                 ),
@@ -226,8 +226,8 @@ def test_revision_creates_validates_and_persists_a_habit() -> None:
     output = asyncio.run(run())
 
     assert output.input.parent_operation_id == "parent-turn"
-    assert isinstance(output.applied, habit.CreateData)
-    assert output.applied.source == ANSWER_RING_HABIT_SOURCE
+    assert isinstance(output.applied, behavior.CreateData)
+    assert output.applied.source == ANSWER_RING_BEHAVIOR_SOURCE
     assert output.applied.name == "AnswerIncomingRing"
     assert output.applied.triggers == ("world.sound",)
     assert output.applied.description == "Answer an incoming ring."

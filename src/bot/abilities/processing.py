@@ -20,12 +20,19 @@ import collections.abc
 import dataclasses
 import re
 import typing
+import uuid
 
+import bot
 import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
-from bot.event_schema import event_json_schema, event_schema_json_schema, validate_event_data
+from bot.event_schema import (
+    embeddable_json_schema,
+    event_json_schema,
+    event_schema_json_schema,
+    validate_event_data,
+)
 from bot.telemetry import observer
 
 # Processing inputs offer live HSM events (not a parallel offer DTO).
@@ -269,6 +276,8 @@ def _selection_item_branch(
     """One anyOf branch: const event name + projected event payload schema as ``data``.
 
     Payload required/description/examples come only from the event (and optional patch) models.
+    Nested model ``$defs``/``$ref`` from Pydantic are closed via ``embeddable_json_schema`` so
+    document-root ``#/$defs/…`` refs remain valid after this branch is nested under ``dispatch``.
     """
 
     data_schema = model_facing_event_json_schema(event, patch=patch)
@@ -281,12 +290,12 @@ def _selection_item_branch(
     elif data_schema.get("type") not in (None, "object") and "properties" not in data_schema:
         data_schema = {
             "type": "object",
-            "properties": {"value": data_schema},
+            "properties": {"value": embeddable_json_schema(data_schema)},
             "required": ["value"],
             "additionalProperties": False,
         }
     else:
-        data_schema = dict(data_schema)
+        data_schema = embeddable_json_schema(data_schema)
         data_schema.setdefault("type", "object")
         data_schema.setdefault("additionalProperties", False)
 
@@ -337,7 +346,9 @@ def dispatch_tool(
     """Build the single model-facing ``dispatch`` function tool.
 
     Structural only: one tool, ``events`` array, anyOf item per offered event. Each branch's
-    ``data`` is the projected event payload schema (Pydantic/event contract + optional patch).
+    ``data`` is the embeddable (ref-closed) projection of the event payload schema
+    (Pydantic/event contract + optional patch). Composition never nests document-root
+    ``#/$defs/…`` refs under the tool parameters document.
     """
 
     unique: list[Event[typing.Any]] = []
@@ -352,7 +363,9 @@ def dispatch_tool(
         "Dispatch zero or more modeled events for this turn. Call once. "
         "Multi-select by listing multiple items (for example speaking and reasoning together). "
         "Each item must match one offered event branch; payload fields and requirements are "
-        "defined on that event's data schema. Use events: [] when nothing should run."
+        "defined on that event's data schema. An empty events list leaves the turn unhandled for "
+        "the host cascade (e.g. deliberative reasoning); use an explicit ignore/pass event when "
+        "the stage should handle the turn with no world actions."
     )
 
     if unique:
@@ -676,6 +689,156 @@ def finish_operations(ctx: hsm.Context, owner: hsm.Instance) -> None:
     )
     for operation_id in operation_ids:
         finish_operation(ctx, owner, operation_id)
+
+
+def matches_private_terminal(
+    owner: hsm.Instance,
+    event: Event[typing.Any],
+    operation: tuple[str, str] | None,
+) -> bool:
+    """Whether a machine-private event is one ``owner`` sent itself for a live operation.
+
+    ``operation`` is the ``(operation_id, generation)`` the caller decoded from the typed
+    payload; ``None`` means the payload carries no correlation and never matches. Topology has
+    already selected the transition — this is post-delivery correlation only (HSM-DELIVERY-001).
+    """
+
+    if operation is None:
+        return False
+    operation_id, generation = operation
+    return (
+        matches_operation(owner, operation_id, generation)
+        and event.id == operation_id
+        and event.source == hsm.id(owner)
+        and event.target == hsm.id(owner)
+    )
+
+
+def matches_child_terminal(
+    owner: hsm.Instance,
+    child: hsm.Instance,
+    event: Event[typing.Any],
+    *,
+    name: str,
+    request_id: str,
+    operation_id: str,
+    generation: str,
+) -> bool:
+    """Whether ``event`` is the exact terminal ``child`` owes ``owner`` for one live operation.
+
+    Callers narrow the typed payload first; this correlates the already-delivered terminal with
+    the live operation actor and the request identity the owner used to address ``child``.
+    """
+
+    return (
+        matches_operation(owner, operation_id, generation)
+        and event.name == name
+        and event.target == hsm.id(owner)
+        and event.source == hsm.id(child)
+        and event.id == request_id
+    )
+
+
+def dispatch_terminal_output(
+    ctx: hsm.Context,
+    instance: ability.Ability[typing.Any, typing.Any],
+    *,
+    operation_id: str | None,
+    metadata: dict[str, object],
+    output: object,
+) -> None:
+    """Emit ``instance``'s owner-facing output terminal and retire the operation capability."""
+
+    terminal = dataclasses.replace(
+        instance.output_event.with_data(output),
+        id=operation_id,
+        metadata=dict(metadata),
+        source=hsm.id(instance),
+    )
+    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+    if operation_id is not None:
+        finish_operation(ctx, instance, operation_id)
+
+
+def dispatch_terminal_failure(
+    ctx: hsm.Context,
+    instance: ability.Ability[typing.Any, typing.Any],
+    *,
+    operation_id: str | None,
+    metadata: dict[str, object],
+    failure: ability.FailureData,
+) -> None:
+    """Emit ``instance``'s owner-facing failure terminal and retire the operation capability."""
+
+    terminal = dataclasses.replace(
+        instance.failed_event.with_data(failure),
+        id=operation_id,
+        metadata=dict(metadata),
+        source=hsm.id(instance),
+    )
+    _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+    if operation_id is not None:
+        finish_operation(ctx, instance, operation_id)
+
+
+def dispatch_reboot(
+    ctx: hsm.Context,
+    instance: ability.Ability[typing.Any, typing.Any],
+    event: Event[typing.Any],
+    *,
+    reason: "bot.RebootReason",
+) -> None:
+    """Ask the attachment owner for a clean robot lifecycle restart.
+
+    ``reason`` is the calling ability's own domain-scoped failure category; this helper owns only
+    the envelope. No owner attached means nothing can act on the request, so nothing is sent.
+    """
+
+    owner = instance.attachment_owner
+    if owner is None:
+        return
+    _ = hsm.dispatch(
+        ctx,
+        owner,
+        dataclasses.replace(
+            bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
+            id=event.id or uuid.uuid4().hex,
+            source=hsm.id(instance),
+            target=hsm.id(owner),
+            metadata=dict(event.metadata),
+        ),
+    )
+
+
+def dispatch_child_cancel(
+    ctx: hsm.Context,
+    owner: hsm.Instance,
+    child: hsm.Instance,
+    event: Event[typing.Any],
+    *,
+    request_id: str,
+    parent_operation_id: str,
+    token: str,
+) -> None:
+    """Ask ``child`` to cancel the work ``owner`` addressed to it as ``request_id``."""
+
+    _ = hsm.dispatch(
+        ctx,
+        child,
+        dataclasses.replace(
+            CancelEvent.with_data(
+                CancelData(
+                    operation_id=request_id,
+                    token=token,
+                    parent_operation_id=parent_operation_id,
+                )
+            ),
+            id=request_id,
+            source=hsm.id(owner),
+            target=hsm.id(child),
+            metadata=dict(event.metadata),
+        ),
+    )
 
 
 class InputData(pydantic.BaseModel):
@@ -1461,14 +1624,20 @@ __all__ = [
     "active_operation_id",
     "cancellation_operation_id",
     "coerce_event_selections",
+    "dispatch_child_cancel",
+    "dispatch_reboot",
     "dispatch_selected_events",
+    "dispatch_terminal_failure",
+    "dispatch_terminal_output",
     "dispatch_tool",
     "enabled_call_events",
     "events_from_dispatch_args",
     "finish_operation",
     "finish_operations",
     "model_facing_event_json_schema",
+    "matches_child_terminal",
     "matches_operation",
+    "matches_private_terminal",
     "normalize_confidence",
     "patch_field_names",
     "patched_event_data_model",

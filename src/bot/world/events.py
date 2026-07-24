@@ -14,7 +14,12 @@ import pydantic
 
 
 class SoundData(pydantic.BaseModel):
-    """Acoustic energy available to a bot's input (hearing) abilities."""
+    """Acoustic energy available to a bot's input (hearing) abilities.
+
+    Domain-specific elevation may use a :class:`SoundData` subclass with extra
+    typed fields (for example phone ring elevation carries ``call_id``) so models
+    copy from ``event.data`` instead of inferring from ``event.id``.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -31,7 +36,7 @@ class SoundData(pydantic.BaseModel):
                     "media_type": "audio/pcm",
                     "sample_rate_hz": 48000,
                     "channels": 1,
-                    "kind": "call",
+                    "kind": "phone.call",
                 }
             ],
         },
@@ -67,10 +72,11 @@ class SoundData(pydantic.BaseModel):
         default=None,
         min_length=1,
         description=(
-            "Optional low-cardinality acoustic provenance hint (for example call, ring, ambient, "
-            "knock). Not a linguistic interpretation."
+            "Optional low-cardinality acoustic provenance hint. Prefer domain-qualified labels "
+            "when the source is clear (for example phone.ringing, phone.call, ambient, knock) so "
+            "models do not confuse bare tokens like ring. Not a linguistic interpretation."
         ),
-        examples=["call", "ring", "ambient"],
+        examples=["phone.ringing", "phone.call", "ambient", "knock"],
     )
 
 

@@ -2,6 +2,18 @@
 
 OpenAI-compatible provider package for stateforward.bot text generation and processing abilities.
 
+## Live Mercury tool-call eval
+
+Evidence suite for Inception Mercury 2 dispatch tool calls (phone-bot intuition shape):
+
+```sh
+# from repo root; requires BOT_MERCURY_API_KEY (or MERCURY_API_KEY / INCEPTION_API_KEY)
+uv run --package bot-provider-openai-compat --group dev \
+  python -m pytest src/providers/openai_compat/tests/test_mercury_tool_call_live.py -m live -v -s
+```
+
+Cases: ring WAV + `kind=phone.ringing`, kind-only compact WAV, parseable offered events, ambient negative control.
+
 The package owns the OpenAI SDK dependency for providers that expose the Chat Completions API shape. Pass a `base_url`,
 `model`, and optional `api_key` to `ChatClient`, then use that client through `TextGenerator` or
 `Processing`.

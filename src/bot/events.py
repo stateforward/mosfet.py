@@ -50,6 +50,8 @@ RebootReason = typing.Literal[
     "cognition_child_teardown_failed",
     "cognition_cancel_teardown_failed",
     "cognition_detach_rollback_failed",
+    "learning_child_teardown_failed",
+    "learning_detach_rollback_failed",
 ]
 
 

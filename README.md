@@ -9,7 +9,7 @@ same Stateforward packaging convention as `stateforward.hsm` → `import hsm`.
 
 It began as a way to decompose an existing `voice-bot` runtime into smaller
 contracts that could be understood, tested, and reused independently. The
-package now treats robots, devices, abilities, habits, memory, telemetry, and
+package now treats robots, devices, abilities, behaviors, memory, telemetry, and
 provider integrations as explicit boundaries instead of letting realtime
 behavior disappear into prompt glue or callback chains.
 
@@ -44,8 +44,8 @@ behavior disappear into prompt glue or callback chains.
 
 ## Package Map
 
-- `src/bot/bot.py` defines the body machine; `src/bot/abilities`, `habit`, and
-  `skills` define cognitive, ability, habit, memory, and action contracts.
+- `src/bot/bot.py` defines the body machine; `src/bot/abilities`,  `behavior`, and
+  `skills` define cognitive, ability, behavior, memory, and action contracts.
 - `src/bot/device` and `src/bot/devices` define device lifecycle,
   notifications, audio peripherals, and phone behavior.
 - `src/bot/telemetry` records HSM observations as OpenTelemetry metrics and

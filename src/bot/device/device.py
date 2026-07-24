@@ -9,13 +9,10 @@ import hsm
 import pydantic
 
 from bot import abilities
+from bot import lifecycle
 from bot.protocols import attachment
 
 from bot.device.events import (
-    ActivateEvent,
-    ActivateEventData,
-    DeactivateEvent,
-    DeactivateEventData,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
@@ -140,18 +137,13 @@ class Device(hsm.Instance, attachment.Attachment):
 
     @typing.override
     async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
-        # hsm 1.3.2+: id fails when stopped/unstarted — surface typed failure when a reply sink exists.
-        try:
-            _ = hsm.id(self)
-        except hsm.ErrorValidatingModel:
+        # Stopped/unstarted device: surface typed failure when a reply sink exists.
+        if not lifecycle.is_started(self):
             data = event.data
             if not isinstance(data, attachment.DetachData):
                 return
             reply_to: hsm.Instance = data.reply_to if data.reply_to is not None else data.actor
-            try:
-                reply_id = hsm.id(reply_to)
-            except hsm.ErrorValidatingModel:
-                reply_id = ""
+            reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""
             await hsm.Instance.dispatch(
                 reply_to,
                 ctx,
@@ -180,23 +172,15 @@ class Device(hsm.Instance, attachment.Attachment):
         firmware = self._firmware
         if firmware is None:
             return
-        # hsm 1.3.2+: id fails when firmware was never started or already stopped.
         # Do not raise into Bot multi-device teardown by calling hsm.stop on a dead machine.
-        firmware_id = ""
-        firmware_instances: object | None = None
-        try:
-            firmware_id = hsm.id(firmware)
-            firmware_instances = firmware.context().value(hsm.Keys.Instances)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(firmware):
             if self._firmware is firmware:
                 self._firmware = None
             return
+        firmware_id = hsm.id(firmware)
+        firmware_instances: object | None = firmware.context().value(hsm.Keys.Instances)
         await hsm.stop(firmware)
-        try:
-            _ = hsm.id(firmware)
-        except hsm.ErrorValidatingModel:
-            pass
-        else:
+        if lifecycle.is_started(firmware):
             raise RuntimeError("Device firmware remained started after Device stop.")
         if firmware_id and isinstance(firmware_instances, collections.abc.MutableMapping):
             typed_map = typing.cast(collections.abc.MutableMapping[str, object], firmware_instances)
@@ -227,7 +211,7 @@ class Device(hsm.Instance, attachment.Attachment):
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
         """Deliver into device shell and firmware. No event-name routing table.
 
-        Shell-only lifecycle payloads (attach/detach/activate/deactivate) stay on the shell.
+        Shell-only lifecycle payloads (attach/detach) stay on the shell.
         Other events also reach firmware when present; unmatched triggers are ignored by
         normal HSM semantics. Dual delivery is intentional for shared device/firmware
         observations; subclasses (e.g. Phone) may override with narrower routing.
@@ -239,15 +223,7 @@ class Device(hsm.Instance, attachment.Attachment):
             if firmware is None:
                 return
             # Shell-only lifecycle (typed payload, not event.name).
-            if isinstance(
-                event.data,
-                (
-                    attachment.AttachData,
-                    attachment.DetachData,
-                    ActivateEventData,
-                    DeactivateEventData,
-                ),
-            ):
+            if isinstance(event.data, (attachment.AttachData, attachment.DetachData)):
                 return
             await firmware.dispatch(ctx, event)
 
@@ -260,12 +236,11 @@ class Device(hsm.Instance, attachment.Attachment):
         firmware = self._firmware
         if firmware is None:
             return snapshot
-        # hsm 1.3.2+: stopped machines cannot take_snapshot. Firmware may already be
-        # stopped during initialization_failing cleanup while still referenced here.
-        try:
-            firmware_snapshot = firmware.take_snapshot()
-        except hsm.ErrorValidatingModel:
+        # Stopped machines cannot take_snapshot. Firmware may already be stopped during
+        # initialization_failing cleanup while still referenced here.
+        if not lifecycle.is_started(firmware):
             return snapshot
+        firmware_snapshot = firmware.take_snapshot()
         return dataclasses.replace(
             snapshot,
             Transitions=(*snapshot.Transitions, *firmware_snapshot.Transitions),
@@ -274,16 +249,6 @@ class Device(hsm.Instance, attachment.Attachment):
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
         del ctx, event
         return hsm.Instance()
-
-    def _can_activate(self, ctx: hsm.Context, event: hsm.Event) -> bool:
-        del ctx, event
-        return False
-
-    def _on_inactive_entry(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
-
-    def _on_inactive_exit(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
 
     async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
         # Firmware outlives this activity: parent under the device machine context, not activity ctx.
@@ -461,46 +426,6 @@ class Device(hsm.Instance, attachment.Attachment):
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:
         del ctx, event
 
-    async def _do_inactive_activity(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
-
-    def _on_active_entry(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
-
-    def _on_active_exit(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
-
-    async def _do_active_activity(self, ctx: hsm.Context, event: hsm.Event) -> None:
-        del ctx, event
-
-    @staticmethod
-    def _on_inactive_entry_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        instance._on_inactive_entry(ctx, event)
-
-    @staticmethod
-    def _on_inactive_exit_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        instance._on_inactive_exit(ctx, event)
-
-    @staticmethod
-    async def _do_inactive_activity_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        await instance._do_inactive_activity(ctx, event)
-
-    @staticmethod
-    def _can_activate_guard(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> bool:
-        return instance._can_activate(ctx, event)
-
-    @staticmethod
-    def _on_active_entry_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        instance._on_active_entry(ctx, event)
-
-    @staticmethod
-    def _on_active_exit_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        instance._on_active_exit(ctx, event)
-
-    @staticmethod
-    async def _do_active_activity_effect(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        await instance._do_active_activity(ctx, event)
-
     model: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Device",
         hsm.initial(hsm.target("initializing")),
@@ -560,7 +485,7 @@ class Device(hsm.Instance, attachment.Attachment):
             hsm.transition(
                 hsm.on(attachment.AttachCompleteEvent),
                 hsm.effect(attachment.Attachment._deliver_attach_complete),
-                hsm.target("../attached/inactive"),
+                hsm.target("../attached"),
             ),
             hsm.transition(
                 hsm.after(attachment.Attachment._attachment_timeout_delay),
@@ -568,9 +493,10 @@ class Device(hsm.Instance, attachment.Attachment):
                 hsm.target("../detached"),
             ),
         ),
+        # Attached is ownership only (who owns the device). Domain "in use" / call state
+        # lives on firmware (e.g. Phone ringing); bot attention is focus — not a shell mode.
         hsm.state(
             "attached",
-            hsm.initial(hsm.target("inactive")),
             hsm.transition(
                 hsm.on(attachment.AttachEvent),
                 hsm.guard(attachment.Attachment._is_attached),
@@ -604,27 +530,6 @@ class Device(hsm.Instance, attachment.Attachment):
                 hsm.on(attachment.DetachEvent),
                 hsm.guard(attachment.Attachment._is_detach_request),
                 hsm.effect(attachment.Attachment._dispatch_detach_failed),
-            ),
-            hsm.state(
-                "inactive",
-                hsm.entry(_on_inactive_entry_effect),
-                hsm.exit(_on_inactive_exit_effect),
-                hsm.activity(_do_inactive_activity_effect),
-                hsm.transition(
-                    hsm.on(ActivateEvent),
-                    hsm.guard(_can_activate_guard),
-                    hsm.target("../active"),
-                ),
-            ),
-            hsm.state(
-                "active",
-                hsm.entry(_on_active_entry_effect),
-                hsm.exit(_on_active_exit_effect),
-                hsm.activity(_do_active_activity_effect),
-                hsm.transition(
-                    hsm.on(DeactivateEvent),
-                    hsm.target("../inactive"),
-                ),
             ),
         ),
         hsm.observe(observer),

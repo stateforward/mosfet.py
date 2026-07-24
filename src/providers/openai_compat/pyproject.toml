@@ -31,6 +31,9 @@ stateforward-bot = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live: hits real external providers (requires API keys; skipped by default in CI without keys)",
+]
 
 [tool.ruff]
 line-length = 120

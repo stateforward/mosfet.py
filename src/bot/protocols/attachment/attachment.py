@@ -7,6 +7,8 @@ import typing
 
 import hsm
 
+from bot import lifecycle
+
 from . import events
 
 
@@ -46,11 +48,10 @@ class Attachment(typing.Protocol):
 
     @staticmethod
     def _actor_id(actor: hsm.Instance) -> str:
-        try:
+        if lifecycle.is_started(actor):
             return hsm.id(actor)
-        except hsm.ErrorValidatingModel:
-            identifier = getattr(actor, "id", None)
-            return identifier if isinstance(identifier, str) else ""
+        identifier = getattr(actor, "id", None)
+        return identifier if isinstance(identifier, str) else ""
 
     @staticmethod
     def _is_attached(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> bool:

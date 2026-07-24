@@ -1,6 +1,6 @@
 from bot import abilities
 import bot
-from bot import habit as habit_events
+from bot import behavior as behavior_events
 from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
@@ -36,18 +36,18 @@ def test_cognition_types_never_use_metadata_for_coordination() -> None:
     assert_metadata_is_not_coordination(cognition.types)
 
 
-# Minimal valid Starlark HSM habit used by Reflection create/change tests.
-_ANSWER_RING_HABIT_SOURCE = """
+# Minimal valid Starlark HSM behavior used by Reflection create/change tests.
+_ANSWER_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
-    name = "bot.habit.answer_incoming_ring.input",
+    name = "bot.behavior.answer_incoming_ring.input",
     schema = {
         "type": "object",
         "additionalProperties": True,
     },
-    description = "Live habit input for the observed turn stimulus.",
+    description = "Live behavior input for the observed turn stimulus.",
 )
 output_event = hsm.event(
-    name = "bot.habit.answer_incoming_ring.output",
+    name = "bot.behavior.answer_incoming_ring.output",
     schema = {
         "type": "object",
         "properties": {
@@ -74,7 +74,7 @@ def select_focus(event):
         "reason": "pattern",
     })
 
-habit = hsm.define(
+behavior = hsm.define(
     "AnswerIncomingRing",
     hsm.initial(hsm.target("/AnswerIncomingRing/idle")),
     hsm.state(
@@ -130,9 +130,27 @@ def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, li
     return memory.compile_statement(clause)
 
 
-def no_output(reason: str = "") -> cognition.types.OutputData:
-    del reason
+def empty_output() -> cognition.types.OutputData:
+    """Empty selection product — intuition treats as unhandled and cascades to reasoning."""
+
     return ()
+
+
+def ignore_output(reason: str = "") -> cognition.types.OutputData:
+    """Handled deliberate pass (cognition.ignore); not an empty cascade."""
+
+    return (
+        cognition.types.EventData(
+            event=cognition.types.IgnoreEvent.name,
+            data={"reason": reason} if reason else None,
+        ),
+    )
+
+
+def no_output(reason: str = "") -> cognition.types.OutputData:
+    """Handled no-op product for stage fixtures (ignore). Use empty_output() for cascade."""
+
+    return ignore_output(reason)
 
 
 def focus_output(device: str, reason: str) -> cognition.types.OutputData:
@@ -336,7 +354,8 @@ class DelayedReasoningProcessor(processing.Processor):
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
-        return ()
+        label = f"reasoned {len(self.calls)}"
+        return _as_events(ignore_output(label), confidence=99)
 
 
 class FailingReasoningProcessor(processing.Processor):
@@ -398,7 +417,8 @@ class FixedSelectionProcessor(processing.Processor):
     calls: list[processing.InputData]
 
     def __init__(self, selection: cognition.types.OutputData | None = None) -> None:
-        self.selection = selection or no_output("noop")
+        # Do not use `or`: empty_output() is falsy but means "no behavior selected".
+        self.selection = empty_output() if selection is None else selection
         self.calls = []
 
     @typing.override
@@ -410,14 +430,14 @@ class FixedSelectionProcessor(processing.Processor):
 class FixedWriteProcessor(processing.Processor):
     """Single Reflection write-phase processor (create and change both use change events)."""
 
-    written: list[habit_events.ChangeData]
+    written: list[behavior_events.ChangeData]
     calls: list[processing.InputData]
 
     def __init__(
         self,
-        written: habit_events.ChangeData | list[habit_events.ChangeData],
+        written: behavior_events.ChangeData | list[behavior_events.ChangeData],
     ) -> None:
-        self.written = [written] if isinstance(written, habit_events.ChangeData) else list(written)
+        self.written = [written] if isinstance(written, behavior_events.ChangeData) else list(written)
         self.calls = []
 
     @typing.override
@@ -428,7 +448,7 @@ class FixedWriteProcessor(processing.Processor):
         payload = self.written.pop(0)
         return (
             processing.SelectedEvent(
-                event=habit_events.ChangeEvent.name,
+                event=behavior_events.ChangeEvent.name,
                 data=payload.model_dump(mode="json"),
             ),
         )
@@ -438,7 +458,7 @@ class FixedProcessor(processing.Processor):
     """Test reflection transport: routes select vs change by stamped input instructions."""
 
     selection: cognition.types.OutputData
-    write: habit_events.ChangeData | list[habit_events.ChangeData]
+    write: behavior_events.ChangeData | list[behavior_events.ChangeData]
     step: FixedSelectionProcessor
     write_step: FixedWriteProcessor
     builds: list[str]
@@ -447,21 +467,22 @@ class FixedProcessor(processing.Processor):
         self,
         selection: cognition.types.OutputData | None = None,
         *,
-        write: habit_events.ChangeData | list[habit_events.ChangeData] | None = None,
+        write: behavior_events.ChangeData | list[behavior_events.ChangeData] | None = None,
         # Compat kwargs used by older tests / call sites.
-        change_write: habit_events.ChangeData | list[habit_events.ChangeData] | None = None,
-        create_write: habit_events.CreateData | list[habit_events.CreateData] | None = None,
+        change_write: behavior_events.ChangeData | list[behavior_events.ChangeData] | None = None,
+        create_write: behavior_events.CreateData | list[behavior_events.CreateData] | None = None,
     ) -> None:
-        self.selection = selection or no_output("noop")
+        # Do not use `or`: empty_output() is falsy but means "no behavior selected".
+        self.selection = empty_output() if selection is None else selection
         if write is not None:
             self.write = write
         elif change_write is not None:
             self.write = change_write
         elif create_write is not None:
             # Create select still authors via the write machine as ChangeData.
-            creates = [create_write] if isinstance(create_write, habit_events.CreateData) else list(create_write)
+            creates = [create_write] if isinstance(create_write, behavior_events.CreateData) else list(create_write)
             self.write = [
-                habit_events.ChangeData(
+                behavior_events.ChangeData(
                     name=item.name,
                     triggers=item.triggers,
                     description=item.description,
@@ -471,13 +492,13 @@ class FixedProcessor(processing.Processor):
                 for item in creates
             ]
         elif self.selection and self.selection[0].event in {
-            habit_events.CreateEvent.name,
-            habit_events.ChangeEvent.name,
+            behavior_events.CreateEvent.name,
+            behavior_events.ChangeEvent.name,
         }:
-            raw = {**(self.selection[0].data or {}), "event": habit_events.ChangeEvent.name}
-            self.write = habit_events.ChangeData.model_validate(raw)
+            raw = {**(self.selection[0].data or {}), "event": behavior_events.ChangeEvent.name}
+            self.write = behavior_events.ChangeData.model_validate(raw)
         else:
-            self.write = habit_events.ChangeData(name="unused-write", reason="phase processor unused")
+            self.write = behavior_events.ChangeData(name="unused-write", reason="phase processor unused")
         self.step = FixedSelectionProcessor(self.selection)
         self.write_step = FixedWriteProcessor(self.write)
         self.builds = []
@@ -499,7 +520,7 @@ class FixedProcessor(processing.Processor):
         return await self.step.process(input)
 
 
-def habit_create_selection(
+def behavior_create_selection(
     *,
     name: str = "AnswerIncomingRing",
     triggers: tuple[str, ...] = (),
@@ -507,9 +528,9 @@ def habit_create_selection(
 ) -> cognition.types.OutputData:
     return (
         cognition.types.EventData(
-            event=habit_events.CreateEvent.name,
+            event=behavior_events.CreateEvent.name,
             data={
-                "event": habit_events.CreateEvent.name,
+                "event": behavior_events.CreateEvent.name,
                 "name": name,
                 "triggers": list(triggers),
                 "reason": reason,
@@ -529,7 +550,7 @@ class RecordingReflectionAbility(cognition.Reflection):
         connection: sqlite3.Connection,
         selection: cognition.types.OutputData | None = None,
     ) -> None:
-        processor = FixedProcessor(selection or habit_create_selection())
+        processor = FixedProcessor(selection or behavior_create_selection())
         super().__init__(processor=processor, memory=memory.Memory(connection=connection))
         self.processor = processor
 
@@ -1672,8 +1693,8 @@ def test_reasoning_and_reflection_payloads_carry_typed_decisions() -> None:
         cognition_input=cognition_input(),
         cognition_output=reasoning_output.result,
     )
-    selection = habit_create_selection(reason="repeated pattern")
-    ops = cognition.reflection.habit_events()
+    selection = behavior_create_selection(reason="repeated pattern")
+    ops = cognition.reflection.behavior_events()
 
     assert request.processing_input == deliberative_input()
     assert request.turn.input.stimulus == cognition_input().stimulus
@@ -1681,24 +1702,24 @@ def test_reasoning_and_reflection_payloads_carry_typed_decisions() -> None:
     assert reasoning_output.result == focus_output("phone", "deliberate")
     assert reflection_input.cognition_output == focus_output("phone", "deliberate")
     assert cognition.Reflection.instructions
-    assert selection[0].event == habit_events.CreateEvent.name
+    assert selection[0].event == behavior_events.CreateEvent.name
     assert {event.name for event in ops} == {
-        habit_events.CreateEvent.name,
-        habit_events.ChangeEvent.name,
-        habit_events.BreakEvent.name,
+        behavior_events.CreateEvent.name,
+        behavior_events.ChangeEvent.name,
+        behavior_events.BreakEvent.name,
     }
 
 
-def test_reflection_habit_events_require_name() -> None:
-    created = habit_events.CreateData(
+def test_reflection_behavior_events_require_name() -> None:
+    created = behavior_events.CreateData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         reason="repeated pattern",
     )
     assert created.name == "AnswerIncomingRing"
-    assert habit_events.event_for_data(created).name == habit_events.CreateEvent.name
+    assert behavior_events.event_for_data(created).name == behavior_events.CreateEvent.name
     with pytest.raises(ValueError):
-        _ = habit_events.ChangeData(name="", reason="revise")
+        _ = behavior_events.ChangeData(name="", reason="revise")
 
 
 def test_cognition_dispatches_reflection_after_processing_completes() -> None:
@@ -1716,13 +1737,13 @@ def test_cognition_dispatches_reflection_after_processing_completes() -> None:
     assert len(calls) == 1
     processor_input = calls[0].input
     assert processor_input.cognition_input.focus is None
-    # Default intuition handles with empty events; reflection still sees that result.
-    assert processor_input.cognition_output == no_output("fast")
+    # Default intuition handles with deliberate ignore; reflection still sees that result.
+    assert processor_input.cognition_output == ignore_output("fast")
     assert processor_input.prior_episodes == ()
     assert {event.name for event in calls[0].schemas} == {
-        habit_events.CreateEvent.name,
-        habit_events.ChangeEvent.name,
-        habit_events.BreakEvent.name,
+        behavior_events.CreateEvent.name,
+        behavior_events.ChangeEvent.name,
+        behavior_events.BreakEvent.name,
     }
 
 
@@ -1941,7 +1962,7 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
     assert reflection_output_schema.get("type") == "null" or "null" in str(reflection_output_schema)
     assert "CognitiveEpisode" in cognition.reflection.ProcessorInput.model_json_schema().get("$defs", {})
     assert cognition.Reflection.instructions == cognition.reflection.INSTRUCTIONS
-    assert len(cognition.reflection.habit_events()) == 3
+    assert len(cognition.reflection.behavior_events()) == 3
 
 
 def test_cognitive_output_events_validate_through_typed_schema_contracts() -> None:
@@ -2236,6 +2257,27 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
     assert 22 < threshold
 
 
+def test_intuition_empty_dispatch_cascades_to_reasoning() -> None:
+    """events: [] / empty product is unhandled → System 2 (not a deliberate pass)."""
+
+    async def run() -> tuple[cognition.types.OutputData, int]:
+        intuition_processor = RecordingIntuitionProcessor(empty_output())
+        reasoning_processor = RecordingReasoningProcessor(
+            cognition.reasoning.OutputData(result=focus_output("phone", "from-reasoning"))
+        )
+        ability = RecordingCognition(
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning=cognition.Reasoning(processor=reasoning_processor),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        return result, len(reasoning_processor.calls)
+
+    result, reasoning_calls = asyncio.run(run())
+    assert reasoning_calls == 1
+    assert result == focus_output("phone", "from-reasoning")
+
+
 def test_intuition_high_confidence_skips_reasoning_cascade() -> None:
     """High confidence relative to tuner baseline completes without System 2 cascade."""
 
@@ -2274,8 +2316,14 @@ def test_cognition_keeps_reasoning_off_intuition_actor_map() -> None:
     """Cognition owns the intuition-to-reasoning edge."""
 
     async def run() -> set[str]:
-        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=()))
-        ability = RecordingCognition(intuition_processor=processor)
+        # Handled ignore (not empty cascade) so we only inspect intuition's offered map.
+        processor = RecordingIntuitionProcessor(
+            cognition.intuition.OutputData(result=ignore_output("map-only"))
+        )
+        ability = RecordingCognition(
+            intuition_processor=processor,
+            reasoning_processor=RecordingReasoningProcessor(ignore_output("should not run")),
+        )
         ctx = await start_cognition_ability_for_test(ability)
         _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
         assert processor.calls
@@ -2321,7 +2369,7 @@ def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
 
 def test_intuition_processor_receives_input() -> None:
     async def run() -> tuple[cognition.types.OutputData | None, list[processing.InputData]]:
-        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=()))
+        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=ignore_output("seen")))
         intuition = cognition.Intuition(processor=processor)
         ctx = await start_cognition_ability_for_test(intuition)
 
@@ -2330,7 +2378,7 @@ def test_intuition_processor_receives_input() -> None:
 
     result, calls = asyncio.run(run())
 
-    assert result.output == ()
+    assert result.output == ignore_output("seen")
     assert len(calls) == 1
 
 
@@ -2489,18 +2537,18 @@ def test_reasoning_defers_repeated_input_while_applying() -> None:
     state, outputs, calls = asyncio.run(run())
 
     assert state == "/ReasoningLifecycle/attached/behavior/idle"
-    assert [output.output for output in outputs] == [no_output("reasoned 1"), no_output("reasoned 2")]
+    assert [output.output for output in outputs] == [ignore_output("reasoned 1"), ignore_output("reasoned 2")]
     assert len(calls) == 2
 
 
-def test_reasoning_recalls_prior_episodes_and_retains_habit_episode() -> None:
+def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None:
     """Reasoning SELECTs prior episodes then INSERTs the new episode via SQL transactions."""
 
     prior = cognition.episodes.CognitiveEpisode(
         focus="phone",
         stimulus_name="world.sound",
         output=focus_output("phone", "prior answer"),
-        habit=habit_events.CreateData(
+        behavior=behavior_events.CreateData(
             name="AnswerIncomingRing",
             triggers=("world.sound",),
             reason="seed",
@@ -2519,7 +2567,7 @@ def test_reasoning_recalls_prior_episodes_and_retains_habit_episode() -> None:
         processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(
                 result=focus_output("phone", "deliberate with memory"),
-                create=habit_events.CreateData(
+                create=behavior_events.CreateData(
                     name="AnswerIncomingRing",
                     triggers=("world.sound",),
                     reason="matches prior episode",
@@ -2545,32 +2593,32 @@ def test_reasoning_recalls_prior_episodes_and_retains_habit_episode() -> None:
     latest = next(
         episode for episode in reversed(stored) if episode.output == focus_output("phone", "deliberate with memory")
     )
-    # Habit inventory create/change/break is Reflection's job; Reasoning retains the episode product.
+    # Behavior inventory create/change/break is Reflection's job; Reasoning retains the episode product.
     assert latest.focus == "phone"
 
 
-def test_reflection_creates_validates_and_stores_habit() -> None:
-    """Select create → seed broken empty stub → write → store executable habit + episode."""
+def test_reflection_creates_validates_and_stores_behavior() -> None:
+    """Select create → seed broken empty stub → write → store executable behavior + episode."""
 
-    intent = habit_events.CreateData(
+    intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         description="Answer when a labeled ring arrives.",
         reason="select intent",
     )
-    written = habit_events.ChangeData(
+    written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         description="Answer when a labeled ring arrives (written).",
         reason="repeated ring→answer",
-        source=_ANSWER_RING_HABIT_SOURCE.replace(
+        source=_ANSWER_RING_BEHAVIOR_SOURCE.replace(
             "Select focus_device for the observed pattern.",
             "Answer when a labeled ring arrives (written).",
         ),
     )
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.CreateEvent.name,
+            event=behavior_events.CreateEvent.name,
             data=intent.model_dump(mode="json"),
             reason="clear repeated pattern",
         ),
@@ -2597,16 +2645,16 @@ def test_reflection_creates_validates_and_stores_habit() -> None:
         recalled = store.execute(select)
         episodes = cognition.episodes.episodes_from_output(recalled)
 
-        from bot.habit import storage as habit_storage
+        from bot.behavior import storage as behavior_storage
 
-        habit_select = memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
+        behavior_select = memory.InputData(
+            statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        habit_out = store.execute(habit_select)
-        habit_sources = _habit_sources_from_output(habit_out)
-        return result, episodes, habit_sources, processor.builds, processor.write_step.calls
+        behavior_out = store.execute(behavior_select)
+        behavior_sources = _behavior_sources_from_output(behavior_out)
+        return result, episodes, behavior_sources, processor.builds, processor.write_step.calls
 
-    result, episodes, habit_sources, builds, write_calls = asyncio.run(run())
+    result, episodes, behavior_sources, builds, write_calls = asyncio.run(run())
 
     assert result is None
     assert builds == [
@@ -2614,48 +2662,48 @@ def test_reflection_creates_validates_and_stores_habit() -> None:
         cognition.Reflection.change_instructions,
     ]
     assert len(write_calls) == 1
-    assert write_calls[0].input.existing_habit.name == "AnswerIncomingRing"
-    assert write_calls[0].input.existing_habit.source == ""
-    assert write_calls[0].input.existing_habit.status == "DRAFT"
+    assert write_calls[0].input.existing_behavior.name == "AnswerIncomingRing"
+    assert write_calls[0].input.existing_behavior.source == ""
+    assert write_calls[0].input.existing_behavior.status == "DRAFT"
     assert write_calls[0].input.intent.name == intent.name
     assert len(episodes) == 1
-    applied = episodes[0].habit
-    assert isinstance(applied, habit_events.CreateData)
+    applied = episodes[0].behavior
+    assert isinstance(applied, behavior_events.CreateData)
     assert applied.name == "AnswerIncomingRing"
     assert applied.source is not None
     assert "hsm.define" in applied.source
     assert "AnswerIncomingRing" in applied.source
-    assert len(habit_sources) == 1
-    assert "AnswerIncomingRing" in habit_sources[0]
-    assert "hsm.define" in habit_sources[0]
-    assert "written" in habit_sources[0]
-    # Stored inventory must compile into executable habit behavior.
-    habit = habit_events.start(applied.source)
-    compiled = habit_events.build(habit.source)
-    assert compiled.input_event.name == "bot.habit.answer_incoming_ring.input"
+    assert len(behavior_sources) == 1
+    assert "AnswerIncomingRing" in behavior_sources[0]
+    assert "hsm.define" in behavior_sources[0]
+    assert "written" in behavior_sources[0]
+    # Stored inventory must compile into executable behavior.
+    behavior = behavior_events.start(applied.source)
+    compiled = behavior_events.build(behavior.source)
+    assert compiled.input_event.name == "bot.behavior.answer_incoming_ring.input"
 
 
 def test_reflection_create_stops_when_fix_yields_same_diagnostics() -> None:
     """Create seeds empty stub; two identical bad writes abandon and leave broken draft."""
 
-    intent = habit_events.CreateData(
+    intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         reason="select intent",
     )
     bad_source = """
-input_event = hsm.event(name="bot.habit.answer_incoming_ring.input", schema={"type": "object"})
-output_event = hsm.event(name="bot.habit.answer_incoming_ring.output", schema={"type": "object"})
+input_event = hsm.event(name="bot.behavior.answer_incoming_ring.input", schema={"type": "object"})
+output_event = hsm.event(name="bot.behavior.answer_incoming_ring.output", schema={"type": "object"})
 def focus_phone(event):
     hsm.dispatch(output_event, {"device": "phone"})
-habit = hsm.define(
+behavior = hsm.define(
     "AnswerIncomingRing",
     hsm.initial(
         hsm.transition(hsm.on(input_event), hsm.effect("focus_phone")),
     ),
 )
 """
-    bad = habit_events.ChangeData(
+    bad = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         reason="invalid topo",
@@ -2663,7 +2711,7 @@ habit = hsm.define(
     )
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.CreateEvent.name,
+            event=behavior_events.CreateEvent.name,
             data=intent.model_dump(mode="json"),
             reason="pattern",
         ),
@@ -2683,104 +2731,132 @@ habit = hsm.define(
                     cognition_output=focus_output("phone", "answered"),
                 ),
             )
-        from bot.habit import storage as habit_storage
+        from bot.behavior import storage as behavior_storage
 
-        habit_out = store.execute(
-            memory.InputData(statements=memory.compile_statements(*habit_storage.select_all_habits_clauses()))
+        behavior_out = store.execute(
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
         )
-        habits = habit_storage.instances_from_habit_results(
-            tuple(row.as_mapping() for row in habit_out.results[0].rows),
-            tuple(row.as_mapping() for row in habit_out.results[1].rows),
+        behaviors = behavior_storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in behavior_out.results[0].rows),
+            tuple(row.as_mapping() for row in behavior_out.results[1].rows),
         )
-        return str(error.value), processor.write_step.calls, habits[0].status if habits else "ACTIVE"
+        return str(error.value), processor.write_step.calls, behaviors[0].status if behaviors else "ACTIVE"
 
     message, write_calls, draft_status = asyncio.run(run())
 
     assert len(write_calls) == 2
     assert write_calls[0].input.diagnostics is None
-    assert write_calls[0].input.existing_habit.source == ""
-    assert write_calls[0].input.existing_habit.status == "DRAFT"
+    assert write_calls[0].input.existing_behavior.source == ""
+    assert write_calls[0].input.existing_behavior.status == "DRAFT"
     assert write_calls[1].input.diagnostics is not None
     assert draft_status == "DRAFT"
     assert "same diagnostic message after fix" in message
 
 
-def test_reflection_change_exhausts_alternating_diagnostic_budget() -> None:
-    intent = habit_events.CreateData(name="BoundedRepair", reason="exercise bounded fixes")
+def test_reflection_change_retries_while_diagnostics_change_without_fixed_budget() -> None:
+    """Changing diagnostics keep repairing; there is no attempt-count budget (only same-error stop)."""
+
+    intent = behavior_events.CreateData(name="BoundedRepair", reason="exercise unbounded fixes")
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.CreateEvent.name,
+            event=behavior_events.CreateEvent.name,
             data=intent.model_dump(mode="json"),
         ),
     )
-    invalid_topology = habit_events.ChangeData(
+    invalid_topology = behavior_events.ChangeData(
         name="BoundedRepair",
         reason="invalid topology",
-        source='habit = hsm.define("BoundedRepair", hsm.initial())',
+        source='behavior = hsm.define("BoundedRepair", hsm.initial())',
     )
-    invalid_syntax = habit_events.ChangeData(
+    invalid_syntax = behavior_events.ChangeData(
         name="BoundedRepair",
         reason="invalid syntax",
-        source='habit = hsm.define("BoundedRepair"',
+        source='behavior = hsm.define("BoundedRepair"',
+    )
+    # Former max was 3 writes; alternating errors past that must still reach a fix.
+    good = behavior_events.ChangeData(
+        name="BoundedRepair",
+        reason="fixed after alternating diagnostics",
+        source=_ANSWER_RING_BEHAVIOR_SOURCE.replace("AnswerIncomingRing", "BoundedRepair").replace(
+            "answer_incoming_ring", "bounded_repair"
+        ),
     )
 
-    async def run() -> int:
+    async def run() -> tuple[int, str]:
+        store = memory.Memory()
         processor = FixedProcessor(
             selection,
-            write=[invalid_topology, invalid_syntax, invalid_topology, invalid_syntax],
+            write=[
+                invalid_topology,
+                invalid_syntax,
+                invalid_topology,
+                invalid_syntax,
+                good,
+            ],
         )
-        reflection = cognition.Reflection(processor=processor, memory=memory.Memory())
+        reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
-        with pytest.raises(RuntimeError, match="retry budget exhausted"):
-            _ = await dispatch_ability_for_test(
-                reflection,
-                ctx,
-                cognition.reflection.InputData(
-                    cognition_input=cognition_input(),
-                    cognition_output=(),
-                ),
-            )
-        return len(processor.write_step.calls)
+        _ = await dispatch_ability_for_test(
+            reflection,
+            ctx,
+            cognition.reflection.InputData(
+                cognition_input=cognition_input(),
+                cognition_output=(),
+            ),
+        )
+        from bot.behavior import storage as behavior_storage
 
-    assert asyncio.run(run()) == 3
+        behavior_out = store.execute(
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
+        )
+        behaviors = behavior_storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in behavior_out.results[0].rows),
+            tuple(row.as_mapping() for row in behavior_out.results[1].rows),
+        )
+        status = behaviors[0].status if behaviors else "missing"
+        return len(processor.write_step.calls), status
+
+    write_count, status = asyncio.run(run())
+    assert write_count == 5
+    assert status == "ACTIVE"
 
 
 def test_reflection_create_fix_pass_rewrites_invalid_source() -> None:
     """Create stub + bad write → diagnostics retry → good write becomes ACTIVE."""
 
-    intent = habit_events.CreateData(
+    intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         reason="select intent",
     )
     bad_source = """
-input_event = hsm.event(name="bot.habit.answer_incoming_ring.input", schema={"type": "object"})
-output_event = hsm.event(name="bot.habit.answer_incoming_ring.output", schema={"type": "object"})
+input_event = hsm.event(name="bot.behavior.answer_incoming_ring.input", schema={"type": "object"})
+output_event = hsm.event(name="bot.behavior.answer_incoming_ring.output", schema={"type": "object"})
 def focus_phone(event):
     hsm.dispatch(output_event, {"device": "phone"})
-habit = hsm.define(
+behavior = hsm.define(
     "AnswerIncomingRing",
     hsm.initial(
         hsm.transition(hsm.on(input_event), hsm.effect("focus_phone")),
     ),
 )
 """
-    bad = habit_events.ChangeData(
+    bad = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         reason="invalid topo first",
         source=bad_source,
     )
-    good = habit_events.ChangeData(
+    good = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=("world.sound",),
         description="Fixed after diagnostics.",
         reason="fix pass",
-        source=_ANSWER_RING_HABIT_SOURCE,
+        source=_ANSWER_RING_BEHAVIOR_SOURCE,
     )
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.CreateEvent.name,
+            event=behavior_events.CreateEvent.name,
             data=intent.model_dump(mode="json"),
             reason="pattern",
         ),
@@ -2799,25 +2875,25 @@ habit = hsm.define(
                 cognition_output=focus_output("phone", "answered"),
             ),
         )
-        from bot.habit import storage as habit_storage
+        from bot.behavior import storage as behavior_storage
 
-        habit_select = memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
+        behavior_select = memory.InputData(
+            statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        habit_out = store.execute(habit_select)
-        sources = _habit_sources_from_output(habit_out)
-        habits = habit_storage.instances_from_habit_results(
-            tuple(row.as_mapping() for row in habit_out.results[0].rows),
-            tuple(row.as_mapping() for row in habit_out.results[1].rows),
+        behavior_out = store.execute(behavior_select)
+        sources = _behavior_sources_from_output(behavior_out)
+        behaviors = behavior_storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in behavior_out.results[0].rows),
+            tuple(row.as_mapping() for row in behavior_out.results[1].rows),
         )
-        return result, processor.write_step.calls, sources, habits[0].status if habits else "DRAFT"
+        return result, processor.write_step.calls, sources, behaviors[0].status if behaviors else "DRAFT"
 
     result, write_calls, sources, status = asyncio.run(run())
 
     assert result is None
     assert len(write_calls) == 2
     assert write_calls[0].input.diagnostics is None
-    assert write_calls[0].input.existing_habit.source == ""
+    assert write_calls[0].input.existing_behavior.source == ""
     assert write_calls[1].input.diagnostics is not None
     assert not write_calls[1].input.diagnostics.ok
     assert write_calls[1].input.failed_source is not None
@@ -2829,8 +2905,8 @@ habit = hsm.define(
     assert status == "ACTIVE"
 
 
-def _habit_sources_from_output(output: memory.OutputData) -> tuple[str, ...]:
-    """Source column values from select_all_habits_clauses result (statement 0)."""
+def _behavior_sources_from_output(output: memory.OutputData) -> tuple[str, ...]:
+    """Source column values from select_all_behaviors_clauses result (statement 0)."""
 
     if not output.results:
         return ()
@@ -2843,7 +2919,7 @@ def _habit_sources_from_output(output: memory.OutputData) -> tuple[str, ...]:
     return tuple(sources)
 
 
-async def _seed_habit_record(
+async def _seed_behavior_record(
     store: memory.Memory,
     *,
     name: str = "AnswerIncomingRing",
@@ -2851,44 +2927,44 @@ async def _seed_habit_record(
     description: str = "",
     source: str | None = None,
 ) -> None:
-    """Insert executable habit into bot_habit / bot_habit_trigger tables."""
+    """Insert executable behavior into bot_behavior / bot_behavior_trigger tables."""
 
-    from bot.habit import storage as habit_storage
+    from bot.behavior import storage as behavior_storage
 
-    habit_source = source if source is not None else _ANSWER_RING_HABIT_SOURCE
+    behavior_source = source if source is not None else _ANSWER_RING_BEHAVIOR_SOURCE
     if description:
-        habit = habit_events.start(
-            habit_source,
+        behavior = behavior_events.start(
+            behavior_source,
             name=name,
             triggers=triggers if triggers else None,
             description=description,
         )
     else:
-        habit = habit_events.start(
-            habit_source,
+        behavior = behavior_events.start(
+            behavior_source,
             name=name,
             triggers=triggers if triggers else None,
         )
     _ = store.execute(
-        memory.InputData(statements=memory.compile_statements(*habit_storage.insert_habit_clauses(habit)))
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(behavior)))
     )
 
 
 def test_reflection_change_loads_existing_and_writes_update() -> None:
-    """Select change → changing → replace installed habit."""
+    """Select change → changing → replace installed behavior."""
 
-    change_intent = habit_events.ChangeData(
+    change_intent = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         reason="select change",
     )
-    revised_source = _ANSWER_RING_HABIT_SOURCE.replace(
+    revised_source = _ANSWER_RING_BEHAVIOR_SOURCE.replace(
         'triggers = ["world.sound"]',
         'triggers = ["world.sound", "phone.ringing"]',
     ).replace(
         "Select focus_device for the observed pattern.",
         "Also clear focus before answer.",
     )
-    written = habit_events.ChangeData(
+    written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=("world.sound", "phone.ringing"),
         description="Also clear focus before answer.",
@@ -2897,9 +2973,9 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
     )
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.ChangeEvent.name,
+            event=behavior_events.ChangeEvent.name,
             data=change_intent.model_dump(mode="json"),
-            reason="revise habit",
+            reason="revise behavior",
         ),
     )
 
@@ -2907,10 +2983,10 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         None,
         tuple[str, ...],
         list[processing.InputData],
-        habit_events.CreateData | habit_events.ChangeData | habit_events.BreakData | None,
+        behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
     ]:
         store = memory.Memory()
-        await _seed_habit_record(
+        await _seed_behavior_record(
             store,
             name="AnswerIncomingRing",
             triggers=("world.sound",),
@@ -2927,44 +3003,44 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
                 cognition_output=focus_output("phone", "revised"),
             ),
         )
-        from bot.habit import storage as habit_storage
+        from bot.behavior import storage as behavior_storage
 
-        habit_select = memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
+        behavior_select = memory.InputData(
+            statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        habit_out = store.execute(habit_select)
-        sources = _habit_sources_from_output(habit_out)
+        behavior_out = store.execute(behavior_select)
+        sources = _behavior_sources_from_output(behavior_out)
         select = cognition.episodes.episode_select_input(context_ref=None)
         episodes = cognition.episodes.episodes_from_output(store.execute(select))
-        latest_habit = episodes[-1].habit if episodes else None
-        return result, sources, processor.change_step.calls, latest_habit
+        latest_behavior = episodes[-1].behavior if episodes else None
+        return result, sources, processor.change_step.calls, latest_behavior
 
-    result, sources, change_calls, latest_habit = asyncio.run(run())
+    result, sources, change_calls, latest_behavior = asyncio.run(run())
 
     assert result is None
     assert len(change_calls) == 1
-    assert change_calls[0].input.existing_habit.name == "AnswerIncomingRing"
-    assert change_calls[0].input.existing_habit.description == "Original description."
-    assert change_calls[0].input.existing_habit.source
+    assert change_calls[0].input.existing_behavior.name == "AnswerIncomingRing"
+    assert change_calls[0].input.existing_behavior.description == "Original description."
+    assert change_calls[0].input.existing_behavior.source
     assert change_calls[0].input.intent == change_intent
-    assert isinstance(latest_habit, habit_events.ChangeData)
-    assert latest_habit.name == written.name
-    assert latest_habit.triggers == written.triggers
-    assert latest_habit.description == written.description
-    assert latest_habit.source is not None
-    assert "phone.ringing" in latest_habit.source
+    assert isinstance(latest_behavior, behavior_events.ChangeData)
+    assert latest_behavior.name == written.name
+    assert latest_behavior.triggers == written.triggers
+    assert latest_behavior.description == written.description
+    assert latest_behavior.source is not None
+    assert "phone.ringing" in latest_behavior.source
     assert len(sources) == 1
     assert "clear focus" in sources[0]
     assert "hsm.define" in sources[0]
 
 
-def test_reflection_break_marks_habit_broken_without_write_step() -> None:
+def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
     """Select break → mark inventory broken (keep row); no create/change write processor."""
 
-    break_data = habit_events.BreakData(name="AnswerIncomingRing", reason="harmful")
+    break_data = behavior_events.BreakData(name="AnswerIncomingRing", reason="harmful")
     selection: cognition.types.OutputData = (
         cognition.types.EventData(
-            event=habit_events.BreakEvent.name,
+            event=behavior_events.BreakEvent.name,
             data=break_data.model_dump(mode="json"),
             reason="break it",
         ),
@@ -2979,7 +3055,7 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
         int,
     ]:
         store = memory.Memory()
-        await _seed_habit_record(
+        await _seed_behavior_record(
             store,
             name="AnswerIncomingRing",
             triggers=("world.sound",),
@@ -2996,21 +3072,21 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
                 cognition_output=focus_output("phone", "break"),
             ),
         )
-        from bot.habit import storage as habit_storage
+        from bot.behavior import storage as behavior_storage
 
-        habit_select = memory.InputData(
-            statements=memory.compile_statements(*habit_storage.select_all_habits_clauses())
+        behavior_select = memory.InputData(
+            statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        habit_out = store.execute(habit_select)
-        sources = _habit_sources_from_output(habit_out)
-        habits = habit_storage.instances_from_habit_results(
-            tuple(row.as_mapping() for row in habit_out.results[0].rows),
-            tuple(row.as_mapping() for row in habit_out.results[1].rows),
+        behavior_out = store.execute(behavior_select)
+        sources = _behavior_sources_from_output(behavior_out)
+        behaviors = behavior_storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in behavior_out.results[0].rows),
+            tuple(row.as_mapping() for row in behavior_out.results[1].rows),
         )
         active_out = store.execute(
-            memory.InputData(statements=memory.compile_statements(*habit_storage.select_active_habits_clauses()))
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_active_behaviors_clauses()))
         )
-        active = habit_storage.instances_from_habit_results(
+        active = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in active_out.results[0].rows),
             tuple(row.as_mapping() for row in active_out.results[1].rows),
         )
@@ -3019,13 +3095,13 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
         return (
             result,
             sources,
-            habits[0].status if habits else "ACTIVE",
+            behaviors[0].status if behaviors else "ACTIVE",
             processor.builds,
-            episodes[-1].habit,
+            episodes[-1].behavior,
             len(active),
         )
 
-    result, sources, status, builds, latest_habit, active_count = asyncio.run(run())
+    result, sources, status, builds, latest_behavior, active_count = asyncio.run(run())
 
     assert result is None
     assert len(sources) == 1
@@ -3034,18 +3110,18 @@ def test_reflection_break_marks_habit_broken_without_write_step() -> None:
     assert active_count == 0
     # Break is applied after select; change-phase Processing is not used.
     assert builds == [cognition.Reflection.select_instructions]
-    assert latest_habit == break_data
+    assert latest_behavior == break_data
 
 
 def test_reflection_no_selection_still_stores_episode() -> None:
     async def run() -> tuple[None, tuple[cognition.episodes.CognitiveEpisode, ...]]:
         store = memory.Memory()
-        processor = FixedProcessor(no_output("no pattern"))
+        processor = FixedProcessor(empty_output())
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
         input = cognition.reflection.InputData(
             cognition_input=cognition_input(),
-            cognition_output=no_output("nothing to learn"),
+            cognition_output=ignore_output("nothing to learn"),
         )
         result = await dispatch_ability_for_test(reflection, ctx, input)
         select = cognition.episodes.episode_select_input(context_ref=None)
@@ -3057,12 +3133,12 @@ def test_reflection_no_selection_still_stores_episode() -> None:
 
     assert result is None
     assert len(episodes) == 1
-    assert episodes[0].habit is None
+    assert episodes[0].behavior is None
 
 
-_FOCUS_RING_HABIT_SOURCE = """
+_FOCUS_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
-    name = "bot.habit.focus_on_ring.input",
+    name = "bot.behavior.focus_on_ring.input",
     schema = {
         "type": "object",
         "properties": {
@@ -3072,7 +3148,7 @@ input_event = hsm.event(
     },
 )
 output_event = hsm.event(
-    name = "bot.habit.focus_on_ring.output",
+    name = "bot.behavior.focus_on_ring.output",
     schema = {
         "type": "object",
         "properties": {
@@ -3088,16 +3164,16 @@ description = "Focus the phone when a ring sound arrives."
 
 def is_ring(event):
     data = event["data"] or {}
-    return data.get("kind") == "ring"
+    return data.get("kind") == "phone.ringing"
 
 def focus_phone(event):
     hsm.dispatch(output_event, {
         "event": "bot.focus_device",
         "data": {"device": "phone"},
-        "reason": "ring habit",
+        "reason": "ring behavior",
     })
 
-habit = hsm.define(
+behavior = hsm.define(
     "FocusOnRing",
     hsm.initial(hsm.target("/FocusOnRing/idle")),
     hsm.state(
@@ -3115,19 +3191,19 @@ habit = hsm.define(
 def _ring_stimulus() -> hsm.Event[object]:
     from bot.world import SoundData, SoundEvent
 
-    return SoundEvent.with_data(SoundData(audio=b"ring", kind="ring"))
+    return SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
 
 
-def test_autonomy_handles_matching_habit_without_intuition_processor() -> None:
-    """Stimulus → habit Behavior → EventData selection without deliberative Processing."""
+def test_autonomy_handles_matching_behavior_without_intuition_processor() -> None:
+    """Stimulus → behavior Behavior → EventData selection without deliberative Processing."""
 
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
         store = memory.Memory()
-        await _seed_habit_record(
+        await _seed_behavior_record(
             store,
             name="FocusOnRing",
             triggers=("world.sound",),
-            source=_FOCUS_RING_HABIT_SOURCE,
+            source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
         intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="should not run"))
@@ -3162,7 +3238,7 @@ def test_autonomy_handles_matching_habit_without_intuition_processor() -> None:
         cognition.types.EventData(
             event=bot.FocusDeviceEvent.name,
             data={"device": "phone"},
-            reason="ring habit",
+            reason="ring behavior",
         ),
     )
     assert intuition_calls == []
@@ -3173,11 +3249,11 @@ def test_autonomy_handles_matching_habit_without_intuition_processor() -> None:
 def test_autonomy_unhandled_falls_through_to_intuition() -> None:
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
         store = memory.Memory()
-        await _seed_habit_record(
+        await _seed_behavior_record(
             store,
             name="FocusOnRing",
             triggers=("world.sound",),
-            source=_FOCUS_RING_HABIT_SOURCE,
+            source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
         intuition_processor = RecordingIntuitionProcessor(no_output("intuition after autonomy"))

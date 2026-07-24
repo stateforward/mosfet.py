@@ -10,9 +10,10 @@ import typing
 import hsm
 import bot.device
 
+from bot import lifecycle
 from bot.event_schema import validate_event_data
 from bot.telemetry import observer
-from bot.world import SoundData, SoundEvent, World, require_world_scope
+from bot.world import SoundEvent, World, require_world_scope
 
 from .events import (
     AnswerCallData,
@@ -38,6 +39,7 @@ from .events import (
     MediaReadyEvent,
     PhoneCallData,
     PhoneHungUpData,
+    PhoneSoundData,
     PhoneTransferData,
     PhoneTransferFailedData,
     RemoteHangUpData,
@@ -141,15 +143,13 @@ class _PhoneObservationService:
 
         Elevation stamps ``source=hsm.id(speaker)`` on ``world.sound``; that requires a
         started speaker in the same world Instances map as ``ctx``. Readiness uses this
-        service's attach hold (``self.target``), successful ``hsm.id(speaker)`` (hsm 1.3.2+
-        fails after stop), and same-world scope — never ``state()``.
+        service's attach hold (``self.target``), speaker liveness, and same-world scope
+        — never ``state()``.
         """
 
         if self.target is None:
             return False
-        try:
-            _ = hsm.id(self.speaker)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(self.speaker):
             return False
         speaker_context = self.speaker.context()
         return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
@@ -248,18 +248,22 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
     Ringing is heard as ``world.sound`` with ``source`` = the phone instance id. Device-plane
     ``phone.ringing`` still flows on the service/firmware path; bots do not receive it as a
     raw cognitive stimulus. Ring elevation selects on :class:`RingingData` payload type.
+    Live ``call_id`` is stamped on :class:`PhoneSoundData` (model-facing ``event.data``) and
+    mirrored on ``event.id`` for correlation. ``kind`` is the explicit provenance label
+    ``phone.ringing`` (not bare ``ring``, which is ambiguous for models).
     """
 
     data = event.data
     if isinstance(data, RingingData):
         return dataclasses.replace(
             SoundEvent.with_data(
-                SoundData(
+                PhoneSoundData(
                     audio=RING_SOUND_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,
                     channels=1,
-                    kind="ring",
+                    kind="phone.ringing",
+                    call_id=data.call_id,
                 )
             ),
             id=data.call_id,

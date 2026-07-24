@@ -1,5 +1,5 @@
 import bot
-from bot import habit
+from bot import behavior
 from bot.abilities import cognition
 from bot.abilities import memory
 from bot.abilities import processing
@@ -144,8 +144,8 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
                 reflection_impl._SelectedEventData(
                     turn=turn,
                     selection=cognition.types.EventData(
-                        event=habit.CreateEvent.name,
-                        data=habit.CreateData(name="ForgedHabit", triggers=(bot.InputEvent.name,)).model_dump(
+                        event=behavior.CreateEvent.name,
+                        data=behavior.CreateData(name="ForgedBehavior", triggers=(bot.InputEvent.name,)).model_dump(
                             mode="json"
                         ),
                     ),
@@ -159,7 +159,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         )
         _ = await hsm.dispatch(ctx, reflection, forged)
         await asyncio.sleep(0)
-        stored = reflection_impl._load_habit(store, name="ForgedHabit")
+        stored = reflection_impl._load_behavior(store, name="ForgedBehavior")
         state = reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -221,9 +221,9 @@ def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
-                    event=habit.CreateEvent.name,
-                    data=habit.CreateData(
-                        name="CancellationHabit",
+                    event=behavior.CreateEvent.name,
+                    data=behavior.CreateData(
+                        name="CancellationBehavior",
                         triggers=(bot.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
@@ -272,9 +272,9 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
-                    event=habit.CreateEvent.name,
-                    data=habit.CreateData(
-                        name="StartingCancellationHabit",
+                    event=behavior.CreateEvent.name,
+                    data=behavior.CreateData(
+                        name="StartingCancellationBehavior",
                         triggers=(bot.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
@@ -518,9 +518,9 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
-                    event=habit.CreateEvent.name,
-                    data=habit.CreateData(
-                        name="TimedChangeHabit",
+                    event=behavior.CreateEvent.name,
+                    data=behavior.CreateData(
+                        name="TimedChangeBehavior",
                         triggers=(bot.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
@@ -612,7 +612,7 @@ def test_reflection_builds_one_attachment_group_for_fixed_children(
     connection.close()
 
 
-def test_reflection_rejects_forged_habit_mutation_during_select() -> None:
+def test_reflection_rejects_forged_behavior_mutation_during_select() -> None:
     async def run() -> tuple[int, str]:
         processor = HangingProcessor()
         reflection, connection = reflection_with_processor(processor)
@@ -631,7 +631,7 @@ def test_reflection_rejects_forged_habit_mutation_during_select() -> None:
         )
         await wait_until(lambda: reflection.state().endswith("/processing") and processor.calls == 1)
         forged = dataclasses.replace(
-            habit.CreateEvent.with_data(habit.CreateData(name="ForgedHabit", reason="untrusted mutation")),
+            behavior.CreateEvent.with_data(behavior.CreateData(name="ForgedBehavior", reason="untrusted mutation")),
             id="current-reflection:reflection:select",
             source=hsm.id(intruder),
             target=hsm.id(reflection),
@@ -802,10 +802,10 @@ def test_reflection_defers_detach_during_initialization_then_detaches_once(
             "revising",
             (
                 processing.SelectedEvent(
-                    event=habit.CreateEvent.name,
+                    event=behavior.CreateEvent.name,
                     data={
-                        "event": habit.CreateEvent.name,
-                        "name": "RuntimeDetachHabit",
+                        "event": behavior.CreateEvent.name,
+                        "name": "RuntimeDetachBehavior",
                         "reason": "exercise changing detach",
                     },
                 ),

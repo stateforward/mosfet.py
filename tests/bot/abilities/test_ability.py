@@ -16,6 +16,7 @@ import pydantic
 import pytest
 import bot.abilities as abilities_module
 import bot.abilities.ability as ability_module
+import bot.lifecycle
 from bot.protocols import attachment
 
 from tests.type_helpers import invalid_value, object_dict
@@ -817,24 +818,17 @@ def test_text_generation_routes_wrong_output_type_to_failure() -> None:
 def test_ability_production_stop_then_attach_restarts() -> None:
     """``hsm.stop(ability)`` then attach must restart without RuntimeError (hsm 1.3.2)."""
 
-    def started(instance: hsm.Instance) -> bool:
-        try:
-            _ = hsm.id(instance)
-        except hsm.ErrorValidatingModel:
-            return False
-        return True
-
     async def run() -> None:
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         ctx, owner = await start_recorded_generation(generation)
-        assert started(generation) is True
+        assert bot.lifecycle.is_started(generation) is True
         await hsm.stop(generation)
-        assert started(generation) is False
+        assert bot.lifecycle.is_started(generation) is False
         await generation.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
         )
-        assert started(generation) is True
+        assert bot.lifecycle.is_started(generation) is True
 
     asyncio.run(run())
 

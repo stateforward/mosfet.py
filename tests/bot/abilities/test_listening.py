@@ -94,7 +94,7 @@ class FixedVoiceDiarizer(voice.diarization.VoiceDiarizer):
 
 
 class FixedSoundClassifier(sound_hearing.classification.SoundClassifier):
-    calls: list[bytes]
+    calls: list[SoundData]
     labels: tuple[str, ...]
 
     def __init__(self, *, labels: tuple[str, ...] = ("alarm",)) -> None:
@@ -102,19 +102,19 @@ class FixedSoundClassifier(sound_hearing.classification.SoundClassifier):
         self.labels = labels
 
     @override
-    async def classify(self, input: bytes) -> sound_hearing.classification.OutputData:
+    async def classify(self, input: SoundData) -> sound_hearing.classification.OutputData:
         self.calls.append(input)
         return sound_hearing.classification.OutputData(labels=self.labels, confidence=0.9)
 
 
 class EmptySoundClassifier(sound_hearing.classification.SoundClassifier):
-    calls: list[bytes]
+    calls: list[SoundData]
 
     def __init__(self) -> None:
         self.calls = []
 
     @override
-    async def classify(self, input: bytes) -> sound_hearing.classification.OutputData:
+    async def classify(self, input: SoundData) -> sound_hearing.classification.OutputData:
         self.calls.append(input)
         return sound_hearing.classification.OutputData(labels=(), confidence=0.95)
 
@@ -518,7 +518,7 @@ def test_listening_skips_cognition_input_when_no_voice() -> None:
 
 
 def test_listening_publishes_sound_cognition_input_when_sound_classifier_labels_nonvoice() -> None:
-    async def run() -> tuple[list[cognition.InputData], list[bytes], list[bytes], str]:
+    async def run() -> tuple[list[cognition.InputData], list[SoundData], list[bytes], str]:
         classifier = FixedSoundClassifier(labels=("alarm",))
         listening, decoder = _listening(is_voice=False, decoder=False, sound_classifier=classifier)
         await start_ability_tree(None, listening)
@@ -534,13 +534,14 @@ def test_listening_publishes_sound_cognition_input_when_sound_classifier_labels_
     assert stimulus.name == SoundEvent.name
     assert isinstance(stimulus.data, SoundData)
     assert stimulus.data.audio == b"alarm-tone"
-    assert classifier_calls == [b"alarm-tone"]
+    assert len(classifier_calls) == 1
+    assert classifier_calls[0].audio == b"alarm-tone"
     assert decoder_calls == []
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
 
 
 def test_listening_skips_cognition_input_when_sound_classifier_finds_no_labels() -> None:
-    async def run() -> tuple[list[cognition.InputData], list[bytes], str]:
+    async def run() -> tuple[list[cognition.InputData], list[SoundData], str]:
         classifier = EmptySoundClassifier()
         listening, _ = _listening(is_voice=False, decoder=False, sound_classifier=classifier)
         await start_ability_tree(None, listening)
@@ -553,7 +554,45 @@ def test_listening_skips_cognition_input_when_sound_classifier_finds_no_labels()
     handoffs, classifier_calls, active_state = asyncio.run(run())
 
     assert handoffs == []
-    assert classifier_calls == [b"ambient"]
+    assert len(classifier_calls) == 1
+    assert classifier_calls[0].audio == b"ambient"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+
+
+def test_kind_sound_classifier_labels_present_kind() -> None:
+    async def run() -> sound_hearing.classification.OutputData:
+        classifier = sound_hearing.classification.KindSoundClassifier()
+        return await classifier.classify(SoundData(audio=b"ring-clip", kind="phone.ringing"))
+
+    assert asyncio.run(run()) == sound_hearing.classification.OutputData(labels=("phone.ringing",), confidence=1.0)
+
+
+def test_kind_sound_classifier_unlabeled_without_kind() -> None:
+    async def run() -> sound_hearing.classification.OutputData:
+        classifier = sound_hearing.classification.KindSoundClassifier()
+        return await classifier.classify(SoundData(audio=b"noise"))
+
+    assert asyncio.run(run()) == sound_hearing.classification.OutputData(labels=())
+
+
+def test_listening_publishes_kind_labeled_nonvoice_sound() -> None:
+    async def run() -> tuple[list[cognition.InputData], str]:
+        listening, _ = _listening(
+            is_voice=False,
+            decoder=False,
+            sound_classifier=sound_hearing.classification.KindSoundClassifier(),
+        )
+        await start_ability_tree(None, listening)
+        _ = await listening.apply(SoundData(audio=b"ring-clip", media_type="audio/wav", kind="phone.ringing"))
+        await wait_until(lambda: bool(listening.handoffs))
+        return listening.handoffs, listening.state()
+
+    handoffs, active_state = asyncio.run(run())
+    stimulus = _stimulus(handoffs[0])
+    assert stimulus.name == SoundEvent.name
+    assert isinstance(stimulus.data, SoundData)
+    assert stimulus.data.kind == "phone.ringing"
+    assert stimulus.data.audio == b"ring-clip"
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
 
 

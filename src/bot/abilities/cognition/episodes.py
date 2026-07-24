@@ -1,13 +1,13 @@
 """Shared cognitive episode types for reflection and reasoning.
 
-Episodes are prior turns in memory. Habit inventory types live in ``bot.habit``
-(create/change/break); abilities import those rather than owning habit vocabulary.
+Episodes are prior turns in memory. Behavior inventory types live in ``bot.behavior``
+(create/change/break); abilities import those rather than owning behavior vocabulary.
 """
 
 from __future__ import annotations
 
 import bot
-from bot.habit import BreakData, CreateData, ChangeData
+from bot.behavior import BreakData, CreateData, ChangeData
 from .. import memory
 
 import typing
@@ -25,7 +25,7 @@ COGNITIVE_EPISODE_QUERY = "cognitive_episode"
 
 
 class CognitiveEpisode(pydantic.BaseModel):
-    """Prior cognition turn stored for later habit create/change/break on similar events."""
+    """Prior cognition turn stored for later behavior create/change/break on similar events."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -33,7 +33,7 @@ class CognitiveEpisode(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Recallable cognition episode (JSON in memory, query_tags=cognitive_episode). "
-                "Used when reflection chooses bot.habit.create / change / break."
+                "Used when reflection chooses bot.behavior.create / change / break."
             ),
         },
     )
@@ -42,9 +42,9 @@ class CognitiveEpisode(pydantic.BaseModel):
     focus_candidates: tuple[str, ...] = pydantic.Field(default=(), examples=[["phone"]])
     stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["world.sound"])
     output: types.OutputData = pydantic.Field(description="Typed cognitive output from that prior turn.")
-    habit: CreateData | ChangeData | BreakData | None = pydantic.Field(
+    behavior: CreateData | ChangeData | BreakData | None = pydantic.Field(
         default=None,
-        description="Habit create/change/break payload recorded with this episode, if any.",
+        description="Behavior create/change/break payload recorded with this episode, if any.",
     )
 
 
@@ -79,7 +79,7 @@ def episode_select_input(
     context_ref: str | None = None,
     limit: int = 50,
 ) -> memory.InputData:
-    """Memory apply input that SELECTs prior cognitive episodes for habit learning."""
+    """Memory apply input that SELECTs prior cognitive episodes for behavior learning."""
 
     table = memory.memory_table
     clause = select(table).where(table.c.query_tags == COGNITIVE_EPISODE_QUERY)
@@ -96,7 +96,7 @@ def episode_insert_input(
     scope: str = "short_term",
     memory_id: str | None = None,
 ) -> memory.InputData:
-    """Memory apply input that INSERTs one cognitive episode for later habit learning."""
+    """Memory apply input that INSERTs one cognitive episode for later behavior learning."""
 
     table = memory.memory_table
     clause = insert(table).values(

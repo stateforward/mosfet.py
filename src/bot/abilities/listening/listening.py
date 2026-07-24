@@ -419,7 +419,9 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         try:
-            classification = await sound_classification.classifier.classify(detection.sound.audio)
+            # Pass full SoundData so kind/media provenance is available to classifiers
+            # (e.g. KindSoundClassifier labels from sound.kind without probing codecs).
+            classification = await sound_classification.classifier.classify(detection.sound)
         except Exception as error:
             _dispatch_stage_failure(
                 ctx,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hsm
 
 from bot.abilities.conversation.text import TextConversation
-from bot.abilities.cognition.reflection.revision import Revision
 from bot.abilities.listening.listening import Listening
 from bot.abilities.participating.participating import Participating
 from bot.abilities.reading.reading import Reading
@@ -41,7 +40,8 @@ def test_hsm_init_required_composites_declare_nested_initials() -> None:
         (Reading, "Focused", "Classifying/Applying"),
         (Participating, "perceiving", "routing"),
         (Listening, "DecodingSpeech", "Detected"),
-        (Revision, "authoring", "attempt_0"),
+        # Revision.authoring is a leaf: attempt index is free-running on the write payload,
+        # not nested attempt_0/1/2 states (retries continue until same diagnostics twice).
         (TextConversation, "active", "decoding"),
     ]
     for machine_cls, composite_name, expected_target_suffix in cases:

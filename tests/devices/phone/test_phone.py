@@ -444,7 +444,7 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> No
     assert inside_events[0].source == phone_id
     assert inside_events[0].target == "inside"
     sound = inside_events[0].data
-    assert getattr(sound, "kind", None) == "ring"
+    assert getattr(sound, "kind", None) == "phone.ringing"
     assert getattr(sound, "media_type", None) == "audio/wav"
     assert getattr(sound, "sample_rate_hz", None) == 16_000
     assert getattr(sound, "channels", None) == 1
@@ -768,7 +768,11 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
         ]
         assert len(observer.events) == 1
         assert observer.events[0].name == SoundEvent.name
-        assert getattr(observer.events[0].data, "kind", None) == "ring"
+        ring_data = observer.events[0].data
+        assert isinstance(ring_data, phone_device.PhoneSoundData)
+        assert ring_data.kind == "phone.ringing"
+        assert ring_data.call_id == "call-123"
+        assert observer.events[0].id == "call-123"
         observer.events.clear()
         await _emit_service_event(phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123")))
         await _wait_until(lambda: _event_names(firmware.event_recorder())[-1] == phone_device.MediaReadyEvent.name)

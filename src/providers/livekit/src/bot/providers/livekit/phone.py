@@ -16,10 +16,12 @@ import pydantic
 import bot.device
 from livekit import rtc
 
+from bot import lifecycle
 from bot.telemetry import observer
 from bot.world import World, require_world_scope
 
 from .audio import AudioBridge, create_audio_bridge
+from .pcm_batch import RemotePcmBatcher
 from .room_audio import (
     AudioStreamFactory,
     LocalAudioTrackFactory,
@@ -688,6 +690,7 @@ class PhoneService(hsm.Instance):
     _room_connect: RoomAudioConnectData | None
     _bridge: AudioBridge[typing.Any] | None
     _track_path: RoomAudioTrackPath | None
+    _remote_pcm_batcher: RemotePcmBatcher | None
     _local_track_sid: str | None
     _remote_audio_chunks: int
     _remote_audio_bytes: int
@@ -730,6 +733,7 @@ class PhoneService(hsm.Instance):
         )
         self._bridge = None
         self._track_path = None
+        self._remote_pcm_batcher = None
         self._local_track_sid = None
         self._remote_audio_chunks = 0
         self._remote_audio_bytes = 0
@@ -867,8 +871,8 @@ class PhoneService(hsm.Instance):
             return self._bridge, self._track_path
         service_ref = weakref.ref(self)
 
-        async def consume_remote_audio(audio_input: audio.AudioInputData) -> None:
-            """Ingress: publish remote PCM into PhoneService RTC (guards decide deliver vs drop).
+        async def deliver_batched_remote_audio(audio_input: audio.AudioInputData) -> None:
+            """Publish one batched utterance into PhoneService (guards decide deliver vs drop).
 
             HSM-CONTEXT-001: do not gate on ``context().is_done()`` or ``state()``. Attach
             lifetime opens ingress; HSM guards decide deliver vs drop once dispatched.
@@ -878,6 +882,18 @@ class PhoneService(hsm.Instance):
             if live_service is None or not live_service._sdk_ingress_open():
                 return
             await live_service.receive_remote_audio(live_service.context(), audio_input)
+
+        async def consume_remote_audio(audio_input: audio.AudioInputData) -> None:
+            """Ingress: batch ~10 ms LiveKit frames into utterance-sized PCM for Listening."""
+
+            live_service = service_ref()
+            if live_service is None or not live_service._sdk_ingress_open():
+                return
+            batcher = live_service._remote_pcm_batcher
+            if batcher is None:
+                await deliver_batched_remote_audio(audio_input)
+                return
+            await batcher.push(audio_input)
 
         def record_connected(data: RoomAudioConnectedData) -> None:
             live_service = service_ref()
@@ -902,6 +918,10 @@ class PhoneService(hsm.Instance):
         )
         self._bridge = bridge
         self._track_path = track_path
+        self._remote_pcm_batcher = RemotePcmBatcher(
+            emit=deliver_batched_remote_audio,
+            loop=self._loop,
+        )
         if self._room is not None:
             self._bind_room_presence(self._room)
         return bridge, track_path
@@ -948,15 +968,10 @@ class PhoneService(hsm.Instance):
 
         require_world_scope(world, target, participant="Phone service target")
         _, track_path = self._ensure_media()
-        # hsm 1.3.2+: id fails after stop — start only when not started.
-        try:
-            _ = hsm.id(track_path)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(track_path):
             _ = await hsm.started(world, track_path, track_path.model)
         # Start this service before room connect so participant_connected can ring.
-        try:
-            _ = hsm.id(self)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(self):
             _ = await hsm.started(world, self, self.model)
         require_world_scope(world, self, participant="PhoneService")
         await self.dispatch(world, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
@@ -976,10 +991,8 @@ class PhoneService(hsm.Instance):
     async def detach(self, world: World, target: hsm.Instance) -> None:
         """Detach this service from the phone-owned firmware target."""
 
-        try:
-            _ = hsm.id(self)
-        except hsm.ErrorValidatingModel:
-            # Idempotent when already stopped; no firmware reply channel on this API.
+        # Idempotent when already stopped; no firmware reply channel on this API.
+        if not lifecycle.is_started(self):
             return
         require_world_scope(world, target, participant="Phone service target")
         require_world_scope(world, self, participant="PhoneService")
@@ -995,14 +1008,9 @@ class PhoneService(hsm.Instance):
         """Connect the privately owned LiveKit room audio path for this service."""
 
         _, track_path = self._ensure_media()
-        try:
-            _ = hsm.id(track_path)
-        except hsm.ErrorValidatingModel:
-            try:
-                parent = self.context()
-                _ = hsm.id(self)
-            except hsm.ErrorValidatingModel:
-                parent = None
+        if not lifecycle.is_started(track_path):
+            # Parent the track path under this service only while the service is live.
+            parent = self.context() if lifecycle.is_started(self) else None
             _ = await hsm.started(parent, track_path, track_path.model)
         await track_path.connect_room(
             track_path.context(),
@@ -1030,9 +1038,7 @@ class PhoneService(hsm.Instance):
         if track_path is None:
             return
         # Track path is created by _ensure_media before start; only stop if started.
-        try:
-            _ = hsm.id(track_path)
-        except hsm.ErrorValidatingModel:
+        if not lifecycle.is_started(track_path):
             return
         await hsm.stop(track_path, ctx)
 

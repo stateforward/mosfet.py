@@ -14,22 +14,19 @@ import pytest
 
 import bot.device.device as device_module
 
+import bot.lifecycle
 from bot.device import Device
 from bot.protocols import attachment
 from bot.device.events import (
-    ActivateEvent,
-    DeactivateEvent,
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
-    ActivateEventData,
-    DeactivateEventData,
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEventData,
 )
 from bot.world import World
 from tests.hsm_instance_state import device_bots, device_firmware, device_peripherals
 from tests.hsm_model import transition_map
-from tests.type_helpers import callable_object, object_dict, string_list
+from tests.type_helpers import callable_object, object_dict
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -222,7 +219,7 @@ def test_device_initializes_to_detached_before_accepting_attach_events() -> None
 
         await device.attach(world, attach_event(bot_instance))
 
-        assert device.state() == "/Device/attached/inactive"
+        assert device.state() == "/Device/attached"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
@@ -274,13 +271,13 @@ def test_device_attach_dispatches_deferred_attach_during_firmware_initialization
         assert device_bots(device) == ()
 
         release.set()
-        await wait_until(lambda: device.state() == "/Device/attached/inactive")
+        await wait_until(lambda: device.state() == "/Device/attached")
 
         return device.state(), device_bots(device)
 
     state, agents = asyncio.run(run())
 
-    assert state == "/Device/attached/inactive"
+    assert state == "/Device/attached"
     assert len(agents) == 1
 
 
@@ -376,11 +373,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         assert device.state() == "/Device/initializing"
         # hsm 1.3.2: stopped firmware has empty state and cannot take_snapshot / id.
         assert first_firmware.state() == ""
-        try:
-            _ = hsm.id(first_firmware)
-            raise AssertionError("stopped firmware must not remain addressable via hsm.id")
-        except hsm.ErrorValidatingModel:
-            pass
+        assert bot.lifecycle.is_started(first_firmware) is False
         del first_firmware_id, instances
 
         await device.dispatch(world, stale_result)
@@ -397,11 +390,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         await hsm.stop(device)
 
         assert second_firmware.state() == ""
-        try:
-            _ = hsm.id(second_firmware)
-            raise AssertionError("stopped firmware must not remain addressable via hsm.id")
-        except hsm.ErrorValidatingModel:
-            pass
+        assert bot.lifecycle.is_started(second_firmware) is False
 
     asyncio.run(run())
 
@@ -639,7 +628,7 @@ def test_device_external_actors_attach_only_through_explicit_events() -> None:
         await device.attach(world, attach_event(first_bot))
         await device.attach(world, attach_event(second_bot))
 
-        assert device.state() == "/Device/attached/inactive"
+        assert device.state() == "/Device/attached"
         assert device_bots(device) == (first_bot, second_bot)
 
     asyncio.run(run())
@@ -657,7 +646,7 @@ def test_device_detaching_one_of_multiple_bots_stays_attached() -> None:
 
         await device.dispatch(device.context(), detach_event(first_bot))
 
-        assert device.state() == "/Device/attached/inactive"
+        assert device.state() == "/Device/attached"
         assert device_bots(device) == (second_bot,)
 
         await device.dispatch(device.context(), detach_event(second_bot))
@@ -677,7 +666,7 @@ def test_device_duplicate_attach_event_keeps_single_agent_attachment() -> None:
         await device.attach(world, attach_event(bot_instance))
         await device.attach(world, attach_event(bot_instance))
 
-        assert device.state() == "/Device/attached/inactive"
+        assert device.state() == "/Device/attached"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
@@ -705,7 +694,7 @@ def test_device_malformed_detach_event_is_ineligible() -> None:
         await device.attach(world, attach_event(bot_instance))
         await device.dispatch(device.context(), attachment.DetachEvent.with_data({"actor": {"id": "bot-device-owner"}}))
 
-        assert device.state() == "/Device/attached/inactive"
+        assert device.state() == "/Device/attached"
         assert device_bots(device) == (bot_instance,)
 
     asyncio.run(run())
@@ -721,11 +710,9 @@ def test_device_declares_required_bot_abilities_on_subclasses() -> None:
     assert device.required_bot_abilities == (voice.VoiceDetection,)
 
 
-def test_device_event_schemas_describe_attachment_and_activation() -> None:
+def test_device_event_schemas_describe_attachment() -> None:
     attach_schema = object_dict(attachment.AttachEvent.schema)
     detach_schema = object_dict(attachment.DetachEvent.schema)
-    activate_schema = object_dict(ActivateEvent.schema)
-    deactivate_schema = object_dict(DeactivateEvent.schema)
 
     assert attachment.AttachEvent.name == "attachment.attach"
     assert attach_schema == attachment.AttachData.model_json_schema()
@@ -745,26 +732,21 @@ def test_device_event_schemas_describe_attachment_and_activation() -> None:
         pass
     else:
         raise AssertionError("Device bot JSON data should require a string id.")
-    assert ActivateEvent.name == "device.activate"
-    assert activate_schema == ActivateEventData.model_json_schema()
-    assert "required" not in activate_schema
-    assert DeactivateEvent.name == "device.deactivate"
-    assert deactivate_schema == DeactivateEventData.model_json_schema()
-    assert "required" not in deactivate_schema
 
 
-def test_device_model_tracks_initialization_attachment_and_activation_state() -> None:
+def test_device_model_tracks_initialization_and_attachment_state() -> None:
     model = Device.model
 
     assert model.qualified_name == "/Device"
     assert model.initial == "/Device/.initial"
     assert "/Device/initializing" in model.members
     assert "/Device/initialization_failing" in model.members
+    assert "/Device/failed" in model.members
     assert "/Device/detached" in model.members
     assert "/Device/attaching" in model.members
     assert "/Device/attached" in model.members
-    assert "/Device/attached/inactive" in model.members
-    assert "/Device/attached/active" in model.members
+    assert "/Device/active" not in model.members
+    assert "/Device/inactive" not in model.members
     transitions = transition_map(model)
     deferred_map = typing.cast(
         collections.abc.Mapping[str, collections.abc.Mapping[str, str]],
@@ -789,97 +771,13 @@ def test_device_model_tracks_initialization_attachment_and_activation_state() ->
     assert "attachment.attach" in transitions["/Device/attached"]
     assert "attachment.detach" in transitions["/Device/attached"]
     assert len(transitions["/Device/attached"]["attachment.detach"]) == 3
-    assert "device.activate" in transitions["/Device/attached/inactive"]
-    assert "device.deactivate" in transitions["/Device/attached/active"]
-
-
-def test_device_activate_transition_has_device_owned_guard_hook() -> None:
-    activate_transitions = transition_map(Device.model)["/Device/attached/inactive"]["device.activate"]
-    guard_path = activate_transitions[0].guard
-
-    assert len(activate_transitions) == 1
-    assert guard_path is not None
-    assert guard_path in Device.model.members
-    assert getattr(Device.model.members[guard_path], "expression")
-
-
-def test_device_active_and_inactive_states_have_lifecycle_hooks() -> None:
-    inactive_state = Device.model.members["/Device/attached/inactive"]
-    active_state = Device.model.members["/Device/attached/active"]
-
-    assert getattr(inactive_state, "entry")
-    assert getattr(inactive_state, "exit")
-    assert getattr(inactive_state, "activity")
-    assert getattr(active_state, "entry")
-    assert getattr(active_state, "exit")
-    assert getattr(active_state, "activity")
-
-
-def test_device_lifecycle_hooks_delegate_to_subclass_overrides() -> None:
-    class LifecycleDevice(Device):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls: list[str] = []
-
-        @override
-        def _on_inactive_entry(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("inactive_entry")
-
-        @override
-        def _on_inactive_exit(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("inactive_exit")
-
-        @override
-        async def _do_inactive_activity(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("inactive_activity")
-
-        @override
-        def _on_active_entry(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("active_entry")
-
-        @override
-        def _on_active_exit(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("active_exit")
-
-        @override
-        async def _do_active_activity(self, ctx: hsm.Context, event: hsm.Event) -> None:
-            del ctx, event
-            self.calls.append("active_activity")
-
-    async def call_first_behavior(state_path: str, behavior: str, device: LifecycleDevice) -> None:
-        state = Device.model.members[state_path]
-        behavior_name = string_list(typing.cast(object, getattr(state, behavior)))[0]
-        behavior_node = Device.model.members[behavior_name]
-        operation = callable_object(typing.cast(object, getattr(behavior_node, "operation")))
-        result = operation(hsm.Context(), device, hsm.Event(name="device.lifecycle.test"))
-        if inspect.isawaitable(result):
-            await result
-
-    async def exercise_hooks() -> None:
-        device = LifecycleDevice()
-
-        await call_first_behavior("/Device/attached/inactive", "entry", device)
-        await call_first_behavior("/Device/attached/inactive", "exit", device)
-        await call_first_behavior("/Device/attached/inactive", "activity", device)
-        await call_first_behavior("/Device/attached/active", "entry", device)
-        await call_first_behavior("/Device/attached/active", "exit", device)
-        await call_first_behavior("/Device/attached/active", "activity", device)
-
-        assert device.calls == [
-            "inactive_entry",
-            "inactive_exit",
-            "inactive_activity",
-            "active_entry",
-            "active_exit",
-            "active_activity",
-        ]
-
-    asyncio.run(exercise_hooks())
+    assert "device.activate" not in transitions["/Device/attached"]
+    assert "device.deactivate" not in transitions["/Device/attached"]
+    # Attached is ownership only; shell has no active/inactive substates.
+    attached_state = model.members["/Device/attached"]
+    assert not getattr(attached_state, "entry", None)
+    assert not getattr(attached_state, "exit", None)
+    assert not getattr(attached_state, "activity", None)
 
 
 def test_device_firmware_started_hook_runs_before_later_explicit_attachments() -> None:
@@ -1097,26 +995,6 @@ def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
         assert device_bots(device) == ()
 
     asyncio.run(run())
-
-
-def test_device_activate_guard_delegates_to_device_policy() -> None:
-    class ActivatingDevice(Device):
-        def __init__(self, can_activate: bool) -> None:
-            super().__init__()
-            self.can_activate: bool = can_activate
-
-        @override
-        def _can_activate(self, ctx: hsm.Context, event: hsm.Event) -> bool:
-            del ctx, event
-            return self.can_activate
-
-    guard_path = transition_map(Device.model)["/Device/attached/inactive"]["device.activate"][0].guard
-    assert guard_path is not None
-    guard = callable_object(typing.cast(object, getattr(Device.model.members[guard_path], "expression")))
-    event = ActivateEvent.with_data(ActivateEventData())
-
-    assert guard(hsm.Context(), ActivatingDevice(True), event)
-    assert not guard(hsm.Context(), ActivatingDevice(False), event)
 
 
 def test_device_firmware_initializing_event_uses_completion_kind() -> None:

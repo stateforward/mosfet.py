@@ -6,16 +6,9 @@ import asyncio
 
 import hsm
 
+import bot.lifecycle
 from bot.providers.livekit.phone import PhoneService
 from bot.world import World
-
-
-def _is_started(instance: hsm.Instance) -> bool:
-    try:
-        _ = hsm.id(instance)
-    except hsm.ErrorValidatingModel:
-        return False
-    return True
 
 
 def test_phone_service_production_stop_unstarts_machine() -> None:
@@ -31,9 +24,9 @@ def test_phone_service_production_stop_unstarts_machine() -> None:
             hsm.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await service.attach(world, target)
-        after_attach = _is_started(service)
+        after_attach = bot.lifecycle.is_started(service)
         await hsm.stop(service)
-        after_stop = _is_started(service)
+        after_stop = bot.lifecycle.is_started(service)
         return after_attach, after_stop
 
     after_attach, after_stop = asyncio.run(run())
@@ -54,13 +47,13 @@ def test_phone_service_attach_after_stop_restarts_machine() -> None:
             hsm.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await service.attach(world, target)
-        assert _is_started(service) is True
+        assert bot.lifecycle.is_started(service) is True
 
         await hsm.stop(service)
-        assert _is_started(service) is False
+        assert bot.lifecycle.is_started(service) is False
 
         await service.attach(world, target)
-        assert _is_started(service) is True
+        assert bot.lifecycle.is_started(service) is True
         await service.detach(world, target)
 
     asyncio.run(run())

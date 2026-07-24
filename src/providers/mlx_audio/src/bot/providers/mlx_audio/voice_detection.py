@@ -16,6 +16,10 @@ from ._mlx import (
     optional_float,
 )
 
+# Process-local warm cache: frozen VoiceDetector cannot store a loaded model after first use.
+_VOICE_DETECTION_MODEL_CACHE: dict[str, VoiceDetectionModel] = {}
+
+
 class VoiceDetectionError(RuntimeError):
     """Raised when MLX Audio voice detection fails."""
 
@@ -37,7 +41,7 @@ class VoiceDetector(voice.VoiceDetector):
         return await asyncio.to_thread(self._classify_blocking, input)
 
     def _classify_blocking(self, audio: bytes) -> voice.detection.OutputData:
-        model = self.model if self.model is not None else self.load_model(self.model_id)
+        model = self._resolve_model()
         try:
             with temporary_audio_file(audio, suffix=self.audio_file_suffix) as audio_path:
                 timestamps = coerce_iterable(
@@ -49,6 +53,19 @@ class VoiceDetector(voice.VoiceDetector):
             raise VoiceDetectionError(message) from error
 
         return voice.detection.OutputData(is_voice=bool(timestamps), confidence=_confidence_from_timestamps(timestamps))
+
+    def _resolve_model(self) -> VoiceDetectionModel:
+        if self.model is not None:
+            return self.model
+        # Only warm-cache the default loader so injected load_model seams stay testable.
+        if self.load_model is not load_voice_detection_model:
+            return self.load_model(self.model_id)
+        cached = _VOICE_DETECTION_MODEL_CACHE.get(self.model_id)
+        if cached is not None:
+            return cached
+        loaded = self.load_model(self.model_id)
+        _VOICE_DETECTION_MODEL_CACHE[self.model_id] = loaded
+        return loaded
 
 def _confidence_from_timestamps(timestamps: tuple[object, ...]) -> float | None:
     confidence_values: list[float] = []

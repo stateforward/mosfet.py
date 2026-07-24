@@ -68,7 +68,7 @@ def test_reasoning_retains_world_event_stimulus_without_stranding() -> None:
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, reasoning)
 
-        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="ring"))
+        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
         output = await dispatch_ability_for_test(
             reasoning,
             ctx,
@@ -98,7 +98,7 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
                 reasoning,
                 ctx,
                 reasoning_input(
-                    SoundEvent.with_data(SoundData(audio=b"ring", kind="ring")),
+                    SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")),
                     operation_id="live-operation",
                 ),
                 timeout=0.3,
@@ -106,7 +106,7 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
         )
         await asyncio.wait_for(processor.called.wait(), timeout=0.2)
         forged_input = reasoning_input(
-            SoundEvent.with_data(SoundData(audio=b"forged", kind="ring")),
+            SoundEvent.with_data(SoundData(audio=b"forged", kind="phone.ringing")),
             operation_id="stale-operation",
         )
         capability = reasoning_module._ReasoningCapability(

@@ -4,6 +4,8 @@ import weakref
 
 import hsm
 
+from bot import lifecycle
+
 
 def _instance_scope(instance: hsm.Instance) -> object | None:
     return instance.context().value(hsm.Keys.Instances)
@@ -54,10 +56,8 @@ class World(hsm.Context):
 def require_world_scope(world: World, instance: hsm.Instance, *, participant: str) -> None:
     """Reject attaching a running instance to a different world scope."""
 
-    # Only enforce while the machine is started (hsm 1.3.2+: id fails after stop).
-    try:
-        _ = hsm.id(instance)
-    except hsm.ErrorValidatingModel:
+    # Only enforce while the machine is started; a stopped instance has no world scope yet.
+    if not lifecycle.is_started(instance):
         return
     if _instance_scope(instance) is world.value(hsm.Keys.Instances):
         return

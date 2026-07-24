@@ -1,4 +1,5 @@
 from bot import abilities
+import bot.lifecycle
 import bot
 from bot.abilities import cognition
 from bot.abilities import listening
@@ -76,12 +77,18 @@ def assert_heard_phone_ring(
     input: bot.BotInputData,
     *,
     phone: phone_device.Phone | None = None,
+    call_id: str | None = None,
 ) -> None:
     """Ringing is world.sound from the phone; cognition sees that sound stimulus, not phone.ringing."""
 
     assert isinstance(input, hsm.Event)
     assert input.name == SoundEvent.name
     assert isinstance(input.data, SoundData)
+    assert input.data.kind == "phone.ringing"
+    if call_id is not None:
+        assert isinstance(input.data, phone_device.PhoneSoundData)
+        assert input.data.call_id == call_id
+        assert input.id == call_id
     if phone is not None:
         assert input.source == hsm.id(phone)
 
@@ -1419,7 +1426,12 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.ability.cognition.input" in deferred_map["/Bot/active/processing"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
-    assert "bot.focus_device" in transitions["/Bot/active/processing"]
+    # Focus is declared on active (transition_map may inherit it into child keys). Clear is
+    # declared only on focused + processing so idle unfocused does not offer clear_focus.
+    assert "bot.focus_device" in transitions["/Bot/active"]
+    assert "bot.clear_focus" not in transitions.get("/Bot/active", {})
+    assert "bot.clear_focus" not in transitions["/Bot/active/unfocused"]
+    assert "bot.clear_focus" in transitions["/Bot/active/focused"]
     assert "bot.clear_focus" in transitions["/Bot/active/processing"]
     assert "bot.processing.completed" in transitions["/Bot/active/processing"]
     assert "bot.processing.failed" in transitions["/Bot/active/processing"]
@@ -1565,11 +1577,14 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
     assert len(calls) == 1
     assert_heard_phone_ring(calls[0].input)
     operations = {operation.name: operation for operation in calls[0].schemas}
+    # Body attention + device call tools from live snapshots; ignore from Cognition host topology.
+    # First ring turn enters processing from unfocused: focus is offered, clear is not
+    # (clear lives on focused + processing leaf, and entry snapshot is still unfocused).
     assert set(operations) == {
         bot.FocusDeviceEvent.name,
-        bot.ClearFocusEvent.name,
         phone_device.AnswerCallEvent.name,
         phone_device.DeclineCallEvent.name,
+        cognition.types.IgnoreEvent.name,
     }
     assert event_data_schema(operations[bot.FocusDeviceEvent.name]) == bot.FocusDeviceEventData.model_json_schema()
     answer_operation = operations[phone_device.AnswerCallEvent.name]
@@ -1602,9 +1617,12 @@ def test_bot_snapshot_merges_focused_device_transitions() -> None:
 
     assert phone_device.AnswerCallEvent.name not in before_focus
     assert phone_device.DeclineCallEvent.name not in before_focus
-    # Focus control is a processing-turn affordance: it appears only in the processing snapshot.
-    assert bot.FocusDeviceEvent.name not in after_focus
-    assert bot.ClearFocusEvent.name not in after_focus
+    # Focus is available while active; clear only when focused (or mid-processing).
+    # Device call tools appear only with focus/device state.
+    assert bot.FocusDeviceEvent.name in before_focus
+    assert bot.ClearFocusEvent.name not in before_focus
+    assert bot.FocusDeviceEvent.name in after_focus
+    assert bot.ClearFocusEvent.name in after_focus
     assert phone_device.AnswerCallEvent.name in after_focus
     assert phone_device.DeclineCallEvent.name in after_focus
 
@@ -1637,6 +1655,7 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert observed_browser_input.input.id == "call-456"
     offered = {event.name for event in observed_browser_input.schemas}
     assert bot.FocusDeviceEvent.name in offered
+    # Second turn while already focused: clear is on focused snapshot during processing entry.
     assert bot.ClearFocusEvent.name in offered
     assert phone_device.AnswerCallEvent.name in offered
     assert phone_device.DeclineCallEvent.name in offered
@@ -1735,23 +1754,13 @@ class RecordingListening(listening.Listening):
         return super().dispatch(ctx, event)
 
 
-class RingWavSoundClassifier(sound_hearing.classification.SoundClassifier):
-    """Labels the elevated phone ring WAV payload as a non-speech acoustic event."""
-
-    @typing.override
-    async def classify(self, input: bytes) -> sound_hearing.classification.OutputData:
-        if input == phone_device.RING_SOUND_WAV:
-            return sound_hearing.classification.OutputData(labels=("ring",), confidence=1.0)
-        return sound_hearing.classification.OutputData(labels=())
-
-
 def ring_hearing(*, is_voice: bool = False) -> RecordingListening:
-    """Sensory Listening for phone ring: no-voice ring WAV labeled by sound classification."""
+    """Sensory Listening for phone ring: no-voice sound labeled from SoundData.kind."""
 
     return RecordingListening(
         is_voice=is_voice,
         speech_decoder=False,
-        sound_classifier=RingWavSoundClassifier(),
+        sound_classifier=sound_hearing.classification.KindSoundClassifier(),
     )
 
 
@@ -3188,7 +3197,9 @@ def test_bot_processing_state_times_out_hanging_ability() -> None:
         str, bool, str | None, list[int], list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]
     ]:
         ability = CancellableHangingAbility()
-        active_bot = TimeoutAbilityAgent(devices=configured_devices("phone"), cognition=ability)
+        # First turn hangs forever (timeout cancels). Second turn returns immediately; use a
+        # recovery-scale timeout so the full Cognition pipeline can finish without racing 1ms.
+        active_bot = QuickTimeoutAgent(devices=configured_devices("phone"), cognition=ability)
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -3476,13 +3487,6 @@ def test_bot_deactivation_clears_focus() -> None:
 def test_bot_deactivation_stops_input_output_abilities() -> None:
     """Normal deactivate stops input/output abilities; cognition stays started."""
 
-    def started(instance: hsm.Instance) -> bool:
-        try:
-            _ = hsm.id(instance)
-        except hsm.ErrorValidatingModel:
-            return False
-        return True
-
     async def run() -> tuple[bool, bool, bool, bool]:
         cognition_ability = as_cognition(IgnoreAbility())
         input_ability = ProbeAbility()
@@ -3494,18 +3498,18 @@ def test_bot_deactivation_stops_input_output_abilities() -> None:
             output=(output_ability,),
         )
         world = await start_bot_with_devices(active_bot)
-        assert started(input_ability) is True
-        assert started(output_ability) is True
-        assert started(cognition_ability) is True
+        assert bot.lifecycle.is_started(input_ability) is True
+        assert bot.lifecycle.is_started(output_ability) is True
+        assert bot.lifecycle.is_started(cognition_ability) is True
 
         _ = await active_bot.detach(world)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return (
-            started(input_ability),
-            started(output_ability),
-            started(cognition_ability),
-            started(active_bot),
+            bot.lifecycle.is_started(input_ability),
+            bot.lifecycle.is_started(output_ability),
+            bot.lifecycle.is_started(cognition_ability),
+            bot.lifecycle.is_started(active_bot),
         )
 
     input_live, output_live, cognition_live, bot_live = asyncio.run(run())
@@ -3638,7 +3642,7 @@ def test_bot_activation_starts_phone_peripherals_in_agent_world() -> None:
         asyncio.run(run())
     )
 
-    assert phone_state == "/Device/attached/inactive"
+    assert phone_state == "/Device/attached"
     assert firmware_state == "/Phone/hung_up"
     assert microphone_state == "/Device/detached"
     assert speaker_state == "/Device/detached"

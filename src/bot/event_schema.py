@@ -501,10 +501,108 @@ def _has_local_defs_ref(value: object) -> bool:
     return False
 
 
+def _local_defs_table(schema: collections.abc.Mapping[str, object]) -> dict[str, object]:
+    """Return the document-local ``$defs`` table for ``schema`` when it is a document root."""
+
+    raw = schema.get("$defs")
+    if not isinstance(raw, dict):
+        return {}
+    table: dict[str, object] = {}
+    for name, definition in typing.cast(dict[object, object], raw).items():
+        if isinstance(name, str):
+            table[name] = definition
+    return table
+
+
+def _close_local_defs_refs(
+    value: object,
+    *,
+    defs: collections.abc.Mapping[str, object],
+    resolving: frozenset[str],
+) -> object:
+    """Deep-copy ``value``, inlining ``#/$defs/…`` against ``defs`` (cycle- and miss-safe)."""
+
+    if isinstance(value, dict):
+        mapping = typing.cast(dict[str, object], dict(typing.cast(dict[object, object], value)))
+        ref = mapping.get("$ref")
+        if isinstance(ref, str) and ref.startswith(_LOCAL_DEFS_REF_PREFIX):
+            name = ref.removeprefix(_LOCAL_DEFS_REF_PREFIX)
+            if not name:
+                raise ValueError(f"JSON schema $ref {ref!r} is not a named local definition")
+            if name in resolving:
+                raise ValueError(f"JSON schema $ref cycle involving {name!r}")
+            definition = defs.get(name)
+            if not isinstance(definition, dict):
+                raise ValueError(f"JSON schema $ref {ref!r} does not resolve in $defs")
+            definition_schema = typing.cast(dict[str, object], dict(typing.cast(dict[object, object], definition)))
+            closed_definition = _close_local_defs_refs(
+                definition_schema,
+                defs=defs,
+                resolving=resolving | {name},
+            )
+            if not isinstance(closed_definition, dict):
+                raise ValueError(f"JSON schema $defs {name!r} must resolve to an object schema")
+            merged: dict[str, object] = dict(typing.cast(dict[str, object], closed_definition))
+            for key, child in mapping.items():
+                if key in {"$ref", "$defs"}:
+                    continue
+                merged[key] = _close_local_defs_refs(child, defs=defs, resolving=resolving)
+            return merged
+        closed: dict[str, object] = {}
+        for key, child in mapping.items():
+            if key == "$defs":
+                # Embeddable fragments must not keep a local $defs table: #/$defs refs are
+                # document-root relative and break when this object is nested under another schema.
+                continue
+            closed[key] = _close_local_defs_refs(child, defs=defs, resolving=resolving)
+        return closed
+    if isinstance(value, list | tuple):
+        sequence = typing.cast(collections.abc.Sequence[object], value)
+        return [_close_local_defs_refs(item, defs=defs, resolving=resolving) for item in sequence]
+    return value
+
+
+def embeddable_json_schema(schema: collections.abc.Mapping[str, object]) -> JsonSchema:
+    """Return a ref-closed copy of ``schema`` safe to nest inside a larger JSON Schema document.
+
+    Pydantic (and ``event_schema_json_schema``) may emit document-root ``#/$defs/Name`` refs when a
+    payload is its own schema document. Those refs are valid only while that payload remains the
+    document root. Tool composition (e.g. ``dispatch`` ``anyOf`` branches) nests payloads under a
+    larger parameters document, so document-root refs must be closed before embedding.
+
+    This projection:
+    - resolves every local ``#/$defs/…`` against this schema's own ``$defs``
+    - merges sibling keywords onto inlined definitions (Pydantic often pairs ``$ref`` with
+      ``description`` / ``examples``)
+    - strips ``$defs`` from the result
+    - does not invent domain fields; it only eliminates nesting-unsafe structure
+
+    Validation of live event data still uses typed Pydantic models, not this closed shape.
+    """
+
+    root = dict(schema)
+    defs = _local_defs_table(root)
+    closed = _close_local_defs_refs(root, defs=defs, resolving=frozenset())
+    if not isinstance(closed, dict):
+        raise ValueError("embeddable_json_schema requires an object schema root")
+    result = typing.cast(JsonSchema, closed)
+    if _has_local_defs_ref(result):
+        raise ValueError("embeddable_json_schema left unresolved local $defs references")
+    return result
+
+
+def json_schema_is_embeddable(schema: collections.abc.Mapping[str, object]) -> bool:
+    """Return whether ``schema`` has no local ``#/$defs/…`` refs (safe to nest as a fragment)."""
+
+    return not _has_local_defs_ref(schema)
+
+
 __all__ = [
     "JsonSchema",
+    "embeddable_json_schema",
     "event_json_schema",
     "event_schema_json_schema",
+    "json_schema_is_embeddable",
     "matches_json_schema",
     "validate_event_data",
     "validate_event_schema_data",

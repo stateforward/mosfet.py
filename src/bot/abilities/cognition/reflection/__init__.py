@@ -1,4 +1,4 @@
-"""Post-output reflection orchestration and habit revision."""
+"""Post-output reflection orchestration and behavior revision."""
 
 from . import revision
 from .reflection import (
@@ -15,7 +15,7 @@ from .reflection import (
     Reflection,
     SelectInput,
     episode_from_turn,
-    habit_events,
+    behavior_events,
     stimulus_name,
 )
 
@@ -33,7 +33,7 @@ __all__ = [
     "SELECT_INSTRUCTIONS",
     "SelectInput",
     "episode_from_turn",
-    "habit_events",
+    "behavior_events",
     "revision",
     "stimulus_name",
 ]
