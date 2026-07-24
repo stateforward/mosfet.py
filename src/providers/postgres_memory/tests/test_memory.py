@@ -16,7 +16,6 @@ from bot.providers.postgres_memory import (
     MEMORY_TABLE,
     DatabaseConnection,
     Database,
-    Memory,
     PostgresMemory,
     QueryParameters,
 )

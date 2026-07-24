@@ -818,5 +818,5 @@ def test_conversation_active_turn_match_is_id_equality() -> None:
     conversation_ability._active_turn_id = "turn-a"
     wrong = conversation_ability.input_event.with_data_and_id(text_message(), "turn-b")
     right = conversation_ability.input_event.with_data_and_id(text_message(), "turn-a")
-    assert conversation_impl._matches_active_turn(conversation_ability, wrong) is False
-    assert conversation_impl._matches_active_turn(conversation_ability, right) is True
+    assert conversation_impl.Conversation._matches_active_turn(conversation_ability, wrong) is False
+    assert conversation_impl.Conversation._matches_active_turn(conversation_ability, right) is True

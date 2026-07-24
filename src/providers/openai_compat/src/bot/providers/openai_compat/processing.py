@@ -5,14 +5,12 @@ from bot.abilities.language import text
 
 import collections.abc
 import copy
-import dataclasses
 import json
 import re
 import typing
 
 import pydantic
 
-from bot.event_schema import event_json_schema
 
 from .client import ChatCompletionClient, jsonable
 from .text_generator import TextGenerator as ProviderTextGenerator

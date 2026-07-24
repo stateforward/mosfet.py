@@ -32,8 +32,10 @@ class VoiceEncoder(conversation.voice.VoiceEncoder):
         return await self.speech_encoder.encode(_response_text(input).encode("utf-8"))
 
 def _response_text(input: abilities.EncodeData) -> str:
-    if input.result.reason:
-        return input.result.reason
+    # Cognition result is a tuple of event selections; speak the first stated reason.
+    reason = next((selection.reason for selection in input.result if selection.reason), None)
+    if reason:
+        return reason
     if input.memory_context:
         return "\n".join(input.memory_context)
     return input.decoded_text

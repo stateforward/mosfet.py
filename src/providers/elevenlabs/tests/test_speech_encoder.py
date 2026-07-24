@@ -55,7 +55,9 @@ def test_speech_encoder_uses_sdk_client_directly(monkeypatch: pytest.MonkeyPatch
         assert timeout == 10.0
         return client
 
-    monkeypatch.setattr(speech_encoder, "ElevenLabs", fake_elevenlabs)
+    # Patch the construction site: SpeechEncoder._client imports from elevenlabs.client at call
+    # time, so patching the re-exported name on speech_encoder would not intercept it.
+    monkeypatch.setattr("elevenlabs.client.ElevenLabs", fake_elevenlabs)
     encoder = speech_encoder.SpeechEncoder(
         api_key="test-api-key",
         voice_id="voice-123",
@@ -85,7 +87,9 @@ def test_speech_encoder_is_awaitable(monkeypatch: pytest.MonkeyPatch) -> None:
         assert timeout == 240.0
         return FakeElevenLabsClient(text_to_speech=FakeTextToSpeechClient(chunks=(b"audio",)))
 
-    monkeypatch.setattr(speech_encoder, "ElevenLabs", fake_elevenlabs)
+    # Patch the construction site: SpeechEncoder._client imports from elevenlabs.client at call
+    # time, so patching the re-exported name on speech_encoder would not intercept it.
+    monkeypatch.setattr("elevenlabs.client.ElevenLabs", fake_elevenlabs)
     encoder = speech_encoder.SpeechEncoder(api_key="test-api-key", voice_id="voice-123")
 
     encoded = encoder.encode(b"hello")

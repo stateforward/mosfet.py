@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bot.abilities import processing
 from bot.abilities.language import text
+from bot.protocols import attachment
 from bot.providers.openai_compat import Processor, ProcessingError
 
 import asyncio
@@ -88,14 +89,20 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
     _ = await hsm.started(context, owner, owner.model)
-    _ = await ability.attach(owner=owner, ctx=context)
+    _ = await ability.attach(
+        context,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
     operation_id = uuid.uuid4().hex
     result = owner.result_for(operation_id)
     _ = await hsm.dispatch(context, ability, ability.input_event.with_data_and_id(input, operation_id))
     try:
-        return typing.cast(processing.Events, await asyncio.wait_for(result, timeout=5.0))
+        completion = await asyncio.wait_for(result, timeout=5.0)
     except RuntimeError as error:
         raise ProcessingError(str(error)) from error
+    # Processing terminals carry CompletionData (request + validated product), not bare Events.
+    assert isinstance(completion, processing.CompletionData)
+    return completion.output.events
 
 
 def test_processor_returns_empty_events_without_schemas() -> None:
@@ -122,11 +129,19 @@ def test_processor_user_content_serializes_speech_event_stimulus() -> None:
     assert "TypeAdapter" not in content
 
 
-def test_processor_maps_tool_calls_to_events() -> None:
+def test_processor_maps_dispatch_tool_to_events() -> None:
     generator = RecordingGenerator(
         content="",
         tool_calls=(
-            text.TextToolCall(id="tc1", name="phone_answer_call", args={"call_id": "c1"}),
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={
+                    "events": [
+                        {"event": "phone.answer_call", "data": {"call_id": "c1"}},
+                    ]
+                },
+            ),
         ),
     )
     processor = Processor(generator=generator)
@@ -139,8 +154,12 @@ def test_processor_maps_tool_calls_to_events() -> None:
     assert len(output) == 1
     assert output[0].event == "phone.answer_call"
     assert output[0].data == {"call_id": "c1"}
-    assert generator.inputs[0].tool_selection == text.ToolSelectionPolicy.AUTO
+    # Single model-facing dispatch tool; multi-select rides the events array.
+    assert generator.inputs[0].tool_selection == text.ToolSelectionPolicy.REQUIRED
     assert len(generator.inputs[0].tools) == 1
+    tool = generator.inputs[0].tools[0]
+    assert isinstance(tool, dict)
+    assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
 
 
 def test_processor_requires_stamped_instructions() -> None:

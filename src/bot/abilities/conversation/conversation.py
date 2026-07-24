@@ -404,37 +404,6 @@ def _conversation_event_with_operation(
 conversation_event_with_operation = _conversation_event_with_operation
 
 
-def _matches_active_turn(
-    instance: "Conversation[typ.Any, typ.Any]",
-    event: hsm.Event[typ.Any],
-) -> bool:
-    """True when envelope id names the conversation's single-flight active turn."""
-
-    turn_id = event.id if event.id else None
-    active = instance._active_turn_id
-    return turn_id is not None and active is not None and turn_id == active
-
-
-def _has_conversation_decoded(
-    ctx: hsm.Context,
-    instance: "Conversation[typ.Any, typ.Any]",
-    event: hsm.Event[typ.Any],
-) -> bool:
-    """Single in-flight turn (inputs deferred); completion carries DecodedTurn (HSM-COMPLETION-001)."""
-
-    del ctx
-    return isinstance(event.data, DecodedTurn) and _matches_active_turn(instance, event)
-
-
-def _has_conversation_participated(
-    ctx: hsm.Context,
-    instance: "Conversation[typ.Any, typ.Any]",
-    event: hsm.Event[typ.Any],
-) -> bool:
-    del ctx
-    return isinstance(event.data, ParticipatedTurn) and _matches_active_turn(instance, event)
-
-
 def _matches_data_type(
     data: object,
     data_type: type[object] | tuple[type[object], ...] | None,
@@ -461,20 +430,6 @@ def _matches_message_contract(
     return isinstance(data, Message) and _matches_data_type(data, instance.input_data_type)
 
 
-def _has_conversation_failure(
-    ctx: hsm.Context,
-    instance: "Conversation[typ.Any, typ.Any]",
-    event: hsm.Event[typ.Any],
-) -> bool:
-    del ctx
-    if not isinstance(event.data, FailureData):
-        return False
-    # Private phase failures must name the active turn when one is live (HSM-CORRELATION-001).
-    if instance._active_turn_id is None:
-        return True
-    return _matches_active_turn(instance, event)
-
-
 def _has_conversation_snapshot_request(
     ctx: hsm.Context,
     instance: "Conversation[typ.Any, typ.Any]",
@@ -482,28 +437,6 @@ def _has_conversation_snapshot_request(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, SnapshotRequest)
-
-
-def _dispatch_conversation_phase_failure(
-    ctx: hsm.Context,
-    instance: "Conversation[typ.Any, typ.Any]",
-    source: hsm.Event[typ.Any],
-    failure_event: hsm.Event[FailureData],
-    *,
-    kind: ConversationChildKind | None = None,
-) -> None:
-    del kind
-    # Prefer the active turn id; fall back to source envelope for fail-closed paths before start.
-    operation_id = instance._active_turn_id or _conversation_operation_id(source)
-    _ = hsm.dispatch(
-        ctx,
-        instance,
-        _conversation_event_with_operation(
-            failure_event,
-            source,
-            operation_id=operation_id,
-        ),
-    )
 
 
 def _dispatch_conversation_terminal_output(
@@ -602,6 +535,73 @@ class Conversation(
         self._participants_by_ref = {}
         self._active_turn_id = None
         self._contribution_waiters = {}
+
+    @staticmethod
+    def _matches_active_turn(
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> bool:
+        """True when envelope id names the conversation's single-flight active turn."""
+
+        turn_id = event.id if event.id else None
+        active = instance._active_turn_id
+        return turn_id is not None and active is not None and turn_id == active
+
+    @staticmethod
+    def _has_conversation_decoded(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> bool:
+        """Single in-flight turn (inputs deferred); completion carries DecodedTurn (HSM-COMPLETION-001)."""
+
+        del ctx
+        return isinstance(event.data, DecodedTurn) and Conversation._matches_active_turn(instance, event)
+
+    @staticmethod
+    def _has_conversation_participated(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> bool:
+        del ctx
+        return isinstance(event.data, ParticipatedTurn) and Conversation._matches_active_turn(instance, event)
+
+    @staticmethod
+    def _has_conversation_failure(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        event: hsm.Event[typ.Any],
+    ) -> bool:
+        del ctx
+        if not isinstance(event.data, FailureData):
+            return False
+        # Private phase failures must name the active turn when one is live (HSM-CORRELATION-001).
+        if instance._active_turn_id is None:
+            return True
+        return Conversation._matches_active_turn(instance, event)
+
+    @staticmethod
+    def _dispatch_conversation_phase_failure(
+        ctx: hsm.Context,
+        instance: "Conversation[typ.Any, typ.Any]",
+        source: hsm.Event[typ.Any],
+        failure_event: hsm.Event[FailureData],
+        *,
+        kind: ConversationChildKind | None = None,
+    ) -> None:
+        del kind
+        # Prefer the active turn id; fall back to source envelope for fail-closed paths before start.
+        operation_id = instance._active_turn_id or _conversation_operation_id(source)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _conversation_event_with_operation(
+                failure_event,
+                source,
+                operation_id=operation_id,
+            ),
+        )
 
     def register_contribution_waiter(self, operation_id: str, waiter: asyncio.Future[object]) -> None:
         """Register a host Future completed with ParticipatedTurn for ``operation_id``."""
@@ -763,7 +763,7 @@ class Conversation(
 
         message = event.data
         if not isinstance(message, Message):
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -778,7 +778,7 @@ class Conversation(
             return
         operation_id = _conversation_operation_id(event)
         if operation_id is None:
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -807,7 +807,7 @@ class Conversation(
             raise
         if terminal.name == child.failed_event.name:
             message_text = getattr(terminal.data, "message", "Conversation decoding child failed.")
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -816,7 +816,7 @@ class Conversation(
             )
             return
         if not isinstance(terminal.data, str):
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -828,7 +828,7 @@ class Conversation(
             return
         decoded_text = terminal.data.strip()
         if not decoded_text:
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -895,7 +895,7 @@ class Conversation(
             raise
         if terminal.name == child.failed_event.name:
             message_text = getattr(terminal.data, "message", "Conversation participating child failed.")
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -907,7 +907,7 @@ class Conversation(
             return
         output = terminal.data
         if not isinstance(output, participating.OutputData):
-            _dispatch_conversation_phase_failure(
+            Conversation._dispatch_conversation_phase_failure(
                 ctx,
                 instance,
                 event,
@@ -995,7 +995,7 @@ class Conversation(
                         _ConversationDecodingFailedEvent,
                         _ConversationParticipatingFailedEvent,
                     ),
-                    hsm.guard(_has_conversation_failure),
+                    hsm.guard(cls._has_conversation_failure),
                     hsm.effect(cls._clear_active_turn_and_fail),
                     hsm.target(f"{root_path}/silent"),
                 ),
@@ -1005,7 +1005,7 @@ class Conversation(
                     hsm.activity(cls._run_decoding_activity),
                     hsm.transition(
                         hsm.on(_ConversationDecodingCompletedEvent),
-                        hsm.guard(_has_conversation_decoded),
+                        hsm.guard(cls._has_conversation_decoded),
                         hsm.target(f"{root_path}/active/participating"),
                     ),
                 ),
@@ -1015,7 +1015,7 @@ class Conversation(
                     hsm.activity(cls._run_participating_activity),
                     hsm.transition(
                         hsm.on(_ConversationParticipatingCompletedEvent),
-                        hsm.guard(_has_conversation_participated),
+                        hsm.guard(cls._has_conversation_participated),
                         hsm.effect(Conversation._dispatch_contribution_output),
                         hsm.target(f"{root_path}/silent"),
                     ),

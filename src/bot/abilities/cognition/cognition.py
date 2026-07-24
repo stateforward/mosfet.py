@@ -166,31 +166,6 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
     return child_id
 
 
-def _matches_child_terminal(
-    event: hsm.Event[typing.Any],
-    *,
-    owner: "Cognition",
-    child: ability.Ability[typing.Any, typing.Any],
-    suffix: str,
-    terminal_name: str,
-) -> bool:
-    data = event.data
-    if not isinstance(data, types.CompletionData | types.FailureData):
-        return False
-    operation = processing.active_operation(owner, data.turn.operation_id)
-    # Phase identity is machine-owned active-child suffix (set when starting the child),
-    # not a state() probe (HSM-CONTEXT-001). Envelope id + generation still correlate the turn.
-    return (
-        event.name == terminal_name
-        and event.source == hsm.id(child)
-        and event.target == hsm.id(owner)
-        and operation is not None
-        and data.turn.generation == hsm.id(operation)
-        and event.id == f"{data.turn.operation_id}{suffix}"
-        and owner._active_child_suffix == suffix
-    )
-
-
 class Cognition(ability.Ability[InputData, OutputData]):
     """Judgment ability: autonomy → intuition → reasoning, then reflection.
 
@@ -213,6 +188,31 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
     _attachment_group: attachment.Group
+
+    @staticmethod
+    def _matches_child_terminal(
+        event: hsm.Event[typing.Any],
+        *,
+        owner: "Cognition",
+        child: ability.Ability[typing.Any, typing.Any],
+        suffix: str,
+        terminal_name: str,
+    ) -> bool:
+        data = event.data
+        if not isinstance(data, types.CompletionData | types.FailureData):
+            return False
+        operation = processing.active_operation(owner, data.turn.operation_id)
+        # Phase identity is machine-owned active-child suffix (set when starting the child),
+        # not a state() probe (HSM-CONTEXT-001). Envelope id + generation still correlate the turn.
+        return (
+            event.name == terminal_name
+            and event.source == hsm.id(child)
+            and event.target == hsm.id(owner)
+            and operation is not None
+            and data.turn.generation == hsm.id(operation)
+            and event.id == f"{data.turn.operation_id}{suffix}"
+            and owner._active_child_suffix == suffix
+        )
 
     @staticmethod
     def _autonomy_operation_id(event: hsm.Event[typing.Any]) -> str:
@@ -325,7 +325,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child = instance._autonomy
         if child is None:
             return False
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -343,7 +343,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child = instance._autonomy
         if child is None:
             return False
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -494,7 +494,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._intuition
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -510,7 +510,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._intuition
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -601,7 +601,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._reasoning
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -617,7 +617,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         child = instance._reasoning
-        return _matches_child_terminal(
+        return Cognition._matches_child_terminal(
             event,
             owner=instance,
             child=child,
@@ -677,24 +677,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if not instance._attachments:
-            return
         if event.name == ability.Ability._composite_attachment_terminal_event.name:
             reason: bot.RebootReason = "cognition_detach_rollback_failed"
         else:
             reason = "cognition_child_teardown_failed"
-        owner = instance._attachments[0]
-        _ = hsm.dispatch(
-            ctx,
-            owner,
-            dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
-                id=event.id or uuid.uuid4().hex,
-                source=hsm.id(instance),
-                target=hsm.id(owner),
-                metadata=_public_metadata(dict(event.metadata)),
-            ),
-        )
+        processing.request_reboot(ctx, instance, event, reason=reason)
 
     @staticmethod
     def _dispatch_failure(
@@ -925,20 +912,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if not instance._attachments:
-            return
-        owner = instance._attachments[0]
-        _ = hsm.dispatch(
-            ctx,
-            owner,
-            dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_cancel_teardown_failed")),
-                id=event.id or uuid.uuid4().hex,
-                source=hsm.id(instance),
-                target=hsm.id(owner),
-                metadata=_public_metadata(dict(event.metadata)),
-            ),
-        )
+        processing.request_reboot(ctx, instance, event, reason="cognition_cancel_teardown_failed")
 
     @staticmethod
     def _finish_operations(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:

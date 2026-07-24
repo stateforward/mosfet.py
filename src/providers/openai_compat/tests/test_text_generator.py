@@ -115,7 +115,7 @@ def test_text_generator_maps_bot_text_generation_contract() -> None:
             ],
             tools=[{"type": "function", "function": {"name": "get_appointments"}}],
             response_format={"type": "json_object"},
-            extra_body={"temperature": 0.1, "tool_choice": "auto"},
+            extra_body={"temperature": 0.1, "tool_choice": "auto", "reasoning_effort": "none"},
         )
     ]
 
@@ -147,7 +147,7 @@ def test_text_generator_maps_string_tools_to_openai_function_tools() -> None:
             messages=[{"role": "user", "content": "Check availability."}],
             tools=[{"type": "function", "function": {"name": "get_appointments"}}],
             response_format=None,
-            extra_body={"tool_choice": "auto"},
+            extra_body={"tool_choice": "auto", "reasoning_effort": "none"},
         )
     ]
 
@@ -183,7 +183,7 @@ def test_text_generator_maps_tool_selection_policy_to_openai_tool_choice() -> No
         )
     )
 
-    assert client.calls[0].extra_body == {"tool_choice": "required"}
+    assert client.calls[0].extra_body == {"tool_choice": "required", "reasoning_effort": "none"}
 
 def test_text_generator_omits_tool_choice_without_tools() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})
@@ -255,7 +255,7 @@ def test_text_generator_rejects_tool_calls_when_selection_is_none() -> None:
         assert str(error) == "OpenAI-compatible chat completion included tool calls when tool selection is none."
     else:
         raise AssertionError("Expected TextGenerationError.")
-    assert client.calls[0].extra_body == {"tool_choice": "none"}
+    assert client.calls[0].extra_body == {"tool_choice": "none", "reasoning_effort": "none"}
 
 def test_text_generator_rejects_malformed_tools() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})

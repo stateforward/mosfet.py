@@ -84,7 +84,12 @@ def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
                 message=voice_message(),
                 decoded_text="hello caller",
                 participation=participating_output(),
-                result=(),
+                result=(
+                    cognition.types.EventData(
+                        event="phone.answer_call",
+                        reason="I can help with that.",
+                    ),
+                ),
             )
         )
     )

@@ -11,7 +11,6 @@ import datetime
 import typing
 import uuid
 
-import bot
 import hsm
 from pydantic.json_schema import SkipJsonSchema
 import pydantic
@@ -1033,20 +1032,7 @@ class Revision(processing.Processing):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        if not instance._attachments:
-            return
-        owner = instance._attachments[0]
-        _ = hsm.dispatch(
-            ctx,
-            owner,
-            dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
-                id=event.id or uuid.uuid4().hex,
-                source=hsm.id(instance),
-                target=hsm.id(owner),
-                metadata=dict(event.metadata),
-            ),
-        )
+        processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Revision",

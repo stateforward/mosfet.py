@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bot.abilities import processing
 from bot.abilities.language import text
+from bot.protocols import attachment
 from bot.providers.gemini.processing import Processor, ProcessingError
 
 import asyncio
@@ -88,14 +89,20 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
     _ = await hsm.started(context, owner, owner.model)
-    _ = await ability.attach(owner=owner, ctx=context)
+    _ = await ability.attach(
+        context,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
     operation_id = uuid.uuid4().hex
     result = owner.result_for(operation_id)
     _ = await hsm.dispatch(context, ability, ability.input_event.with_data_and_id(input, operation_id))
     try:
-        return typing.cast(processing.Events, await asyncio.wait_for(result, timeout=5.0))
+        completion = await asyncio.wait_for(result, timeout=5.0)
     except RuntimeError as error:
         raise ProcessingError(str(error)) from error
+    # Processing terminals carry CompletionData (request + validated product), not bare Events.
+    assert isinstance(completion, processing.CompletionData)
+    return completion.output.events
 
 
 def test_processor_user_content_serializes_speech_event_stimulus() -> None:

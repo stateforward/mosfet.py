@@ -9,7 +9,6 @@ import pathlib
 
 from bot.providers.sqlite_memory import (
     MEMORY_TABLE,
-    Memory,
     MemoryStore,
     SqliteMemory,
 )
