@@ -73,6 +73,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
         "existing_behavior",
         "failed_source",
         "generation",
+        "instruction",
         "intent",
         "operation_id",
         "previous_messages",
@@ -93,6 +94,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
         "existing_behavior",
         "failed_source",
         "generation",
+        "instruction",
         "intent",
         "operation_id",
         "previous_messages",
@@ -101,7 +103,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "e5085b840a8a895b92c09ebd7082f1c701f70e4f6fc3359e013e85ce1d3090b9"
+        == "3deacac3bb2f2aaf0749f2fdc3089420f1b041c33cb177afe8b041bd2fc4bac7"
     )
 
 

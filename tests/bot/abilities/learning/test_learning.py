@@ -22,6 +22,7 @@ from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import episodes
 from bot.abilities.cognition import reflection
+from bot.abilities.cognition.reflection import revision
 from bot.abilities.cognition import types as cognition_types
 from bot.abilities.learning import Learning
 from bot.abilities.learning import learning as learning_impl
@@ -692,3 +693,68 @@ def test_learning_decode_failure_surfaces() -> None:
         raise AssertionError("expected failure")
     except RuntimeError as error:
         assert "decode failed" in str(error).lower()
+
+
+class _CapturingLearningProcessor(LearningTestProcessor):
+    """Records the authoring input Revision hands the model."""
+
+    captured: list[object]
+
+    def __init__(self, *, selection: processing.Events, write: behavior.ChangeData) -> None:
+        super().__init__(selection=selection, write=write)
+        self.captured = []
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        self.captured.append(input.input)
+        return await super().process(input)
+
+
+def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_selection() -> None:
+    """The decoded lesson must reach Revision as typed data, not a fake selection.
+
+    Learning used to fabricate a ``bot.ability.learning.lesson`` entry inside
+    ``cognition_output`` -- a typed list of real cognition selections -- carrying the
+    lesson prose in ``reason``, then recover it by string-matching that name. That is
+    scratch smuggled through a typed field and correlated by literal. The lesson is
+    authoring evidence and must travel as its own typed field.
+    """
+
+    async def run() -> _CapturingLearningProcessor:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        _seed_ring_episode(store)
+        processor = _CapturingLearningProcessor(
+            selection=_generate_selection(),
+            write=behavior.ChangeData(
+                name="AnswerIncomingRing",
+                triggers=("world.sound",),
+                reason="When the phone rings, answer it.",
+                source=ANSWER_RING_BEHAVIOR_SOURCE,
+            ),
+        )
+        ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        _ = await dispatch_ability_for_test(
+            ability,
+            None,
+            learning.InputData(content="When the phone rings, answer it.", media_type="text/plain"),
+            timeout=5.0,
+        )
+        return processor
+
+    processor = asyncio.run(run())
+    authoring = [item for item in processor.captured if isinstance(item, revision.ChangeWriteInput)]
+    assert authoring, "expected Revision to request an authoring turn"
+    write = authoring[0]
+
+    selection_names = [item.event for item in write.cognition_output]
+    assert not any(name.startswith("bot.ability.learning.lesson") for name in selection_names), (
+        f"lesson must not be smuggled as a synthetic selection; got {selection_names!r}"
+    )
+    assert all(name.startswith("phone.") or name.startswith("bot.focus") for name in selection_names), (
+        f"cognition_output must carry only real turn selections; got {selection_names!r}"
+    )
+
+    assert write.instruction is not None, "Revision must receive the decoded lesson as typed data"
+    assert write.instruction.text == "When the phone rings, answer it."
+    assert write.instruction.kind == "instruction"

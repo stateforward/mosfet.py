@@ -41,7 +41,6 @@ from bot.behavior import ChangeData, CreateData
 from bot.protocols import attachment
 from bot.telemetry import observer
 
-_LESSON_EVIDENCE_EVENT = "bot.ability.learning.lesson"
 _GENERATE_EVENT_NAME = "bot.ability.learning.generate"
 # Durable memory query tag for stored turns (same tag writers use when inserting episodes).
 _REMEMBERED_TURN_QUERY = "cognitive_episode"
@@ -508,19 +507,6 @@ def _synthetic_stimulus(runtime_input: RuntimeInputData, *, operation_id: str) -
     )
 
 
-def _lesson_evidence_output(decoded: DecodedData) -> cognition_types.EventData:
-    """Revision bridge: lesson evidence as a typed selection for authoring evidence only."""
-
-    data: dict[str, object] = {}
-    if decoded.kind is not None:
-        data["kind"] = decoded.kind
-    return cognition_types.EventData(
-        event=_LESSON_EVIDENCE_EVENT,
-        data=data or None,
-        reason=decoded.text,
-    )
-
-
 def _expected_output(runtime_input: RuntimeInputData) -> cognition_types.OutputData:
     """Revision bridge: optional expected product from memory-grounded runtime_input."""
 
@@ -599,17 +585,9 @@ def _runtime_input_from_revision_stimulus(cognition: cognition_input.InputData) 
 
 
 def _decoded_from_revision_input(revision_input: revision.InputData) -> DecodedData | None:
-    for item in revision_input.cognition_output:
-        if item.event != _LESSON_EVIDENCE_EVENT:
-            continue
-        if not isinstance(item.reason, str) or not item.reason:
-            continue
-        kind: str | None = None
-        if isinstance(item.data, dict):
-            raw_kind = item.data.get("kind")
-            if isinstance(raw_kind, str) and raw_kind:
-                kind = raw_kind
-        return DecodedData(text=item.reason, kind=kind)
+    instruction = revision_input.instruction
+    if instruction is not None:
+        return DecodedData(text=instruction.text, kind=instruction.kind)
     reason = revision_input.intent.reason
     if isinstance(reason, str) and reason:
         return DecodedData(text=reason, kind=None)
@@ -1129,10 +1107,10 @@ class Learning(ability.Ability[InputData, OutputData]):
             )
             return
         # Revision handoff only: map memory-grounded runtime_input into Revision's turn shape.
-        cognition_output = (_lesson_evidence_output(selected.decoded), *_expected_output(generate.runtime_input))
         revision_input = revision.InputData(
             cognition_input=_revision_cognition_input(generate.runtime_input, operation_id=selected.operation_id),
-            cognition_output=cognition_output,
+            cognition_output=_expected_output(generate.runtime_input),
+            instruction=revision.InstructionData(text=selected.decoded.text, kind=selected.decoded.kind),
             prior_episodes=_revision_prior_episodes(selected.prior_turns),
             intent=intent,
             parent_operation_id=selected.operation_id,
@@ -1199,10 +1177,8 @@ class Learning(ability.Ability[InputData, OutputData]):
                 failure=ability.FailureData(message="Learning lost runtime input after revision."),
             )
             return
-        # Recover expected selection from non-lesson revision evidence entries.
+        # Recover the expected selection from the turn's real selections.
         for item in data.input.cognition_output:
-            if item.event == _LESSON_EVIDENCE_EVENT:
-                continue
             runtime_input = runtime_input.model_copy(
                 update={
                     "expected_event": item.event,

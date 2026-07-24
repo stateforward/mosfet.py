@@ -66,6 +66,36 @@ class ProcessorFactory(typing.Protocol):
     def __call__(self) -> processing.Processor: ...
 
 
+class InstructionData(pydantic.BaseModel):
+    """External instruction material that motivated an authoring request.
+
+    Set when the revision was requested from taught material rather than an observed
+    turn. Authoring evidence only: it never names a stimulus, event, or selection, and
+    it is not part of ``cognition_output``, which carries real turn selections alone.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Instruction material behind this authoring request, when taught rather than observed.",
+            "examples": [{"text": "When the phone rings, answer it.", "kind": "instruction"}],
+        },
+    )
+
+    text: str = pydantic.Field(
+        min_length=1,
+        description="Instruction text to author against.",
+        examples=["When the phone rings, answer it."],
+    )
+    kind: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description="Optional material kind assigned by whichever ability decoded it.",
+        examples=["instruction", "transcript", "correction"],
+    )
+
+
 class InputData(pydantic.BaseModel):
     """One create or change intent with immutable parent-turn correlation."""
 
@@ -83,6 +113,10 @@ class InputData(pydantic.BaseModel):
     )
     cognition_output: types.OutputData = pydantic.Field(
         description="Already-handled cognition output associated with the reflected turn."
+    )
+    instruction: InstructionData | None = pydantic.Field(
+        default=None,
+        description="Instruction material behind this request when it was taught rather than observed.",
     )
     prior_episodes: tuple[episodes.CognitiveEpisode, ...] = pydantic.Field(
         default=(), description="Prior similar episodes available as authoring evidence."
@@ -155,6 +189,13 @@ class ChangeWriteInput(pydantic.BaseModel):
     )
     cognition_output: types.OutputData = pydantic.Field(
         description="Typed cognition output for this turn.",
+    )
+    instruction: InstructionData | None = pydantic.Field(
+        default=None,
+        description=(
+            "Instruction material behind this request when it was taught rather than observed. "
+            "Author the behavior to satisfy it; it is evidence, not a stimulus or a selection."
+        ),
     )
     prior_episodes: tuple[episodes.CognitiveEpisode, ...] = pydantic.Field(
         default=(),
@@ -362,6 +403,7 @@ def _revision_input(write: ChangeWriteInput) -> InputData:
     return InputData(
         cognition_input=write.cognition_input,
         cognition_output=write.cognition_output,
+        instruction=write.instruction,
         prior_episodes=write.prior_episodes,
         intent=write.create_intent if write.create_intent is not None else write.intent,
         parent_operation_id=write.operation_id,
@@ -526,6 +568,7 @@ class Revision(processing.Processing):
         write = ChangeWriteInput(
             cognition_input=data.cognition_input,
             cognition_output=data.cognition_output,
+            instruction=data.instruction,
             prior_episodes=data.prior_episodes,
             intent=intent,
             existing_behavior=existing,
@@ -1163,6 +1206,7 @@ __all__ = [
     "FailureData",
     "InputData",
     "InputEvent",
+    "InstructionData",
     "OutputData",
     "OutputEvent",
     "ProcessorFactory",
