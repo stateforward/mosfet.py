@@ -124,6 +124,23 @@ class InputData(pydantic.BaseModel):
     )
 
 
+_INPUT_EVENT = ability.ability_input_event(
+    "bot.ability.learning.input",
+    InputData,
+    description=(
+        "Teach the bot a standing rule from something it was just told, so the behavior runs "
+        "automatically next time instead of being reasoned about again. Select this when a turn is "
+        "instruction about what to do in future situations ('when the phone rings, answer it') rather "
+        "than a request to act now. content is the instruction as heard; the bot grounds it against "
+        "what it already remembers and authors the behavior itself."
+    ),
+    examples=[{"content": "When the phone rings, answer it.", "media_type": "text/plain"}],
+)
+# Model-callable so judgment can select learning from a live turn, the same way Speaking is
+# selected. Programmatic callers still dispatch this event directly.
+InputEvent = dataclasses.replace(_INPUT_EVENT, kind=hsm.CallEventKind)
+
+
 class DecodedData(pydantic.BaseModel):
     """Normalized product of the learning decoder."""
 
@@ -710,12 +727,7 @@ class Learning(ability.Ability[InputData, OutputData]):
     instructions: typing.ClassVar[str] = GENERATE_INSTRUCTIONS
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.learning.input",
-        InputData,
-        description="External material to decode and learn a behavior from.",
-        examples=[{"content": "When the phone rings, answer it.", "media_type": "text/plain"}],
-    )
+    input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
         "bot.ability.learning.output",
         OutputData,
@@ -1556,7 +1568,6 @@ class Learning(ability.Ability[InputData, OutputData]):
         )
 
 
-InputEvent = Learning.input_event
 OutputEvent = Learning.output_event
 
 __all__ = [

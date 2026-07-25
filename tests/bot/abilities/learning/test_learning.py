@@ -27,7 +27,7 @@ from bot.abilities.cognition import types as cognition_types
 from bot.abilities.learning import Learning
 from bot.abilities.learning import learning as learning_impl
 from bot.protocols import attachment
-from tests.bot.abilities.support import dispatch_ability_for_test
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
@@ -758,3 +758,36 @@ def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_select
     assert write.instruction is not None, "Revision must receive the decoded lesson as typed data"
     assert write.instruction.text == "When the phone rings, answer it."
     assert write.instruction.kind == "instruction"
+
+
+def test_learning_input_is_offered_as_a_model_callable_tool() -> None:
+    """An attached Learning offers its input event, so judgment can select being taught.
+
+    Without this the bot can only be taught by a host dispatching Learning directly; the
+    model never sees learning as an option on a live turn.
+    """
+
+    async def run() -> tuple[tuple[str, ...], str | None]:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        ability = Learning(
+            decoder=TextDecoder(),
+            processor=LearningTestProcessor(
+                selection=_generate_selection(),
+                write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
+            ),
+            memory=store,
+        )
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        offered = tuple(event.name for event in processing.enabled_call_events(ability))
+        state = ability.state()
+        connection.close()
+        return offered, state
+
+    offered, state = asyncio.run(run())
+    assert Learning.input_event.kind == hsm.CallEventKind, "Learning input must be model-callable"
+    assert "bot.ability.learning.input" in offered, (
+        f"attached Learning in {state!r} did not offer its input event; offered={offered!r}"
+    )
