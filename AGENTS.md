@@ -25,6 +25,11 @@
 - ALWAYS do hard cutovers for renames, moves, contract changes, and package rehomes: update all callers, tests, and
   docs in the same change. NEVER leave deprecated shims, compatibility re-exports, alias layers, dual import paths,
   unused modules, dead code, or temporary backwards-compatibility stubs.
+- ALWAYS complete the cutover regardless of how many call sites it touches. This package is unpublished, so there are
+  no external consumers and no migration window to preserve: scope is never a reason to phase a change, keep an old
+  path alive beside a new one, or stop partway. Land the whole thing in one change with every caller, test, and doc
+  updated. If a change is too large to finish in one sitting, do not start it — a half-finished cutover leaves exactly
+  the legacy surface this forbids.
 - ALWAYS use the `hsm` skill when writing or reviewing state machines.
 - ALWAYS reference `rules/hsm.rules.md` for HSM work and `rules/python.rules.md` for Python work.
 - ALWAYS leverage subagents as navigator and reviewer for code or architecture work.
