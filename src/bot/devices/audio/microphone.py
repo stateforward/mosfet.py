@@ -1,41 +1,59 @@
 from .events import InputEvent, AudioInputData, routed_audio_event
 
-import asyncio
 import collections.abc
 import typing
 
 import hsm
 
 from bot.device import Device
+from bot.telemetry import observer
+from bot.world import SoundData, SoundEvent, World
+
 
 class Microphone(Device):
-    """Audio input event dispatcher for another device or audio implementation."""
+    """Transducer that hears the world and emits what it captures as audio input.
+
+    Event-driven only: nothing hands a microphone audio. It observes ``world.sound`` and
+    re-emits the acoustic energy as ``devices.audio.input`` for whichever device firmware
+    models a transition on it. A phone's mouthpiece is exactly this — the bot speaks into
+    the world, its phone microphone picks that up, and firmware carries it up the wire.
+    """
 
     input_event: typing.ClassVar[hsm.Event[AudioInputData]] = InputEvent
-    # Where captured audio goes, wired by the owning device (a Phone points this at its own
-    # firmware, giving microphone -> firmware -> service). None means nothing is listening yet.
-    _uplink: hsm.Instance | None = None
 
-    def connect_uplink(self, target: hsm.Instance) -> None:
-        """Point captured audio at the owning device's firmware."""
+    @staticmethod
+    def _capture_world_sound(ctx: hsm.Context, instance: "Microphone", event: hsm.Event[typing.Any]) -> None:
+        """Re-emit heard acoustic energy as audio input for owning firmware to route."""
 
-        self._uplink = target
+        data = event.data
+        if not isinstance(data, SoundData):
+            return
+        captured = routed_audio_event(
+            Microphone.input_event,
+            AudioInputData(
+                audio=data.audio,
+                media_type=data.media_type,
+                sample_rate_hz=data.sample_rate_hz,
+                channels=data.channels,
+            ),
+            source=instance,
+            target=instance,
+            metadata=event.metadata,
+        )
+        _ = hsm.dispatch_all(World.from_context(ctx), captured)
 
-    def capture(
-        self,
-        ctx: hsm.Context,
-        data: AudioInputData,
-        *,
-        metadata: collections.abc.Mapping[str, object] | None = None,
-    ) -> collections.abc.Awaitable[None]:
-        """Dispatch captured audio to the connected uplink, if any."""
-
-        uplink = self._uplink
-        if uplink is None:
-            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            future.set_result(None)
-            return future
-        return self.dispatch_audio_input(ctx, uplink, data, metadata=metadata)
+    firmware_model: typing.ClassVar[hsm.Model] = hsm.define(
+        "MicrophoneFirmware",
+        hsm.initial(hsm.target("/MicrophoneFirmware/listening")),
+        hsm.state(
+            "listening",
+            hsm.transition(
+                hsm.on(SoundEvent),
+                hsm.effect(_capture_world_sound),
+            ),
+        ),
+        hsm.observe(observer),
+    )
 
     def dispatch_audio_input(
         self,

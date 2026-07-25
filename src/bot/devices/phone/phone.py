@@ -1170,8 +1170,6 @@ class Phone(bot.device.Device):
             answer_timeout=answer_timeout,
             transfer_timeout=transfer_timeout,
         )
-        # microphone -> firmware -> service. Both are phone-owned, so the phone wires them.
-        resolved_microphone.connect_uplink(self._firmware_instance)
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:

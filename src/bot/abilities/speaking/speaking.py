@@ -21,7 +21,6 @@ import pydantic
 from bot.telemetry import observer
 
 if typing.TYPE_CHECKING:
-    from bot.devices.audio.microphone import Microphone
     from bot.devices.audio.speaker import Speaker
 
 _DEFAULT_SAMPLE_RATE_HZ = 24_000
@@ -160,9 +159,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     _encoder: encoding.Encoder[bytes, bytes]
     _speaker: Speaker | None
-    # Phone mouthpiece: speech the bot utters goes up the wire through the microphone, never
-    # through the speaker (the speaker is the receiver and must not reach the service).
-    _microphone: "Microphone | None"
     _sample_rate_hz: int
     _channels: int
     _media_type: str
@@ -172,7 +168,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
         *,
         encoder: encoding.Encoder[bytes, bytes],
         speaker: Speaker | None = None,
-        microphone: "Microphone | None" = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
         channels: int = _DEFAULT_CHANNELS,
         media_type: str = "audio/pcm",
@@ -184,7 +179,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
             raise ValueError("channels must be positive.")
         self._encoder = encoder
         self._speaker = speaker
-        self._microphone = microphone
         self._sample_rate_hz = sample_rate_hz
         self._channels = channels
         self._media_type = media_type
@@ -235,23 +229,10 @@ class Speaking(ability.Ability[InputData, OutputData]):
             )
             speaker = instance._speaker
             if speaker is not None:
-                # Elevate into world.sound so bot input abilities can hear playout.
+                # Elevate into world.sound so bot input (and call uplink paths) can hear playout.
                 await speaker.dispatch_audio_output_to_world(
                     ctx,
                     frame,
-                    metadata=dict(event.metadata),
-                )
-            microphone = instance._microphone
-            if microphone is not None:
-                # Mouthpiece: the only path to the wire.
-                await microphone.capture(
-                    ctx,
-                    audio.AudioInputData(
-                        audio=audio_bytes,
-                        media_type=instance._media_type,
-                        sample_rate_hz=instance._sample_rate_hz,
-                        channels=instance._channels,
-                    ),
                     metadata=dict(event.metadata),
                 )
             product = OutputData(

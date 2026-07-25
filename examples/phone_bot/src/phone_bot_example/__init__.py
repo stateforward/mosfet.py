@@ -575,19 +575,15 @@ def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening
 
 def _speaking(
     *,
-    microphone: audio.Microphone,
+    speaker: audio.Speaker,
     speech_config: SpeechConfig | None = None,
 ) -> speaking.Speaking:
-    """Bot output ability: Gemini TTS into the phone mouthpiece (microphone -> firmware -> service).
-
-    Deliberately not the speaker. The speaker is the receiver, carrying far-end audio into the
-    world; wiring speech to it put the earpiece on the wire and echoed the caller back.
-    """
+    """Bot output ability: Gemini TTS + phone speaker playout (world.sound elevation)."""
 
     config = speech_config or SpeechConfig()
     return speaking.Speaking(
         encoder=_gemini_speech_encoder(config),
-        microphone=microphone,
+        speaker=speaker,
         sample_rate_hz=config.output_sample_rate_hz,
         channels=config.output_channels,
         media_type="audio/wav",
@@ -724,13 +720,13 @@ class PhoneBot(Bot):
     ) -> None:
         self._label = label
         if phone is None and speaking is None:
-            microphone = audio.Microphone()
-            self._phone = phone_device.Phone(speaker=audio.Speaker(), microphone=microphone)
-            speaking_instance = _speaking(microphone=microphone, speech_config=speech_config)
+            speaker = audio.Speaker()
+            self._phone = phone_device.Phone(speaker=speaker)
+            speaking_instance = _speaking(speaker=speaker, speech_config=speech_config)
         else:
             self._phone = phone if phone is not None else phone_device.Phone()
             if speaking is None:
-                raise ValueError("An injected phone requires an injected Speaking ability sharing its microphone.")
+                raise ValueError("An injected phone requires an injected Speaking ability sharing its speaker.")
             speaking_instance = speaking
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
@@ -1029,11 +1025,10 @@ async def run(
         track_name=app_config.livekit.track_name,
     )
     speaker = audio.Speaker()
-    microphone = audio.Microphone()
-    phone = phone_device.Phone(service=phone_service, speaker=speaker, microphone=microphone)
+    phone = phone_device.Phone(service=phone_service, speaker=speaker)
     # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).
     listening_ability = _listening(app_config.speech)
-    speaking_ability = _speaking(microphone=microphone, speech_config=app_config.speech)
+    speaking_ability = _speaking(speaker=speaker, speech_config=app_config.speech)
     _LOG.info(
         "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
         "tts_voice=%s vad_provider=silero vad_model_id=%s api_key_loaded=%s",
