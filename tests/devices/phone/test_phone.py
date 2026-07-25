@@ -1403,12 +1403,16 @@ def test_phone_event_recorder_ignores_local_audio_output_not_service_audio() -> 
     assert isinstance(recorder.events[0].data, phone_device.ServiceAudioData)
 
 
-def test_observation_service_audio_does_not_elevate_as_local_uplink() -> None:
-    """ServiceAudioData must not take the local speaker world-elevation side channel."""
+def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
+    """Regression: far-end audio must never take the uplink path back to the caller.
 
-    async def run() -> tuple[int, int, list[str]]:
-        from bot.devices.phone.phone import _PhoneObservationService
+    Previously firmware flattened ServiceAudioData into an exact AudioOutputData and published
+    it through the service, whose direction was inferred from `type(data)`. The flattening
+    erased the provenance the guard depended on, so the receiver fed the wire and the caller
+    heard themselves. Direction is now which transition fired, and the service never sees it.
+    """
 
+    async def run() -> tuple[list[bytes], list[str]]:
         class TrackingSpeaker(audio_device.Speaker):
             elevated: list[audio_device.AudioOutputData]
 
@@ -1426,7 +1430,6 @@ def test_observation_service_audio_does_not_elevate_as_local_uplink() -> None:
             ) -> collections.abc.Awaitable[None]:
                 del ctx, metadata
                 self.elevated.append(data)
-                # Schedule so fire-and-forget publish does not leak an unawaited coroutine.
                 return asyncio.ensure_future(asyncio.sleep(0))
 
         class TrackingService:
@@ -1447,17 +1450,8 @@ def test_observation_service_audio_does_not_elevate_as_local_uplink() -> None:
 
         speaker = TrackingSpeaker()
         inner = TrackingService()
-        owner = hsm.Instance()
-        target = hsm.Instance()
-        observation = _PhoneObservationService(owner=owner, service=inner, speaker=speaker)
-        observation.target = target
+        firmware = phone_device.PhoneFirmware(service=inner, speaker=speaker)
         ctx = hsm.Context()
-        _ = await hsm.started(ctx, owner, hsm.define("Owner", hsm.initial(hsm.target("s")), hsm.state("s")))
-        _ = await hsm.started(ctx, target, hsm.define("Target", hsm.initial(hsm.target("s")), hsm.state("s")))
-
-        local = audio_device.OutputEvent.with_data(
-            audio_device.AudioOutputData(audio=b"local", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
-        )
         service_audio = phone_device.ServiceAudioReceivedEvent.with_data(
             phone_device.ServiceAudioData(
                 call_id="call-1",
@@ -1467,11 +1461,82 @@ def test_observation_service_audio_does_not_elevate_as_local_uplink() -> None:
                 channels=1,
             )
         )
-        observation.publish(ctx, local)
-        observation.publish(ctx, service_audio)
-        return len(speaker.elevated), len(inner.events), [event.name for event in inner.events]
+        phone_device.PhoneFirmware._receive_service_audio(ctx, firmware, service_audio)
+        await asyncio.sleep(0)
+        return [bytes(item.audio) for item in speaker.elevated], [event.name for event in inner.events]
 
-    elevated, published, names = asyncio.run(run())
-    assert elevated == 1
-    assert published == 2
-    assert names == [audio_device.OutputEvent.name, phone_device.ServiceAudioReceivedEvent.name]
+    elevated, published = asyncio.run(run())
+    assert elevated == [b"remote"], "far-end audio must reach the speaker"
+    assert published == [], f"receiver audio must never reach the service; got {published!r}"
+
+
+def test_receiver_audio_keeps_its_service_type() -> None:
+    """The speaker is handed ServiceAudioData, not a flattened AudioOutputData."""
+
+    captured: list[audio_device.AudioOutputData] = []
+
+    class CapturingSpeaker(audio_device.Speaker):
+        @typing.override
+        def dispatch_audio_output_to_world(
+            self,
+            ctx: hsm.Context,
+            data: audio_device.AudioOutputData,
+            *,
+            metadata: collections.abc.Mapping[str, object] | None = None,
+        ) -> collections.abc.Awaitable[None]:
+            del ctx, metadata
+            captured.append(data)
+            return asyncio.ensure_future(asyncio.sleep(0))
+
+    async def run() -> None:
+        firmware = phone_device.PhoneFirmware(service=phone_device.PhoneEventRecorder(), speaker=CapturingSpeaker())
+        event = phone_device.ServiceAudioReceivedEvent.with_data(
+            phone_device.ServiceAudioData(call_id="call-1", audio=b"remote", media_type="audio/pcm")
+        )
+        phone_device.PhoneFirmware._receive_service_audio(hsm.Context(), firmware, event)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert len(captured) == 1
+    assert isinstance(captured[0], phone_device.ServiceAudioData), (
+        f"provenance was flattened to {type(captured[0]).__name__}"
+    )
+
+
+def test_microphone_audio_uplinks_only_while_media_ready() -> None:
+    """Mouthpiece carries local audio up the wire, and only while a call is connected.
+
+    Outbound had no coverage at all before: the speaker's uplink could be removed without a
+    single test failing. This pins the direction that replaced it.
+    """
+
+    class TrackingService:
+        events: list[hsm.Event[typing.Any]]
+
+        def __init__(self) -> None:
+            self.events = []
+
+        async def attach(self, world: World, target: hsm.Instance) -> None:
+            del world, target
+
+        async def detach(self, world: World, target: hsm.Instance) -> None:
+            del world, target
+
+        def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+            del ctx
+            self.events.append(event)
+
+    inner = TrackingService()
+    firmware = phone_device.PhoneFirmware(service=inner, speaker=audio_device.Speaker())
+    captured = audio_device.InputEvent.with_data(
+        audio_device.AudioInputData(audio=b"local speech", media_type="audio/pcm", sample_rate_hz=24_000, channels=1)
+    )
+    phone_device.PhoneFirmware._send_microphone_audio(hsm.Context(), firmware, captured)
+
+    uplinked = [event for event in inner.events if event.name == audio_device.OutputEvent.name]
+    assert len(uplinked) == 1, f"microphone audio must uplink; got {[e.name for e in inner.events]!r}"
+    payload = uplinked[0].data
+    assert isinstance(payload, audio_device.AudioOutputData)
+    assert bytes(payload.audio) == b"local speech"
+    # Exact type: the LiveKit provider only uplinks exact AudioOutputData.
+    assert type(payload) is audio_device.AudioOutputData

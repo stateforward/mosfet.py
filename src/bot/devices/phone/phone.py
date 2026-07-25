@@ -126,7 +126,6 @@ def _completed_phone_service_event() -> asyncio.Future[None]:
 class _PhoneObservationService:
     owner: "Phone"
     service: "PhoneService"
-    speaker: audio.Speaker
     target: hsm.Instance | None = dataclasses.field(default=None, init=False)
 
     async def attach(self, world: World, target: hsm.Instance) -> None:
@@ -138,38 +137,19 @@ class _PhoneObservationService:
         if self.target is target:
             self.target = None
 
-    def speaker_ready_in_world(self, ctx: hsm.Context) -> bool:
-        """True when observation is attached and the phone speaker can elevate audio.
+    def is_attached(self) -> bool:
+        """True when this service still holds its attach target.
 
-        Elevation stamps ``source=hsm.id(speaker)`` on ``world.sound``; that requires a
-        started speaker in the same world Instances map as ``ctx``. Readiness uses this
-        service's attach hold (``self.target``), speaker liveness, and same-world scope
-        — never ``state()``.
+        Routing audio to peripherals is firmware work; the service only reports whether the
+        phone is attached, never which transducer a payload belongs to.
         """
 
-        if self.target is None:
-            return False
-        if not lifecycle.is_started(self.speaker):
-            return False
-        speaker_context = self.speaker.context()
-        return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
+        return self.target is not None
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        # Typed side channel: local speaker playout elevates to world and offers provider uplink.
-        # Exact AudioOutputData only — ServiceAudioData subclasses it and must not take this path.
-        if type(event.data) is audio.AudioOutputData:
-            _ = self.speaker.dispatch_audio_output_to_world(ctx, event.data, metadata=event.metadata)
-            service_id = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
-            self.service.publish(
-                ctx,
-                dataclasses.replace(
-                    event,
-                    source=hsm.id(self.target) if self.target is not None else hsm.id(self.owner),
-                    target=service_id,
-                    metadata=dict(event.metadata),
-                ),
-            )
-            return
+        # Transport only: forward to the provider service. Direction is decided by which firmware
+        # transition fired, never by sniffing the payload type here — a shared channel that infers
+        # direction from `type(data)` is what let receiver audio take the uplink path (echo).
         service_id = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
         self.service.publish(
             ctx,
@@ -293,6 +273,11 @@ class PhoneFirmware(hsm.Instance):
     """Phone-owned firmware state for a single active call."""
 
     _service: PhoneService
+    # Firmware owns transducer routing: the speaker transmits service audio into the world
+    # (receiver), the microphone carries local speech to the service (mouthpiece). The service
+    # knows about neither.
+    _speaker: audio.Speaker
+    _microphone: audio.Microphone
     _answer_timeout: datetime.timedelta
     _transfer_timeout: datetime.timedelta
     _closed_call_ids: frozenset[str]
@@ -304,6 +289,8 @@ class PhoneFirmware(hsm.Instance):
         self,
         *,
         service: PhoneService | None = None,
+        speaker: audio.Speaker | None = None,
+        microphone: audio.Microphone | None = None,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
@@ -311,6 +298,8 @@ class PhoneFirmware(hsm.Instance):
         _require_positive_timeout("answer_timeout", answer_timeout)
         _require_positive_timeout("transfer_timeout", transfer_timeout)
         self._service = service if service is not None else PhoneEventRecorder()
+        self._speaker = speaker if speaker is not None else audio.Speaker()
+        self._microphone = microphone if microphone is not None else audio.Microphone()
         self._answer_timeout = answer_timeout
         self._transfer_timeout = transfer_timeout
         self._closed_call_ids = frozenset()
@@ -419,9 +408,14 @@ class PhoneFirmware(hsm.Instance):
         if not isinstance(data, ServiceAudioData) or instance._current_call_id != data.call_id:
             return False
         service = instance._service
-        if not isinstance(service, _PhoneObservationService):
+        if isinstance(service, _PhoneObservationService) and not service.is_attached():
             return False
-        return service.speaker_ready_in_world(ctx)
+        # Elevation stamps source=hsm.id(speaker) on world.sound, so the speaker must be started
+        # in the same world Instances map as ctx. Liveness and scope only — never state().
+        if not lifecycle.is_started(instance._speaker):
+            return False
+        speaker_context = instance._speaker.context()
+        return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
 
     @staticmethod
     def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
@@ -550,16 +544,36 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_speaker_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _send_microphone_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """Mouthpiece: carry locally captured audio up the wire.
+
+        Only reachable from the answered/media_ready state, so the microphone is live exactly
+        while a call is connected and world sound is ignored otherwise. This is the only path
+        to the service; the speaker never reaches it.
+        """
+
         data = event.data
-        assert isinstance(data, ServiceAudioData)
-        output = audio.AudioOutputData(
+        assert isinstance(data, audio.AudioInputData)
+        uplink = audio.AudioOutputData(
             audio=data.audio,
             media_type=data.media_type,
             sample_rate_hz=data.sample_rate_hz,
             channels=data.channels,
         )
-        PhoneFirmware._publish(ctx, instance, event, audio.OutputEvent.with_data(output))
+        PhoneFirmware._publish(ctx, instance, event, audio.OutputEvent.with_data(uplink))
+
+    @staticmethod
+    def _receive_service_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """Receiver: transmit far-end audio out of the phone speaker into the world.
+
+        ``data`` is passed through as the ``ServiceAudioData`` it already is. Flattening it to
+        ``AudioOutputData`` used to erase where it came from, which is how receiver audio ended
+        up back on the wire. Nothing here reaches the service; the uplink is the microphone.
+        """
+
+        data = event.data
+        assert isinstance(data, ServiceAudioData)
+        _ = instance._speaker.dispatch_audio_output_to_world(ctx, data, metadata=event.metadata)
 
     @staticmethod
     def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -1012,6 +1026,12 @@ class PhoneFirmware(hsm.Instance):
             ),
             hsm.state(
                 "media_ready",
+                # Microphone is live only here: the mouthpiece carries local audio up the wire
+                # while a call is connected, and nothing is captured before answer.
+                hsm.transition(
+                    hsm.on(audio.InputEvent),
+                    hsm.effect(_send_microphone_audio),
+                ),
                 hsm.transition(
                     hsm.on(ServiceMediaReadyEvent),
                     hsm.guard(_matches_current_media_ready),
@@ -1019,7 +1039,7 @@ class PhoneFirmware(hsm.Instance):
                 hsm.transition(
                     hsm.on(ServiceAudioReceivedEvent),
                     hsm.guard(_matches_current_service_audio),
-                    hsm.effect(_publish_speaker_audio),
+                    hsm.effect(_receive_service_audio),
                 ),
                 hsm.transition(
                     hsm.on(TransferCallEvent),
@@ -1056,7 +1076,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(ServiceAudioReceivedEvent),
                 hsm.guard(_matches_current_service_audio),
-                hsm.effect(_publish_speaker_audio),
+                hsm.effect(_receive_service_audio),
             ),
             hsm.transition(
                 hsm.on(ServiceTransferCompletedEvent),
@@ -1141,11 +1161,12 @@ class Phone(bot.device.Device):
         observation_service = _PhoneObservationService(
             owner=self,
             service=service if service is not None else PhoneEventRecorder(),
-            speaker=resolved_speaker,
         )
         self._service = observation_service
         self._firmware_instance = PhoneFirmware(
             service=observation_service,
+            speaker=resolved_speaker,
+            microphone=resolved_microphone,
             answer_timeout=answer_timeout,
             transfer_timeout=transfer_timeout,
         )

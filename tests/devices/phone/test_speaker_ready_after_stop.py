@@ -1,4 +1,4 @@
-"""speaker_ready_in_world needs attach hold + started speaker (hsm.id)."""
+"""Receiver readiness needs an attach hold plus a started, same-world speaker."""
 
 from __future__ import annotations
 
@@ -7,24 +7,43 @@ import asyncio
 import hsm
 
 from bot.devices import audio
-from bot.devices.phone.phone import _PhoneObservationService
+from bot.devices.phone import phone as phone_device
+from bot.devices.phone.phone import PhoneFirmware, _PhoneObservationService
 from bot.world import World
 
 
-def test_speaker_ready_requires_attach_and_started_speaker() -> None:
+def _service_audio(call_id: str) -> hsm.Event[phone_device.ServiceAudioData]:
+    return phone_device.ServiceAudioReceivedEvent.with_data(
+        phone_device.ServiceAudioData(
+            call_id=call_id,
+            audio=b"remote",
+            media_type="audio/pcm",
+            sample_rate_hz=16_000,
+            channels=1,
+        )
+    )
+
+
+def test_receiver_requires_attach_and_started_speaker() -> None:
+    """Speaker liveness is firmware's guard now; the service only reports attachment."""
+
     async def run() -> tuple[bool, bool, bool, bool]:
         world = World()
         speaker = audio.Speaker()
         owner = hsm.Instance()
         target = hsm.Instance()
-        service = _PhoneObservationService(owner=owner, service=object(), speaker=speaker)  # type: ignore[arg-type]
-        unattached = service.speaker_ready_in_world(world)
-        service.target = target
-        attached_unstarted = service.speaker_ready_in_world(world)
-        await hsm.started(world, speaker, speaker.model)
-        ready = service.speaker_ready_in_world(world)
+        observation = _PhoneObservationService(owner=owner, service=object())  # type: ignore[arg-type]
+        firmware = PhoneFirmware(service=observation, speaker=speaker)
+        firmware._current_call_id = "call-1"
+        event = _service_audio("call-1")
+
+        unattached = PhoneFirmware._matches_current_service_audio(world, firmware, event)
+        observation.target = target
+        attached_unstarted = PhoneFirmware._matches_current_service_audio(world, firmware, event)
+        _ = await hsm.started(world, speaker, speaker.model)
+        ready = PhoneFirmware._matches_current_service_audio(world, firmware, event)
         await hsm.stop(speaker)
-        after_stop = service.speaker_ready_in_world(world)
+        after_stop = PhoneFirmware._matches_current_service_audio(world, firmware, event)
         return unattached, attached_unstarted, ready, after_stop
 
     unattached, attached_unstarted, ready, after_stop = asyncio.run(run())
