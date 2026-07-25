@@ -1540,3 +1540,14 @@ def test_microphone_audio_uplinks_only_while_media_ready() -> None:
     assert bytes(payload.audio) == b"local speech"
     # Exact type: the LiveKit provider only uplinks exact AudioOutputData.
     assert type(payload) is audio_device.AudioOutputData
+
+
+def test_phone_wires_its_microphone_uplink_to_its_own_firmware() -> None:
+    """microphone -> firmware -> service: the phone connects the first hop at construction.
+
+    Without this the mouthpiece has nowhere to send captured speech, so Speaking produces
+    audio that never reaches the wire and the bot is silent on a live call.
+    """
+
+    phone = phone_device.Phone(service=phone_device.PhoneEventRecorder())
+    assert phone._microphone._uplink is phone._firmware_instance

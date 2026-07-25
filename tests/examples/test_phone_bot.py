@@ -282,8 +282,10 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     assert "--audio-file" not in source
     assert "remote_audio_sink" not in source
     assert "PhoneService(" in source
-    assert "phone_device.Phone(service=phone_service, speaker=speaker)" in source
-    assert "_speaking(speaker=speaker" in source
+    assert "phone_device.Phone(service=phone_service, speaker=speaker, microphone=microphone)" in source
+    # Speech goes up the wire through the mouthpiece; the speaker is the receiver only.
+    assert "_speaking(microphone=microphone" in source
+    assert "_speaking(speaker=" not in source
     assert "ensure_future" not in source
 
 
