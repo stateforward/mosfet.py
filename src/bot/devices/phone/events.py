@@ -4,6 +4,7 @@ from bot.world import SoundData
 import typing
 
 import hsm
+from bot import event_schema
 import pydantic
 
 CallId = typing.Annotated[
@@ -429,27 +430,27 @@ ServiceTransferFailedEvent = hsm.Event[TransferFailedData](
 )
 AnswerCallEvent = hsm.Event[AnswerCallData](
     name="phone.answer_call",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=AnswerCallData,
 )
 DialEvent = hsm.Event[DialData](
     name="phone.dial",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=DialData,
 )
 DeclineCallEvent = hsm.Event[DeclineCallData](
     name="phone.decline_call",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=DeclineCallData,
 )
 HangUpCallEvent = hsm.Event[HangUpCallData](
     name="phone.hang_up_call",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=HangUpCallData,
 )
 TransferCallEvent = hsm.Event[TransferCallData](
     name="phone.transfer_call",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=TransferCallData,
 )
 

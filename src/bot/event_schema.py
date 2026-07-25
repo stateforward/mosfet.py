@@ -7,6 +7,20 @@ import typing
 import hsm
 import pydantic
 
+# Marks an event as offerable to a model as a tool. Derived from ``hsm.EventKind``, so
+# ``hsm.kind.Is(EventKind, hsm.EventKind)`` still holds and HSM treats it as any other event.
+#
+# This is a stateforward.bot concern, not an HSM one: the owning domain is ``abilities.processing``,
+# which builds each turn's tool menu from live topology and refuses selections the target never
+# offered. It is defined here rather than there because ``bot.events``, ``bot.behavior.events``, and
+# ``abilities.speaking`` all stamp events and all cycle on importing ``processing``; this module is a
+# leaf. Import it as ``processing.EventKind`` wherever that does not cycle.
+#
+# Do NOT reuse ``hsm.CallEventKind`` for this. That kind means "an invocation of a declared
+# ``hsm.Operation``" and is what HSM mints for one; conflating the two left no way to express a real
+# call event that is not a tool, or a tool that is not an operation invocation.
+EventKind = hsm.kind.Make(hsm.EventKind)
+
 JsonSchema: typing.TypeAlias = dict[str, object]
 _LOCAL_DEFS_REF_PREFIX = "#/$defs/"
 _SUPPORTED_JSON_SCHEMA_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})

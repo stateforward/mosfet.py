@@ -34,6 +34,7 @@ import typing
 import uuid
 
 import hsm
+from bot import event_schema
 import pydantic
 from sqlalchemy import select
 
@@ -138,7 +139,7 @@ _INPUT_EVENT = ability.ability_input_event(
 )
 # Model-callable so judgment can select learning from a live turn, the same way Speaking is
 # selected. Programmatic callers still dispatch this event directly.
-InputEvent = dataclasses.replace(_INPUT_EVENT, kind=hsm.CallEventKind)
+InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
 
 
 class DecodedData(pydantic.BaseModel):
@@ -370,7 +371,7 @@ class GenerateData(pydantic.BaseModel):
 
 GenerateEvent = hsm.Event[GenerateData](
     name=_GENERATE_EVENT_NAME,
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=GenerateData,
 )
 
@@ -511,9 +512,10 @@ def _intent_from_generate(generate: GenerateData) -> CreateData | ChangeData:
 def _synthetic_stimulus(runtime_input: RuntimeInputData, *, operation_id: str) -> hsm.Event[object]:
     """Build an ObservedBotEvent-shaped stimulus for Revision dry-run / authoring."""
 
+    # Shaped like the world stimulus it stands in for (``world.sound`` and friends declare no
+    # kind), not like a tool: this is dry-run authoring input, never offered for selection.
     template = hsm.Event[object](
         name=runtime_input.stimulus_name,
-        kind=hsm.CallEventKind,
         schema=object,
     )
     return dataclasses.replace(

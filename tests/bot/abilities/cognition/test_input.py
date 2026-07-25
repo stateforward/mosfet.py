@@ -24,7 +24,7 @@ def _accept_focus(
 
 
 class _FocusBotActor(hsm.Instance):
-    """Minimal body stand-in that enables focus via CallEventKind topology (not a schema list)."""
+    """Minimal body stand-in that enables focus via model-offerable topology (not a schema list)."""
 
     model: typing.ClassVar[hsm.Model | None] = hsm.define(
         "FocusBotActor",
@@ -94,7 +94,7 @@ def test_build_processing_input_does_not_invent_focus_for_non_topology_bot() -> 
 
 
 def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
-    """Focus/Clear appear only when the bot actor's live CallEventKind transitions enable them."""
+    """Focus/Clear appear only when the bot actor's live model-offerable transitions enable them."""
 
     async def run() -> None:
         bot_actor = _FocusBotActor()

@@ -6,6 +6,7 @@ import asyncio
 import typing
 
 import hsm
+from bot.abilities import processing
 
 from bot.abilities import speaking
 from bot.devices import audio
@@ -40,7 +41,7 @@ async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 
 
 def test_speaking_input_is_call_event_for_cognition_selection() -> None:
     assert speaking.InputEvent.name == "bot.ability.speaking.input"
-    assert speaking.InputEvent.kind == hsm.CallEventKind
+    assert speaking.InputEvent.kind == processing.EventKind
 
 
 def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
@@ -148,9 +149,9 @@ def test_speaking_is_cognition_callable_output_ability() -> None:
     """
 
     speaking_ability = speaking.Speaking(encoder=RecordingEncoder())
-    assert speaking.InputEvent.kind == hsm.CallEventKind
+    assert speaking.InputEvent.kind == processing.EventKind
     assert speaking_ability.input_event is speaking.InputEvent
-    assert speaking_ability.input_event.kind == hsm.CallEventKind
+    assert speaking_ability.input_event.kind == processing.EventKind
 
 
 def test_cognition_to_speaking_output_end_to_end() -> None:

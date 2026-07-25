@@ -28,6 +28,7 @@ import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
 from bot.event_schema import (
+    EventKind,
     embeddable_json_schema,
     event_json_schema,
     event_schema_json_schema,
@@ -1088,7 +1089,7 @@ def _instance_event_map(instance: hsm.Instance) -> dict[str, Event[typing.Any]]:
 
 
 def enabled_call_events(instance: hsm.Instance) -> tuple[Event[typing.Any], ...]:
-    """Enabled CallEventKind events on ``instance`` from its current transition snapshot."""
+    """Enabled model-offerable events on ``instance`` from its current transition snapshot."""
 
     event_map = _instance_event_map(instance)
     offered: list[Event[typing.Any]] = []
@@ -1099,7 +1100,7 @@ def enabled_call_events(instance: hsm.Instance) -> tuple[Event[typing.Any], ...]
             if event_name in seen:
                 continue
             event = event_map.get(event_name)
-            if event is None or event.kind != hsm.CallEventKind:
+            if event is None or event.kind != EventKind:
                 continue
             seen.add(event_name)
             offered.append(event)
@@ -1118,7 +1119,7 @@ def _declared_call_event_names(instance: hsm.Instance) -> set[str]:
     return {
         name
         for name, event in _instance_event_map(instance).items()
-        if isinstance(event, hsm.Event) and event.kind == hsm.CallEventKind
+        if isinstance(event, hsm.Event) and event.kind == EventKind
     }
 
 
@@ -1180,7 +1181,7 @@ async def dispatch_selected_events(
 
         target = _resolve_target(input, selection)
         declared = _instance_event_map(target).get(selection.event)
-        if declared is None or declared.kind != hsm.CallEventKind:
+        if declared is None or declared.kind != EventKind:
             raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
         try:
             validated = validate_event_data(declared, raw)
@@ -1609,6 +1610,7 @@ __all__ = [
     "CompletionData",
     "FailureData",
     "DISPATCH_TOOL_NAME",
+    "EventKind",
     "Event",
     "Events",
     "InputEvent",

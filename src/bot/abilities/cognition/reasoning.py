@@ -8,6 +8,7 @@ import typing
 import uuid
 
 import hsm
+from bot import event_schema
 
 import pydantic
 
@@ -343,7 +344,7 @@ class Reasoning(processing.Processing):
     # only after autonomy and intuition leave the turn unhandled.
     input_event: typing.ClassVar[hsm.Event[CallData | InputData]] = hsm.Event[CallData | InputData](
         name="bot.ability.reasoning.input",
-        kind=hsm.CallEventKind,
+        kind=event_schema.EventKind,
         schema=CallData,
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](

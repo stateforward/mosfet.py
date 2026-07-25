@@ -92,9 +92,9 @@ def build_processing_input(
     Offered tools are deduced from each actor's live HSM transition snapshot
     (``enabled_call_events``). Body attention (``bot.focus_device`` /
     ``bot.clear_focus``) appears when the bot actor's active topology enables
-    those CallEventKind transitions — never via a parallel hard-coded schema
+    those ``processing.EventKind`` transitions — never via a parallel hard-coded schema
     allowlist. The cognition host itself is included when ``authority`` is the
-    live Cognition instance so host CallEventKind events such as
+    live Cognition instance so host model-offerable events such as
     ``bot.ability.cognition.ignore`` appear only when that topology enables them.
     """
 

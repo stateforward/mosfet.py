@@ -7,6 +7,7 @@ import dataclasses
 import typing
 
 import hsm
+from bot import event_schema
 import pydantic
 
 _Reference = typing.Annotated[
@@ -113,7 +114,7 @@ class IgnoreData(pydantic.BaseModel):
 
 IgnoreEvent = hsm.Event[IgnoreData](
     name="bot.ability.cognition.ignore",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=IgnoreData,
 )
 
@@ -265,7 +266,7 @@ async def dispatch_selected_events(
 ) -> None:
     """Validate body-action constraints, then dispatch selected modeled events.
 
-    Cognition ignore is offered from the host CallEventKind snapshot and may appear in
+    Cognition ignore is offered from the host model-offerable snapshot and may appear in
     selections as a handled terminal product, but it is not a body/device dispatch target
     (judgment only). Strip it before actor delivery.
 

@@ -7,6 +7,7 @@ import datetime
 import typing
 
 import hsm
+from bot.abilities import processing
 import bot.devices.phone as phone_contracts
 import bot.devices.phone.phone as phone_module
 
@@ -166,7 +167,7 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         for transition in hsm.take_snapshot(phone.context(), phone).Transitions:
             for event_name in transition.events:
                 event = event_map.get(event_name)
-                if event is not None and event.kind == hsm.CallEventKind:
+                if event is not None and event.kind == processing.EventKind:
                     names.append(event.name)
         return names
 

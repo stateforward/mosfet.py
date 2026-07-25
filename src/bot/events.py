@@ -3,6 +3,7 @@ import typing
 
 import pydantic
 import hsm
+from bot import event_schema
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import PlainSerializer
 
@@ -309,12 +310,12 @@ InputEvent = hsm.Event[InputEventData](
 )
 FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=FocusDeviceEventData,
 )
 ClearFocusEvent = hsm.Event[ClearFocusEventData](
     name="bot.clear_focus",
-    kind=hsm.CallEventKind,
+    kind=event_schema.EventKind,
     schema=ClearFocusEventData,
 )
 ProcessingCompletedEvent = hsm.Event[ProcessingCompletedEventData](

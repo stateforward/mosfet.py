@@ -15,6 +15,7 @@ import dataclasses
 import typing
 
 import hsm
+from bot import event_schema
 import pydantic
 
 from bot.telemetry import observer
@@ -117,8 +118,8 @@ _INPUT_EVENT = ability.ability_input_event(
     ),
     examples=[{"text": "Let me think about that."}, {"text": "Hello."}],
 )
-# Selectable by Processing / cognition (device call events use CallEventKind).
-InputEvent = dataclasses.replace(_INPUT_EVENT, kind=hsm.CallEventKind)
+# Selectable by Processing / cognition: mark the ability's one front door offerable.
+InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
 
 OutputEvent = ability.ability_output_event(
     "bot.ability.speaking.output",

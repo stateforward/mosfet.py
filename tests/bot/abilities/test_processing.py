@@ -423,7 +423,7 @@ class _ConfidencePatch(pydantic.BaseModel):
 
 _SPEAK_EVENT = hsm.Event[_SpeakData](
     name="bot.ability.speaking.input",
-    kind=hsm.CallEventKind,
+    kind=processing.EventKind,
     schema=_SpeakData,
 )
 

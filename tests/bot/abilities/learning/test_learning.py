@@ -787,7 +787,7 @@ def test_learning_input_is_offered_as_a_model_callable_tool() -> None:
         return offered, state
 
     offered, state = asyncio.run(run())
-    assert Learning.input_event.kind == hsm.CallEventKind, "Learning input must be model-callable"
+    assert Learning.input_event.kind == processing.EventKind, "Learning input must be model-offerable"
     assert "bot.ability.learning.input" in offered, (
         f"attached Learning in {state!r} did not offer its input event; offered={offered!r}"
     )
