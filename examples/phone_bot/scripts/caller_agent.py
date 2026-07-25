@@ -110,12 +110,24 @@ async def _gemini_to_pcm(
 
 
 def _pcm_peak(pcm: bytes) -> int:
+    """Peak absolute sample across the whole buffer, scanned in bounded chunks.
+
+    Scans everything rather than a leading window: an inbound capture opens while the far
+    side is still silent (agent A does not speak until spoken to, ~11s into a run), so a
+    truncated window reports silence for audio that is plainly present later.
+    """
+
     if len(pcm) < 2:
         return 0
     usable = pcm if len(pcm) % 2 == 0 else pcm[:-1]
-    samples = array.array("h")
-    samples.frombytes(usable[: min(len(usable), 192_000)])
-    return max((abs(s) for s in samples), default=0)
+    peak = 0
+    for start in range(0, len(usable), 192_000):
+        samples = array.array("h")
+        samples.frombytes(usable[start : start + 192_000])
+        chunk_peak = max((abs(s) for s in samples), default=0)
+        if chunk_peak > peak:
+            peak = chunk_peak
+    return peak
 
 
 def _write_wav(path: pathlib.Path, pcm: bytes, *, sample_rate_hz: int, channels: int = 1) -> None:
