@@ -32,7 +32,11 @@
   the legacy surface this forbids.
 - ALWAYS use the `hsm` skill when writing or reviewing state machines.
 - ALWAYS reference `rules/hsm.rules.md` for HSM work and `rules/python.rules.md` for Python work.
-- ALWAYS leverage subagents as navigator and reviewer for code or architecture work.
+- NEVER do the work yourself when you are the parent/owning agent. ALWAYS delegate to subagent swarms — decompose the
+  task, fan out independent work in parallel, and use subagents as navigator and reviewer for code and architecture
+  work. Match each subagent's model and effort level to its task: cheap/low effort for mechanical sweeps and lookups,
+  the strongest tier for design, cutover planning, and adversarial review. The parent's job is decomposition,
+  arbitration, and integration — not implementation.
 - ALWAYS decompose state machines and avoid state explosion.
 - ALWAYS follow DRY; ALWAYS use dependency injection.
 - ALWAYS get user approval before adding or changing dependencies, and before changing established type or class
