@@ -1847,3 +1847,48 @@ def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
 
     assert heard_nearby == 1
     assert heard_across_the_room == 0
+
+
+def test_stopping_a_phone_releases_the_service_it_acquired() -> None:
+    """The phone acquires its service at bring-up, so the phone releases it at teardown.
+
+    Held past teardown, the service keeps a strong reference to firmware that has stopped, which
+    is what stops a replacement phone from ever attaching to the same service.
+    """
+
+    async def run() -> tuple[bool, bool]:
+        world = World()
+        service = AttachablePhoneService()
+        phone = phone_device.Phone(service=service)
+
+        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        await _wait_until(lambda: service.target is not None)
+        attached = service.target is not None
+
+        await phone.stop(world)
+
+        return attached, service.target is None
+
+    attached, released = asyncio.run(run())
+
+    assert attached
+    assert released
+
+
+def test_stopping_a_phone_twice_still_releases_once() -> None:
+    """Bot activation cleanup stops the whole configured set, started or not."""
+
+    async def run() -> bool:
+        world = World()
+        service = AttachablePhoneService()
+        phone = phone_device.Phone(service=service)
+
+        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        await _wait_until(lambda: service.target is not None)
+
+        await phone.stop(world)
+        await phone.stop(world)
+
+        return service.target is None
+
+    assert asyncio.run(run())

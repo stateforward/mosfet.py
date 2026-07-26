@@ -2298,3 +2298,32 @@ def test_local_audio_uplink_publish_failure_is_surfaced(caplog: pytest.LogCaptur
     assert snapshot.local_audio_failed_chunks == 1
     assert snapshot.local_audio_failed_bytes == 4
     assert snapshot.remote_audio_dropped_chunks == 0
+
+
+def test_a_replacement_phone_can_attach_to_the_same_service() -> None:
+    """Swapping the phone on a live service must work: this is what the leak actually broke.
+
+    The service refuses a second target while it still holds the first. Nothing released the
+    first, so a replacement phone could never boot — its firmware initialization failed and the
+    device landed in ``/Device/failed``.
+    """
+
+    async def run() -> tuple[str, str]:
+        world = World()
+        service = PhoneService()
+
+        first = phone_device.Phone(service=service)
+        _ = await hsm.started(world, first, typing.cast(hsm.Model, phone_device.Phone.model))
+        await _wait_until(lambda: first.state() == "/Device/detached")
+        await first.stop(world)
+
+        second = phone_device.Phone(service=service)
+        _ = await hsm.started(world, second, typing.cast(hsm.Model, phone_device.Phone.model))
+        await _wait_until(lambda: second.state() == "/Device/detached", timeout=2.0)
+
+        return first.state(), second.state()
+
+    first_state, second_state = asyncio.run(run())
+
+    assert first_state == ""
+    assert second_state == "/Device/detached"

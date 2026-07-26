@@ -1212,6 +1212,22 @@ class Phone(bot.device.Device):
             transfer_timeout=transfer_timeout,
         )
 
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Release the service this phone acquired, then power down.
+
+        Paired with the acquire in ``_after_firmware_started``, and ordered before it: the
+        service is attached *to* the firmware, so it has to be let go while that firmware is
+        still there — the same reason firmware goes down before the transducers it holds.
+        Held past teardown it keeps a stopped machine alive, and a replacement phone can never
+        attach to the same service.
+        """
+
+        firmware = self._firmware
+        if firmware is not None:
+            await self._service.detach(World.from_context(self.context()), firmware)
+        await super().stop(ctx)
+
     def _broadcast_observation(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         """Elevate a committed observation into a world stimulus, from where this phone stands.
 
