@@ -187,6 +187,9 @@ def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:
     assert phone.NoCallData(reason="nothing_to_answer").reason == "nothing_to_answer"
     # No call happened, so there is no call id to report it against.
     assert "call_id" not in object_dict(phone.NoCallEvent.schema)["properties"]
+    # A service verdict when a service gave one, and nothing invented when none did.
+    assert phone.NoCallData(reason="nothing_to_answer").failure_kind is None
+    assert phone.NoCallData(reason="dial_failed", failure_kind="call_declined").failure_kind == "call_declined"
 
 def test_phone_event_names_do_not_use_observed_suffix() -> None:
     event_names = [event.name for event in PHONE_EVENTS]

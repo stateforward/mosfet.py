@@ -2150,7 +2150,11 @@ def test_livekit_phone_service_times_out_blocked_dial_operation() -> None:
         assert service.state() == "/PhoneService/ready"
         assert gateway.dial_requests == [phone_device.DialData(target=target)]
         assert _phone_events(recording_service)[-1].name == phone_device.NoCallEvent.name
-        assert _phone_events(recording_service)[-1].data == phone_device.NoCallData(reason="dial_failed")
+        # The provider's verdict survives the trip: firmware reports which way the dial failed,
+        # not just that it did.
+        assert _phone_events(recording_service)[-1].data == phone_device.NoCallData(
+            reason="dial_failed", failure_kind="timeout"
+        )
 
     asyncio.run(run())
 

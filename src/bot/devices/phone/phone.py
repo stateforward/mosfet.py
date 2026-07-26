@@ -33,6 +33,7 @@ from .events import (
     DeclineRequestData,
     DialData,
     DialEvent,
+    DialFailedData,
     HangUpCallData,
     HangUpCallEvent,
     HangUpRequestData,
@@ -88,6 +89,17 @@ uplink transition only exists in ``/Phone/answered/media_ready``. If call-waitin
 is known rather than overlooked.
 """
 
+CALL_PROGRESS_DB = 60.0
+"""How loud a call-progress tone is out of the earpiece, in dB SPL measured one metre away.
+
+Device-intrinsic like :data:`RINGER_DB`, and deliberately 20 dB below it, because the two are
+different transducers doing different jobs. A ringer is for the room — it has to fetch someone who
+is not holding the handset. A call-progress tone is for the one person already holding it, so the
+earpiece only has to reach an ear 15 cm away. At that distance this lands near 76 dB SPL, which is
+about what a handset receiver does with a tone, and across a room it is nearly nothing — which is
+right: nobody but the caller hears their own busy tone.
+"""
+
 MOUTH_OFFSET_M = 0.15
 """Distance from a handset's earpiece to its mouthpiece, in metres.
 
@@ -100,15 +112,21 @@ _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
 
 
-def _load_ring_sound_wav() -> bytes:
-    """Load the short package-local landline ring clip for environment.sound elevation."""
+def _load_sound_wav(name: str) -> bytes:
+    """Load one package-local acoustic clip for environment.sound elevation."""
 
-    return (importlib.resources.files(__package__) / "assets" / "ring.wav").read_bytes()
+    return (importlib.resources.files(__package__) / "assets" / name).read_bytes()
 
 
-# Real short ring WAV (see assets/SOURCES.md). Sensory classifiers match this acoustic payload;
+# Real acoustic WAVs (see assets/SOURCES.md). Sensory classifiers match these acoustic payloads;
 # Listening does not special-case phone.
-RING_SOUND_WAV = _load_ring_sound_wav()
+RING_SOUND_WAV = _load_sound_wav("ring.wav")
+BUSY_TONE_WAV = _load_sound_wav("busy.wav")
+"""Busy tone: what the exchange puts in your ear when the line you dialled refused or is engaged."""
+
+REORDER_TONE_WAV = _load_sound_wav("reorder.wav")
+"""Reorder tone (fast busy): what the network sends when it could not complete the call at all."""
+
 _RingingCommittedEvent = hsm.Event[RingingData](
     name="bot.phone.ringing.committed",
     kind=hsm.CompletionEventKind,
@@ -256,7 +274,7 @@ def _require_positive_timeout(name: str, value: datetime.timedelta) -> None:
         raise ValueError(f"{name} must be a positive duration.")
 
 
-def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:
+def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
     """Map phone observations that bots experience as input energy into environment stimuli.
 
     Ringing is heard as ``environment.sound`` with ``source`` = the phone instance id. Device-plane
@@ -266,6 +284,11 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     session handle, which has no counterpart on a handset and nothing outside firmware can use.
     ``kind`` is the explicit provenance label ``phone.ringing`` (not bare ``ring``, which is
     ambiguous for models).
+
+    ``None`` means this observation is inaudible and there is nothing to put in the environment.
+    Silence is a real answer here, not a gap: several ways of ending up with no call are ones a
+    real handset marks with no sound whatsoever, and manufacturing a tone for them would be
+    putting a noise in the earpiece that no telephone has ever made.
     """
 
     data = event.data
@@ -280,6 +303,36 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
                     kind="phone.ringing",
                     caller=data.caller,
                     amplitude_db=RINGER_DB,
+                )
+            ),
+            source=hsm.id(owner),
+            metadata=dict(event.metadata),
+        )
+    if isinstance(data, NoCallData):
+        # A call-progress tone, when there is one. Which tone is the exchange's verdict carried
+        # down the line, not something the handset works out — the handset only reproduces it.
+        if data.reason != "dial_failed":
+            # nothing_to_answer: pressing answer with nothing ringing does essentially nothing
+            # audible on a real handset. dial_abandoned: you hung up, so you hear nothing, because
+            # you hung up. dial_not_answered: there is no "they did not answer" tone and never was
+            # — a real caller hears ringback the whole time and then gives up, so what marks this
+            # case is ringback *stopping*, which is a sound the phone has yet to be able to make.
+            return None
+        # call_declined is the one failure a caller can name by ear: somebody refused, or the line
+        # is engaged. Busy tone. Every other failure kind is the network saying it could not
+        # complete the call, which is reorder — and a caller genuinely cannot tell "no route"
+        # from "congestion" from "the switch broke" apart either, so collapsing them is what the
+        # real object does rather than a shortcut around it.
+        busy = data.failure_kind == "call_declined"
+        return dataclasses.replace(
+            SoundEvent.with_data(
+                PhoneSoundData(
+                    audio=BUSY_TONE_WAV if busy else REORDER_TONE_WAV,
+                    media_type="audio/wav",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    kind="phone.busy" if busy else "phone.reorder",
+                    amplitude_db=CALL_PROGRESS_DB,
                 )
             ),
             source=hsm.id(owner),
@@ -663,7 +716,17 @@ class PhoneFirmware(hsm.Instance):
 
     @staticmethod
     def _publish_dial_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_failed")))
+        # The service's verdict travels with the fact it explains. Firmware does not get to
+        # decide why a dial failed and cannot reconstruct it later, so dropping it here is what
+        # left the phone unable to say whether the line refused or the network gave up.
+        data = event.data
+        assert isinstance(data, DialFailedData)
+        PhoneFirmware._publish(
+            ctx,
+            instance,
+            event,
+            NoCallEvent.with_data(NoCallData(reason="dial_failed", failure_kind=data.failure_kind)),
+        )
 
     @staticmethod
     def _publish_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -1249,16 +1312,24 @@ class Phone(bot.device.Device):
         Committed public payloads only — not service-request payloads (MediaReadyData / DialData
         and friends), which must not re-enter the phone shell as environment sound. Committed
         media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
+
+        NoCallData is here for its acoustics and only its acoustics: the environment gets the tone
+        or nothing, and device-plane ``phone.no_call`` keeps flowing to the service either way,
+        exactly as ``phone.ringing`` does. What a bot does about a tone it hears is its own to
+        decide; this only makes the tone reach it.
         """
 
         if not isinstance(
             event.data,
-            RingingData | PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
+            RingingData | PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData | NoCallData,
         ):
+            return
+        stimulus = _environment_observation_event(self, event)
+        if stimulus is None:
             return
         placement = self._placement
         _ = Environment.from_context(ctx).broadcast(
-            _environment_observation_event(self, event),
+            stimulus,
             origin=None if placement is None else placement.position,
         )
 

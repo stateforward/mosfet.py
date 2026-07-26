@@ -473,6 +473,163 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 
+async def _dialing_phone_in_environment(
+    environment: Environment,
+) -> tuple[phone_device.Phone, phone_device.PhoneFirmware, PhoneObservationRecorder]:
+    """A started phone mid-dial, with an environment citizen standing where it can hear it."""
+
+    phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
+    listener = PhoneObservationRecorder()
+    _ = await hsm.started(environment, phone, phone.model)
+    _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+    environment.join(listener)
+    await _wait_until(lambda: phone.state() == "/Device/detached")
+    firmware = _phone_firmware(phone)
+    await phone.dispatch(
+        phone.context(),
+        phone_device.DialEvent.with_data(
+            phone_device.DialData(target=phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com"))
+        ),
+    )
+    return phone, firmware, listener
+
+def test_phone_dial_failure_is_heard_as_the_call_progress_tone_the_exchange_would_send() -> None:
+    """A failed dial reaches the bot's ears, and busy and reorder stay distinguishable.
+
+    The exchange's verdict is what picks the tone: a line that refused or is engaged gives busy,
+    and every other way the network fails to complete a call gives reorder — which is all a real
+    caller gets to hear, and all this pins.
+    """
+
+    async def run(failure_kind: phone_device.FailureKind) -> tuple[list[hsm.Event[typing.Any]], list[str], str]:
+        environment = Environment()
+        phone, firmware, listener = await _dialing_phone_in_environment(environment)
+        await _emit_service_event(
+            phone,
+            phone_device.ServiceDialFailedEvent.with_data(phone_device.DialFailedData(failure_kind=failure_kind)),
+        )
+        await _wait_until(lambda: bool(listener.events))
+        return listener.events, _event_names(firmware.event_recorder()), hsm.id(phone)
+
+    for failure_kind, expected_kind, expected_audio in (
+        ("call_declined", "phone.busy", phone_device.BUSY_TONE_WAV),
+        ("remote_unavailable", "phone.reorder", phone_device.REORDER_TONE_WAV),
+        ("provider_unavailable", "phone.reorder", phone_device.REORDER_TONE_WAV),
+        ("signaling_failed", "phone.reorder", phone_device.REORDER_TONE_WAV),
+        ("timeout", "phone.reorder", phone_device.REORDER_TONE_WAV),
+        ("unknown", "phone.reorder", phone_device.REORDER_TONE_WAV),
+    ):
+        heard, published, phone_id = asyncio.run(run(typing.cast(phone_device.FailureKind, failure_kind)))
+
+        assert len(heard) == 1
+        assert heard[0].name == SoundEvent.name
+        assert heard[0].source == phone_id
+        tone = heard[0].data
+        assert isinstance(tone, phone_device.PhoneSoundData)
+        assert tone.kind == expected_kind
+        assert tone.audio == expected_audio
+        assert tone.audio.startswith(b"RIFF")
+        assert tone.media_type == "audio/wav"
+        assert tone.sample_rate_hz == 16_000
+        assert tone.channels == 1
+        # An earpiece tone, not the ringer: for the one person holding the handset.
+        assert tone.amplitude_db == phone_device.CALL_PROGRESS_DB
+        assert phone_device.CALL_PROGRESS_DB < phone_device.RINGER_DB
+        # A tone identifies nobody; only a ringing phone shows you who is calling.
+        assert tone.caller is None
+        # The device plane is unchanged: the environment gets the sound, the service gets the fact.
+        assert published == [
+            phone_device.ServiceDialRequestedEvent.name,
+            phone_device.NoCallEvent.name,
+        ]
+
+def test_phone_no_call_carries_the_service_verdict_that_chose_the_tone() -> None:
+    async def run() -> phone_device.NoCallData:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, phone.model)
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        firmware = _phone_firmware(phone)
+        await phone.dispatch(
+            phone.context(),
+            phone_device.DialEvent.with_data(
+                phone_device.DialData(
+                    target=phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
+                )
+            ),
+        )
+        await _emit_service_event(
+            phone,
+            phone_device.ServiceDialFailedEvent.with_data(phone_device.DialFailedData(failure_kind="call_declined")),
+        )
+        published = firmware.event_recorder().events[-1].data
+        assert isinstance(published, phone_device.NoCallData)
+        return published
+
+    no_call = asyncio.run(run())
+
+    assert no_call.reason == "dial_failed"
+    assert no_call.failure_kind == "call_declined"
+    assert no_call == phone_device.NoCallData(reason="dial_failed", failure_kind="call_declined")
+
+def test_phone_makes_no_sound_for_the_ways_a_handset_makes_none() -> None:
+    """Three ways to end up with no call that a real handset marks with silence.
+
+    ``nothing_to_answer``: a handset with nothing ringing does essentially nothing audible when
+    you press answer. ``dial_abandoned``: you hung up, so you hear nothing, because you hung up.
+    ``dial_not_answered``: there is no "they did not answer" tone — a real caller hears ringback
+    the whole time and then gives up, so what marks this case is ringback stopping rather than any
+    sound starting. Each still reports ``phone.no_call`` on the device plane; silence in the
+    environment is what the object does, not a dropped notification.
+    """
+
+    async def answer_with_nothing_ringing(phone: phone_device.Phone) -> None:
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+
+    async def hang_up_mid_dial(phone: phone_device.Phone) -> None:
+        await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()))
+
+    async def wait_out_the_ring(phone: phone_device.Phone) -> None:
+        del phone
+        await asyncio.sleep(0.05)
+
+    async def run(
+        act: collections.abc.Callable[[phone_device.Phone], collections.abc.Awaitable[None]],
+        dial_first: bool,
+    ) -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
+        environment = Environment()
+        if dial_first:
+            phone, firmware, listener = await _dialing_phone_in_environment(environment)
+        else:
+            phone = phone_device.Phone()
+            listener = PhoneObservationRecorder()
+            _ = await hsm.started(environment, phone, phone.model)
+            _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+            environment.join(listener)
+            await _wait_until(lambda: phone.state() == "/Device/detached")
+            firmware = _phone_firmware(phone)
+        await act(phone)
+        await _wait_until(
+            lambda: phone_device.NoCallEvent.name in _event_names(firmware.event_recorder()),
+        )
+        # Give any broadcast that was going to happen every chance to land.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return listener.events, list(firmware.event_recorder().events)
+
+    for act, dial_first, expected_reason in (
+        (answer_with_nothing_ringing, False, "nothing_to_answer"),
+        (hang_up_mid_dial, True, "dial_abandoned"),
+        (wait_out_the_ring, True, "dial_not_answered"),
+    ):
+        heard, published = asyncio.run(run(act, dial_first))
+
+        assert heard == []
+        no_call = published[-1].data
+        assert isinstance(no_call, phone_device.NoCallData)
+        assert no_call.reason == expected_reason
+        # Nothing decided these but the phone and its operator, so there is no service verdict.
+        assert no_call.failure_kind is None
+
 def test_phone_committed_observations_have_priority_over_queued_external_events() -> None:
     async def run() -> tuple[str, list[str]]:
         phone = phone_device.Phone()

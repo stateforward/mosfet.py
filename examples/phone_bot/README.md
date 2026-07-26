@@ -61,6 +61,14 @@ After answer, room media can flow `ServiceAudioReceived` → speaker → `enviro
 Listening. Local speaker uplink is published to the LiveKit track (remote delivery is
 suppressed to avoid echo).
 
+A dial that never becomes a call is heard too, as the tone the exchange would have put in the
+caller's ear: `kind=phone.busy` when the line refused or is engaged, `kind=phone.reorder` (fast
+busy) every other way the network fails to complete the call. Both come out of the earpiece at
+`CALL_PROGRESS_DB`, 20 dB under the ringer, because they are for the one person holding the
+handset. The other ways to end up with no call — nothing was ringing, the bot hung up mid-dial,
+nobody answered — make **no sound**, because no telephone makes one for them; they stay on the
+service plane as `phone.no_call`. What the bot does about a busy tone is its own call.
+
 To let this bot place calls, give it a dial plan with `BOT_LIVEKIT_DIRECTORY`
 (`name=identity`, or a bare identity dialable by its own name). With no dial plan the bot is
 registered with no exchange: it can be called but cannot call. Answering, declining, and hanging

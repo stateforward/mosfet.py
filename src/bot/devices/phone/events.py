@@ -388,6 +388,15 @@ class PhoneSoundData(SoundData):
 
     Subclasses :class:`~bot.environment.SoundData` with the caller ID, so what a bot perceives
     when a phone rings is who is calling. ``None`` is a real ring: a withheld caller still rings.
+
+    The phone's ``kind`` vocabulary, all of it sound a handset genuinely makes:
+
+    * ``phone.ringing`` — the ringer, for an incoming call. Carries the caller.
+    * ``phone.busy`` — busy tone. A dialled line refused the call or is engaged.
+    * ``phone.reorder`` — reorder tone (fast busy). The network could not complete the call.
+
+    Only the ringer carries a caller. A call-progress tone is put on the line by the exchange and
+    says nothing about who was dialled, which is exactly why a caller learns so little from one.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -396,8 +405,10 @@ class PhoneSoundData(SoundData):
         val_json_bytes="base64",
         json_schema_extra={
             "description": (
-                "Phone-elevated acoustic stimulus for environment.sound. Carries the caller ID the "
-                "phone reports, or null when the caller is unknown or withheld."
+                "Phone-elevated acoustic stimulus for environment.sound. Either the ringer "
+                "(phone.ringing, carrying the caller ID the phone reports, or null when the caller "
+                "is unknown or withheld) or a call-progress tone the exchange put in the caller's "
+                "ear (phone.busy, phone.reorder), which carries no caller."
             ),
             "examples": [
                 {
@@ -407,7 +418,14 @@ class PhoneSoundData(SoundData):
                     "channels": 1,
                     "kind": "phone.ringing",
                     "caller": "Front desk",
-                }
+                },
+                {
+                    "audio": "YXVkaW8tY2h1bms=",
+                    "media_type": "audio/wav",
+                    "sample_rate_hz": 16000,
+                    "channels": 1,
+                    "kind": "phone.busy",
+                },
             ],
         },
     )
@@ -416,7 +434,8 @@ class PhoneSoundData(SoundData):
         default=None,
         description=(
             "Who this call is with, as the phone reports it. Null when the caller is unknown or "
-            "withheld — an anonymous call rings exactly like an identified one."
+            "withheld — an anonymous call rings exactly like an identified one — and always null "
+            "on a call-progress tone, which identifies nobody."
         ),
         examples=["Front desk", "+15555550123"],
     )
@@ -447,7 +466,11 @@ class NoCallData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"reason": "nothing_to_answer"}, {"reason": "dial_not_answered"}],
+            "examples": [
+                {"reason": "nothing_to_answer"},
+                {"reason": "dial_not_answered"},
+                {"reason": "dial_failed", "failure_kind": "call_declined"},
+            ],
         },
     )
 
@@ -459,6 +482,18 @@ class NoCallData(pydantic.BaseModel):
             "reported the attempt could not be completed."
         ),
         examples=["nothing_to_answer", "dial_not_answered", "dial_abandoned", "dial_failed"],
+    )
+    failure_kind: FailureKind | None = pydantic.Field(
+        default=None,
+        description=(
+            "The service's normalized verdict on a dial_failed attempt, carried through unchanged. "
+            "Null for every other reason, because nothing outside the phone decided those: nobody "
+            "answered, the operator hung up, or there was nothing ringing to answer. This is what "
+            "separates a refused line from an unreachable one — the same distinction a real caller "
+            "hears as busy tone against reorder — so flattening it away leaves the phone unable to "
+            "say which sound the exchange would have made."
+        ),
+        examples=["call_declined", "remote_unavailable", "provider_unavailable"],
     )
 
 class PhoneTransferData(CallIdData):
