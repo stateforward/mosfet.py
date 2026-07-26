@@ -5,7 +5,7 @@ Three live phases against a real ``Phone`` device. Nothing about the ring is syn
 the phone firmware produces the stimulus and this script only observes typed events.
 
 1. **Experience** — an injected :class:`~bot.devices.phone.PhoneEventRecorder` delivers a
-   provider incoming call. Firmware rings and elevates that ring to a real ``world.sound``
+   provider incoming call. Firmware rings and elevates that ring to a real ``environment.sound``
    stimulus (``PhoneSoundData`` with the packaged ring WAV plus ``call_id``). Intuition
    deliberates that turn live against the phone's offered call events, and the turn is
    stored in memory as a cognitive episode.
@@ -56,7 +56,7 @@ from bot.devices import phone as phone_device
 from bot.protocols import attachment
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.world import SoundEvent, World
+from bot.environment import SoundEvent, Environment
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _LESSON = "When the phone rings make sure you answer it"
@@ -240,8 +240,8 @@ class RingWatcher(phone_device.PhoneEventRecorder):
         return self._published.expect(lambda event: event.name == name, seen=self.events)
 
     @typing.override
-    async def attach(self, world: World, target: hsm.Instance) -> None:
-        await super().attach(world, target)
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+        await super().attach(environment, target)
         self._attached_target = target
         for future in self._attach_waiters:
             if not future.done():
@@ -249,8 +249,8 @@ class RingWatcher(phone_device.PhoneEventRecorder):
         self._attach_waiters = []
 
     @typing.override
-    async def detach(self, world: World, target: hsm.Instance) -> None:
-        await super().detach(world, target)
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+        await super().detach(environment, target)
         if self._attached_target is target:
             self._attached_target = None
 
@@ -261,10 +261,10 @@ class RingWatcher(phone_device.PhoneEventRecorder):
 
 
 class TerminalCollector(hsm.Instance):
-    """Attachment owner and world listener for one phase of the proof.
+    """Attachment owner and environment listener for one phase of the proof.
 
     Abilities dispatch their terminal events to their attachment owner, and a started
-    instance in a :class:`~bot.world.World` receives world broadcasts. Collecting both is
+    instance in a :class:`~bot.environment.Environment` receives environment broadcasts. Collecting both is
     what lets the script await typed attach, ability, and stimulus events.
     """
 
@@ -294,15 +294,15 @@ class TerminalCollector(hsm.Instance):
     )
 
 
-async def started_collector(world: World) -> TerminalCollector:
+async def started_collector(environment: Environment) -> TerminalCollector:
     collector = TerminalCollector()
-    _ = await hsm.started(world, collector, typing.cast(hsm.Model, TerminalCollector.model))
-    world.join(collector)
+    _ = await hsm.started(environment, collector, typing.cast(hsm.Model, TerminalCollector.model))
+    environment.join(collector)
     return collector
 
 
 async def attach_ability(
-    world: World,
+    environment: Environment,
     collector: TerminalCollector,
     ability: abilities.Ability[typing.Any, typing.Any],
 ) -> None:
@@ -314,7 +314,7 @@ async def attach_ability(
         and event.name in (attachment.AttachCompleteEvent.name, attachment.AttachFailedEvent.name)
     )
     _ = await ability.attach(
-        world,
+        environment,
         attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=collector), operation_id),
     )
     event = await awaited(terminal, timeout=_ATTACH_TIMEOUT_S, what=f"{type(ability).__name__} attach terminal")
@@ -325,7 +325,7 @@ async def attach_ability(
 
 
 async def ability_output(
-    world: World,
+    environment: Environment,
     collector: TerminalCollector,
     ability: abilities.Ability[typing.Any, typing.Any],
     input: object,
@@ -338,7 +338,7 @@ async def ability_output(
     output_name = ability.output_event.name
     failed_name = ability.failed_event.name
     terminal = collector.expect(lambda event: event.id == operation_id and event.name in (output_name, failed_name))
-    _ = await hsm.dispatch(world, ability, ability.input_event.with_data_and_id(input, operation_id))
+    _ = await hsm.dispatch(environment, ability, ability.input_event.with_data_and_id(input, operation_id))
     event = await awaited(terminal, timeout=timeout, what=f"{type(ability).__name__} terminal")
     if event.name == failed_name:
         data = event.data
@@ -348,16 +348,16 @@ async def ability_output(
 
 
 async def ringing_phone(
-    world: World,
+    environment: Environment,
     collector: TerminalCollector,
     *,
     call_id: str,
 ) -> tuple[phone_device.Phone, RingWatcher, hsm.Event[typing.Any]]:
-    """Start a phone, ring it through its service, and return the elevated world stimulus."""
+    """Start a phone, ring it through its service, and return the elevated environment stimulus."""
 
     watcher = RingWatcher()
     phone = phone_device.Phone(service=watcher)
-    _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+    _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
     await awaited(watcher.attached(), timeout=_DEVICE_TIMEOUT_S, what="phone service attach")
     ringing = watcher.expect(phone_device.RingingEvent.name)
     elevated = collector.expect(
@@ -372,7 +372,7 @@ async def ringing_phone(
         ),
     )
     _ = await awaited(ringing, timeout=_DEVICE_TIMEOUT_S, what=f"{phone_device.RingingEvent.name} for {call_id}")
-    stimulus = await awaited(elevated, timeout=_DEVICE_TIMEOUT_S, what=f"world.sound ring elevation for {call_id}")
+    stimulus = await awaited(elevated, timeout=_DEVICE_TIMEOUT_S, what=f"environment.sound ring elevation for {call_id}")
     return phone, watcher, stimulus
 
 
@@ -433,21 +433,21 @@ def installed_behavior(store: memory.Memory, name: str) -> behavior.Instance | N
     return instances[0] if instances else None
 
 
-async def experience_ring(world: World, store: memory.Memory) -> cognition.episodes.CognitiveEpisode:
+async def experience_ring(environment: Environment, store: memory.Memory) -> cognition.episodes.CognitiveEpisode:
     """Phase 1: deliberate one real ring live and remember that turn in memory."""
 
-    collector = await started_collector(world)
-    phone, watcher, stimulus = await ringing_phone(world, collector, call_id=_EXPERIENCE_CALL_ID)
+    collector = await started_collector(environment)
+    phone, watcher, stimulus = await ringing_phone(environment, collector, call_id=_EXPERIENCE_CALL_ID)
     print(f"ring #1 stimulus: {describe_stimulus(stimulus)}")
     intuition = cognition.Intuition(processor=_processor())
-    await attach_ability(world, collector, intuition)
+    await attach_ability(environment, collector, intuition)
     operation_id = uuid.uuid4().hex
     turn = ring_turn(phone, stimulus, operation_id=operation_id)
     processing_input = cognition.input.build_processing_input(turn.input)
     offered = tuple(event.name for event in processing_input.schemas)
     print(f"ring #1 offered events: {list(offered)}")
     completion = await ability_output(
-        world,
+        environment,
         collector,
         intuition,
         cognition.intuition.InputData(turn=turn, processing_input=processing_input),
@@ -472,19 +472,19 @@ async def experience_ring(world: World, store: memory.Memory) -> cognition.episo
         output=selections,
     )
     _ = store.execute(cognition.episodes.episode_insert_input(episode, context_ref=turn.input.focus))
-    await hsm.stop(phone, world)
-    await hsm.stop(collector, world)
+    await hsm.stop(phone, environment)
+    await hsm.stop(collector, environment)
     return episode
 
 
-async def learn_lesson(world: World, store: memory.Memory, lesson: str) -> learning.OutputData:
+async def learn_lesson(environment: Environment, store: memory.Memory, lesson: str) -> learning.OutputData:
     """Phase 2: Learning decodes the spoken lesson and Revision authors the behavior."""
 
-    collector = await started_collector(world)
+    collector = await started_collector(environment)
     ability = learning.Learning(decoder=LessonTextDecoder(), processor=_processor(), memory=store)
-    await attach_ability(world, collector, ability)
+    await attach_ability(environment, collector, ability)
     output = await ability_output(
-        world,
+        environment,
         collector,
         ability,
         learning.InputData(content=lesson, media_type="text/plain"),
@@ -496,19 +496,19 @@ async def learn_lesson(world: World, store: memory.Memory, lesson: str) -> learn
     return output
 
 
-async def prove_ring_answers(world: World, store: memory.Memory) -> tuple[tuple[str, ...], bool]:
+async def prove_ring_answers(environment: Environment, store: memory.Memory) -> tuple[tuple[str, ...], bool]:
     """Phase 3: ring a fresh phone and run Autonomy with the installed behavior loaded."""
 
-    collector = await started_collector(world)
+    collector = await started_collector(environment)
     autonomy = cognition.Autonomy(memory=store)
-    await attach_ability(world, collector, autonomy)
-    phone, watcher, stimulus = await ringing_phone(world, collector, call_id=_PROOF_CALL_ID)
+    await attach_ability(environment, collector, autonomy)
+    phone, watcher, stimulus = await ringing_phone(environment, collector, call_id=_PROOF_CALL_ID)
     print(f"ring #2 stimulus: {describe_stimulus(stimulus)}")
     operation_id = uuid.uuid4().hex
     turn = ring_turn(phone, stimulus, operation_id=operation_id)
     requested = watcher.expect(phone_device.ServiceAnswerRequestedEvent.name)
     completion = await ability_output(
-        world,
+        environment,
         collector,
         autonomy,
         turn,
@@ -523,24 +523,24 @@ async def prove_ring_answers(world: World, store: memory.Memory) -> tuple[tuple[
             answered = True
         except TimeoutError as error:
             print(f"NOTE: {error}")
-    await hsm.stop(phone, world)
-    await hsm.stop(collector, world)
+    await hsm.stop(phone, environment)
+    await hsm.stop(collector, environment)
     return events, answered
 
 
 async def prove(lesson: str) -> int:
     store = memory.Memory()
-    world = World()
+    environment = Environment()
 
     print("--- phase 1: experience a real ring ---")
-    episode = await experience_ring(world, store)
+    episode = await experience_ring(environment, store)
     print(
         f"remembered turn: stimulus_name={episode.stimulus_name!r} focus={episode.focus!r} "
         f"output={[item.event for item in episode.output]}"
     )
 
     print("--- phase 2: learn the spoken lesson ---")
-    output = await learn_lesson(world, store, lesson)
+    output = await learn_lesson(environment, store, lesson)
     print(f"decoded.text={output.decoded.text!r} kind={output.decoded.kind!r}")
     print(
         f"runtime_input.stimulus_name={output.runtime_input.stimulus_name!r} "
@@ -564,7 +564,7 @@ async def prove(lesson: str) -> int:
     print(f"installed: status={installed.status} triggers={installed.triggers} reason={installed.status_reason!r}")
 
     print("--- phase 3: ring again and let Autonomy run the behavior ---")
-    events, answered = await prove_ring_answers(world, store)
+    events, answered = await prove_ring_answers(environment, store)
     print(f"ring #2 autonomy selected: {list(events)} answer_requested={answered}")
     if phone_device.AnswerCallEvent.name not in events:
         print(

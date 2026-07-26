@@ -183,7 +183,7 @@ class RuntimeInputData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "stimulus_name": "world.sound",
+                    "stimulus_name": "environment.sound",
                     "payload": {"kind": "phone.ringing", "call_id": "incoming-call"},
                     "focus": "phone",
                     "focus_candidates": ["phone"],
@@ -196,8 +196,8 @@ class RuntimeInputData(pydantic.BaseModel):
 
     stimulus_name: str = pydantic.Field(
         min_length=1,
-        description="External event name that should propose the behavior (e.g. world.sound).",
-        examples=["world.sound"],
+        description="External event name that should propose the behavior (e.g. environment.sound).",
+        examples=["environment.sound"],
     )
     payload: dict[str, object] = pydantic.Field(
         min_length=1,
@@ -295,7 +295,7 @@ class RememberedTurn(pydantic.BaseModel):
 
     focus: str | None = pydantic.Field(default=None, examples=["phone"])
     focus_candidates: tuple[str, ...] = pydantic.Field(default=(), examples=[["phone"]])
-    stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["world.sound"])
+    stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["environment.sound"])
     output: tuple[RememberedSelection, ...] = pydantic.Field(
         default=(),
         description="Prior selections from that turn (event/target/data/reason).",
@@ -320,7 +320,7 @@ class GenerateData(pydantic.BaseModel):
                     "name": "AnswerIncomingRing",
                     "reason": "When the phone rings, answer it.",
                     "runtime_input": {
-                        "stimulus_name": "world.sound",
+                        "stimulus_name": "environment.sound",
                         "payload": {"kind": "phone.ringing"},
                         "focus_candidates": ["phone"],
                         "expected_event": "bot.focus_device",
@@ -512,7 +512,7 @@ def _intent_from_generate(generate: GenerateData) -> CreateData | ChangeData:
 def _synthetic_stimulus(runtime_input: RuntimeInputData, *, operation_id: str) -> hsm.Event[object]:
     """Build an ObservedBotEvent-shaped stimulus for Revision dry-run / authoring."""
 
-    # Shaped like the world stimulus it stands in for (``world.sound`` and friends declare no
+    # Shaped like the environment stimulus it stands in for (``environment.sound`` and friends declare no
     # kind), not like a tool: this is dry-run authoring input, never offered for selection.
     template = hsm.Event[object](
         name=runtime_input.stimulus_name,

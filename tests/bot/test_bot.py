@@ -32,7 +32,7 @@ from bot.device import Device
 from bot.event_schema import event_json_schema
 from bot.protocols import attachment
 
-from bot.world import SoundData, SoundEvent, VisualData, VisualEvent, World, space
+from bot.environment import SoundData, SoundEvent, VisualData, VisualEvent, Environment, space
 from tests.hsm_instance_state import (
     device_firmware,
     bot_has_focus,
@@ -79,7 +79,7 @@ def assert_heard_phone_ring(
     phone: phone_device.Phone | None = None,
     call_id: str | None = None,
 ) -> None:
-    """Ringing is world.sound from the phone; cognition sees that sound stimulus, not phone.ringing."""
+    """Ringing is environment.sound from the phone; cognition sees that sound stimulus, not phone.ringing."""
 
     assert isinstance(input, hsm.Event)
     assert input.name == SoundEvent.name
@@ -654,11 +654,11 @@ def configured_devices(*references: str) -> dict[str, Device]:
     return {reference: Device() for reference in references}
 
 
-async def start_bot_with_devices(active_bot: Bot, *, placement: space.Placement | None = None) -> World:
-    world = World()
-    _ = await active_bot.attach(world, placement=placement)
+async def start_bot_with_devices(active_bot: Bot, *, placement: space.Placement | None = None) -> Environment:
+    environment = Environment()
+    _ = await active_bot.attach(environment, placement=placement)
     await wait_until(lambda: active_bot.state() != "/Bot/activating")
-    return world
+    return environment
 
 
 def test_cognition_reboot_request_cycles_bot_lifecycle(
@@ -685,7 +685,7 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
             release=release, block_on_call=1, outputs=(no_output("turn"), no_output("turn"))
         )
         active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability)
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         cognition_ability = active_bot._cognition
         await active_bot.dispatch(
             active_bot.context(),
@@ -693,7 +693,7 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/processing" and len(ability.calls) == 1)
         _ = await hsm.dispatch(
-            world,
+            environment,
             active_bot,
             dataclasses.replace(
                 bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
@@ -759,12 +759,12 @@ def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts
             await original_attach(group, ctx, event)
 
         monkeypatch.setattr(attachment.Group, "attach", block_first_bot_attach)
-        world = World()
-        _ = await active_bot.attach(world)
+        environment = Environment()
+        _ = await active_bot.attach(environment)
         await first_attach_started.wait()
         assert active_bot.state() == "/Bot/activating"
         _ = await hsm.dispatch(
-            world,
+            environment,
             active_bot,
             dataclasses.replace(
                 bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_detach_rollback_failed")),
@@ -812,11 +812,11 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart() -> 
             cognition=IgnoreAbility(),
             acquired_abilities=(stuck,),
         )
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         cognition_ability = active_bot._cognition
         _ = await hsm.dispatch(
-            world,
+            environment,
             active_bot,
             dataclasses.replace(
                 bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
@@ -842,16 +842,16 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart() -> 
     assert detach_calls == 1
 
 
-def test_bot_attach_rejects_started_agent_from_another_world() -> None:
+def test_bot_attach_rejects_started_agent_from_another_environment() -> None:
     async def run() -> None:
         active_bot = basic_agent(devices={})
-        first_world = World()
-        second_world = World()
+        first_environment = Environment()
+        second_environment = Environment()
 
-        _ = await active_bot.attach(first_world)
+        _ = await active_bot.attach(first_environment)
 
-        with pytest.raises(RuntimeError, match="Bot is already started in another world"):
-            _ = await active_bot.attach(second_world)
+        with pytest.raises(RuntimeError, match="Bot is already started in another environment"):
+            _ = await active_bot.attach(second_environment)
 
     asyncio.run(run())
 
@@ -860,9 +860,9 @@ def test_bot_activation_deduplicates_device_aliases() -> None:
     async def run() -> tuple[str, bool]:
         shared_device = Device()
         active_bot = basic_agent(devices={"one": shared_device, "two": shared_device})
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
 
         return active_bot.state(), device_bots(shared_device) == (active_bot,)
@@ -876,7 +876,7 @@ def test_bot_activation_deduplicates_device_aliases() -> None:
 def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[int, int, bool, str]:
         active_bot = basic_agent(devices={"device": Device()})
-        world = World()
+        environment = Environment()
         attach_calls = 0
         detach_calls = 0
         group_is_private = False
@@ -890,7 +890,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
         ) -> collections.abc.Awaitable[None]:
             nonlocal attach_calls, group_is_private
             attach_calls += 1
-            group_is_private = group.context().value(hsm.Keys.Instances) is not world.value(hsm.Keys.Instances)
+            group_is_private = group.context().value(hsm.Keys.Instances) is not environment.value(hsm.Keys.Instances)
             return group_attach(group, ctx, event)
 
         def detach_group(
@@ -905,9 +905,9 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
         monkeypatch.setattr(attachment.Group, "attach", attach_group)
         monkeypatch.setattr(attachment.Group, "detach", detach_group)
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
         return attach_calls, detach_calls, group_is_private, active_bot.state()
 
@@ -919,30 +919,30 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
     assert state == "/Bot/inactive"
 
 
-def test_bot_rejects_world_started_lifecycle_ability_without_stopping_it() -> None:
+def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it() -> None:
     async def run() -> tuple[str, str, bool]:
         cognition_ability = as_cognition(IgnoreAbility())
         active_bot = AbilityAgent(devices={}, cognition=cognition_ability)
-        world = World()
+        environment = Environment()
         model = cognition_ability.model
         assert model is not None
-        _ = await hsm.started(world, cognition_ability, model)
+        _ = await hsm.started(environment, cognition_ability, model)
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await asyncio.sleep(0.05)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return (
             active_bot.state(),
             cognition_ability.state(),
-            cognition_ability.context().value(hsm.Keys.Instances) is world.value(hsm.Keys.Instances),
+            cognition_ability.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances),
         )
 
-    state, ability_state, ability_stayed_in_world = asyncio.run(run())
+    state, ability_state, ability_stayed_in_environment = asyncio.run(run())
 
     assert state == "/Bot/inactive"
     assert ability_state != "/IgnoreAbilityLifecycle"
-    assert ability_stayed_in_world
+    assert ability_stayed_in_environment
 
 
 def test_bot_deduplicates_repeated_lifecycle_ability_instance() -> None:
@@ -954,11 +954,11 @@ def test_bot_deduplicates_repeated_lifecycle_ability_instance() -> None:
             input=(shared,),
             output=(shared,),
         )
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
         return active_bot.state()
 
@@ -970,18 +970,18 @@ def test_bot_attachment_group_preserves_preexisting_device_attachment() -> None:
         first_device = Device()
         failing_device = ImmediatelyFailingInitializingDevice()
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
+        environment = Environment()
 
-        _ = await hsm.started(world, active_bot, active_bot.model)
-        _ = await hsm.started(world, first_device, first_device.model)
+        _ = await hsm.started(environment, active_bot, active_bot.model)
+        _ = await hsm.started(environment, first_device, first_device.model)
         await first_device.attach(
-            world,
+            environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=active_bot)),
         )
         await wait_until(lambda: device_bots(first_device) == (active_bot,))
         assert device_bots(first_device) == (active_bot,)
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return active_bot.state(), device_bots(first_device) == (active_bot,)
@@ -997,9 +997,9 @@ def test_bot_activation_waits_for_device_attach_events() -> None:
         release = asyncio.Event()
         device = SlowInitializingDevice(release)
         active_bot = basic_agent(devices={"slow": device})
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: device.state() == "/Device/initializing")
         await asyncio.sleep(0)
 
@@ -1029,12 +1029,12 @@ def test_bot_detach_during_activation_stops_owned_lifecycle_tree() -> None:
             input=(input_ability,),
             output=(output_ability,),
         )
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: device.state() == "/Device/initializing")
         group = typing.cast(attachment.Group, vars(active_bot)["_attachments"])
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() in {"/Bot/inactive", "/Bot/degraded"})
 
         return (
@@ -1059,9 +1059,9 @@ def test_bot_activation_rolls_back_when_device_firmware_initialization_fails() -
         first_device = Device()
         failing_device = FailingInitializingDevice(release)
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: failing_device.state() == "/Device/initializing")
         release.set()
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
@@ -1086,9 +1086,9 @@ def test_bot_activation_rolls_back_when_device_failed_before_attachment() -> Non
         first_device = Device()
         failing_device = ImmediatelyFailingInitializingDevice()
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return (
@@ -1111,9 +1111,9 @@ def test_bot_attachment_group_uses_modeled_device_events_not_dispatch_override()
         first_device = LifecycleDispatchFailingDevice()
         failing_device = ImmediatelyFailingInitializingDevice()
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return active_bot.state(), device_bots(first_device), first_device.state() in {"", "/Device"}
@@ -1130,7 +1130,7 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
         first_device = Device()
         failing_device = Device()
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
-        world = World()
+        environment = Environment()
         original_dispatch = hsm.Instance.dispatch
 
         def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
@@ -1140,7 +1140,7 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
 
         monkeypatch.setattr(hsm.Instance, "dispatch", dispatch)
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         # Activation cleanup now stops nested ability/group holds; give wall-clock time
         # beyond pure yield scheduling for the modeled rollback path.
         for _ in range(200):
@@ -1176,9 +1176,9 @@ def test_bot_attachment_group_handles_multiple_firmware_initialization_failures(
                 "second_failing": second_failing_device,
             }
         )
-        world = World()
+        environment = Environment()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(
             lambda: first_failing_device.state() == "/Device/initializing"
             and second_failing_device.state() == "/Device/initializing"
@@ -1207,9 +1207,9 @@ def test_bot_deactivation_detaches_shared_device_alias() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool]:
         shared_device = LifecycleDispatchFailingDevice()
         active_bot = basic_agent(devices={"one": shared_device, "two": shared_device})
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
 
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return active_bot.state(), device_bots(shared_device), shared_device.state() in {"", "/Device"}
@@ -1265,12 +1265,12 @@ async def emit_phone_service_event(phone: phone_device.Phone, event: hsm.Event[t
     await recorder.receive(phone.context(), event)
 
 
-async def answered_phone_in_world() -> tuple[World, phone_device.Phone]:
-    world = World()
+async def answered_phone_in_environment() -> tuple[Environment, phone_device.Phone]:
+    environment = Environment()
     phone = phone_device.Phone()
-    _ = await hsm.started(world, phone, phone.model)
+    _ = await hsm.started(environment, phone, phone.model)
     await answer_phone(phone)
-    return world, phone
+    return environment, phone
 
 
 def probe_input() -> processing.InputData:
@@ -1409,8 +1409,8 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/reboot_cleanup_reset"]
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivating"])
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivation_cleanup"])
-    assert "world.sound" in transitions["/Bot/active"]
-    assert "world.visual" in transitions["/Bot/active"]
+    assert "environment.sound" in transitions["/Bot/active"]
+    assert "environment.visual" in transitions["/Bot/active"]
     assert "bot.deactivate" in transitions["/Bot/active"]
     assert "bot.reboot" in transitions["/Bot/active"]
     assert "bot.reboot" in transitions["/Bot/activating"]
@@ -1661,7 +1661,7 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert phone_device.DeclineCallEvent.name in offered
 
 
-def test_bot_processes_world_broadcast_from_configured_device_event() -> None:
+def test_bot_processes_environment_broadcast_from_configured_device_event() -> None:
     async def run() -> tuple[str, str | None, list[processing.InputData], list[cognition.types.OutputData]]:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
@@ -1818,7 +1818,7 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     assert state.endswith("/active/unfocused")
 
 
-def test_bot_does_not_send_speaker_world_sound_to_cognition() -> None:
+def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
     async def run() -> tuple[
         str,
         str | None,
@@ -1830,13 +1830,13 @@ def test_bot_does_not_send_speaker_world_sound_to_cognition() -> None:
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         ability.calls.clear()
         active_bot.actions.clear()
-        # Signal into the speaker; the speaker is the transducer that makes it world sound.
-        await phone_speaker(phone).dispatch(world, audio.OutputEvent.with_data(data))
+        # Signal into the speaker; the speaker is the transducer that makes it environment sound.
+        await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0.05)
 
         return (
@@ -1850,12 +1850,12 @@ def test_bot_does_not_send_speaker_world_sound_to_cognition() -> None:
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    # Speaker elevates to world.sound; Listening skips ordinary no-voice playback (not cognition).
+    # Speaker elevates to environment.sound; Listening skips ordinary no-voice playback (not cognition).
     assert calls == []
     assert actions == []
 
 
-def test_same_world_sibling_bots_do_not_send_speaker_sound_to_cognition() -> None:
+def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() -> None:
     async def run() -> tuple[
         list[processing.InputData],
         list[processing.InputData],
@@ -1869,16 +1869,16 @@ def test_same_world_sibling_bots_do_not_send_speaker_sound_to_cognition() -> Non
         sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
-        world = await start_bot_with_devices(owning_agent)
-        _ = await sibling_agent.attach(world)
+        environment = await start_bot_with_devices(owning_agent)
+        _ = await sibling_agent.attach(environment)
         await wait_until(lambda: sibling_agent.state() == "/Bot/active/unfocused")
         await ring_phone(phone)
         await wait_until(lambda: len(owner_ability.calls) == 1 and owning_agent.state() == "/Bot/active/focused")
         owner_ability.calls.clear()
         owning_agent.actions.clear()
 
-        # Signal into the speaker; the speaker is the transducer that makes it world sound.
-        await phone_speaker(phone).dispatch(world, audio.OutputEvent.with_data(data))
+        # Signal into the speaker; the speaker is the transducer that makes it environment sound.
+        await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0.05)
 
         return (
@@ -1896,7 +1896,7 @@ def test_same_world_sibling_bots_do_not_send_speaker_sound_to_cognition() -> Non
     assert not sibling_focus
 
 
-def test_same_world_sibling_agent_without_phone_config_ignores_phone_broadcast() -> None:
+def test_same_environment_sibling_agent_without_phone_config_ignores_phone_broadcast() -> None:
     async def run() -> tuple[
         list[processing.InputData],
         list[processing.InputData],
@@ -1909,8 +1909,8 @@ def test_same_world_sibling_agent_without_phone_config_ignores_phone_broadcast()
         owning_agent = AbilityAgent(devices={"phone": phone}, cognition=owner_ability, input=(ring_hearing(),))
         sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
 
-        world = await start_bot_with_devices(owning_agent)
-        _ = await sibling_agent.attach(world)
+        environment = await start_bot_with_devices(owning_agent)
+        _ = await sibling_agent.attach(environment)
         await wait_until(lambda: sibling_agent.state() == "/Bot/active/unfocused")
 
         await emit_phone_service_event(
@@ -2313,7 +2313,7 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
                 reason="transfer call",
             ),
         )
-        world, phone = await answered_phone_in_world()
+        environment, phone = await answered_phone_in_environment()
         await emit_phone_service_event(
             phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123"))
         )
@@ -2323,7 +2323,7 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
         )
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await active_bot.dispatch(
             active_bot.context(),
@@ -2367,7 +2367,7 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
                 reason="transfer call",
             )
         )
-        world, phone = await answered_phone_in_world()
+        environment, phone = await answered_phone_in_environment()
         await emit_phone_service_event(
             phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123"))
         )
@@ -2377,7 +2377,7 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
         )
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await active_bot.dispatch(
             active_bot.context(),
@@ -3368,9 +3368,9 @@ def test_bot_timeout_cancel_falls_back_to_processing_cancel_event() -> None:
 def test_attach_is_idempotent_for_started_bot() -> None:
     async def run() -> str:
         active_bot = basic_agent()
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         await wait_until(lambda: active_bot.state().startswith("/Bot/active/"))
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await asyncio.sleep(0)
         return active_bot.state()
 
@@ -3380,7 +3380,7 @@ def test_attach_is_idempotent_for_started_bot() -> None:
 def test_detach_is_idempotent_for_unstarted_bot() -> None:
     async def run() -> None:
         detached = basic_agent()
-        _ = await detached.detach(World())
+        _ = await detached.detach(Environment())
 
     asyncio.run(run())
 
@@ -3390,14 +3390,14 @@ def test_bot_activation_dispatches_completion_after_queueing_device_notification
         device = Device()
         active_bot = basic_agent(devices={"phone": device})
 
-        world = await start_bot_with_devices(active_bot)
-        _ = await active_bot.detach(world)
+        environment = await start_bot_with_devices(active_bot)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         assert active_bot.state() == "/Bot/inactive"
         assert device_bots(device) == ()
 
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: device_bots(device) == (active_bot,))
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
 
@@ -3412,7 +3412,7 @@ def test_bot_rejects_stale_attachment_terminal_from_previous_activation(
 ) -> None:
     async def run() -> tuple[str, str]:
         active_bot = basic_agent(devices={"phone": Device()})
-        world = World()
+        environment = Environment()
         original_attach = attachment.Group.attach
         prior_request: hsm.Event[attachment.AttachData] | None = None
         bot_group: attachment.Group | None = None
@@ -3435,11 +3435,11 @@ def test_bot_rejects_stale_attachment_terminal_from_previous_activation(
             await original_attach(group, ctx, event)
 
         monkeypatch.setattr(attachment.Group, "attach", attach_group)
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
-        _ = await active_bot.attach(world)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/activating")
 
         assert prior_request is not None
@@ -3474,8 +3474,8 @@ def test_bot_deactivation_clears_focus() -> None:
         )
         await wait_until(lambda: bot_has_focus(active_bot))
 
-        world = World.from_context(active_bot.context())
-        _ = await active_bot.detach(world)
+        environment = Environment.from_context(active_bot.context())
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return active_bot.state(), bot_has_focus(active_bot)
@@ -3499,12 +3499,12 @@ def test_bot_deactivation_stops_input_output_abilities() -> None:
             input=(input_ability,),
             output=(output_ability,),
         )
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         assert bot.lifecycle.is_started(input_ability) is True
         assert bot.lifecycle.is_started(output_ability) is True
         assert bot.lifecycle.is_started(cognition_ability) is True
 
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return (
@@ -3576,7 +3576,7 @@ def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPa
 
     async def run() -> str:
         active_bot = FastDeactivationTimeoutAgent(devices={"stuck": HangOnDetachDevice()})
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         original_stop = hsm.stop
 
@@ -3586,7 +3586,7 @@ def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPa
             await original_stop(instance, ctx)
 
         monkeypatch.setattr(hsm, "stop", stop)
-        _ = await active_bot.detach(world)
+        _ = await active_bot.detach(environment)
         # FastDeactivationTimeoutAgent uses a 10ms HSM after; wait_until only yields, so give
         # the timer wall-clock time to fire deactivating -> cleanup -> degraded.
         for _ in range(50):
@@ -3604,9 +3604,9 @@ def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
         unstarted_device = Device()
         active_bot = basic_agent(devices={"started": started_device, "unstarted": unstarted_device})
 
-        world = World()
-        _ = await hsm.started(world, started_device, started_device.model)
-        _ = await active_bot.attach(world)
+        environment = Environment()
+        _ = await hsm.started(environment, started_device, started_device.model)
+        _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await wait_until(lambda: device_bots(started_device) == (active_bot,))
         await wait_until(lambda: device_bots(unstarted_device) == (active_bot,))
@@ -3618,14 +3618,14 @@ def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
     asyncio.run(run())
 
 
-def test_bot_activation_starts_phone_peripherals_in_agent_world() -> None:
+def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
     async def run() -> tuple[str, str, str, str, bool, bool, bool, bool]:
         phone = phone_device.Phone()
         active_bot = basic_agent(devices={"phone": phone})
 
-        world = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         assert device_firmware(phone) is not None
-        world_scope = world.value(hsm.Keys.Instances)
+        environment_scope = environment.value(hsm.Keys.Instances)
 
         microphone = phone_microphone(phone)
         speaker = phone_speaker(phone)
@@ -3634,10 +3634,10 @@ def test_bot_activation_starts_phone_peripherals_in_agent_world() -> None:
             device_firmware(phone).state(),
             microphone.state(),
             speaker.state(),
-            active_bot.context().value(hsm.Keys.Instances) is world_scope,
-            phone.context().value(hsm.Keys.Instances) is world_scope,
-            microphone.context().value(hsm.Keys.Instances) is world_scope,
-            speaker.context().value(hsm.Keys.Instances) is world_scope,
+            active_bot.context().value(hsm.Keys.Instances) is environment_scope,
+            phone.context().value(hsm.Keys.Instances) is environment_scope,
+            microphone.context().value(hsm.Keys.Instances) is environment_scope,
+            speaker.context().value(hsm.Keys.Instances) is environment_scope,
         )
 
     phone_state, firmware_state, microphone_state, speaker_state, agent_scope, phone_scope, mic_scope, speaker_scope = (
@@ -3662,11 +3662,11 @@ def test_bot_lifecycle_starts_and_stops_innate_ability() -> None:
         bot_instance = FocusedAgent(devices={})
         probe = bot_instance.probe
 
-        world = await start_bot_with_devices(bot_instance)
+        environment = await start_bot_with_devices(bot_instance)
         _ = await probe.apply(probe_input())
         await wait_until(lambda: bool(probe.calls))
 
-        _ = await bot_instance.detach(world)
+        _ = await bot_instance.detach(environment)
         await wait_until(lambda: bot_instance.state() == "/Bot/inactive")
 
         return probe.calls, bot_instance.state()
@@ -3686,11 +3686,11 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
             acquired_abilities=(acquired,),
         )
 
-        world = await start_bot_with_devices(bot_instance)
+        environment = await start_bot_with_devices(bot_instance)
         _ = await acquired.apply(probe_input())
         await wait_until(lambda: bool(acquired.calls))
 
-        _ = await bot_instance.detach(world)
+        _ = await bot_instance.detach(environment)
         await wait_until(lambda: bot_instance.state() == "/Bot/inactive")
 
         return acquired.calls, acquired.state()
@@ -3717,7 +3717,7 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
         active_bot = AbilityAgent(devices={}, cognition=ability, input=(ring_hearing(),))
         here = space.Position(x=0.0, y=0.0)
 
-        world = await start_bot_with_devices(
+        environment = await start_bot_with_devices(
             active_bot, placement=space.Placement(position=here, threshold_db=20.0)
         )
         ability.calls.clear()
@@ -3734,11 +3734,11 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
                 )
             )
 
-        await world.broadcast(sound(b"far-away"), origin=space.Position(x=500.0, y=0.0))
+        await environment.broadcast(sound(b"far-away"), origin=space.Position(x=500.0, y=0.0))
         await asyncio.sleep(0)
         after_far = len(ability.calls)
 
-        await world.broadcast(sound(b"right-here"), origin=here)
+        await environment.broadcast(sound(b"right-here"), origin=here)
         await wait_until(lambda: len(ability.calls) > after_far)
 
         return after_far, len(ability.calls)

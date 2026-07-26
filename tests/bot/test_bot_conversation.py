@@ -21,7 +21,7 @@ from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice as hearing_voice
 from bot.bot import Bot
 from bot.device import Device
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.test_bot import as_cognition
 
 
@@ -140,8 +140,8 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
@@ -151,7 +151,7 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
             conversation_ref="support-call",
         )
         _ = await hsm.dispatch(
-            world,
+            environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(message, operation_id),
         )
@@ -188,8 +188,8 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         encoded = conversation.Response(
@@ -205,7 +205,7 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(world, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         return processor.inputs, probe.state() or ""
 
@@ -228,8 +228,8 @@ def test_bot_ignores_contribution_with_null_decoded_text() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         bare = conversation.Response(
@@ -244,7 +244,7 @@ def test_bot_ignores_contribution_with_null_decoded_text() -> None:
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(world, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         return processor.inputs
 
@@ -265,8 +265,8 @@ def test_bot_accepts_contribution_with_empty_decoded_text() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         silence = conversation.Response(
@@ -281,7 +281,7 @@ def test_bot_accepts_contribution_with_empty_decoded_text() -> None:
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(world, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
         await _wait_until(lambda: len(processor.inputs) == 1, timeout=2.0)
         texts: list[str | None] = []
         for item in processor.inputs:
@@ -311,8 +311,8 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         contribution = conversation.Response(
@@ -328,7 +328,7 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(world, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         return encoder.calls
 
@@ -354,12 +354,12 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
         _ = await hsm.dispatch(
-            world,
+            environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
                 conversation.text_turn("only body path"),
@@ -421,14 +421,14 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
         first_id = uuid.uuid4().hex
         _ = await hsm.dispatch(
-            world,
+            environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
                 conversation.text_turn("first", conversation_ref="call-a"),
@@ -442,7 +442,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
         # Conversation is single-flight; wait for it to return to silent before second Message.
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
         _ = await hsm.dispatch(
-            world,
+            environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
                 conversation.text_turn("second", conversation_ref="call-b"),
@@ -483,8 +483,8 @@ def test_bot_bridges_listening_speech_to_conversation_then_speaking() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
@@ -497,7 +497,7 @@ def test_bot_bridges_listening_speech_to_conversation_then_speaking() -> None:
             source="listening-ability",
             target=hsm.id(probe),
         )
-        _ = await hsm.dispatch(world, probe, handoff)
+        _ = await hsm.dispatch(environment, probe, handoff)
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         # Speech must not enter deliberative cognition as raw sensory stimulus when Conversation is acquired.
         for item in processor.inputs:
@@ -530,15 +530,15 @@ def test_bot_text_conversation_rejects_non_utf8_speech_product() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
         bad_product = speech.SpeechDecoding.output_event.with_data(b"\xff\xfe not utf-8")
         bad_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=bad_product))
         bad_handoff = dataclasses.replace(bad_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, bad_handoff)
+        _ = await hsm.dispatch(environment, probe, bad_handoff)
         # Fail closed: no Conversation turn, no deliberative cognition, Bot remains active.
         await asyncio.sleep(0.05)
         assert len(processor.inputs) == 0
@@ -549,7 +549,7 @@ def test_bot_text_conversation_rejects_non_utf8_speech_product() -> None:
         good_product = speech.SpeechDecoding.output_event.with_data("hello after refuse".encode("utf-8"))
         good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
         good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, good_handoff)
+        _ = await hsm.dispatch(environment, probe, good_handoff)
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         return encoder.calls
 
@@ -577,15 +577,15 @@ def test_bot_text_conversation_drops_empty_stt_without_bricking() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
         empty_product = speech.SpeechDecoding.output_event.with_data(b"")
         empty_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=empty_product))
         empty_handoff = dataclasses.replace(empty_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, empty_handoff)
+        _ = await hsm.dispatch(environment, probe, empty_handoff)
         await asyncio.sleep(0.05)
         assert len(processor.inputs) == 0
         assert (probe.state() or "").endswith("/unfocused")
@@ -594,7 +594,7 @@ def test_bot_text_conversation_drops_empty_stt_without_bricking() -> None:
         good_product = speech.SpeechDecoding.output_event.with_data("after empty".encode("utf-8"))
         good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
         good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, good_handoff)
+        _ = await hsm.dispatch(environment, probe, good_handoff)
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         return encoder.calls
 
@@ -623,15 +623,15 @@ def test_voice_conversation_refuses_utf8_stt_transcript_as_audio() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
         bad_product = speech.SpeechDecoding.output_event.with_data("hello transcript".encode("utf-8"))
         bad_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=bad_product))
         bad_handoff = dataclasses.replace(bad_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, bad_handoff)
+        _ = await hsm.dispatch(environment, probe, bad_handoff)
         await asyncio.sleep(0.05)
         assert len(processor.inputs) == 0
         assert (conversation_ability.state() or "").endswith("/behavior/silent")
@@ -642,7 +642,7 @@ def test_voice_conversation_refuses_utf8_stt_transcript_as_audio() -> None:
         good_product = speech.SpeechDecoding.output_event.with_data(acoustic)
         good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
         good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(world, probe, good_handoff)
+        _ = await hsm.dispatch(environment, probe, good_handoff)
         await _wait_until(lambda: len(processor.inputs) >= 1, timeout=10.0)
         bot_state = probe.state() or ""
         return len(processor.inputs), bot_state, int(bool(processor.inputs))
@@ -686,8 +686,8 @@ class _FixedTranscriptSpeechDecoder(speech.SpeechDecoder):
         return self.transcript.encode("utf-8")
 
 
-def test_world_sound_through_listening_bridges_to_conversation_then_speaking() -> None:
-    """Real Listening machine: world.sound → STT product → Bot bridge → Conversation → Speaking."""
+def test_environment_sound_through_listening_bridges_to_conversation_then_speaking() -> None:
+    """Real Listening machine: environment.sound → STT product → Bot bridge → Conversation → Speaking."""
 
     async def run() -> list[bytes]:
         encoder = RecordingEncoder()
@@ -711,15 +711,15 @@ def test_world_sound_through_listening_bridges_to_conversation_then_speaking() -
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
 
         sound = SoundEvent.with_data(
             SoundData(audio=b"pcm-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
         )
-        _ = await hsm.dispatch(world, probe, sound)
+        _ = await hsm.dispatch(environment, probe, sound)
         await _wait_until(lambda: bool(speech_decoder.calls), timeout=10.0)
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         # Deliberative cognition must only see Conversation contribution, not raw speech product.

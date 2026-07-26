@@ -16,7 +16,7 @@ import hsm
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
 
@@ -228,7 +228,7 @@ def test_listening_events_use_concrete_pydantic_schemas() -> None:
     failed_schema = object_dict(listening.Listening.failed_event.schema)
 
     assert listening.Listening.input_event is SoundEvent
-    assert listening.Listening.input_event.name == "world.sound"
+    assert listening.Listening.input_event.name == "environment.sound"
     assert input_schema == SoundData.model_json_schema()
     assert input_schema["properties"]["audio"]["format"] in {"binary", "base64", "base64url"}
 
@@ -484,7 +484,7 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     initializing_events = model.transition_map["/ListeningLifecycle/attached/behavior/initializing"]
     assert "bot.ability.attachment.terminal" in initializing_events
     assert "bot.ability.listening.children.attached" not in initializing_events
-    assert "world.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Listening"]
+    assert "environment.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Listening"]
     assert (
         "bot.ability.listening.voice_detection.completed"
         in model.transition_map["/ListeningLifecycle/attached/behavior/DetectingVoice"]

@@ -61,7 +61,7 @@ output_event = hsm.event(
     },
     description = "Cognition event selection.",
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 description = "Select focus_device for the observed pattern."
 
 def always(event):
@@ -1713,7 +1713,7 @@ def test_reasoning_and_reflection_payloads_carry_typed_decisions() -> None:
 def test_reflection_behavior_events_require_name() -> None:
     created = behavior_events.CreateData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         reason="repeated pattern",
     )
     assert created.name == "AnswerIncomingRing"
@@ -2181,8 +2181,8 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
     assert reflection_calls[0].input.cognition_output == result
 
 
-def test_intuition_low_confidence_escalates_to_reasoning_after_world_actions() -> None:
-    """Self-tuning confidence: low reported confidence → world dispatch then System 2 cascade."""
+def test_intuition_low_confidence_escalates_to_reasoning_after_environment_actions() -> None:
+    """Self-tuning confidence: low reported confidence → environment dispatch then System 2 cascade."""
 
     async def run() -> tuple[cognition.types.OutputData, int, float]:
         # Pre-seed tuner so we are past warmup with a high baseline.
@@ -2546,11 +2546,11 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
 
     prior = cognition.episodes.CognitiveEpisode(
         focus="phone",
-        stimulus_name="world.sound",
+        stimulus_name="environment.sound",
         output=focus_output("phone", "prior answer"),
         behavior=behavior_events.CreateData(
             name="AnswerIncomingRing",
-            triggers=("world.sound",),
+            triggers=("environment.sound",),
             reason="seed",
         ),
     )
@@ -2569,7 +2569,7 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
                 result=focus_output("phone", "deliberate with memory"),
                 create=behavior_events.CreateData(
                     name="AnswerIncomingRing",
-                    triggers=("world.sound",),
+                    triggers=("environment.sound",),
                     reason="matches prior episode",
                 ),
             )
@@ -2602,13 +2602,13 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
 
     intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         description="Answer when a labeled ring arrives.",
         reason="select intent",
     )
     written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         description="Answer when a labeled ring arrives (written).",
         reason="repeated ring→answer",
         source=_ANSWER_RING_BEHAVIOR_SOURCE.replace(
@@ -2688,7 +2688,7 @@ def test_reflection_create_stops_when_fix_yields_same_diagnostics() -> None:
 
     intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         reason="select intent",
     )
     bad_source = """
@@ -2705,7 +2705,7 @@ behavior = hsm.define(
 """
     bad = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         reason="invalid topo",
         source=bad_source,
     )
@@ -2826,7 +2826,7 @@ def test_reflection_create_fix_pass_rewrites_invalid_source() -> None:
 
     intent = behavior_events.CreateData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         reason="select intent",
     )
     bad_source = """
@@ -2843,13 +2843,13 @@ behavior = hsm.define(
 """
     bad = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         reason="invalid topo first",
         source=bad_source,
     )
     good = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         description="Fixed after diagnostics.",
         reason="fix pass",
         source=_ANSWER_RING_BEHAVIOR_SOURCE,
@@ -2958,15 +2958,15 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         reason="select change",
     )
     revised_source = _ANSWER_RING_BEHAVIOR_SOURCE.replace(
-        'triggers = ["world.sound"]',
-        'triggers = ["world.sound", "phone.ringing"]',
+        'triggers = ["environment.sound"]',
+        'triggers = ["environment.sound", "phone.ringing"]',
     ).replace(
         "Select focus_device for the observed pattern.",
         "Also clear focus before answer.",
     )
     written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("world.sound", "phone.ringing"),
+        triggers=("environment.sound", "phone.ringing"),
         description="Also clear focus before answer.",
         reason="revised from episodes",
         source=revised_source,
@@ -2989,7 +2989,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         await _seed_behavior_record(
             store,
             name="AnswerIncomingRing",
-            triggers=("world.sound",),
+            triggers=("environment.sound",),
             description="Original description.",
         )
         processor = FixedProcessor(selection, change_write=written)
@@ -3058,7 +3058,7 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         await _seed_behavior_record(
             store,
             name="AnswerIncomingRing",
-            triggers=("world.sound",),
+            triggers=("environment.sound",),
             description="To be broken.",
         )
         processor = FixedProcessor(selection)
@@ -3159,7 +3159,7 @@ output_event = hsm.event(
         "required": ["event"],
     },
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 description = "Focus the phone when a ring sound arrives."
 
 def is_ring(event):
@@ -3189,7 +3189,7 @@ behavior = hsm.define(
 
 
 def _ring_stimulus() -> hsm.Event[object]:
-    from bot.world import SoundData, SoundEvent
+    from bot.environment import SoundData, SoundEvent
 
     return SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
 
@@ -3202,7 +3202,7 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
         await _seed_behavior_record(
             store,
             name="FocusOnRing",
-            triggers=("world.sound",),
+            triggers=("environment.sound",),
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
@@ -3252,7 +3252,7 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
         await _seed_behavior_record(
             store,
             name="FocusOnRing",
-            triggers=("world.sound",),
+            triggers=("environment.sound",),
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
@@ -3263,7 +3263,7 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
             reasoning_processor=FailingReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
-        # bot.input stimulus does not match world.sound trigger.
+        # bot.input stimulus does not match environment.sound trigger.
         _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
         await wait_until(lambda: bool(ability.outputs))
         return ability.outputs, intuition_processor.calls

@@ -31,7 +31,7 @@ from bot.providers.livekit.room_audio import (
     LocalAudioTrackFactory,
     RoomHandle,
 )
-from bot.world import World
+from bot.environment import Environment
 from tests.hsm_instance_state import device_firmware
 from tests.livekit_room_fakes import (
     FakeRemoteParticipant,
@@ -171,18 +171,18 @@ class RecordingPhoneService:
     forwarded_events: list[hsm.Event[typing.Any]] | None = None
     forwarding_target: RecordingPhoneEventTarget | None = None
 
-    async def attach(self, world: World, target: hsm.Instance) -> None:
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
         if self.forwarded_events is None:
-            await self.service.attach(world, target)
+            await self.service.attach(environment, target)
             return
         forwarding_target = RecordingPhoneEventTarget(target=target, events=self.forwarded_events)
-        _ = await hsm.started(world, forwarding_target, forwarding_target.model)
+        _ = await hsm.started(environment, forwarding_target, forwarding_target.model)
         self.forwarding_target = forwarding_target
-        await self.service.attach(world, forwarding_target)
+        await self.service.attach(environment, forwarding_target)
 
-    async def detach(self, world: World, target: hsm.Instance) -> None:
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
         attached_target: hsm.Instance = self.forwarding_target if self.forwarding_target is not None else target
-        await self.service.detach(world, attached_target)
+        await self.service.detach(environment, attached_target)
         self.forwarding_target = None
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
@@ -598,7 +598,7 @@ def test_livekit_phone_service_stays_unconnected_without_attachment() -> None:
 
 def test_livekit_phone_service_attach_starts_fresh_service() -> None:
     async def run() -> None:
-        world = World()
+        environment = Environment()
         service = FakePhoneService()
         target = hsm.Instance()
         target_model = hsm.define(
@@ -607,8 +607,8 @@ def test_livekit_phone_service_attach_starts_fresh_service() -> None:
             hsm.state("active"),
         )
 
-        _ = await hsm.started(world, target, target_model, hsm.Config(id="phone-service-target"))
-        await service.attach(world, target)
+        _ = await hsm.started(environment, target, target_model, hsm.Config(id="phone-service-target"))
+        await service.attach(environment, target)
 
         assert service.state() == "/PhoneService/ready"
 
@@ -737,7 +737,7 @@ def test_livekit_phone_service_detaches_from_phone_service_target() -> None:
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
         assert device_firmware(phone) is not None
 
-        await service.detach(World.from_context(phone.context()), _require_firmware(phone))
+        await service.detach(Environment.from_context(phone.context()), _require_firmware(phone))
         await _wait_until(lambda: service.state() == "/PhoneService/unconnected", timeout=0.05)
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await asyncio.sleep(0)
@@ -760,7 +760,7 @@ def test_livekit_phone_service_keeps_first_phone_attachment_when_second_phone_at
         other_target = RecordingPhoneEventTarget(target=_require_firmware(first), events=[])
         _ = await hsm.started(first.context(), other_target, other_target.model, hsm.Config(id="other-target"))
         with pytest.raises(PhoneServiceError, match="already attached"):
-            await service.attach(World.from_context(first.context()), other_target)
+            await service.attach(Environment.from_context(first.context()), other_target)
         await asyncio.sleep(0)
 
         assert service.state() == "/PhoneService/ready"
@@ -801,7 +801,7 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
                 return super().dispatch(ctx, event)
 
         service = RecordingPhoneServiceInstance()
-        world = World()
+        environment = Environment()
         terminal_model = hsm.define(
             "PhoneServiceTerminal",
             hsm.initial(hsm.target("active")),
@@ -819,11 +819,11 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
         attached_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachedEvent"))
         rejected_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachmentRejectedEvent"))
 
-        _ = await hsm.started(world, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
-        _ = await hsm.started(world, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
-        _ = await hsm.started(world, first_target, first_target.model, hsm.Config(id="first-target"))
-        _ = await hsm.started(world, second_target, second_target.model, hsm.Config(id="second-target"))
-        await service.attach(world, first_target)
+        _ = await hsm.started(environment, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
+        _ = await hsm.started(environment, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
+        _ = await hsm.started(environment, first_target, first_target.model, hsm.Config(id="first-target"))
+        _ = await hsm.started(environment, second_target, second_target.model, hsm.Config(id="second-target"))
+        await service.attach(environment, first_target)
 
         recorded_events.clear()
         await service.dispatch(service.context(), attached_event.with_data(attachment_data(target=second_target)))
@@ -2021,7 +2021,7 @@ def test_livekit_phone_service_drops_remote_audio_without_phone_target() -> None
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
         )
-        await service.detach(World.from_context(phone.context()), _require_firmware(phone))
+        await service.detach(Environment.from_context(phone.context()), _require_firmware(phone))
         await _wait_until(lambda: service.state() == "/PhoneService/unconnected")
         chunk = _pcm_chunk(b"\x01\x02\x03")
 
@@ -2309,16 +2309,16 @@ def test_a_replacement_phone_can_attach_to_the_same_service() -> None:
     """
 
     async def run() -> tuple[str, str]:
-        world = World()
+        environment = Environment()
         service = PhoneService()
 
         first = phone_device.Phone(service=service)
-        _ = await hsm.started(world, first, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(environment, first, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: first.state() == "/Device/detached")
-        await first.stop(world)
+        await first.stop(environment)
 
         second = phone_device.Phone(service=service)
-        _ = await hsm.started(world, second, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(environment, second, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: second.state() == "/Device/detached", timeout=2.0)
 
         return first.state(), second.state()

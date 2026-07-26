@@ -14,7 +14,7 @@ uv run --project examples/phone_bot phone-bot-example
 
 `listen_speak_bot` is its own example package (macOS only, device-free). It uses
 `say` and `afconvert` to render *Hey I'm Gabe how are you* into a WAV, injects
-that audio as `world.sound` into a bot with no devices, runs **Listening** →
+that audio as `environment.sound` into a bot with no devices, runs **Listening** →
 **Mercury 2** intuition (OpenAI-compatible) / Gemini **reasoning**
 (`gemini-3.5-flash`) → **Speaking**, and writes a reply WAV under
 `examples/listen_speak_bot/assets/`. STT is a fixed offline transcript and TTS is

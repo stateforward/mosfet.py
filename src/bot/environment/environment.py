@@ -16,33 +16,33 @@ def _instance_scope(instance: hsm.Instance) -> object | None:
 
 
 class _Scope:
-    """Context key carrying the World that published this context chain."""
+    """Context key carrying the Environment that published this context chain."""
 
 
-class World(hsm.Context):
-    """HSM context that separates world *presence* from world *addressing*.
+class Environment(hsm.Context):
+    """HSM context that separates environment *presence* from environment *addressing*.
 
-    World *is* an ``hsm.Context`` — pass it directly to ``hsm.started``, ``hsm.dispatch``,
+    Environment *is* an ``hsm.Context`` — pass it directly to ``hsm.started``, ``hsm.dispatch``,
     ``hsm.dispatch_to``, and ``hsm.dispatch_all``. Two planes live on it:
 
     * **Addressing/lifetime** is ``hsm.Keys.Instances``. Every started machine in the scope is
       in it, including device firmware, so it stays reachable and stays able to emit into the
-      world. It is not a public registry or discovery surface.
+      environment. It is not a public registry or discovery surface.
     * **Presence** is the participant set, held on this object. Only citizens admitted through
       :meth:`join` are in it, and only they receive :meth:`broadcast`. Device firmware is never a
-      citizen: it consumes world stimuli through its shell's forward, so a broadcast reaches it
+      citizen: it consumes environment stimuli through its shell's forward, so a broadcast reaches it
       once. A placement, when a citizen gives one, says where it is and how quiet a sound can get
       before it stops hearing it.
 
-    The addressing map propagates as a context value, so a machine started under this world can
+    The addressing map propagates as a context value, so a machine started under this environment can
     broadcast *into* it without being a recipient *of* it. The scope key is not readable from
-    outside this module: World is a scope, not a registry.
+    outside this module: Environment is a scope, not a registry.
     """
 
     _instances: weakref.WeakValueDictionary[str, hsm.Instance]
     _participants: weakref.WeakValueDictionary[str, hsm.Instance]
     # Keyed by instance, not id: a placement cannot outlive the thing it places, so leaving a
-    # world needs no placement bookkeeping and a stale placement is not representable.
+    # environment needs no placement bookkeeping and a stale placement is not representable.
     _placements: weakref.WeakKeyDictionary[hsm.Instance, space.Placement]
 
     def __init__(self, context: hsm.Context | None = None) -> None:
@@ -63,10 +63,10 @@ class World(hsm.Context):
         super().__init__(parent=parent, values={hsm.Keys.Instances: self._instances, _Scope: self})
 
     @classmethod
-    def from_context(cls, context: hsm.Context) -> "World":
-        """Resolve the World owning ``context``, creating one only when none is reachable.
+    def from_context(cls, context: hsm.Context) -> "Environment":
+        """Resolve the Environment owning ``context``, creating one only when none is reachable.
 
-        Resolution is O(1) and allocation-free for any context started under a world, which
+        Resolution is O(1) and allocation-free for any context started under an environment, which
         matters on per-chunk paths: every constructed context registers a done-callback on its
         parent that is never removed.
         """
@@ -77,9 +77,9 @@ class World(hsm.Context):
         if isinstance(scope, cls) and not scope.is_done():
             return scope
         # hsm.dispatch_to returns early on a canceled context, so a canceled scope would go
-        # permanently silent. Fall back to a live World over the same maps: the addressing map
+        # permanently silent. Fall back to a live Environment over the same maps: the addressing map
         # comes off the context, and presence and placement are carried over from the canceled
-        # World by reference, so joining or leaving either scope is visible in both.
+        # Environment by reference, so joining or leaving either scope is visible in both.
         revived = cls(context)
         if isinstance(scope, cls):
             revived._participants = scope._participants
@@ -87,7 +87,7 @@ class World(hsm.Context):
         return revived
 
     def join(self, instance: hsm.Instance, *, placement: space.Placement | None = None) -> None:
-        """Admit a started instance as a world citizen. Idempotent.
+        """Admit a started instance as an environment citizen. Idempotent.
 
         Presence is not addressing: firmware and privately scoped actors stay addressable
         without becoming independent broadcast recipients.
@@ -98,19 +98,19 @@ class World(hsm.Context):
 
         participant = type(instance).__name__
         if not lifecycle.is_started(instance):
-            raise RuntimeError(f"{participant} must be started before it joins a world.")
-        require_world_scope(self, instance, participant=participant)
+            raise RuntimeError(f"{participant} must be started before it joins an environment.")
+        require_environment_scope(self, instance, participant=participant)
         if placement is not None:
             placed = self._placements.get(instance)
             # One object cannot be in two places. Taking the newer one silently is how a shared
             # transducer ends up somewhere it is not, with no error and a wrong audience.
             if placed is not None and placed != placement:
-                raise RuntimeError(f"{participant} is already placed elsewhere in this world.")
+                raise RuntimeError(f"{participant} is already placed elsewhere in this environment.")
             self._placements[instance] = placement
         self._participants[hsm.id(instance)] = instance
 
     def leave(self, instance: hsm.Instance) -> None:
-        """Remove a citizen from world presence. Idempotent; safe on a stopped instance."""
+        """Remove a citizen from environment presence. Idempotent; safe on a stopped instance."""
 
         for identifier, participant in list(self._participants.items()):
             if participant is instance:
@@ -146,9 +146,9 @@ class World(hsm.Context):
         *,
         origin: space.Position | None = None,
     ) -> collections.abc.Awaitable[None]:
-        """Deliver a world stimulus to every participant it is still audible to.
+        """Deliver an environment stimulus to every participant it is still audible to.
 
-        ``origin`` is where the sound came from. The world computes what reaches each citizen,
+        ``origin`` is where the sound came from. The environment computes what reaches each citizen,
         because how far a sound carries is a property of the space, not of the emitter — which is
         also why the emitter is a parameter here rather than something read off ``event.source``.
 
@@ -160,7 +160,7 @@ class World(hsm.Context):
         # of this guard is load-bearing, not just its presence: a filter that removes everyone
         # would otherwise hand dispatch_to an empty id list, which means "deliver to every
         # instance in scope" — the defect the guard exists to prevent, in the case that hits most
-        # often, a quiet sound in a large world. Any future narrowing goes above this line.
+        # often, a quiet sound in a large environment. Any future narrowing goes above this line.
         audible = [
             identifier
             for identifier, participant in self._participants.items()
@@ -173,12 +173,12 @@ class World(hsm.Context):
         return hsm.dispatch_to(self, event, *audible)
 
 
-def require_world_scope(world: World, instance: hsm.Instance, *, participant: str) -> None:
-    """Reject attaching a running instance to a different world scope."""
+def require_environment_scope(environment: Environment, instance: hsm.Instance, *, participant: str) -> None:
+    """Reject attaching a running instance to a different environment scope."""
 
-    # Only enforce while the machine is started; a stopped instance has no world scope yet.
+    # Only enforce while the machine is started; a stopped instance has no environment scope yet.
     if not lifecycle.is_started(instance):
         return
-    if _instance_scope(instance) is world.value(hsm.Keys.Instances):
+    if _instance_scope(instance) is environment.value(hsm.Keys.Instances):
         return
-    raise RuntimeError(f"{participant} is already started in another world.")
+    raise RuntimeError(f"{participant} is already started in another environment.")

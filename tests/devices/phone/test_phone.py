@@ -15,7 +15,7 @@ from bot.device import Device
 from bot.devices import phone as phone_device
 from bot.protocols import attachment
 
-from bot.world import SoundData, SoundEvent, World, space
+from bot.environment import SoundData, SoundEvent, Environment, space
 from tests.hsm_instance_state import (
     device_peripherals,
     device_firmware,
@@ -66,12 +66,12 @@ class AttachablePhoneService:
     events: list[hsm.Event[typing.Any]] = dataclasses.field(default_factory=list)
     target: hsm.Instance | None = None
 
-    async def attach(self, world: World, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is world.value(hsm.Keys.Instances)
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
         self.target = target
 
-    async def detach(self, world: World, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is world.value(hsm.Keys.Instances)
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
         if self.target is target:
             self.target = None
 
@@ -426,17 +426,17 @@ def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
 
     asyncio.run(run())
 
-def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> None:
+def test_phone_broadcasts_committed_ringing_observation_in_current_environment() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         inside = PhoneObservationRecorder()
         outside = PhoneObservationRecorder()
 
-        _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
-        world.join(inside)
+        _ = await hsm.started(environment, phone, phone.model)
+        _ = await hsm.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        environment.join(inside)
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside"))
         phone_id = hsm.id(phone)
 
@@ -454,7 +454,7 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> No
     inside_events, outside_events, phone_id = asyncio.run(run())
 
     assert len(inside_events) == 1
-    assert inside_events[0].name == "world.sound"
+    assert inside_events[0].name == "environment.sound"
     assert inside_events[0].source == phone_id
     assert inside_events[0].target == "inside"
     sound = inside_events[0].data
@@ -755,10 +755,10 @@ def test_phone_media_ready_publishes_committed_event() -> None:
 
     asyncio.run(run())
 
-def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None:
+def test_phone_service_audio_routes_through_speaker_to_environment_observers() -> None:
     async def run() -> tuple[tuple[hsm.Event[typing.Any], ...], list[str], str]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         observer = PhoneObservationRecorder()
         current_audio = phone_device.ServiceAudioData(
@@ -778,9 +778,9 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
 
         speaker = phone_speaker(phone)
         # The phone powers its own speaker; starting it here would be a second start.
-        _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
-        world.join(observer)
+        _ = await hsm.started(environment, phone, phone.model)
+        _ = await hsm.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -836,7 +836,7 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
 
 def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audio() -> None:
     async def run() -> tuple[tuple[hsm.Event[typing.Any], ...], list[str]]:
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         observer = PhoneObservationRecorder()
         audio = phone_device.ServiceAudioData(
@@ -847,9 +847,9 @@ def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audi
             channels=1,
         )
 
-        _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
-        world.join(observer)
+        _ = await hsm.started(environment, phone, phone.model)
+        _ = await hsm.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -883,7 +883,7 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
         phone_device.TransferTarget | None,
     ]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         observer = PhoneObservationRecorder()
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
@@ -904,9 +904,9 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
 
         speaker = phone_speaker(phone)
         # The phone powers its own speaker; starting it here would be a second start.
-        _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
-        world.join(observer)
+        _ = await hsm.started(environment, phone, phone.model)
+        _ = await hsm.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -1476,11 +1476,11 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
             def __init__(self) -> None:
                 self.events = []
 
-            async def attach(self, world: World, target: hsm.Instance) -> None:
-                del world, target
+            async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+                del environment, target
 
-            async def detach(self, world: World, target: hsm.Instance) -> None:
-                del world, target
+            async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+                del environment, target
 
             def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
                 del ctx
@@ -1550,11 +1550,11 @@ def test_microphone_audio_uplinks_only_while_media_ready() -> None:
         def __init__(self) -> None:
             self.events = []
 
-        async def attach(self, world: World, target: hsm.Instance) -> None:
-            del world, target
+        async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+            del environment, target
 
-        async def detach(self, world: World, target: hsm.Instance) -> None:
-            del world, target
+        async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+            del environment, target
 
         def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
             del ctx
@@ -1581,7 +1581,7 @@ def _uplinks(service: AttachablePhoneService) -> list[hsm.Event[typing.Any]]:
 
 
 def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
-    """A microphone feeds the controller attached to it, not every phone sharing the world.
+    """A microphone feeds the controller attached to it, not every phone sharing the environment.
 
     Two phones hear one spoken chunk. Each mouthpiece carries its own capture up its own wire,
     so each service sees exactly one uplink. Attachment membership is asserted alongside the
@@ -1593,7 +1593,7 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
         tuple[int, tuple[hsm.Instance, ...], tuple[hsm.Instance, ...]],
         tuple[int, tuple[hsm.Instance, ...], tuple[hsm.Instance, ...]],
     ]:
-        world = World()
+        environment = Environment()
         first_service = AttachablePhoneService()
         second_service = AttachablePhoneService()
         first = phone_device.Phone(service=first_service)
@@ -1601,7 +1601,7 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
 
         # Starting the phones is enough: each powers its own transducers.
         for phone in (first, second):
-            _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+            _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: device_firmware(first) is not None and device_firmware(second) is not None)
 
         for phone, service, call_id in ((first, first_service, "call-first"), (second, second_service, "call-second")):
@@ -1628,7 +1628,7 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
         first_service.events.clear()
         second_service.events.clear()
 
-        await world.broadcast(
+        await environment.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"spoken-chunk", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )
@@ -1683,7 +1683,7 @@ class Ears(hsm.Instance):
 
 
 async def _handset_on_a_call(
-    world: World,
+    environment: Environment,
     service: AttachablePhoneService,
 ) -> tuple[phone_device.Phone, audio_device.Speaker, Ears]:
     """A placed handset at the robot's ear, its voice at its mouth, on a connected call."""
@@ -1701,14 +1701,14 @@ async def _handset_on_a_call(
     voice = audio_device.Speaker(placement=space.Placement(position=mouth), amplitude_db=_VOICE_DB)
     ears = Ears()
 
-    _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
-    _ = await hsm.started(world, voice, typing.cast(hsm.Model, audio_device.Speaker.model))
-    _ = await hsm.started(world, ears, Ears.model, hsm.Config(id="ears"))
-    world.join(ears, placement=space.Placement(position=ear, threshold_db=_EARS_THRESHOLD_DB))
+    _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+    _ = await hsm.started(environment, voice, typing.cast(hsm.Model, audio_device.Speaker.model))
+    _ = await hsm.started(environment, ears, Ears.model, hsm.Config(id="ears"))
+    environment.join(ears, placement=space.Placement(position=ear, threshold_db=_EARS_THRESHOLD_DB))
     # Speaking is this speaker's controller in production; a transducer needs one to emit.
     controller = hsm.Instance()
-    _ = await hsm.started(world, controller, hsm.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s")))
-    await voice.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+    _ = await hsm.started(environment, controller, hsm.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s")))
+    await voice.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
 
     await _wait_until(lambda: device_firmware(phone) is not None)
     await service.receive(
@@ -1736,9 +1736,9 @@ def test_far_end_audio_does_not_come_back_up_the_wire() -> None:
     """
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
-        phone, _, _ = await _handset_on_a_call(world, service)
+        phone, _, _ = await _handset_on_a_call(environment, service)
         service.events.clear()
 
         await service.receive(
@@ -1760,9 +1760,9 @@ def test_the_robot_hears_its_own_earpiece() -> None:
     """The same earpiece that is inaudible at the mouthpiece is loud at the ear: 45 dB over."""
 
     async def run() -> int:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
-        phone, _, ears = await _handset_on_a_call(world, service)
+        phone, _, ears = await _handset_on_a_call(environment, service)
         ears.heard.clear()
 
         await service.receive(
@@ -1784,13 +1784,13 @@ def test_the_robots_own_voice_goes_up_the_wire() -> None:
     """The mouthpiece is not deaf, it is selective: the voice at the mouth clears it by 30 dB."""
 
     async def run() -> int:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
-        _, voice, _ = await _handset_on_a_call(world, service)
+        _, voice, _ = await _handset_on_a_call(environment, service)
         service.events.clear()
 
         await voice.dispatch(
-            World.from_context(voice.context()),
+            Environment.from_context(voice.context()),
             audio_device.OutputEvent.with_data(
                 audio_device.AudioOutputData(
                     audio=b"local speech", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
@@ -1805,15 +1805,15 @@ def test_the_robots_own_voice_goes_up_the_wire() -> None:
 
 
 def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
-    """A ring is a sound something makes at a place, not an announcement to the whole world.
+    """A ring is a sound something makes at a place, not an announcement to the whole environment.
 
-    The ringer declares its level and the phone says where it is; the world does the rest. Before
+    The ringer declares its level and the phone says where it is; the environment does the rest. Before
     this, a ring reached every participant at any distance — the same "reaches everyone regardless
     of geometry" shape that produced the cross-call leak, just off the uplink path.
     """
 
     async def run() -> tuple[int, int]:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
         here = space.Position(x=0.0, y=0.0)
         phone = phone_device.Phone(
@@ -1823,11 +1823,11 @@ def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
         nearby = Ears()
         across_the_room = Ears()
 
-        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
-        _ = await hsm.started(world, nearby, Ears.model, hsm.Config(id="nearby"))
-        _ = await hsm.started(world, across_the_room, Ears.model, hsm.Config(id="across-the-room"))
-        world.join(nearby, placement=space.Placement(position=space.Position(x=2.0, y=0.0), threshold_db=20.0))
-        world.join(
+        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(environment, nearby, Ears.model, hsm.Config(id="nearby"))
+        _ = await hsm.started(environment, across_the_room, Ears.model, hsm.Config(id="across-the-room"))
+        environment.join(nearby, placement=space.Placement(position=space.Position(x=2.0, y=0.0), threshold_db=20.0))
+        environment.join(
             across_the_room,
             placement=space.Placement(position=space.Position(x=5_000.0, y=0.0), threshold_db=20.0),
         )
@@ -1857,15 +1857,15 @@ def test_stopping_a_phone_releases_the_service_it_acquired() -> None:
     """
 
     async def run() -> tuple[bool, bool]:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: service.target is not None)
         attached = service.target is not None
 
-        await phone.stop(world)
+        await phone.stop(environment)
 
         return attached, service.target is None
 
@@ -1879,15 +1879,15 @@ def test_stopping_a_phone_twice_still_releases_once() -> None:
     """Bot activation cleanup stops the whole configured set, started or not."""
 
     async def run() -> bool:
-        world = World()
+        environment = Environment()
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: service.target is not None)
 
-        await phone.stop(world)
-        await phone.stop(world)
+        await phone.stop(environment)
+        await phone.stop(environment)
 
         return service.target is None
 

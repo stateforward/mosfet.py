@@ -1,4 +1,4 @@
-"""Receiver readiness needs an attach hold plus a started, same-world speaker."""
+"""Receiver readiness needs an attach hold plus a started, same-environment speaker."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import hsm
 from bot.devices import audio
 from bot.devices.phone import phone as phone_device
 from bot.devices.phone.phone import PhoneFirmware, _PhoneObservationService
-from bot.world import World
+from bot.environment import Environment
 
 
 def _service_audio(call_id: str) -> hsm.Event[phone_device.ServiceAudioData]:
@@ -28,7 +28,7 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
     """Speaker liveness is firmware's guard now; the service only reports attachment."""
 
     async def run() -> tuple[bool, bool, bool, bool]:
-        world = World()
+        environment = Environment()
         speaker = audio.Speaker()
         owner = hsm.Instance()
         target = hsm.Instance()
@@ -43,13 +43,13 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
         firmware._current_call_id = "call-1"
         event = _service_audio("call-1")
 
-        unattached = PhoneFirmware._matches_current_service_audio(world, firmware, event)
+        unattached = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         observation.target = target
-        attached_unstarted = PhoneFirmware._matches_current_service_audio(world, firmware, event)
-        _ = await hsm.started(world, speaker, speaker.model)
-        ready = PhoneFirmware._matches_current_service_audio(world, firmware, event)
+        attached_unstarted = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
+        _ = await hsm.started(environment, speaker, speaker.model)
+        ready = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         await hsm.stop(speaker)
-        after_stop = PhoneFirmware._matches_current_service_audio(world, firmware, event)
+        after_stop = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         return unattached, attached_unstarted, ready, after_stop
 
     unattached, attached_unstarted, ready, after_stop = asyncio.run(run())

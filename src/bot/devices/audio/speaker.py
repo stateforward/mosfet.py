@@ -7,11 +7,11 @@ import typing
 import hsm
 
 from bot.device import Device
-from bot.world import SoundData, SoundEvent, World, space
+from bot.environment import SoundData, SoundEvent, Environment, space
 
 
 class Speaker(Device):
-    """Transducer that converts audio output signal into acoustic energy in the world.
+    """Transducer that converts audio output signal into acoustic energy in the environment.
 
     The mirror of :class:`~bot.devices.audio.microphone.Microphone`: a microphone converts what
     it hears into signal on the way in, a speaker converts signal into sound on the way out.
@@ -40,9 +40,9 @@ class Speaker(Device):
 
     @staticmethod
     def _transduce(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
-        """Convert signal from an attached controller into acoustic energy in the world.
+        """Convert signal from an attached controller into acoustic energy in the environment.
 
-        World broadcast is the input elevation path: bots fan ``world.sound`` to input abilities
+        Environment broadcast is the input elevation path: bots fan ``environment.sound`` to input abilities
         and never treat raw device playout as cognition input. Targeted playout into another
         device still uses ``devices.audio.output`` via :meth:`dispatch_audio_output`.
         """
@@ -64,8 +64,8 @@ class Speaker(Device):
             source=hsm.id(instance),
             metadata=dict(event.metadata),
         )
-        # The world works out what reaches whom; this only says how loud, and from where.
-        _ = World.from_context(ctx).broadcast(sound, origin=None if placement is None else placement.position)
+        # The environment works out what reaches whom; this only says how loud, and from where.
+        _ = Environment.from_context(ctx).broadcast(sound, origin=None if placement is None else placement.position)
 
     model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
         typing.cast(hsm.Model, Device.model),

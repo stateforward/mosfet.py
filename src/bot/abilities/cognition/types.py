@@ -77,7 +77,7 @@ OutputData: typing.TypeAlias = tuple[EventData, ...]
 
 
 class IgnoreData(pydantic.BaseModel):
-    """Explicit judgment that this cognition turn should run no world or body actions.
+    """Explicit judgment that this cognition turn should run no environment or body actions.
 
     Prefer selecting this event over an empty ``events`` array so models have a named
     branch under required tool-calling. Host treats ignore-only as handled (no cascade
@@ -188,7 +188,7 @@ def is_output(value: object) -> typing.TypeGuard[OutputData]:
     return all(isinstance(item, EventData) for item in value)
 
 
-# Answer/decline must target the live ringing call. Phone elevates ring as world.sound with
+# Answer/decline must target the live ringing call. Phone elevates ring as environment.sound with
 # PhoneSoundData.call_id and event.id = call_id; models often still copy schema examples.
 _PHONE_CALL_ID_COMMANDS: frozenset[str] = frozenset(
     {
@@ -200,14 +200,14 @@ _RING_SOUND_KINDS: frozenset[str] = frozenset({"phone.ringing", "phone.call"})
 
 
 def _call_id_from_ring_stimulus(stimulus: object) -> str | None:
-    """Return live call_id from a ring/call world.sound stimulus, if present.
+    """Return live call_id from a ring/call environment.sound stimulus, if present.
 
     Prefers :class:`~bot.devices.phone.events.PhoneSoundData.call_id` so host bind matches
     the model-facing field; falls back to ``event.id`` when only correlation was stamped.
     """
 
     from bot.devices.phone.events import PhoneSoundData
-    from bot.world import SoundData, SoundEvent
+    from bot.environment import SoundData, SoundEvent
 
     if not isinstance(stimulus, hsm.Event):
         return None

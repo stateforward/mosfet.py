@@ -16,7 +16,7 @@ import pytest
 from bot import behavior
 from bot.devices import phone as phone_device
 from bot.devices.phone.events import PhoneSoundData
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.hsm_instance_state import phone_firmware
@@ -42,7 +42,7 @@ output_event = hsm.event(
     },
     description = "Delayed behavior selection.",
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 
 def emit(event):
     hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": "delayed behavior"})
@@ -246,7 +246,7 @@ output_event = hsm.event(
     },
     description = "Cognition event selection.",
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 description = "Answer an incoming phone ring as practiced automatic behavior."
 
 def always(event):
@@ -278,7 +278,7 @@ behavior = hsm.define(
 
 
 def test_autonomy_installed_behavior_answers_phone_ring() -> None:
-    """Pre-installed ACTIVE behavior matches world.sound ring and dispatches phone.answer_call."""
+    """Pre-installed ACTIVE behavior matches environment.sound ring and dispatches phone.answer_call."""
 
     call_id = "call-answer-behavior"
 
@@ -294,10 +294,10 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
             memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
         )
 
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         autonomy = cognition.Autonomy(memory=store)
-        shared = shared_hsm_context(world)
+        shared = shared_hsm_context(environment)
         await start_abilities_for_test(shared, autonomy)
         _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
 

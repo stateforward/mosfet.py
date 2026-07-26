@@ -9,7 +9,7 @@ import hsm
 import pydantic
 
 from bot.telemetry import observer
-from bot.world import SoundData
+from bot.environment import SoundData
 
 
 class OutputData(pydantic.BaseModel):
@@ -50,9 +50,9 @@ class OutputData(pydantic.BaseModel):
 
 
 class SoundClassifier(classifying.Classifier[SoundData, OutputData], abc.ABC):
-    """Classifier that labels non-speech acoustic content from world sound.
+    """Classifier that labels non-speech acoustic content from environment sound.
 
-    Input is :class:`~bot.world.SoundData` (not raw bytes) so provenance hints such as
+    Input is :class:`~bot.environment.SoundData` (not raw bytes) so provenance hints such as
     ``kind`` are available to generic classifiers without probing audio codecs.
     """
 
@@ -99,7 +99,7 @@ class SoundClassification(classifying.Classifying[SoundData, OutputData]):
     input_event: typing.ClassVar[hsm.Event[SoundData]] = ability.ability_input_event(
         "bot.ability.hearing.sound.classification.input",
         SoundData,
-        description="World sound (audio plus optional kind/media provenance) to label as non-speech.",
+        description="Environment sound (audio plus optional kind/media provenance) to label as non-speech.",
         examples=[{"audio": "YXVkaW8=", "kind": "phone.ringing"}],
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(

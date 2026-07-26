@@ -3,7 +3,7 @@ from bot.abilities import ability
 from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import reasoning as reasoning_module
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 
 import asyncio
 import dataclasses
@@ -61,7 +61,7 @@ def reasoning_input(
     )
 
 
-def test_reasoning_retains_world_event_stimulus_without_stranding() -> None:
+def test_reasoning_retains_environment_event_stimulus_without_stranding() -> None:
     async def run() -> tuple[object, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
         store = memory.Memory()
         reasoning = cognition.Reasoning(processor=EmptyProcessor(), memory=store)

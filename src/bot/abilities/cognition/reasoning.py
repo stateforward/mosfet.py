@@ -128,7 +128,7 @@ class OutputData(pydantic.BaseModel):
                     "create": {
                         "event": "bot.behavior.create",
                         "name": "AnswerIncomingRing",
-                        "triggers": ["world.sound"],
+                        "triggers": ["environment.sound"],
                         "reason": "Same ring→answer pattern across recalled episodes.",
                     },
                 },

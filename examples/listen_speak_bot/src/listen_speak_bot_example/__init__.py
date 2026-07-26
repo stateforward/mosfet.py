@@ -3,7 +3,7 @@
 Flow:
 
 1. macOS ``say`` renders *Hey I'm Gabe how are you* into a WAV asset.
-2. ``world.sound`` carries that audio into bot **input** (Listening).
+2. ``environment.sound`` carries that audio into bot **input** (Listening).
 3. Offline VAD + fixed STT hand a transcript stimulus to cognition.
 4. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning select
    ``bot.ability.speaking.input``.
@@ -43,7 +43,7 @@ from bot.providers.gemini import ChatClient as GeminiChatClient
 from bot.providers.gemini import Processor as GeminiProcessor
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 
 # Capture before any local named ``cognition`` shadows the package (constructor param).
 _Cognition = cognition.Cognition
@@ -503,8 +503,8 @@ async def run(
     heard_audio = await asyncio.to_thread(_say_to_wav, _HEARD_PHRASE, heard_wav)
 
     body = ListenSpeakBot(reply_wav=reply_wav, cognition=app_config.cognition)
-    world = World()
-    _ = await body.attach(world)
+    environment = Environment()
+    _ = await body.attach(environment)
     await _wait_until(lambda: (body.state() or "").endswith("/unfocused"))
     _LOG.info("bot active state=%s", body.state())
 
@@ -518,12 +518,12 @@ async def run(
         )
     )
     _LOG.info(
-        "dispatching world.sound bytes=%s intuition_model=%s reasoning_model=%s",
+        "dispatching environment.sound bytes=%s intuition_model=%s reasoning_model=%s",
         len(heard_audio),
         app_config.cognition.intuition_model,
         app_config.cognition.model,
     )
-    await body.dispatch(world, sound)
+    await body.dispatch(environment, sound)
 
     await _wait_until(
         lambda: (
@@ -535,7 +535,7 @@ async def run(
     )
     if body.failures() and not body.encoder().calls:
         failure_messages = [failure.message for failure in body.failures()]
-        await body.detach(world)
+        await body.detach(environment)
         return {
             "status": "failed",
             "heard_phrase": _HEARD_PHRASE,
@@ -544,7 +544,7 @@ async def run(
             "bot_state": body.state(),
         }
 
-    await body.detach(world)
+    await body.detach(environment)
     await _wait_until(lambda: (body.state() or "").endswith("/inactive") or body.state() is None, timeout=5.0)
 
     spoken = body.encoder().calls[0] if body.encoder().calls else ""

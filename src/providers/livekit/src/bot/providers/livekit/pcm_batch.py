@@ -1,8 +1,8 @@
 """Batch remote LiveKit PCM frames into Listening-sized utterances.
 
 LiveKit delivers ~10 ms frames. Silero/Whisper need longer windows; elevating each
-frame as ``world.sound`` never reaches speech decoding. This assembler is an
-ingress-only batcher at the provider boundary (no shared World / direct wiring).
+frame as ``environment.sound`` never reaches speech decoding. This assembler is an
+ingress-only batcher at the provider boundary (no shared Environment / direct wiring).
 """
 
 from __future__ import annotations

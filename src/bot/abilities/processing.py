@@ -366,7 +366,7 @@ def dispatch_tool(
         "Each item must match one offered event branch; payload fields and requirements are "
         "defined on that event's data schema. An empty events list leaves the turn unhandled for "
         "the host cascade (e.g. deliberative reasoning); use an explicit ignore/pass event when "
-        "the stage should handle the turn with no world actions."
+        "the stage should handle the turn with no environment actions."
     )
 
     if unique:

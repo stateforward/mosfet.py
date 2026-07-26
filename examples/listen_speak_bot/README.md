@@ -28,7 +28,7 @@ That command will:
 
 1. Render *Hey I'm Gabe how are you* with `say` into `assets/hey_gabe.wav`
 2. Activate a bot with **no devices**, input=`Listening`, output=`Speaking`
-3. Dispatch the WAV as `world.sound`
+3. Dispatch the WAV as `environment.sound`
 4. Offline VAD + fixed STT → transcript stimulus into cognition
 5. Mercury 2 intuition (then Gemini reasoning if needed) selects `bot.ability.speaking.input`
 6. Encode the reply with `say` into `assets/reply.wav` and print a summary

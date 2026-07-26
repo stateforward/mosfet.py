@@ -19,7 +19,7 @@ from bot.device.events import (
     FirmwareInitializingFailedEventData,
 )
 from bot.telemetry import observer
-from bot.world import World, require_world_scope, space
+from bot.environment import Environment, require_environment_scope, space
 
 _DEFAULT_FIRMWARE = hsm.define(
     "DeviceFirmware",
@@ -58,14 +58,14 @@ _FirmwareInitializingCleanupFailedEvent = hsm.Event[_FirmwareInitializingCleanup
 )
 
 
-def _require_attach_world_scope(world: World, instance: "Device") -> None:
+def _require_attach_environment_scope(environment: Environment, instance: "Device") -> None:
     instance_scope = instance.context().value(hsm.Keys.Instances)
-    world_scope = world.value(hsm.Keys.Instances)
-    if instance_scope is world_scope:
+    environment_scope = environment.value(hsm.Keys.Instances)
+    if instance_scope is environment_scope:
         return
     if instance_scope is None:
-        raise RuntimeError("Device is not started in this world.")
-    raise RuntimeError("Device is already started in another world.")
+        raise RuntimeError("Device is not started in this environment.")
+    raise RuntimeError("Device is already started in another environment.")
 
 
 class Device(hsm.Instance, attachment.Attachment):
@@ -151,8 +151,8 @@ class Device(hsm.Instance, attachment.Attachment):
         # powers them first: firmware wires itself to them during bring-up, so they have to be
         # live before this device starts. Ownership decides this, never the caller's walk order.
         # One resolved scope for the whole set, so a bare ``ctx`` cannot leave each machine in an
-        # instance map of its own — attaching across those would read as a foreign world.
-        scope = World.from_context(ctx)
+        # instance map of its own — attaching across those would read as a foreign environment.
+        scope = Environment.from_context(ctx)
         for peripheral in Device._powered_peripherals(self):
             if lifecycle.is_started(peripheral):
                 continue
@@ -161,19 +161,19 @@ class Device(hsm.Instance, attachment.Attachment):
                 raise RuntimeError(f"{type(peripheral).__name__} has no lifecycle model.")
             _ = await hsm.started(scope, peripheral, model)
         instance = await super().start(scope, data)
-        # Presence is a property of being started in a world, not of being owned by a bot.
+        # Presence is a property of being started in an environment, not of being owned by a bot.
         # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both
         # resolve that scope from self.context(), which is the authoritative one. A passed ctx may
         # be a bare context, or a different scope than the device actually started in; either
-        # resolves to a throwaway World whose participant set is empty, so the operation would
+        # resolves to a throwaway Environment whose participant set is empty, so the operation would
         # silently do nothing.
-        World.from_context(self.context()).join(self, placement=self._placement)
+        Environment.from_context(self.context()).join(self, placement=self._placement)
         return instance
 
     @typing.override
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
-        world = World.from_context(ctx)
-        _require_attach_world_scope(world, self)
+        environment = Environment.from_context(ctx)
+        _require_attach_environment_scope(environment, self)
         await hsm.Instance.dispatch(self, ctx, event)
 
     @typing.override
@@ -203,7 +203,7 @@ class Device(hsm.Instance, attachment.Attachment):
                 ),
             )
             return
-        require_world_scope(World.from_context(ctx), self, participant="Device")
+        require_environment_scope(Environment.from_context(ctx), self, participant="Device")
         await hsm.Instance.dispatch(self, ctx, event)
 
     @typing.override
@@ -217,7 +217,7 @@ class Device(hsm.Instance, attachment.Attachment):
         # ownership completeness and map hygiene — the presence analogue of the firmware-entry
         # cleanup below, which exists because HSM never prunes Keys.Instances on stop. Do not
         # delete it as untested.
-        World.from_context(self.context()).leave(self)
+        Environment.from_context(self.context()).leave(self)
         await hsm.Instance.stop(self, ctx)
 
         firmware = self._firmware
@@ -250,10 +250,10 @@ class Device(hsm.Instance, attachment.Attachment):
     async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:
         """Stop and start again under ``ctx``, the scope the device comes back up in.
 
-        ``ctx`` MUST outlive this device's own context, which ``stop`` cancels — pass the world,
+        ``ctx`` MUST outlive this device's own context, which ``stop`` cancels — pass the environment,
         or another durable scope. The device does not synthesize a replacement context: a
-        synthesized one carries the addressing map but no world scope, so the device would come
-        back addressable yet absent from world presence, and every later broadcast from it would
+        synthesized one carries the addressing map but no environment scope, so the device would come
+        back addressable yet absent from environment presence, and every later broadcast from it would
         silently reach nobody.
 
         This deliberately diverges from ``hsm.HSM.restart``, which still synthesizes a parentless

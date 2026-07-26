@@ -19,7 +19,7 @@ from livekit import rtc
 
 from bot import lifecycle
 from bot.telemetry import observer
-from bot.world import World, require_world_scope
+from bot.environment import Environment, require_environment_scope
 
 from .audio import AudioBridge, create_audio_bridge
 from .pcm_batch import RemotePcmBatcher
@@ -1046,18 +1046,18 @@ class PhoneService(hsm.Instance):
         del request
         _raise_unavailable_call_control()
 
-    async def attach(self, world: World, target: hsm.Instance) -> None:
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
         """Attach this service to the phone-owned firmware target."""
 
-        require_world_scope(world, target, participant="Phone service target")
+        require_environment_scope(environment, target, participant="Phone service target")
         _, track_path = self._ensure_media()
         if not lifecycle.is_started(track_path):
-            _ = await hsm.started(world, track_path, track_path.model)
+            _ = await hsm.started(environment, track_path, track_path.model)
         # Start this service before room connect so participant_connected can ring.
         if not lifecycle.is_started(self):
-            _ = await hsm.started(world, self, self.model)
-        require_world_scope(world, self, participant="PhoneService")
-        await self.dispatch(world, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
+            _ = await hsm.started(environment, self, self.model)
+        require_environment_scope(environment, self, participant="PhoneService")
+        await self.dispatch(environment, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
         target_ref = self._attached_phone_target_ref
         current_target = None if target_ref is None else target_ref()
         if current_target is not target:
@@ -1071,15 +1071,15 @@ class PhoneService(hsm.Instance):
             assert room is not None
             self._scan_existing_remote_participants(room)
 
-    async def detach(self, world: World, target: hsm.Instance) -> None:
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
         """Detach this service from the phone-owned firmware target."""
 
         # Idempotent when already stopped; no firmware reply channel on this API.
         if not lifecycle.is_started(self):
             return
-        require_world_scope(world, target, participant="Phone service target")
-        require_world_scope(world, self, participant="PhoneService")
-        await self.dispatch(world, _ServiceDetachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
+        require_environment_scope(environment, target, participant="Phone service target")
+        require_environment_scope(environment, self, participant="PhoneService")
+        await self.dispatch(environment, _ServiceDetachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
 
     async def connect_room(
         self,

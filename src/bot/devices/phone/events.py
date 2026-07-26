@@ -1,5 +1,5 @@
 from bot.devices import audio
-from bot.world import SoundData
+from bot.environment import SoundData
 
 import typing
 
@@ -14,7 +14,7 @@ CallId = typing.Annotated[
         description=(
             "Provider-neutral identifier for one phone call. Firmware uses this value to reject stale service "
             "callbacks and commands for a previous call. "
-            "When answering or declining a ring elevated as world.sound, copy this from the stimulus "
+            "When answering or declining a ring elevated as environment.sound, copy this from the stimulus "
             "event.data.call_id (also mirrored on event.id for correlation) — never a documentation "
             "example such as call-123."
         ),
@@ -289,15 +289,15 @@ class PhoneCallData(CallIdData):
 class RingingData(PhoneCallData):
     """Committed public phone state that a call is ringing.
 
-    Distinct from :class:`PhoneCallData` used by answered/media-ready so world elevation
+    Distinct from :class:`PhoneCallData` used by answered/media-ready so environment elevation
     can select ring acoustics by payload type without ``event.name`` discrimination.
     """
 
 
 class PhoneSoundData(SoundData):
-    """``world.sound`` payload elevated from phone ringing (or call-scoped acoustic energy).
+    """``environment.sound`` payload elevated from phone ringing (or call-scoped acoustic energy).
 
-    Subclasses :class:`~bot.world.SoundData` with a typed ``call_id`` so models copy
+    Subclasses :class:`~bot.environment.SoundData` with a typed ``call_id`` so models copy
     ``event.data.call_id`` into answer/decline tools instead of inferring from ``event.id``.
     Elevation also mirrors ``call_id`` onto ``event.id`` for HSM correlation.
     """
@@ -308,7 +308,7 @@ class PhoneSoundData(SoundData):
         val_json_bytes="base64",
         json_schema_extra={
             "description": (
-                "Phone-elevated acoustic stimulus for world.sound. Includes call_id so tool "
+                "Phone-elevated acoustic stimulus for environment.sound. Includes call_id so tool "
                 "arguments can copy event.data.call_id directly."
             ),
             "examples": [

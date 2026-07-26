@@ -1,4 +1,4 @@
-"""World-facing input event contracts (stimuli for bot input abilities).
+"""Environment-facing input event contracts (stimuli for bot input abilities).
 
 These are bot-facing acoustic and visual stimuli, not device playout/capture
 primitives (`devices.audio.*`). Speech and other interpretations are produced
@@ -83,7 +83,7 @@ class SoundData(pydantic.BaseModel):
         description=(
             "Optional loudness of this sound at its source, in dB SPL measured one metre away. A "
             "shout and a whisper leave the same mouth, so loudness belongs to the sound rather "
-            "than to the thing that made it. How far it carries is the world's to work out; "
+            "than to the thing that made it. How far it carries is the environment's to work out; "
             "omitting this means the sound reaches every listener regardless of distance."
         ),
         examples=[60.0, 25.0],
@@ -131,11 +131,11 @@ class VisualData(pydantic.BaseModel):
 
 
 SoundEvent = hsm.Event[SoundData](
-    name="world.sound",
+    name="environment.sound",
     schema=SoundData,
 )
 VisualEvent = hsm.Event[VisualData](
-    name="world.visual",
+    name="environment.visual",
     schema=VisualData,
 )
 

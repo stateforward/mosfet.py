@@ -46,7 +46,7 @@ output_event = hsm.event(
     },
     description = "Cognition event selection.",
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 description = "Answer an incoming ring."
 
 def select_focus(event):
@@ -111,7 +111,7 @@ def _generate_selection(
                 "reason": lesson,
                 "lesson_kind": "instruction",
                 "runtime_input": {
-                    "stimulus_name": "world.sound",
+                    "stimulus_name": "environment.sound",
                     "payload": {"kind": "phone.ringing", "call_id": "incoming-call"},
                     "focus": "phone",
                     "focus_candidates": ["phone"],
@@ -156,7 +156,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
         episode = episodes.CognitiveEpisode(
             focus="phone",
             focus_candidates=("phone",),
-            stimulus_name="world.sound",
+            stimulus_name="environment.sound",
             output=(
                 cognition_types.EventData(
                     event="phone.answer_call",
@@ -178,7 +178,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
                     "reason": "When the phone rings, answer it.",
                     "lesson_kind": "instruction",
                     "runtime_input": {
-                        "stimulus_name": "world.sound",
+                        "stimulus_name": "environment.sound",
                         "payload": {"kind": "phone.ringing"},
                         "focus": "phone",
                         "focus_candidates": ["phone"],
@@ -193,7 +193,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
             selection=selection,
             write=behavior.ChangeData(
                 name="AnswerIncomingRing",
-                triggers=("world.sound",),
+                triggers=("environment.sound",),
                 reason="When the phone rings, answer it.",
                 source=ANSWER_RING_BEHAVIOR_SOURCE,
             ),
@@ -211,7 +211,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
         )
 
     output = asyncio.run(run())
-    assert output.runtime_input.stimulus_name == "world.sound"
+    assert output.runtime_input.stimulus_name == "environment.sound"
     assert output.runtime_input.focus == "phone"
     # Model omitted expected answer_call; memory episode supplies it.
     assert output.runtime_input.expected_event == "phone.answer_call"
@@ -227,7 +227,7 @@ def _seed_ring_episode(store: memory.Memory) -> None:
     episode = episodes.CognitiveEpisode(
         focus="phone",
         focus_candidates=("phone",),
-        stimulus_name="world.sound",
+        stimulus_name="environment.sound",
         output=(
             cognition_types.EventData(
                 event="phone.answer_call",
@@ -278,7 +278,7 @@ def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
             selection=_generate_selection(),
             write=behavior.ChangeData(
                 name="AnswerIncomingRing",
-                triggers=("world.sound",),
+                triggers=("environment.sound",),
                 reason="When the phone rings, answer it.",
                 source=ANSWER_RING_BEHAVIOR_SOURCE,
             ),
@@ -299,11 +299,11 @@ def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
     assert isinstance(output, learning.OutputData)
     assert output.decoded.text == "When the phone rings, answer it."
     assert output.decoded.kind == "instruction"
-    assert output.runtime_input.stimulus_name == "world.sound"
+    assert output.runtime_input.stimulus_name == "environment.sound"
     assert output.runtime_input.focus == "phone"
     assert output.runtime_input.expected_event == "phone.answer_call"
     assert output.behavior.name == "AnswerIncomingRing"
-    assert output.behavior.triggers == ("world.sound",)
+    assert output.behavior.triggers == ("environment.sound",)
     assert output.behavior.source is not None
     assert "AnswerIncomingRing" in output.behavior.source
 
@@ -351,7 +351,7 @@ def test_learning_rejects_lesson_text_as_runtime_input_payload() -> None:
                     "name": "BadRuntimeInput",
                     "reason": lesson,
                     "runtime_input": {
-                        "stimulus_name": "world.sound",
+                        "stimulus_name": "environment.sound",
                         # Lesson smuggled as runtime payload — must fail.
                         "payload": {"text": lesson},
                     },
@@ -498,15 +498,15 @@ def test_runtime_input_schema_rejects_lesson_prose_payload() -> None:
 
     lesson = "When the phone rings, answer it immediately without any delay whatsoever."
     with pytest.raises(ValueError, match="lesson"):
-        _ = learning.RuntimeInputData(stimulus_name="world.sound", payload={"note": lesson})
+        _ = learning.RuntimeInputData(stimulus_name="environment.sound", payload={"note": lesson})
     # A live-shaped payload of the same shape but short values stays valid.
-    accepted = learning.RuntimeInputData(stimulus_name="world.sound", payload={"note": "ringing"})
+    accepted = learning.RuntimeInputData(stimulus_name="environment.sound", payload={"note": "ringing"})
     assert accepted.payload == {"note": "ringing"}
 
 
 def test_runtime_input_schema_requires_non_empty_payload() -> None:
     with pytest.raises(ValueError):
-        _ = learning.RuntimeInputData(stimulus_name="world.sound", payload={})
+        _ = learning.RuntimeInputData(stimulus_name="environment.sound", payload={})
 
 
 def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
@@ -529,7 +529,7 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
                     "name": "AnswerIncomingRing",
                     "reason": "When the phone rings, answer it.",
                     "runtime_input": {
-                        "stimulus_name": "world.sound",
+                        "stimulus_name": "environment.sound",
                         "payload": {"kind": "phone.ringing"},
                     },
                 },
@@ -539,7 +539,7 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
             selection=selection,
             write=behavior.ChangeData(
                 name="AnswerIncomingRing",
-                triggers=("world.sound",),
+                triggers=("environment.sound",),
                 reason="When the phone rings, answer it.",
                 source=ANSWER_RING_BEHAVIOR_SOURCE,
             ),
@@ -554,7 +554,7 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
 
     output = asyncio.run(run())
     # Memory is authoritative for identity and expected selection.
-    assert output.runtime_input.stimulus_name == "world.sound"
+    assert output.runtime_input.stimulus_name == "environment.sound"
     assert output.runtime_input.expected_event == "phone.answer_call"
     assert output.runtime_input.expected_data == {"call_id": "from-memory"}
     # The model's live-shaped payload survives verbatim: no promoted keys, no sentinel.
@@ -728,7 +728,7 @@ def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_select
             selection=_generate_selection(),
             write=behavior.ChangeData(
                 name="AnswerIncomingRing",
-                triggers=("world.sound",),
+                triggers=("environment.sound",),
                 reason="When the phone rings, answer it.",
                 source=ANSWER_RING_BEHAVIOR_SOURCE,
             ),

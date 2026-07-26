@@ -30,7 +30,7 @@ output_event = hsm.event(
     },
     description = "Cognition event selection.",
 )
-triggers = ["world.sound"]
+triggers = ["environment.sound"]
 description = "Answer an incoming ring."
 
 def select_focus(event):
@@ -103,7 +103,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "3deacac3bb2f2aaf0749f2fdc3089420f1b041c33cb177afe8b041bd2fc4bac7"
+        == "3c5ceceec8bc969054d1ee65c165005a60f6d4b1e324b672820293ada79113cf"
     )
 
 
@@ -188,7 +188,7 @@ def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
     existing = behavior.Instance(
         name="AnswerIncomingRing",
         source="old source",
-        triggers=("world.sound",),
+        triggers=("environment.sound",),
         description="keep me",
     )
     written = behavior.ChangeData(name="AnswerIncomingRing", source="invalid replacement")
@@ -196,7 +196,7 @@ def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
     draft = revision._inventory_instance(written, None, existing)
 
     assert draft is not None
-    assert draft.triggers == ("world.sound",)
+    assert draft.triggers == ("environment.sound",)
     assert draft.description == "keep me"
 
 
@@ -218,7 +218,7 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
                 cognition_output=focus_output("phone", "answered"),
                 intent=behavior.CreateData(
                     name="AnswerIncomingRing",
-                    triggers=("world.sound",),
+                    triggers=("environment.sound",),
                 ),
                 parent_operation_id="parent-turn",
                 parent_generation="parent-generation",
@@ -231,5 +231,5 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
     assert isinstance(output.applied, behavior.CreateData)
     assert output.applied.source == ANSWER_RING_BEHAVIOR_SOURCE
     assert output.applied.name == "AnswerIncomingRing"
-    assert output.applied.triggers == ("world.sound",)
+    assert output.applied.triggers == ("environment.sound",)
     assert output.applied.description == "Answer an incoming ring."

@@ -22,7 +22,7 @@ from . import events
 
 from bot.device import Device
 from bot.telemetry import observer
-from bot.world import SoundEvent, VisualEvent, World, require_world_scope, space
+from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
@@ -293,12 +293,12 @@ def _device_tree(*roots: Device) -> tuple[Device, ...]:
 
 
 def _private_scope(parent: hsm.Context) -> hsm.Context:
-    """Child context with a private Instances map, off the world addressing map.
+    """Child context with a private Instances map, off the environment addressing map.
 
     ``hsm.dispatch_all`` delivers to every instance in the surrounding Instances map. Actors
     started under this scope (bot-owned abilities, ephemeral reply and timer actors) receive
-    events only through explicit dispatch, and cancel with ``parent``. The world presence set
-    is deliberately *not* shadowed: an actor here can emit into the world without ever being a
+    events only through explicit dispatch, and cancel with ``parent``. The environment presence set
+    is deliberately *not* shadowed: an actor here can emit into the environment without ever being a
     broadcast recipient, which is presence's job to decide.
     """
 
@@ -355,33 +355,33 @@ class Bot(hsm.Instance, abc.ABC):
         self._acquired_abilities = tuple(acquired_abilities)
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
 
-    async def attach(self, world: World, *, placement: space.Placement | None = None) -> typing.Self:
-        require_world_scope(world, self, participant="Bot")
+    async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
+        require_environment_scope(environment, self, participant="Bot")
         try:
-            _ = await hsm.started(world, self, self.model)
+            _ = await hsm.started(environment, self, self.model)
         except Exception as error:
             if not _is_already_running_error(error):
                 raise
         # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
         # Unconditional: the already-running branch above swallows its error, and join is idempotent.
-        world.join(self, placement=placement)
-        await self.dispatch(world, events.ActivateEvent.with_data(events.ActivateEventData()))
+        environment.join(self, placement=placement)
+        await self.dispatch(environment, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
-    async def detach(self, world: World) -> typing.Self:
-        require_world_scope(world, self, participant="Bot")
+    async def detach(self, environment: Environment) -> typing.Self:
+        require_environment_scope(environment, self, participant="Bot")
         try:
-            await self.dispatch(world, events.DeactivateEvent.with_data(events.DeactivateEventData()))
+            await self.dispatch(environment, events.DeactivateEvent.with_data(events.DeactivateEventData()))
         except Exception as error:
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
             if not _is_not_started_error(error):
                 raise
         # Presence is attachment-scoped, not activation-scoped: a deactivated but still attached
-        # bot is legitimately in the world, so only detach ends it — reboot deactivates without
+        # bot is legitimately in the environment, so only detach ends it — reboot deactivates without
         # detaching and keeps presence. Pairs with the join in attach; no test can observe the
         # removal (a stopped or inactive bot ignores broadcasts either way), so this is ownership
         # completeness and map hygiene. Do not delete it as untested.
-        world.leave(self)
+        environment.leave(self)
         return self
 
     @staticmethod
@@ -480,7 +480,7 @@ class Bot(hsm.Instance, abc.ABC):
         cleanup: typing.Literal["preserve", "reset"] | None,
     ) -> None:
         lifetime = instance.context()
-        world = World.from_context(lifetime)
+        environment = Environment.from_context(lifetime)
         if cleanup == "reset":
             for member in Bot._lifecycle_attachment_members(instance):
                 await hsm.Instance.dispatch(
@@ -494,10 +494,10 @@ class Bot(hsm.Instance, abc.ABC):
                         metadata=dict(event.metadata),
                     ),
                 )
-            await hsm.stop(instance._attachments, world)
+            await hsm.stop(instance._attachments, environment)
             instance._attachments = attachment.Group(*Bot._lifecycle_attachment_members(instance))
         elif cleanup is None:
-            await hsm.stop(instance._attachments, world)
+            await hsm.stop(instance._attachments, environment)
             for ability in Bot._lifecycle_abilities(instance):
                 # Cognition's required composite tree remains detached under Bot lifetime;
                 # stopping it cancels the child contexts needed by a later activation.
@@ -1140,7 +1140,7 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     async def _activate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         lifetime = instance.context()
-        world = World.from_context(lifetime)
+        environment = Environment.from_context(lifetime)
         try:
             group_scope = _private_scope(lifetime)
             try:
@@ -1152,12 +1152,12 @@ class Bot(hsm.Instance, abc.ABC):
             # Configured devices only: a device powers its own peripherals (Device.start), so
             # walking the tree here would start them a second time.
             for device in instance._devices.values():
-                require_world_scope(world, device, participant="Device")
+                require_environment_scope(environment, device, participant="Device")
                 model = device.model
                 if model is None:
                     raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
                 try:
-                    _ = await hsm.started(world, device, model)
+                    _ = await hsm.started(environment, device, model)
                 except Exception as error:
                     if not _is_already_running_error(error):
                         raise
@@ -1170,12 +1170,12 @@ class Bot(hsm.Instance, abc.ABC):
                     _ = await hsm.started(ability_scope, ability, model)
                 except Exception as error:
                     # Idempotent when already running under private scope; raise when the
-                    # ability is already running under the world instance map (would receive
-                    # world broadcasts directly).
-                    shares_world_instances = ability.context().value(hsm.Keys.Instances) is world.value(
+                    # ability is already running under the environment instance map (would receive
+                    # environment broadcasts directly).
+                    shares_environment_instances = ability.context().value(hsm.Keys.Instances) is environment.value(
                         hsm.Keys.Instances
                     )
-                    if not _is_already_running_error(error) or shares_world_instances:
+                    if not _is_already_running_error(error) or shares_environment_instances:
                         raise
             await Bot._request_attachment_terminal(ctx, instance, event, kind="attach")
         except asyncio.CancelledError:
@@ -1260,17 +1260,17 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     async def _activation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         lifetime = instance.context()
-        world = World.from_context(lifetime)
+        environment = Environment.from_context(lifetime)
         # Deactivation may cancel activation before the activity can publish its
         # incrementally-started ownership set. Cleanup therefore owns the complete
         # configured lifecycle surface; stopping an actor that never started is
         # intentionally idempotent at this boundary.
-        await hsm.stop(instance._attachments, world)
+        await hsm.stop(instance._attachments, environment)
         for ability in reversed(Bot._lifecycle_abilities(instance)):
             await hsm.stop(ability, lifetime)
         # Device.stop stops the peripherals that device powers, so this owns configured devices only.
         for device in reversed(list(instance._devices.values())):
-            await device.stop(world)
+            await device.stop(environment)
         terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(
             ctx,
@@ -1456,7 +1456,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.effect(_clear_focus),
                 hsm.target("../reboot_deactivating"),
             ),
-            # Explicit world input events fan out in parallel to input abilities (never cognition).
+            # Explicit environment input events fan out in parallel to input abilities (never cognition).
             hsm.transition(
                 hsm.on(SoundEvent, VisualEvent),
                 hsm.effect(_fan_out_input),
@@ -1485,7 +1485,7 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
-                # Sensory products: explicit cognition.InputEvent handoff (never raw world media).
+                # Sensory products: explicit cognition.InputEvent handoff (never raw environment media).
                 # Speech products with acquired Conversation bridge to Message (not deliberative yet).
                 hsm.transition(
                     hsm.on(cognition.InputEvent),

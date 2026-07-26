@@ -9,7 +9,7 @@ import hsm
 
 from bot.device import Device
 from bot.protocols import attachment
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_peripherals
 
 
@@ -68,31 +68,31 @@ def test_speaker_dispatches_audio_output_to_target_device() -> None:
 
     asyncio.run(run())
 
-def test_speaker_transduces_attached_controller_signal_into_world_sound() -> None:
-    """A speaker converts signal into acoustic energy for the world, the mirror of a microphone.
+def test_speaker_transduces_attached_controller_signal_into_environment_sound() -> None:
+    """A speaker converts signal into acoustic energy for the environment, the mirror of a microphone.
 
-    ``devices.audio.output`` from the controller that attached becomes ``world.sound`` sourced at
-    the speaker, so bots hear playout as world stimulus rather than as raw device product.
+    ``devices.audio.output`` from the controller that attached becomes ``environment.sound`` sourced at
+    the speaker, so bots hear playout as environment stimulus rather than as raw device product.
     """
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str]:
-        world = World()
+        environment = Environment()
         speaker = audio.Speaker()
         controller = RecordingDevice()
         inside = RecordingDevice()
         outside = RecordingDevice()
-        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
-        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside-speaker"))
+        _ = await hsm.started(environment, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(environment, controller, controller.model, hsm.Config(id="controller"))
+        _ = await hsm.started(environment, inside, inside.model, hsm.Config(id="inside-speaker"))
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside-speaker"))
-        await speaker.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        await speaker.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: speaker.state() == "/Device/attached")
         inside.events.clear()
         outside.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
         await speaker.dispatch(
-            world,
+            environment,
             dataclasses.replace(
                 audio.OutputEvent.with_data(data),
                 metadata={"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"},
@@ -123,15 +123,15 @@ def test_unattached_speaker_transduces_nothing() -> None:
     """An unwired speaker is silent, exactly as its physical counterpart is."""
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        world = World()
+        environment = Environment()
         speaker = audio.Speaker()
         inside = RecordingDevice()
-        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside-speaker"))
+        _ = await hsm.started(environment, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(environment, inside, inside.model, hsm.Config(id="inside-speaker"))
         inside.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
-        await speaker.dispatch(world, audio.OutputEvent.with_data(data))
+        await speaker.dispatch(environment, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0)
 
         return [event for event in inside.events if event.name == SoundEvent.name]

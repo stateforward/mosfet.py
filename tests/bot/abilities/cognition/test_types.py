@@ -7,7 +7,7 @@ from bot.abilities.cognition import types
 from bot.device import Device
 from bot.devices.phone import events as phone_events
 from bot.devices.phone.events import PhoneSoundData
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 import hsm
 import pytest
 
@@ -39,7 +39,7 @@ def test_dispatch_ignore_only_is_judgment_no_actor_delivery() -> None:
     asyncio.run(run())
 
 
-def test_without_ignore_selections_keeps_world_actions() -> None:
+def test_without_ignore_selections_keeps_environment_actions() -> None:
     mixed = (
         processing.SelectedEvent(event=types.IgnoreEvent.name, data={"reason": "nope"}),
         processing.SelectedEvent(event=phone_events.AnswerCallEvent.name, data={"call_id": "x"}),
@@ -202,7 +202,7 @@ def test_bind_phone_call_id_skips_non_ring_sound() -> None:
             )
         ),
         id="not-a-call",
-        source="world",
+        source="environment",
         target="",
     )
     input = processing.InputData(input=stimulus, schemas=(phone_events.AnswerCallEvent,))

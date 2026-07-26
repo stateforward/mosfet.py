@@ -78,7 +78,7 @@ behavior_trigger_table = Table(
         ForeignKey(f"{BEHAVIOR_TABLE}.name", ondelete="CASCADE"),
         primary_key=True,
     ),
-    # External event name that may activate this behavior (e.g. world.sound).
+    # External event name that may activate this behavior (e.g. environment.sound).
     Column("trigger", Text, primary_key=True),
     Index("bot_behavior_trigger_event_idx", "trigger"),
 )

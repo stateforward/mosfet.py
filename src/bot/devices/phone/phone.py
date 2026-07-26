@@ -14,7 +14,7 @@ from bot import lifecycle
 from bot.event_schema import validate_event_data
 from bot.protocols import attachment
 from bot.telemetry import observer
-from bot.world import SoundEvent, World, require_world_scope, space
+from bot.environment import SoundEvent, Environment, require_environment_scope, space
 
 from .events import (
     AnswerCallData,
@@ -71,7 +71,7 @@ RINGER_DB = 80.0
 """How loud a handset ringer is, in dB SPL measured one metre away.
 
 Device-intrinsic like a speaker's output level: it is what this hardware does, while how far the
-ring carries is the world's to work out from where the phone is.
+ring carries is the environment's to work out from where the phone is.
 
 Known interaction, deliberately not engineered around: at this level a ring clears a close-talk
 mouthpiece threshold from 15 cm away (about 96 dB against 70), so a ringing phone would carry its
@@ -94,7 +94,7 @@ _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
 
 
 def _load_ring_sound_wav() -> bytes:
-    """Load the short package-local landline ring clip for world.sound elevation."""
+    """Load the short package-local landline ring clip for environment.sound elevation."""
 
     return (importlib.resources.files(__package__) / "assets" / "ring.wav").read_bytes()
 
@@ -149,18 +149,18 @@ def _completed_phone_service_event() -> asyncio.Future[None]:
 class _PhoneObservationService:
     owner: "Phone"
     service: "PhoneService"
-    # Injected by the phone that owns this service: elevating a committed observation into a world
+    # Injected by the phone that owns this service: elevating a committed observation into an environment
     # stimulus is the phone's behaviour, not the transport's, and the phone is what knows where it
     # is standing.
     elevate: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]
     target: hsm.Instance | None = dataclasses.field(default=None, init=False)
 
-    async def attach(self, world: World, target: hsm.Instance) -> None:
-        await self.service.attach(world, target)
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+        await self.service.attach(environment, target)
         self.target = target
 
-    async def detach(self, world: World, target: hsm.Instance) -> None:
-        await self.service.detach(world, target)
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+        await self.service.detach(environment, target)
         if self.target is target:
             self.target = None
 
@@ -193,11 +193,11 @@ class _PhoneObservationService:
 class PhoneService(typing.Protocol):
     """Service that receives provider requests and committed public phone events."""
 
-    def attach(self, world: World, target: hsm.Instance) -> collections.abc.Awaitable[None]:
+    def attach(self, environment: Environment, target: hsm.Instance) -> collections.abc.Awaitable[None]:
         """Attach this phone service to a phone-owned firmware instance."""
         ...
 
-    def detach(self, world: World, target: hsm.Instance) -> collections.abc.Awaitable[None]:
+    def detach(self, environment: Environment, target: hsm.Instance) -> collections.abc.Awaitable[None]:
         """Detach this phone service from a phone-owned firmware instance."""
         ...
 
@@ -219,12 +219,12 @@ class PhoneEventRecorder:
     def events(self) -> tuple[hsm.Event[typing.Any], ...]:
         return tuple(self._events)
 
-    async def attach(self, world: World, target: hsm.Instance) -> None:
-        require_world_scope(world, target, participant="Phone service target")
+    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
+        require_environment_scope(environment, target, participant="Phone service target")
         self._target = target
 
-    async def detach(self, world: World, target: hsm.Instance) -> None:
-        require_world_scope(world, target, participant="Phone service target")
+    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
+        require_environment_scope(environment, target, participant="Phone service target")
         if self._target is target:
             self._target = None
 
@@ -249,10 +249,10 @@ def _require_positive_timeout(name: str, value: datetime.timedelta) -> None:
         raise ValueError(f"{name} must be a positive duration.")
 
 
-def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:
-    """Map phone observations that bots experience as input energy into world stimuli.
+def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:
+    """Map phone observations that bots experience as input energy into environment stimuli.
 
-    Ringing is heard as ``world.sound`` with ``source`` = the phone instance id. Device-plane
+    Ringing is heard as ``environment.sound`` with ``source`` = the phone instance id. Device-plane
     ``phone.ringing`` still flows on the service/firmware path; bots do not receive it as a
     raw cognitive stimulus. Ring elevation selects on :class:`RingingData` payload type.
     Live ``call_id`` is stamped on :class:`PhoneSoundData` (model-facing ``event.data``) and
@@ -289,7 +289,7 @@ class PhoneFirmware(hsm.Instance):
     """Phone-owned firmware state for a single active call."""
 
     _service: PhoneService
-    # Firmware owns transducer routing: the speaker transmits service audio into the world
+    # Firmware owns transducer routing: the speaker transmits service audio into the environment
     # (receiver), the microphone carries local speech to the service (mouthpiece). The service
     # knows about neither.
     _speaker: audio.Speaker
@@ -426,12 +426,12 @@ class PhoneFirmware(hsm.Instance):
         service = instance._service
         if isinstance(service, _PhoneObservationService) and not service.is_attached():
             return False
-        # Elevation stamps source=hsm.id(speaker) on world.sound, so the speaker must be started
-        # in the same world Instances map as ctx. Liveness and scope only — never state().
+        # Elevation stamps source=hsm.id(speaker) on environment.sound, so the speaker must be started
+        # in the same environment Instances map as ctx. Liveness and scope only — never state().
         if not lifecycle.is_started(instance._speaker):
             return False
         speaker_context = instance._speaker.context()
-        return speaker_context.value(hsm.Keys.Instances) is World.from_context(ctx).value(hsm.Keys.Instances)
+        return speaker_context.value(hsm.Keys.Instances) is Environment.from_context(ctx).value(hsm.Keys.Instances)
 
     @staticmethod
     def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
@@ -564,7 +564,7 @@ class PhoneFirmware(hsm.Instance):
         """Mouthpiece: carry locally captured audio up the wire.
 
         Only reachable from the answered/media_ready state, so the microphone is live exactly
-        while a call is connected and world sound is ignored otherwise. This is the only path
+        while a call is connected and environment sound is ignored otherwise. This is the only path
         to the service; the speaker never reaches it.
         """
 
@@ -580,14 +580,14 @@ class PhoneFirmware(hsm.Instance):
 
     @staticmethod
     def _receive_service_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        """Receiver: transmit far-end audio out of the phone speaker into the world.
+        """Receiver: transmit far-end audio out of the phone speaker into the environment.
 
         ``data`` is passed through as the ``ServiceAudioData`` it already is. Flattening it to
         ``AudioOutputData`` used to erase where it came from, which is how receiver audio ended
         up back on the wire.
 
         No call *here* reaches the service — but the loop this closes does. Far-end audio put
-        into the world is heard by this phone's own microphone, which carries it back up the
+        into the environment is heard by this phone's own microphone, which carries it back up the
         wire as uplink. That echo is an audibility problem, out of scope for the transducer
         ownership work and tracked for Change B; do not read this docstring as saying the
         receiver path cannot reach the service.
@@ -1225,14 +1225,14 @@ class Phone(bot.device.Device):
 
         firmware = self._firmware
         if firmware is not None:
-            await self._service.detach(World.from_context(self.context()), firmware)
+            await self._service.detach(Environment.from_context(self.context()), firmware)
         await super().stop(ctx)
 
     def _broadcast_observation(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Elevate a committed observation into a world stimulus, from where this phone stands.
+        """Elevate a committed observation into an environment stimulus, from where this phone stands.
 
         Committed public payloads only — not service-request payloads (MediaReadyData / DialData
-        and friends), which must not re-enter the phone shell as world sound. Committed
+        and friends), which must not re-enter the phone shell as environment sound. Committed
         media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
         """
 
@@ -1242,8 +1242,8 @@ class Phone(bot.device.Device):
         ):
             return
         placement = self._placement
-        _ = World.from_context(ctx).broadcast(
-            _world_observation_event(self, event),
+        _ = Environment.from_context(ctx).broadcast(
+            _environment_observation_event(self, event),
             origin=None if placement is None else placement.position,
         )
 
@@ -1300,17 +1300,17 @@ class Phone(bot.device.Device):
         if self._firmware is None:
             return
         # Service/media outlive firmware-init activity; attach under device lifetime context (HSM-CONTEXT-001).
-        world = World.from_context(self.context())
-        await self._service.attach(world, self._firmware)
+        environment = Environment.from_context(self.context())
+        await self._service.attach(environment, self._firmware)
         # Firmware is the controller, so it wires itself to its own transducers. Wiring, not
         # gating: this attach happens once at bring-up and nothing in src ever detaches, so the
-        # microphone transduces on EVERY world.sound for the phone's whole life — a per-broadcast
+        # microphone transduces on EVERY environment.sound for the phone's whole life — a per-broadcast
         # hot path that runs whether or not a call is up — and firmware discards what arrives
         # outside /Phone/answered/media_ready. Call state is gated by that transition's scope, not
         # by the attachment. Anything changing what the mouthpiece costs when idle changes it here.
         wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=self._firmware))
-        await self._microphone.attach(world, wired)
-        await self._speaker.attach(world, wired)
+        await self._microphone.attach(environment, wired)
+        await self._speaker.attach(environment, wired)
 
     @typing.override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:

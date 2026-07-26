@@ -8,7 +8,7 @@ import hsm
 
 from bot.device import Device
 from bot.protocols import attachment
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, device_peripherals
 
 
@@ -69,24 +69,24 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
     asyncio.run(run())
 
 
-def test_microphone_transduces_one_capture_per_world_sound_to_each_attached_controller() -> None:
+def test_microphone_transduces_one_capture_per_environment_sound_to_each_attached_controller() -> None:
     """A microphone converts what it hears once, and hands it to whatever attached to it.
 
-    The capture runs on the shell, which is the world's only presence for this device, so one
-    ``world.sound`` yields exactly one ``devices.audio.input`` per attached controller. Delivery
+    The capture runs on the shell, which is the environment's only presence for this device, so one
+    ``environment.sound`` yields exactly one ``devices.audio.input`` per attached controller. Delivery
     is addressed, not broadcast: nothing that did not attach hears it.
     """
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
-        world = World()
+        environment = Environment()
         microphone = audio.Microphone()
         controller = RecordingDevice()
         bystander = RecordingDevice()
 
-        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
-        _ = await hsm.started(world, bystander, bystander.model, hsm.Config(id="bystander"))
-        await microphone.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, controller, controller.model, hsm.Config(id="controller"))
+        _ = await hsm.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
+        await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: microphone.state() == "/Device/attached")
         controller.events.clear()
         bystander.events.clear()
@@ -94,7 +94,7 @@ def test_microphone_transduces_one_capture_per_world_sound_to_each_attached_cont
         def captures(device: RecordingDevice) -> list[hsm.Event[typing.Any]]:
             return [event for event in device.events if event.name == audio.InputEvent.name]
 
-        await world.broadcast(
+        await environment.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )
@@ -115,7 +115,7 @@ def test_microphone_transduces_one_capture_per_world_sound_to_each_attached_cont
     )
     assert captured[0].source == "microphone"
     assert captured[0].target == "controller"
-    # Nothing attached, nothing heard: a transducer feeds its controllers, not the world.
+    # Nothing attached, nothing heard: a transducer feeds its controllers, not the environment.
     assert overheard == []
 
 
@@ -123,15 +123,15 @@ def test_unattached_microphone_transduces_nothing() -> None:
     """An unwired microphone produces no signal, exactly as its physical counterpart does not."""
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        world = World()
+        environment = Environment()
         microphone = audio.Microphone()
         listener = RecordingDevice()
 
-        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="listener"))
+        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
         listener.events.clear()
 
-        await world.broadcast(
+        await environment.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )
@@ -175,17 +175,17 @@ def test_microphone_mid_attach_transduces_nothing() -> None:
     """
 
     async def run() -> tuple[str, list[hsm.Event[typing.Any]], tuple[hsm.Instance, ...]]:
-        world = World()
+        environment = Environment()
         microphone = HalfAttachedMicrophone()
         controller = RecordingDevice()
 
-        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
-        await microphone.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, controller, controller.model, hsm.Config(id="controller"))
+        await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: microphone.state() == "/Device/attaching")
         controller.events.clear()
 
-        await world.broadcast(
+        await environment.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )

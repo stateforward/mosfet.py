@@ -30,7 +30,7 @@ from bot.abilities import memory
 from bot.abilities import processing
 from bot.devices import phone as phone_device
 from bot.behavior import storage as behavior_storage
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import phone_firmware
 
@@ -194,7 +194,7 @@ async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) ->
         episode = cognition.episodes.CognitiveEpisode(
             focus="phone",
             focus_candidates=("phone",),
-            stimulus_name="world.sound",
+            stimulus_name="environment.sound",
             output=_answer_call_output(f"call-{index}", f"answered incoming ring episode {index}"),
             behavior=None,
         )
@@ -403,10 +403,10 @@ def _live_behavior_answers_phone_call(
             )
         )
 
-        world = World()
+        environment = Environment()
         phone = phone_device.Phone()
         autonomy = cognition.Autonomy(memory=store)
-        shared = shared_hsm_context(world)
+        shared = shared_hsm_context(environment)
         await start_abilities_for_test(shared, autonomy)
         _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
 
@@ -566,8 +566,8 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
             reasoning=cognition.Reasoning(processor=reasoning, memory=store),
             reflection=reflection,
         )
-        world = World()
-        shared = shared_hsm_context(world)
+        environment = Environment()
+        shared = shared_hsm_context(environment)
         phone = phone_device.Phone()
         await start_abilities_for_test(shared, ability)
         _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))

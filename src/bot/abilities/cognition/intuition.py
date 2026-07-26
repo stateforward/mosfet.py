@@ -28,7 +28,7 @@ DEFAULT_INSTRUCTIONS = (
     "includes integer confidence 0–100: always set it on each selected event (whole number only, "
     "never a fraction). Use high confidence (80–100) when the match is clear, mid (40–70) when "
     "plausible but incomplete, and low (0–35) when guessing or the host likely cannot fulfill the "
-    "request—low confidence may still run world actions while Cognition escalates an unhandled "
+    "request—low confidence may still run environment actions while Cognition escalates an unhandled "
     "turn to deliberation. "
     "When no device, body, or speech action should run, select "
     "bot.ability.cognition.ignore (with optional reason) for a deliberate handled pass. "
@@ -66,7 +66,7 @@ class EventPatch(pydantic.BaseModel):
             "0–35 when you are guessing, the host likely cannot fulfill the request with this "
             "event, or slower deliberation should also run. "
             "The host compares this score to a self-tuned baseline: low confidence can keep "
-            "world actions while escalating the turn to deliberate reasoning."
+            "environment actions while escalating the turn to deliberate reasoning."
         ),
         examples=[100, 86, 55, 20, 0],
     )
@@ -277,14 +277,14 @@ def _is_deliberative_input_event(
     return schema is processing.InputData or schema is reasoning_ability.CallData
 
 
-def _world_actions(
+def _environment_actions(
     output: types.OutputData,
     *,
     current_input: processing.InputData,
 ) -> types.OutputData:
     """Action events safe to fire before handing an uncertain turn to deliberate reasoning.
 
-    Cognition ignore is judgment-only (not a world action) and is never pre-fired on escalate.
+    Cognition ignore is judgment-only (not an environment action) and is never pre-fired on escalate.
     """
 
     schemas = {event.name: event for event in current_input.schemas}
@@ -318,7 +318,7 @@ class Intuition(processing.Processing):
     """Fast cognitive ability: multi-dispatch when handled; self-tuning confidence gates System 2.
 
     Processor-reported ``confidence`` updates a per-instance baseline. When confidence is
-    low relative to that baseline, world actions still dispatch, but the terminal is
+    low relative to that baseline, environment actions still dispatch, but the terminal is
     unhandled so Cognition cascades to reasoning. High confidence non-empty terminals keep
     the selection list (no cascade). Empty selections and explicit unhandled
     (``result is None``) cascade to reasoning by default; deliberate pass uses
@@ -441,7 +441,7 @@ class Intuition(processing.Processing):
 
         # Unhandled cascade (System 2): explicit None, empty dispatch, or low confidence.
         # Empty events: [] is not a deliberate pass — use cognition.ignore for that.
-        # On escalate with selections: fire world actions first, then terminal None.
+        # On escalate with selections: fire environment actions first, then terminal None.
         if product is None or len(product) == 0:
             terminal: types.OutputData | None = None
             to_dispatch: types.OutputData = ()
@@ -449,7 +449,7 @@ class Intuition(processing.Processing):
             _is_deliberative_input_event(item.event, {schema.name: schema for schema in input.schemas})
             for item in product
         ):
-            to_dispatch = _world_actions(product, current_input=input)
+            to_dispatch = _environment_actions(product, current_input=input)
             terminal = None
         else:
             to_dispatch = product

@@ -1,7 +1,7 @@
-"""Where things are in the world, and how loud a sound is by the time it gets there.
+"""Where things are in the environment, and how loud a sound is by the time it gets there.
 
 Levels are dB SPL referenced to :data:`D_REF`. An emitter declares how loud it is at that
-reference distance; the world works out what reaches each listener. A device cannot know how far
+reference distance; the environment works out what reaches each listener. A device cannot know how far
 its own sound carries — that is a property of the space it is in, not of the device.
 """
 
@@ -23,7 +23,7 @@ nearer than this reads as this — 1 cm from a source is already 40 dB above its
 
 @dataclasses.dataclass(frozen=True)
 class Position:
-    """A point in the world, in metres."""
+    """A point in the environment, in metres."""
 
     x: float
     y: float

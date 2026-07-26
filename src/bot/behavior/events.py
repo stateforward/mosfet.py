@@ -34,7 +34,7 @@ class CreateData(pydantic.BaseModel):
                 {
                     "event": CREATE_EVENT_NAME,
                     "name": "AnswerIncomingRing",
-                    "triggers": ["world.sound"],
+                    "triggers": ["environment.sound"],
                     "description": "Answer when a labeled ring sound arrives while phone is a focus candidate.",
                     "reason": "Same ring→answer pattern across recent episodes improves call handling.",
                 }

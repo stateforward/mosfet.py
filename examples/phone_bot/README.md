@@ -51,9 +51,9 @@ Open that URL on **this machine** (local SFU is not reachable from other devices
 Bare `https://meet.livekit.io/custom` shows “Missing LiveKit URL” — Meet reads the query params only.
 
 When you join the room, LiveKit `participant_connected` maps to a phone **incoming call**
-(`call_id=livekit:<identity>`). The phone **rings** as `world.sound` (`kind=phone.ringing`,
+(`call_id=livekit:<identity>`). The phone **rings** as `environment.sound` (`kind=phone.ringing`,
 `source` = phone id) into **Listening** input — not raw `phone.ringing` into cognition.
-After answer, room media can flow `ServiceAudioReceived` → speaker → `world.sound` →
+After answer, room media can flow `ServiceAudioReceived` → speaker → `environment.sound` →
 Listening. Local speaker uplink is published to the LiveKit track (remote delivery is
 suppressed to avoid echo).
 
@@ -82,7 +82,7 @@ Room join alone does not require model keys; full agent talk does. VAD is local 
 
 ## Blackbox dual agent (LiveKit only)
 
-Two agents meet **only** on the local SFU — no shared World and no direct `world.sound` wiring.
+Two agents meet **only** on the local SFU — no shared Environment and no direct `environment.sound` wiring.
 Both sides use **off-device Gemini** for speech so dual talk does not load local MLX STT/TTS:
 
 | Side | Process | Speech |

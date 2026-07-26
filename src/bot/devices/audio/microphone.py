@@ -6,13 +6,13 @@ import typing
 import hsm
 
 from bot.device import Device
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 
 
 class Microphone(Device):
     """Transducer that converts heard acoustic energy into audio input signal.
 
-    A microphone makes no routing decision. It hears ``world.sound`` and hands what it captured
+    A microphone makes no routing decision. It hears ``environment.sound`` and hands what it captured
     to whatever is attached to it; the controller that attached — phone firmware, for a
     mouthpiece — decides what the signal is for. It has no firmware of its own: a real
     microphone is a transducer, not a computer.

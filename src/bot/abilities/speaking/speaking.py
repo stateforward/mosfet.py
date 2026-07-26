@@ -1,7 +1,7 @@
 """Speaking: bot output ability that utters text via an encoder and speaker.
 
 Model-facing contract is short text (not raw PCM). Internals encode speech and
-play through a ``Speaker`` (world elevation and/or device path). Conversation is
+play through a ``Speaker`` (environment elevation and/or device path). Conversation is
 separate and may invoke Speaking later; cognition can select ``speaking.input``
 directly as an output ability.
 """
@@ -150,7 +150,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     """Bot output ability: encode text to speech and play it on a speaker.
 
     Constructor-inject a TTS ``encoder`` and optional ``speaker``. When a speaker is
-    provided, completed audio is elevated as ``world.sound`` (and available for device
+    provided, completed audio is elevated as ``environment.sound`` (and available for device
     uplink paths that watch speaker playout). Cognition selects ``bot.ability.speaking.input``.
     """
 
@@ -247,7 +247,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             speaker = instance._speaker
             if speaker is not None:
                 # This ability is the speaker's controller: wire to it once, then hand it signal.
-                # The speaker is the transducer that turns that into world.sound, which is how bot
+                # The speaker is the transducer that turns that into environment.sound, which is how bot
                 # input (and call uplink paths) hear playout. Wiring waits until first use because
                 # an injected speaker may start after this ability does; stop releases it.
                 if not instance._speaker_attached:

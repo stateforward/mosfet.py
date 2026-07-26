@@ -1,4 +1,4 @@
-"""Speaking output ability: text → encoder → speaker world elevation."""
+"""Speaking output ability: text → encoder → speaker environment elevation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from bot.abilities import processing
 
 from bot.abilities import speaking
 from bot.devices import audio
-from bot.world import SoundData, SoundEvent, World
+from bot.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, start_ability_tree
 
 
@@ -45,7 +45,7 @@ def test_speaking_input_is_call_event_for_cognition_selection() -> None:
 
 
 class SoundListener(hsm.Instance):
-    """World participant that records the ``world.sound`` a speaker transduces."""
+    """Environment participant that records the ``environment.sound`` a speaker transduces."""
 
     def __init__(self, sounds: list[SoundData]) -> None:
         super().__init__()
@@ -65,7 +65,7 @@ class SoundListener(hsm.Instance):
     )
 
 
-def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
+def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
     async def run() -> tuple[list[bytes], list[SoundData], speaking.OutputData | None]:
         encoder = RecordingEncoder(audio=b"\x00\x01")
         speaker = audio.Speaker()
@@ -76,16 +76,16 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
             channels=1,
             media_type="audio/pcm",
         )
-        world = World()
+        environment = Environment()
         sounds: list[SoundData] = []
-        # Listen the way anything in the world does, rather than patching the speaker: the
-        # speaker transduces signal into world.sound and every participant hears it.
+        # Listen the way anything in the environment does, rather than patching the speaker: the
+        # speaker transduces signal into environment.sound and every participant hears it.
         listener = SoundListener(sounds)
 
-        await start_ability_tree(world, speaking_ability)
-        _ = await hsm.started(world, speaker, speaker.model)
-        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="world-ear"))
-        world.join(listener)
+        await start_ability_tree(environment, speaking_ability)
+        _ = await hsm.started(environment, speaker, speaker.model)
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        environment.join(listener)
 
         outputs: list[speaking.OutputData] = []
         original = speaking_ability.dispatch
@@ -101,7 +101,7 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
 
         speaking_ability.dispatch = capture_terminal  # type: ignore[method-assign]
         try:
-            _ = await speaking_ability.apply(speaking.InputData(text="  Hello there.  "), ctx=world)
+            _ = await speaking_ability.apply(speaking.InputData(text="  Hello there.  "), ctx=environment)
             await _wait_until(lambda: bool(outputs))
         finally:
             speaking_ability.dispatch = original  # type: ignore[method-assign]
@@ -121,8 +121,8 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
 def test_speaking_failure_surfaces_on_failed_event() -> None:
     async def run() -> str:
         speaking_ability = speaking.Speaking(encoder=FailingEncoder(), speaker=audio.Speaker())
-        world = World()
-        await start_ability_tree(world, speaking_ability)
+        environment = Environment()
+        await start_ability_tree(environment, speaking_ability)
         failures: list[str] = []
         original = speaking_ability.dispatch
 
@@ -137,7 +137,7 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
 
         speaking_ability.dispatch = capture  # type: ignore[method-assign]
         try:
-            _ = await speaking_ability.apply(speaking.InputData(text="hi"), ctx=world)
+            _ = await speaking_ability.apply(speaking.InputData(text="hi"), ctx=environment)
             await _wait_until(lambda: bool(failures))
         finally:
             speaking_ability.dispatch = original  # type: ignore[method-assign]
@@ -166,7 +166,7 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
     from bot.bot import Bot
     from bot.device import Device
     from bot.abilities import processing
-    from bot.world import World
+    from bot.environment import Environment
     from tests.bot.test_bot import as_cognition
 
     class SpeakProcessor(processing.Processor):
@@ -204,13 +204,13 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
                 )
 
         probe = Probe()
-        world = World()
-        await probe.attach(world)
+        environment = Environment()
+        await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
         assert (speaking_ability.state() or "").endswith("/idle")
 
         await probe.dispatch(
-            world,
+            environment,
             bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=0)),
         )
         await _wait_until(lambda: bool(encoder.calls))
@@ -232,18 +232,18 @@ def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
     async def run() -> tuple[int, int]:
         speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
-        world = World()
-        await start_ability_tree(world, speaking_ability)
-        _ = await hsm.started(world, speaker, speaker.model)
+        environment = Environment()
+        await start_ability_tree(environment, speaking_ability)
+        _ = await hsm.started(environment, speaker, speaker.model)
 
         # Sequential utterances: let each finish so this pins "wired once", not a race with a
         # deferred queue.
         for _ in range(3):
-            _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=world)
+            _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
             await _wait_until(lambda: speaking_ability.state().endswith("/idle"))
         while_speaking = len(device_bots(speaker))
 
-        await speaking_ability.stop(world)
+        await speaking_ability.stop(environment)
         await _wait_until(lambda: not device_bots(speaker))
 
         return while_speaking, len(device_bots(speaker))

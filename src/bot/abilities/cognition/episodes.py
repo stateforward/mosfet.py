@@ -40,7 +40,7 @@ class CognitiveEpisode(pydantic.BaseModel):
 
     focus: str | None = pydantic.Field(default=None, examples=["phone"])
     focus_candidates: tuple[str, ...] = pydantic.Field(default=(), examples=[["phone"]])
-    stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["world.sound"])
+    stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["environment.sound"])
     output: types.OutputData = pydantic.Field(description="Typed cognitive output from that prior turn.")
     behavior: CreateData | ChangeData | BreakData | None = pydantic.Field(
         default=None,

@@ -4,7 +4,7 @@
 Starts a local phone bot (no LiveKit room) and injects either:
 
 - **call** — firmware ``IncomingCall`` → elevated ``PhoneSoundData`` (``kind=phone.ringing``)
-- **ambient** — plain ``world.sound`` with ``kind=ambient`` (no call_id)
+- **ambient** — plain ``environment.sound`` with ``kind=ambient`` (no call_id)
 
 Records cognition outputs (answer / ignore / focus / other). Uses real Mercury intuition +
 Terra keys from repo ``.env`` and ``examples/phone_bot/.env``.
@@ -38,7 +38,7 @@ from bot.devices.phone import events as phone_events  # noqa: E402
 from bot.devices.phone.phone import PhoneFirmware, RING_SOUND_WAV  # noqa: E402
 from bot.devices.phone.events import PhoneSoundData  # noqa: E402
 from bot.behavior import storage as behavior_storage  # noqa: E402
-from bot.world import SoundData, SoundEvent, World  # noqa: E402
+from bot.environment import SoundData, SoundEvent, Environment  # noqa: E402
 
 
 def _load_env_files(*paths: pathlib.Path) -> None:
@@ -128,7 +128,7 @@ async def _hang_up_if_needed(phone: object, call_id: str | None) -> None:
     await asyncio.sleep(0.3)
 
 
-async def _inject_call(world: World, body: PhoneBot, *, call_id: str) -> None:
+async def _inject_call(environment: Environment, body: PhoneBot, *, call_id: str) -> None:
     phone = body.phone()
     firmware = _firmware(phone)
     await firmware.event_recorder().receive(
@@ -137,10 +137,10 @@ async def _inject_call(world: World, body: PhoneBot, *, call_id: str) -> None:
             phone_events.IncomingCallData(call_id=call_id, display_hint="experiment-caller")
         ),
     )
-    # Ensure body sees elevated ring even if world broadcast timing races.
+    # Ensure body sees elevated ring even if environment broadcast timing races.
     await asyncio.sleep(0.15)
     await hsm.dispatch(
-        world,
+        environment,
         body,
         dataclasses.replace(
             SoundEvent.with_data(
@@ -160,9 +160,9 @@ async def _inject_call(world: World, body: PhoneBot, *, call_id: str) -> None:
     )
 
 
-async def _inject_ambient(world: World, body: PhoneBot) -> None:
+async def _inject_ambient(environment: Environment, body: PhoneBot) -> None:
     await hsm.dispatch(
-        world,
+        environment,
         body,
         dataclasses.replace(
             SoundEvent.with_data(
@@ -192,9 +192,9 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
         print("missing cognition keys (Mercury/OpenAI); abort", file=sys.stderr)
         return 2
 
-    world = World()
+    environment = Environment()
     body = PhoneBot("experiment", cognition_config=config.cognition, speech_config=config.speech)
-    _ = await body.attach(world)
+    _ = await body.attach(environment)
     await _wait_until(
         lambda: (body.state() or "").endswith("/active/unfocused"),
         timeout=60.0,
@@ -226,9 +226,9 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
         try:
             if kind == "call":
                 active_call_id = call_id
-                await _inject_call(world, body, call_id=call_id)
+                await _inject_call(environment, body, call_id=call_id)
             else:
-                await _inject_ambient(world, body)
+                await _inject_ambient(environment, body)
             await _wait_until(
                 lambda: len(body.outputs()) > before or len(body.failures()) > before_fail,
                 timeout=settle_seconds,

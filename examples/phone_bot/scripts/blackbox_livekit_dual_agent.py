@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Blackbox dual-agent talk through LiveKit only (no shared World / direct sound wiring).
+"""Blackbox dual-agent talk through LiveKit only (no shared Environment / direct sound wiring).
 
 Agent A: already-running ``phone-bot`` (or started by this script) on room ``bot-phone-bot``
 with local Silero VAD + off-device Gemini STT/TTS (no local Whisper/Qwen).
@@ -11,7 +11,7 @@ Success is observed only from LiveKit + optional external log scrape of agent A:
 - B receives bot audio frames (room media path alive)
 - optional: agent A log shows DecodingSpeech after B speaks (utterance batching + VAD/STT)
 
-This intentionally does **not** inject ``world.sound`` or share an HSM World between agents.
+This intentionally does **not** inject ``environment.sound`` or share an HSM Environment between agents.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _count_log_stages(log_path: pathlib.Path, *, since_bytes: int) -> dict[str, 
         "SpeechDecoding",
         "bot.ability.speaking",
         "devices.audio.output",
-        "world.sound",
+        "environment.sound",
         "stt_provider=gemini",
         "tts_provider=gemini",
         "vad_provider=silero",

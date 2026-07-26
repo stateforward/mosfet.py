@@ -183,13 +183,13 @@ A machine can remain started with a non-empty `state()` while `instance.context(
 
 ## Footgun: attach and start under activities
 
-Device firmware bring-up, connect activities, and similar states often call `World.from_context(ctx).attach(...)` or `hsm.started(ctx, ...)` with the **activity** `ctx`.
+Device firmware bring-up, connect activities, and similar states often call `Environment.from_context(ctx).attach(...)` or `hsm.started(ctx, ...)` with the **activity** `ctx`.
 
 When that state exits:
 
 1. HSM terminates the activity and cancels the activity context.
-2. Cancel cascades to any `World` parented to that context.
-3. Cancel cascades to machines started under that World or activity context.
+2. Cancel cascades to any `Environment` parented to that context.
+3. Cancel cascades to machines started under that Environment or activity context.
 4. Those machines may still be live and process events, but `context().is_done()` is true.
 
 Ingress sinks, SDK callbacks, audio/media consumers, and other deferred entry points MUST NOT use `if ctx.is_done(): return` (or equivalent) as a liveness gate for a still-running machine. That silently drops work while the machine appears healthy.
@@ -202,8 +202,8 @@ Ingress sinks, SDK callbacks, audio/media consumers, and other deferred entry po
 - MUST model delivery policy, readiness, and drop paths with HSM guards, transitions, and typed drop/failure observability—not silent early returns on canceled contexts or probed peer state. Ingress sinks, SDK callbacks, and audio/media consumers SHOULD be registered by the owning state's entry activities and unregistered on exit, so deferred entry points exist only while the machine can accept what they deliver.
 - MUST surface dispatch to an unstarted or stopped actor as a typed drop/failure outcome (event or telemetry), never a silent return.
 - MUST treat `context().is_done()` as a cancel signal for work that should stop when the **owning operation/activity** is canceled—not as a substitute for machine lifecycle state.
-- When a machine or World must outlive the activity that creates it, MUST start or re-parent it under a longer-lived scope (device/world/root context), not only under the transient activity context, or MUST document and test that cancel cascade is intended.
-- From an activity or effect, when starting or attaching an actor that must outlive that behavior, MUST use the owning machine's lifetime context (`instance.context()` / `owner.context()` when the owner is started), not the activity `ctx`. Prefer `World.from_context(instance.context())` over `World.from_context(activity_ctx)` for durable attach.
+- When a machine or Environment must outlive the activity that creates it, MUST start or re-parent it under a longer-lived scope (device/environment/root context), not only under the transient activity context, or MUST document and test that cancel cascade is intended.
+- From an activity or effect, when starting or attaching an actor that must outlive that behavior, MUST use the owning machine's lifetime context (`instance.context()` / `owner.context()` when the owner is started), not the activity `ctx`. Prefer `Environment.from_context(instance.context())` over `Environment.from_context(activity_ctx)` for durable attach.
 
 # HSM-DISPATCH-001 MUST Treat Async Dispatch As A Boundary
 
@@ -251,11 +251,11 @@ admission layer that re-routes, NACK-proxies, or drops events by re-checking env
   admission. Guards that run under an already topology-selected trigger may still correlate with `id` / `source` /
   `target` against the observer's own operation bookkeeping.
 - MUST NOT use `event.name` to discriminate shared payloads when a typed payload (or dedicated event schema)
-  can express the same distinction at the world/device boundary (prefer payload type over name elevation doors).
+  can express the same distinction at the environment/device boundary (prefer payload type over name elevation doors).
 
 ## Allowed residual patterns (not admission)
 
-- Documented world-boundary **elevation** that maps one committed observation to another domain event MAY use a
+- Documented environment-boundary **elevation** that maps one committed observation to another domain event MAY use a
   typed payload (preferred) or a documented residual when payloads are unavoidably shared; never as a general
   ingress router.
 - Tests, telemetry, and snapshots MAY inspect `name` / `target` for assertions and diagnostics.

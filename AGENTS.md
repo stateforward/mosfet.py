@@ -99,7 +99,7 @@
   dispatch to unstarted/stopped actors as typed drop/failure outcomes—never silent early returns on cancel or probed
   state.
 - When starting/attaching actors that must outlive an activity, parent them under `instance.context()` /
-  `owner.context()` (or `World.from_context(instance.context())`), not the activity context. See
+  `owner.context()` (or `Environment.from_context(instance.context())`), not the activity context. See
   `rules/hsm.rules.md` HSM-CONTEXT-001.
 - ALWAYS treat delivery as the gate (`hsm.dispatch` / `dispatch_to` / `dispatch_all`). NEVER re-admit production
   ingress with `event.name` / `event.target` door filters or source-id proxy re-routing. Select with topology and typed
@@ -134,13 +134,13 @@
 
 ### Layers and authority
 
-- **Body** owns lifetime, attention (focus), world-facing I/O ability attachment, and explicit handoff into judgment.
+- **Body** owns lifetime, attention (focus), environment-facing I/O ability attachment, and explicit handoff into judgment.
   It does not interpret stimuli, arbitrate behaviors, build deliberative processing frames, or apply judgment
   selections.
 - **Judgment** owns interpretation, behavior/skill selection, deliberative processing, and dispatch of selected modeled
   events to body, devices, and abilities. Judgment builds its own deliberative inputs from live body context.
-- **World** is a broadcast/parenting scope (`hsm.Context` subclass), not a registry, factory, or service locator. Pass
-  `world` directly to start/dispatch APIs; pass dependencies explicitly at construction or attachment.
+- **Environment** is a broadcast/parenting scope (`hsm.Context` subclass), not a registry, factory, or service locator. Pass
+  `environment` directly to start/dispatch APIs; pass dependencies explicitly at construction or attachment.
 - **Devices** are environment-facing and bot-agnostic: they may notify and expose affordances but must not force body
   or judgment policy. Ownership (identity, lifecycle, peripherals) stays separate from control (firmware/OS-like
   bring-up, service exposure, device policy).
@@ -152,13 +152,13 @@
 
 ### Stimulus and product flow
 
-- World stimuli are explicit typed events only—not catch-all ingress. The body fans those stimuli to **input**
+- Environment stimuli are explicit typed events only—not catch-all ingress. The body fans those stimuli to **input**
   abilities in parallel; **output** abilities are effectors, not on that fan-out path.
 - Input abilities produce typed products for the body; the body hands judgment an explicit judgment-input event after
-  enriching live body context. Judgment never receives raw world/device media as deliberative ingress.
-- When a boundary elevates device-plane observations into world stimuli, that elevation is the contract: body and
-  judgment consume the world form, not a parallel denylist of device event names on the body.
-- Body-owned abilities attach under body lifetime with private instance maps so they are not double-delivered via world
+  enriching live body context. Judgment never receives raw environment/device media as deliberative ingress.
+- When a boundary elevates device-plane observations into environment stimuli, that elevation is the contract: body and
+  judgment consume the environment form, not a parallel denylist of device event names on the body.
+- Body-owned abilities attach under body lifetime with private instance maps so they are not double-delivered via environment
   broadcast.
 - Body transitions cover body machinery only (lifecycle, attention, fan-out, judgment handoff and terminals). Unmatched
   events fall through normal HSM ignore semantics—never `hsm.AnyEvent` as body ingress.

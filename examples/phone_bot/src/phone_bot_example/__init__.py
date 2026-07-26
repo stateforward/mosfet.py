@@ -38,7 +38,7 @@ from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
 from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
-from bot.world import World, space
+from bot.environment import Environment, space
 
 _LOG = logging.getLogger("phone_bot_example.hsm")
 
@@ -566,7 +566,7 @@ def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening
             pcm_decoder=pcm_decoder,
             voice_detector=_silero_voice_detector(config),
         ),
-        # Non-voice world.sound with SoundData.kind (e.g. ring) becomes cognition.InputEvent.
+        # Non-voice environment.sound with SoundData.kind (e.g. ring) becomes cognition.InputEvent.
         sound_classifier=sound_hearing.classification.KindSoundClassifier(),
         speech_decoder=PcmListeningSpeechDecoder(
             pcm_decoder=pcm_decoder,
@@ -634,7 +634,7 @@ def _speaking(
     speaker: audio.Speaker,
     speech_config: SpeechConfig | None = None,
 ) -> speaking.Speaking:
-    """Bot output ability: Gemini TTS + phone speaker playout (world.sound elevation)."""
+    """Bot output ability: Gemini TTS + phone speaker playout (environment.sound elevation)."""
 
     config = speech_config or SpeechConfig()
     return speaking.Speaking(
@@ -777,7 +777,7 @@ class PhoneBot(Bot):
         self._label = label
         # Two transducers, because one object cannot be both at the ear and at the mouth. The
         # earpiece belongs to the handset; the voice belongs to the robot. Nothing to enforce
-        # between them any more — World.join rejects a speaker placed in two places.
+        # between them any more — Environment.join rejects a speaker placed in two places.
         self._phone = phone if phone is not None else _handset()
         speaking_instance = (
             speaking if speaking is not None else _speaking(speaker=_voice(), speech_config=speech_config)
@@ -921,8 +921,8 @@ async def start_bot(
         memory=memory,
     )
 
-    world = World()
-    _ = await body.attach(world, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
+    environment = Environment()
+    _ = await body.attach(environment, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
     await _wait_for_active_bot(body)
     if connect_livekit and app_config.livekit.can_connect_room():
         if phone_service is None:

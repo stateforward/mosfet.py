@@ -4,7 +4,7 @@ Behaviors may only dispatch and process declared events — never bound abilitie
 
 Every event a behavior emits is stamped with ``source=hsm.id(behavior)`` so abilities,
 devices, and other machines can dispatch replies back to that id. Optional
-``target`` on ``dispatch`` delivers the event to a live instance in the world
+``target`` on ``dispatch`` delivers the event to a live instance in the environment
 scope; without a target, the event is processed on the behavior itself.
 """
 

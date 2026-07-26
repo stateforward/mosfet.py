@@ -6,5 +6,5 @@
 - **Source:** Derived from a publicly available UK telephone ringtone sample at
   https://telephonesuk.org.uk/sounds/ (`ringtone.wav`), trimmed and resampled for
   tests and ring elevation.
-- **Use:** Elevated as `world.sound` when the phone commits ringing so input
+- **Use:** Elevated as `environment.sound` when the phone commits ringing so input
   listening can classify real acoustic energy.

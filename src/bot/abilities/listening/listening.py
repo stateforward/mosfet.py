@@ -14,7 +14,7 @@ import pydantic
 
 from bot.abilities import cognition
 from bot.telemetry import observer
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 
 ListeningStage: typing.TypeAlias = typing.Literal[
     "voice_detection",
@@ -178,7 +178,7 @@ def _dispatch_listening_cognition_input(
 ) -> None:
     """Terminal handoff: ``cognition.InputEvent`` for the body owner when listening finishes.
 
-    Stimulus is the acoustic product cognition should judge (``world.sound`` or decoded
+    Stimulus is the acoustic product cognition should judge (``environment.sound`` or decoded
     speech). Provenance comes only from the event chain.
     """
 
@@ -311,9 +311,9 @@ def _has_listening_stage_failure(ctx: hsm.Context, instance: "Listening", event:
 
 
 class Listening(ability.Ability[SoundData, cognition.InputData]):
-    """Sensory ability that may turn world sound into ``cognition.InputEvent``.
+    """Sensory ability that may turn environment sound into ``cognition.InputEvent``.
 
-    Public input is ``world.sound``. Stages (VAD, optional non-speech classification,
+    Public input is ``environment.sound``. Stages (VAD, optional non-speech classification,
     optional diarization, optional STT) are internal. Success terminal is cognitive input
     whose stimulus is the original sound or decoded speech. No-voice audio is skipped
     unless an optional sound classifier assigns labels. Stage progress is carried only on

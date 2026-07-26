@@ -14,7 +14,7 @@ def _base(**overrides: object) -> Instance:
     values: dict[str, object] = {
         "name": "AnswerGreeting",
         "source": "behavior = hsm.define('AnswerGreeting')",
-        "triggers": ("world.sound",),
+        "triggers": ("environment.sound",),
         "description": "demo",
     }
     values.update(overrides)
@@ -109,7 +109,7 @@ def test_instances_from_behavior_results_round_trips_status_and_usage() -> None:
             "last_failed_at": "2026-07-11T06:00:00Z",
         }
     ]
-    triggers = [{"behavior_name": behavior.name, "trigger": "world.sound"}]
+    triggers = [{"behavior_name": behavior.name, "trigger": "environment.sound"}]
     loaded = storage.instances_from_behavior_results(rows, triggers)
     assert len(loaded) == 1
     got = loaded[0]
@@ -120,7 +120,7 @@ def test_instances_from_behavior_results_round_trips_status_and_usage() -> None:
     assert got.last_used_at == "2026-07-11T07:00:00Z"
     assert got.failed_count == 1
     assert got.last_failed_at == "2026-07-11T06:00:00Z"
-    assert got.triggers == ("world.sound",)
+    assert got.triggers == ("environment.sound",)
     assert got.examples == ("when ring",)
 
 

@@ -35,7 +35,7 @@ from bot.devices.phone import events as phone_events
 from bot.devices.phone.phone import RING_SOUND_WAV
 from bot.events import ClearFocusEvent, FocusDeviceEvent
 from bot.devices.phone.events import PhoneSoundData
-from bot.world import SoundData, SoundEvent
+from bot.environment import SoundData, SoundEvent
 from bot.providers.openai_compat import ChatClient, Processor
 
 pytestmark = pytest.mark.live
@@ -122,7 +122,7 @@ def _ring_stimulus(*, include_audio: bool, call_id: str = _CALL_ID) -> hsm.Event
 
 
 def _ambient_stimulus() -> hsm.Event[SoundData]:
-    """Ordinary world ambient — plain SoundData, no phone call_id (not ring elevation)."""
+    """Ordinary environment ambient — plain SoundData, no phone call_id (not ring elevation)."""
 
     return dataclasses.replace(
         SoundEvent.with_data(
@@ -135,7 +135,7 @@ def _ambient_stimulus() -> hsm.Event[SoundData]:
             )
         ),
         id="ambient-noise",
-        source="world",
+        source="environment",
         target="",
     )
 

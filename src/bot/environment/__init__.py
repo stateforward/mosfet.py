@@ -1,6 +1,6 @@
 from . import space
 from .events import SoundData, SoundEvent, VisualData, VisualEvent
-from .world import World, require_world_scope
+from .environment import Environment, require_environment_scope
 
 __all__ = [
     "SoundData",
@@ -8,6 +8,6 @@ __all__ = [
     "SoundEvent",
     "VisualData",
     "VisualEvent",
-    "World",
-    "require_world_scope",
+    "Environment",
+    "require_environment_scope",
 ]
