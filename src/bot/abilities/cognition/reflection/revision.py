@@ -78,14 +78,14 @@ class InstructionData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": "Instruction material behind this authoring request, when taught rather than observed.",
-            "examples": [{"text": "When the phone rings, answer it.", "kind": "instruction"}],
+            "examples": [{"text": "When you hear a knock, say hello.", "kind": "instruction"}],
         },
     )
 
     text: str = pydantic.Field(
         min_length=1,
         description="Instruction text to author against.",
-        examples=["When the phone rings, answer it."],
+        examples=["When you hear a knock, say hello."],
     )
     kind: str | None = pydantic.Field(
         default=None,

@@ -12,7 +12,7 @@ BotOperationReason = typing.Annotated[
     pydantic.Field(
         min_length=1,
         description="Concise reason the ability selected this output or operation.",
-        examples=["Incoming notification is lower priority than the active call."],
+        examples=["The interrupt is lower priority than the active turn."],
     ),
 ]
 DeviceReference = typing.Annotated[
@@ -20,7 +20,7 @@ DeviceReference = typing.Annotated[
     pydantic.Field(
         min_length=1,
         description="Stable reference for a device. Only devices may become focused.",
-        examples=["phone"],
+        examples=["device-a"],
     ),
 ]
 
@@ -75,10 +75,10 @@ class InputEventData(pydantic.BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "target_device": "phone",
+                    "target_device": "device-a",
                     "priority": 0,
-                    "source_event": "phone.incoming_call",
-                    "payload": {"call_id": "call-123"},
+                    "source_event": "environment.sound",
+                    "payload": {"kind": "knock"},
                 }
             ],
         },
@@ -86,7 +86,7 @@ class InputEventData(pydantic.BaseModel):
 
     target_device: DeviceReference = pydantic.Field(
         description="Stable reference for the device that produced or owns the input.",
-        examples=["phone"],
+        examples=["device-a"],
     )
     priority: int = pydantic.Field(
         ge=0,
@@ -101,7 +101,7 @@ class InputEventData(pydantic.BaseModel):
             "Modeled event name that caused this input, when the runtime knows it. Cognition may use this as "
             "decision context, but the source device still owns the event semantics and lifecycle."
         ),
-        examples=["phone.incoming_call"],
+        examples=["environment.sound"],
     )
     payload: dict[str, object] | None = pydantic.Field(
         default=None,
@@ -110,7 +110,7 @@ class InputEventData(pydantic.BaseModel):
             "Do not include raw audio, text transcripts, credentials, provider-specific blobs, or high-cardinality "
             "diagnostic data."
         ),
-        examples=[{"call_id": "call-123"}],
+        examples=[{"kind": "knock"}],
     )
 
 
@@ -172,13 +172,13 @@ class FocusDeviceEventData(pydantic.BaseModel):
                 "be a live focus candidate. Prefer this only when a device should become the active "
                 "attention target — not as a substitute for speaking or reasoning."
             ),
-            "examples": [{"device": "phone", "reason": "Incoming call should become the active device."}],
+            "examples": [{"device": "device-a", "reason": "This turn's stimulus came from that device."}],
         },
     )
 
     device: DeviceReference = pydantic.Field(
         description="Required stable configured device reference that should become focused.",
-        examples=["phone"],
+        examples=["device-a"],
     )
     reason: BotOperationReason | None = pydantic.Field(
         default=None,
@@ -217,7 +217,7 @@ class ProcessingCompletedEventData(pydantic.BaseModel):
             "examples": [
                 {
                     "output": [],
-                    "focus_candidates": ["phone"],
+                    "focus_candidates": ["device-a"],
                 }
             ]
         },
@@ -235,7 +235,7 @@ class ProcessingCompletedEventData(pydantic.BaseModel):
             "Stable device references associated with this processing turn for focus bookkeeping on the body. "
             "Empty when the turn had no device context (e.g. no configured devices)."
         ),
-        examples=[["phone"], ["phone", "browser"], []],
+        examples=[["device-a"], ["device-a", "device-b"], []],
     )
 
 

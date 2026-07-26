@@ -38,8 +38,8 @@ class InputData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "focus": "phone",
-                    "focus_candidates": ["phone"],
+                    "focus": "device-a",
+                    "focus_candidates": ["device-a"],
                 }
             ],
         },
@@ -68,12 +68,12 @@ class InputData(pydantic.BaseModel):
     focus: str | None = pydantic.Field(
         default=None,
         description="Instance name the bot is looking at, if any.",
-        examples=["phone"],
+        examples=["device-a"],
     )
     focus_candidates: tuple[str, ...] = pydantic.Field(
         default=(),
         description="Instance names that may become focus for this turn (body attention policy).",
-        examples=[["phone"], ["phone", "browser"]],
+        examples=[["device-a"], ["device-a", "device-b"]],
     )
 
 

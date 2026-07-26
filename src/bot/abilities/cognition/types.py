@@ -35,10 +35,10 @@ class EventData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "target": "phone",
-                    "event": "phone.answer_call",
-                    "data": {"call_id": "livekit:caller"},
-                    "reason": "Incoming call should be answered.",
+                    "target": "bot",
+                    "event": "bot.focus_device",
+                    "data": {"device": "device-a"},
+                    "reason": "Attention should move to that device for this turn.",
                 }
             ],
         },
@@ -50,11 +50,11 @@ class EventData(pydantic.BaseModel):
             "Stable reference for the host-local receiver of the modeled event. Hosts may omit this when the "
             "event resolves relative to focus or a single actor."
         ),
-        examples=["phone"],
+        examples=["bot", "device-a"],
     )
     event: _Reference = pydantic.Field(
         description="Canonical modeled HSM event name selected by cognition.",
-        examples=["phone.answer_call"],
+        examples=["bot.focus_device"],
     )
     data: EventPayload | None = pydantic.Field(
         default=None,
@@ -62,13 +62,13 @@ class EventData(pydantic.BaseModel):
             "Optional JSON-serializable event data for the selected event. Do not include raw audio, message text, "
             "credentials, provider-specific objects, or high-cardinality diagnostics."
         ),
-        examples=[{"call_id": "incoming-call"}],
+        examples=[{"device": "device-a"}],
     )
     reason: str | None = pydantic.Field(
         default=None,
         min_length=1,
         description="Optional reason this event was selected.",
-        examples=["The incoming call should be answered."],
+        examples=["Attention should move to that device for this turn."],
     )
 
 
@@ -91,14 +91,11 @@ class IgnoreData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Deliberately ignore this stimulus: no device command, no focus change, no "
-                "speech. Required when no other offered event should run. Do not use answer, "
-                "decline, focus, or clear_focus as a stand-in for ignore. "
-                "Do not select ignore when the stimulus is an actionable phone.ringing "
-                "(kind=phone.ringing with call_id) and answer/decline are offered — answer "
-                "or decline instead."
+                "speech. Required when no other offered event should run. Do not use a device "
+                "command, focus, or clear_focus as a stand-in for ignore."
             ),
             "examples": [
-                {"reason": "Ambient sound is not an actionable phone ring."},
+                {"reason": "Ambient sound with nothing to act on."},
                 {"reason": "Stimulus is incomplete; no safe action."},
             ],
         },
@@ -108,7 +105,7 @@ class IgnoreData(pydantic.BaseModel):
         default=None,
         min_length=1,
         description="Optional short reason this turn is intentionally ignored.",
-        examples=["Ambient noise only.", "Not a phone.ringing stimulus."],
+        examples=["Ambient noise only.", "Nothing offered fits this stimulus."],
     )
 
 

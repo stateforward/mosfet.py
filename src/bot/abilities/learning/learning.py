@@ -108,14 +108,14 @@ class InputData(pydantic.BaseModel):
                 "a runtime input and inventory intent for Revision."
             ),
             "examples": [
-                {"content": "When the phone rings, answer it.", "media_type": "text/plain"},
+                {"content": "When you hear a knock, say hello.", "media_type": "text/plain"},
             ],
         },
     )
 
     content: str | bytes = pydantic.Field(
         description="Raw learning material (text string or binary bytes).",
-        examples=["When the phone rings, answer it."],
+        examples=["When you hear a knock, say hello."],
     )
     media_type: str | None = pydantic.Field(
         default=None,
@@ -131,11 +131,11 @@ _INPUT_EVENT = ability.ability_input_event(
     description=(
         "Teach the bot a standing rule from something it was just told, so the behavior runs "
         "automatically next time instead of being reasoned about again. Select this when a turn is "
-        "instruction about what to do in future situations ('when the phone rings, answer it') rather "
+        "instruction about what to do in future situations ('when you hear a knock, say hello') rather "
         "than a request to act now. content is the instruction as heard; the bot grounds it against "
         "what it already remembers and authors the behavior itself."
     ),
-    examples=[{"content": "When the phone rings, answer it.", "media_type": "text/plain"}],
+    examples=[{"content": "When you hear a knock, say hello.", "media_type": "text/plain"}],
 )
 # Model-callable so judgment can select learning from a live turn, the same way Speaking is
 # selected. Programmatic callers still dispatch this event directly.
@@ -150,14 +150,14 @@ class DecodedData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": "Decoded learning material used to synthesize a runtime input and inventory intent.",
-            "examples": [{"text": "Answer when the phone rings.", "kind": "instruction"}],
+            "examples": [{"text": "Say hello when you hear a knock.", "kind": "instruction"}],
         },
     )
 
     text: str = pydantic.Field(
         min_length=1,
         description="Decoded text used as generate-step evidence.",
-        examples=["Answer when the phone rings."],
+        examples=["Say hello when you hear a knock."],
     )
     kind: str | None = pydantic.Field(
         default=None,
@@ -184,11 +184,11 @@ class RuntimeInputData(pydantic.BaseModel):
             "examples": [
                 {
                     "stimulus_name": "environment.sound",
-                    "payload": {"kind": "phone.ringing", "call_id": "incoming-call"},
-                    "focus": "phone",
-                    "focus_candidates": ["phone"],
+                    "payload": {"kind": "knock", "source": "device-a"},
+                    "focus": "device-a",
+                    "focus_candidates": ["device-a"],
                     "expected_event": "bot.focus_device",
-                    "expected_data": {"device": "phone"},
+                    "expected_data": {"device": "device-a"},
                 }
             ],
         },
@@ -207,35 +207,35 @@ class RuntimeInputData(pydantic.BaseModel):
             f"not the lesson text. Every string value must be under {_MAX_PAYLOAD_TEXT_LENGTH} "
             "characters; put the lesson in reason instead."
         ),
-        examples=[{"kind": "phone.ringing", "call_id": "incoming-call"}],
+        examples=[{"kind": "knock", "source": "device-a"}],
     )
     focus: str | None = pydantic.Field(
         default=None,
         min_length=1,
         description="Optional focused device/instance name for the synthetic turn.",
-        examples=["phone"],
+        examples=["device-a"],
     )
     focus_candidates: tuple[str, ...] = pydantic.Field(
         default=(),
         description="Optional focus candidates for the synthetic turn.",
-        examples=[["phone"]],
+        examples=[["device-a"]],
     )
     expected_event: str | None = pydantic.Field(
         default=None,
         min_length=1,
         description="Optional expected selection event the lesson implies (from memory when known).",
-        examples=["bot.focus_device", "phone.answer_call"],
+        examples=["bot.focus_device", "bot.ability.speaking.input"],
     )
     expected_target: str | None = pydantic.Field(
         default=None,
         min_length=1,
         description="Optional target for the expected selection.",
-        examples=["phone", "bot"],
+        examples=["device-a", "bot"],
     )
     expected_data: dict[str, object] | None = pydantic.Field(
         default=None,
         description="Optional data for the expected selection.",
-        examples=[{"device": "phone"}],
+        examples=[{"device": "device-a"}],
     )
     expected_reason: str | None = pydantic.Field(
         default=None,
@@ -293,8 +293,8 @@ class RememberedTurn(pydantic.BaseModel):
         },
     )
 
-    focus: str | None = pydantic.Field(default=None, examples=["phone"])
-    focus_candidates: tuple[str, ...] = pydantic.Field(default=(), examples=[["phone"]])
+    focus: str | None = pydantic.Field(default=None, examples=["device-a"])
+    focus_candidates: tuple[str, ...] = pydantic.Field(default=(), examples=[["device-a"]])
     stimulus_name: str | None = pydantic.Field(default=None, min_length=1, examples=["environment.sound"])
     output: tuple[RememberedSelection, ...] = pydantic.Field(
         default=(),
@@ -317,14 +317,14 @@ class GenerateData(pydantic.BaseModel):
                 {
                     "event": _GENERATE_EVENT_NAME,
                     "inventory_event": "bot.behavior.create",
-                    "name": "AnswerIncomingRing",
-                    "reason": "When the phone rings, answer it.",
+                    "name": "GreetOnKnock",
+                    "reason": "When you hear a knock, say hello.",
                     "runtime_input": {
                         "stimulus_name": "environment.sound",
-                        "payload": {"kind": "phone.ringing"},
-                        "focus_candidates": ["phone"],
-                        "expected_event": "bot.focus_device",
-                        "expected_data": {"device": "phone"},
+                        "payload": {"kind": "knock"},
+                        "focus_candidates": ["device-a"],
+                        "expected_event": "bot.ability.speaking.input",
+                        "expected_data": {"text": "Hello."},
                     },
                 }
             ],
@@ -342,7 +342,7 @@ class GenerateData(pydantic.BaseModel):
     name: str = pydantic.Field(
         min_length=1,
         description="PascalCase behavior / HSM model name.",
-        examples=["AnswerIncomingRing"],
+        examples=["GreetOnKnock"],
     )
     runtime_input: RuntimeInputData = pydantic.Field(
         description="Synthesized runtime input the behavior must accept (not lesson text).",
@@ -355,7 +355,7 @@ class GenerateData(pydantic.BaseModel):
     reason: str = pydantic.Field(
         min_length=1,
         description="Authoring reason; must carry the decoded lesson text for Revision evidence.",
-        examples=["When the phone rings, answer it."],
+        examples=["When you hear a knock, say hello."],
     )
     lesson_kind: str | None = pydantic.Field(
         default=None,

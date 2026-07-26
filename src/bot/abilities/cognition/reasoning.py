@@ -109,27 +109,28 @@ class OutputData(pydantic.BaseModel):
                 {
                     "result": [
                         {
-                            "target": "phone",
-                            "event": "phone.answer_call",
-                            "reason": "Incoming call is urgent.",
+                            "target": "bot",
+                            "event": "bot.focus_device",
+                            "data": {"device": "device-a"},
+                            "reason": "That device is where this turn is happening.",
                         }
                     ],
                     "confidence": 0.77,
-                    "reason": "The phone interrupt outranks the current browser task.",
+                    "reason": "Deliberation settled which device this turn is about.",
                 },
                 {
                     "result": [
                         {
-                            "target": "phone",
-                            "event": "phone.answer_call",
-                            "reason": "Ring pattern matches prior episodes.",
+                            "event": "bot.ability.speaking.input",
+                            "data": {"text": "One moment."},
+                            "reason": "Prior episodes bridged with speech while deliberating.",
                         }
                     ],
                     "create": {
                         "event": "bot.behavior.create",
-                        "name": "AnswerIncomingRing",
+                        "name": "AcknowledgeBeforeDeliberating",
                         "triggers": ["environment.sound"],
-                        "reason": "Same ring→answer pattern across recalled episodes.",
+                        "reason": "Same acknowledge-then-deliberate pattern across recalled episodes.",
                     },
                 },
             ],
@@ -141,9 +142,10 @@ class OutputData(pydantic.BaseModel):
         examples=[
             [
                 {
-                    "target": "phone",
-                    "event": "phone.answer_call",
-                    "reason": "Incoming call is urgent.",
+                    "target": "bot",
+                    "event": "bot.focus_device",
+                    "data": {"device": "device-a"},
+                    "reason": "That device is where this turn is happening.",
                 }
             ]
         ],
@@ -159,7 +161,7 @@ class OutputData(pydantic.BaseModel):
         default=None,
         min_length=1,
         description="Optional concise rationale for the deliberate decision.",
-        examples=["The phone interrupt outranks the current browser task."],
+        examples=["Deliberation settled which device this turn is about."],
     )
     create: CreateData | None = pydantic.Field(
         default=None,

@@ -33,10 +33,8 @@ DEFAULT_INSTRUCTIONS = (
     "When no device, body, or speech action should run, select "
     "bot.ability.cognition.ignore (with optional reason) for a deliberate handled pass. "
     "An empty events list is treated as unhandled and falls through to deliberative reasoning. "
-    "Do not invent focus/answer/clear_focus as a stand-in for ignore. "
+    "Do not invent a device command or focus/clear_focus as a stand-in for ignore. "
     "Prefer ignore for ambient or non-actionable stimuli. "
-    "When stimulus event.data.kind is phone.ringing and call_id is present, do not ignore — "
-    "select phone.answer_call or phone.decline_call (and focus if needed). "
     "Select deliberative reasoning only when the stimulus needs slower System-2 thought, or leave "
     "events empty to force that cascade."
 )

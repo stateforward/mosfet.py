@@ -33,10 +33,10 @@ class CreateData(pydantic.BaseModel):
             "examples": [
                 {
                     "event": CREATE_EVENT_NAME,
-                    "name": "AnswerIncomingRing",
+                    "name": "GreetOnKnock",
                     "triggers": ["environment.sound"],
-                    "description": "Answer when a labeled ring sound arrives while phone is a focus candidate.",
-                    "reason": "Same ring→answer pattern across recent episodes improves call handling.",
+                    "description": "Say hello when a knock sound arrives.",
+                    "reason": "Same knock→greeting pattern across recent episodes.",
                 }
             ],
         },
@@ -77,8 +77,8 @@ class ChangeData(pydantic.BaseModel):
             "examples": [
                 {
                     "event": CHANGE_EVENT_NAME,
-                    "name": "AnswerIncomingRing",
-                    "reason": "Also clear browser focus before answering.",
+                    "name": "GreetOnKnock",
+                    "reason": "Also clear focus before greeting.",
                 }
             ],
         },
@@ -118,8 +118,8 @@ class BreakData(pydantic.BaseModel):
             "examples": [
                 {
                     "event": BREAK_EVENT_NAME,
-                    "name": "AnswerIncomingRing",
-                    "reason": "Answered while the user was already on another call.",
+                    "name": "GreetOnKnock",
+                    "reason": "Greeted while the bot was already mid-conversation.",
                 }
             ],
         },

@@ -475,7 +475,7 @@ class OutputData(pydantic.BaseModel):
             "examples": [
                 {
                     "handled": True,
-                    "events": [{"event": "phone.answer_call", "target": "phone"}],
+                    "events": [{"event": "bot.focus_device", "target": "bot"}],
                 },
                 {"handled": False, "events": []},
             ],
@@ -855,13 +855,13 @@ class InputData(pydantic.BaseModel):
                 "Processing input: stimulus payload plus HSM event schemas available for selection. "
                 "Processor output is always an array of selected events."
             ),
-            "examples": [{"input": "incoming phone speech", "schemas": ["phone.answer_call"]}],
+            "examples": [{"input": "incoming speech", "schemas": ["bot.ability.speaking.input"]}],
         },
     )
 
     input: object = pydantic.Field(
         description="Incoming stimulus event or payload.",
-        examples=["incoming phone speech"],
+        examples=["incoming speech"],
     )
     schemas: SkipJsonSchema[tuple[Event[typing.Any], ...]] = pydantic.Field(
         default=(),
