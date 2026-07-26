@@ -78,6 +78,16 @@ class SoundData(pydantic.BaseModel):
         ),
         examples=["phone.ringing", "phone.call", "ambient", "knock"],
     )
+    amplitude_db: float | None = pydantic.Field(
+        default=None,
+        description=(
+            "Optional loudness of this sound at its source, in dB SPL measured one metre away. A "
+            "shout and a whisper leave the same mouth, so loudness belongs to the sound rather "
+            "than to the thing that made it. How far it carries is the world's to work out; "
+            "omitting this means the sound reaches every listener regardless of distance."
+        ),
+        examples=[60.0, 25.0],
+    )
 
 
 class VisualData(pydantic.BaseModel):

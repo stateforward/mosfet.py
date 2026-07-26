@@ -6,7 +6,7 @@ import hsm
 import pydantic
 import pytest
 
-from bot.world import World
+from bot.world import SoundData, SoundEvent, World, space
 
 
 OBSERVED_EVENT = hsm.Event[str](
@@ -237,3 +237,160 @@ def test_world_does_not_mediate_attachment() -> None:
     assert not hasattr(world, "citizens")
     assert not hasattr(world, "instances")
     assert not hasattr(World, "Participants")
+
+
+class SoundRecorder(hsm.Instance):
+    """World citizen that records the ``world.sound`` stimuli that actually reach it."""
+
+    heard: list[tuple[bytes, str | None]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "SoundRecorder", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        data = event.data
+        if isinstance(data, SoundData):
+            instance.heard.append((bytes(data.audio), event.target))
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "SoundRecorder",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
+    )
+
+
+def _sound(amplitude_db: float | None) -> hsm.Event[typing.Any]:
+    return SoundEvent.with_data(
+        SoundData(
+            audio=b"chunk",
+            media_type="audio/pcm",
+            sample_rate_hz=16_000,
+            channels=1,
+            amplitude_db=amplitude_db,
+        )
+    )
+
+
+def test_world_broadcast_reaches_a_participant_above_its_threshold() -> None:
+    """A placed listener hears a source that is still loud enough by the time it arrives."""
+
+    async def run() -> list[tuple[bytes, str | None]]:
+        world = World()
+        near = SoundRecorder()
+
+        _ = await hsm.started(world, near, near.model, hsm.Config(id="near"))
+        world.join(near, placement=space.Placement(position=space.Position(x=1.0, y=0.0), threshold_db=20.0))
+
+        await world.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
+
+        return near.heard
+
+    assert asyncio.run(run()) == [(b"chunk", "near")]
+
+
+def test_world_broadcast_skips_a_participant_below_its_threshold() -> None:
+    """Distance is what silences it: the same sound at the same level, further away."""
+
+    async def run() -> tuple[list[tuple[bytes, str | None]], float]:
+        world = World()
+        far = SoundRecorder()
+        position = space.Position(x=500.0, y=0.0)
+
+        _ = await hsm.started(world, far, far.model, hsm.Config(id="far"))
+        world.join(far, placement=space.Placement(position=position, threshold_db=20.0))
+
+        await world.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
+
+        return far.heard, space.received_level_db(60.0, position.distance_to(space.Position(x=0.0, y=0.0)))
+
+    heard, level = asyncio.run(run())
+
+    assert heard == []
+    assert level < 20.0
+
+
+def test_world_broadcast_without_geometry_reaches_everyone() -> None:
+    """Geometry is opt-in on three counts, and any one of them missing means "deliver"."""
+
+    async def run() -> tuple[list[tuple[bytes, str | None]], ...]:
+        world = World()
+        unplaced = SoundRecorder()
+        no_threshold = SoundRecorder()
+        placed = SoundRecorder()
+
+        _ = await hsm.started(world, unplaced, unplaced.model, hsm.Config(id="unplaced"))
+        _ = await hsm.started(world, no_threshold, no_threshold.model, hsm.Config(id="no-threshold"))
+        _ = await hsm.started(world, placed, placed.model, hsm.Config(id="placed"))
+        far = space.Position(x=500.0, y=0.0)
+        world.join(unplaced)
+        world.join(no_threshold, placement=space.Placement(position=far))
+        world.join(placed, placement=space.Placement(position=far, threshold_db=20.0))
+
+        # No origin: the emitter did not say where it was.
+        await world.broadcast(_sound(60.0))
+        # No amplitude: the emitter did not say how loud it was.
+        await world.broadcast(_sound(None), origin=space.Position(x=0.0, y=0.0))
+
+        return unplaced.heard, no_threshold.heard, placed.heard
+
+    unplaced_heard, no_threshold_heard, placed_heard = asyncio.run(run())
+
+    assert len(unplaced_heard) == 2
+    assert len(no_threshold_heard) == 2
+    # Placed and selective, but each broadcast was missing one of origin or amplitude.
+    assert len(placed_heard) == 2
+
+
+def test_world_broadcast_short_circuits_when_attenuation_silences_everyone() -> None:
+    """The guard runs on the narrowed list.
+
+    If narrowing ran after it, an empty audible list would reach ``hsm.dispatch_to`` as no ids at
+    all, which means "every instance in scope" — the exact defect the guard exists to prevent,
+    restored in the case that matters most: a quiet sound in a large world.
+    """
+
+    async def run() -> tuple[list[tuple[bytes, str | None]], list[tuple[bytes, str | None]]]:
+        world = World()
+        far = SoundRecorder()
+        bystander = SoundRecorder()
+
+        _ = await hsm.started(world, far, far.model, hsm.Config(id="far"))
+        _ = await hsm.started(world, bystander, bystander.model, hsm.Config(id="bystander"))
+        world.join(far, placement=space.Placement(position=space.Position(x=500.0, y=0.0), threshold_db=20.0))
+
+        await world.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
+
+        return far.heard, bystander.heard
+
+    far_heard, bystander_heard = asyncio.run(run())
+
+    assert far_heard == []
+    # Never joined, so it must not hear anything either way.
+    assert bystander_heard == []
+
+
+def test_world_join_rejects_a_conflicting_placement() -> None:
+    """One object cannot be in two places.
+
+    A shared speaker joined twice with different placements would silently take the second, which
+    is how a phone earpiece ends up at the mouth and the echo comes back.
+    """
+
+    async def run() -> None:
+        world = World()
+        speaker = SoundRecorder()
+
+        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="speaker"))
+        ear = space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0)
+        mouth = space.Placement(position=space.Position(x=0.15, y=0.0), threshold_db=20.0)
+        world.join(speaker, placement=ear)
+        # Same placement again is fine; presence is idempotent.
+        world.join(speaker, placement=ear)
+
+        with pytest.raises(RuntimeError, match="already placed"):
+            world.join(speaker, placement=mouth)
+
+    asyncio.run(run())
