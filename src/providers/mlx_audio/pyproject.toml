@@ -31,6 +31,9 @@ stateforward-bot = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live: runs the real MLX Audio model (downloads weights on first use; skipped by default in CI)",
+]
 
 [tool.ruff]
 line-length = 120
