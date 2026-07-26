@@ -1835,7 +1835,8 @@ def test_bot_does_not_send_speaker_world_sound_to_cognition() -> None:
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         ability.calls.clear()
         active_bot.actions.clear()
-        await phone_speaker(phone).dispatch_audio_output_to_world(world, data)
+        # Signal into the speaker; the speaker is the transducer that makes it world sound.
+        await phone_speaker(phone).dispatch(world, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0.05)
 
         return (
@@ -1876,7 +1877,8 @@ def test_same_world_sibling_bots_do_not_send_speaker_sound_to_cognition() -> Non
         owner_ability.calls.clear()
         owning_agent.actions.clear()
 
-        await phone_speaker(phone).dispatch_audio_output_to_world(world, data)
+        # Signal into the speaker; the speaker is the transducer that makes it world sound.
+        await phone_speaker(phone).dispatch(world, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0.05)
 
         return (
@@ -3644,8 +3646,11 @@ def test_bot_activation_starts_phone_peripherals_in_agent_world() -> None:
 
     assert phone_state == "/Device/attached"
     assert firmware_state == "/Phone/hung_up"
-    assert microphone_state == "/Device/detached"
-    assert speaker_state == "/Device/detached"
+    # Wired, not idle: the phone powers its transducers and its firmware attaches to them during
+    # bring-up, so they sit attached for the life of the phone. Call state gates the uplink in
+    # firmware topology, not the wiring.
+    assert microphone_state == "/Device/attached"
+    assert speaker_state == "/Device/attached"
     assert agent_scope
     assert phone_scope
     assert mic_scope

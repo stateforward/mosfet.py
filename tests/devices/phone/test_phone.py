@@ -15,7 +15,7 @@ from bot.device import Device
 from bot.devices import phone as phone_device
 from bot.protocols import attachment
 
-from bot.world import SoundEvent, World
+from bot.world import SoundData, SoundEvent, World
 from tests.hsm_instance_state import (
     device_peripherals,
     device_firmware,
@@ -239,6 +239,8 @@ def test_phone_connects_service_originating_events() -> None:
         phone = phone_device.Phone(service=service)
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert service.target is device_firmware(phone)
         await service.receive(phone.context(), phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
         await _wait_until(lambda: device_firmware(phone) is not None and device_firmware(phone).state() == "/Phone/ringing")
@@ -252,6 +254,8 @@ def test_phone_service_events_enter_through_attached_service_target() -> None:
         phone = phone_device.Phone()
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
 
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
@@ -267,6 +271,8 @@ def test_phone_dispatch_does_not_forward_service_originating_events() -> None:
         phone = phone_device.Phone()
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
 
         await phone.dispatch(
@@ -287,6 +293,8 @@ def test_phone_service_ingress_does_not_forward_non_service_events() -> None:
         phone = phone_device.Phone(service=service)
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert service.target is device_firmware(phone)
 
         await service.receive(
@@ -366,6 +374,8 @@ def test_phone_device_start_initializes_firmware_and_routes_service_events() -> 
         phone = phone_device.Phone()
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
 
         assert phone.state() == "/Device/detached"
         assert device_firmware(phone) is not None
@@ -386,6 +396,8 @@ def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
         phone = phone_device.Phone()
         target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -461,6 +473,8 @@ def test_phone_committed_observations_have_priority_over_queued_external_events(
         phone = phone_device.Phone()
 
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
@@ -496,6 +510,8 @@ def test_phone_rejects_malformed_incoming_call_before_effects() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
         malformed = phone_device.IncomingCallEvent.with_data(invalid_value(phone_device.IncomingCallData, object()))
@@ -513,6 +529,8 @@ def test_phone_rejects_malformed_payloads_before_event_specific_effects() -> Non
         phone = phone_device.Phone()
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -573,6 +591,8 @@ def test_phone_emitted_events_preserve_trigger_metadata() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
@@ -603,6 +623,8 @@ def test_phone_firmware_rejects_stale_service_events_by_call_id() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -664,6 +686,8 @@ def test_phone_firmware_handles_decline_and_hang_up_commands_for_current_call() 
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -709,6 +733,8 @@ def test_phone_media_ready_publishes_committed_event() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -751,8 +777,8 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
         )
 
         speaker = phone_speaker(phone)
+        # The phone powers its own speaker; starting it here would be a second start.
         _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
         _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
         world.join(observer)
         assert device_firmware(phone) is not None
@@ -877,8 +903,8 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
         )
 
         speaker = phone_speaker(phone)
+        # The phone powers its own speaker; starting it here would be a second start.
         _ = await hsm.started(world, phone, phone.model)
-        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
         _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
         world.join(observer)
         assert device_firmware(phone) is not None
@@ -946,6 +972,8 @@ def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect(
     async def run() -> None:
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -992,6 +1020,8 @@ def test_phone_dialing_timeout_commits_failed_hangup_and_rejects_late_connect() 
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
         target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -1042,6 +1072,8 @@ def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
     async def started_phone() -> tuple[phone_device.Phone, phone_device.PhoneFirmware]:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         return phone, _phone_firmware(phone)
 
@@ -1153,6 +1185,8 @@ def test_phone_firmware_owns_transfer_state_and_rejects_stale_transfer_events() 
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
         stale_transfer_target = phone_device.TransferTarget(kind="address", value="old-helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -1288,6 +1322,8 @@ def test_phone_transfer_timeout_returns_to_answered_and_publishes_failure() -> N
         phone = phone_device.Phone(transfer_timeout=datetime.timedelta(milliseconds=1))
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -1336,6 +1372,8 @@ def test_public_phone_events_do_not_route_back_into_phone_firmware() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
 
         await phone.dispatch(
@@ -1425,15 +1463,11 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
                 self.elevated = []
 
             @typing.override
-            def dispatch_audio_output_to_world(
-                self,
-                ctx: hsm.Context,
-                data: audio_device.AudioOutputData,
-                *,
-                metadata: collections.abc.Mapping[str, object] | None = None,
-            ) -> collections.abc.Awaitable[None]:
-                del ctx, metadata
-                self.elevated.append(data)
+            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+                del ctx
+                data = event.data
+                if isinstance(data, audio_device.AudioOutputData):
+                    self.elevated.append(data)
                 return asyncio.ensure_future(asyncio.sleep(0))
 
         class TrackingService:
@@ -1481,15 +1515,11 @@ def test_receiver_audio_keeps_its_service_type() -> None:
 
     class CapturingSpeaker(audio_device.Speaker):
         @typing.override
-        def dispatch_audio_output_to_world(
-            self,
-            ctx: hsm.Context,
-            data: audio_device.AudioOutputData,
-            *,
-            metadata: collections.abc.Mapping[str, object] | None = None,
-        ) -> collections.abc.Awaitable[None]:
-            del ctx, metadata
-            captured.append(data)
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+            del ctx
+            data = event.data
+            if isinstance(data, audio_device.AudioOutputData):
+                captured.append(data)
             return asyncio.ensure_future(asyncio.sleep(0))
 
     async def run() -> None:
@@ -1544,3 +1574,82 @@ def test_microphone_audio_uplinks_only_while_media_ready() -> None:
     assert bytes(payload.audio) == b"local speech"
     # Exact type: the LiveKit provider only uplinks exact AudioOutputData.
     assert type(payload) is audio_device.AudioOutputData
+
+
+def _uplinks(service: AttachablePhoneService) -> list[hsm.Event[typing.Any]]:
+    return [event for event in service.events if event.name == audio_device.OutputEvent.name]
+
+
+def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
+    """A microphone feeds the controller attached to it, not every phone sharing the world.
+
+    Two phones hear one spoken chunk. Each mouthpiece carries its own capture up its own wire,
+    so each service sees exactly one uplink. Attachment membership is asserted alongside the
+    count: a transducer fans out to everything attached to it, so a double-attach would restore
+    the old duplicate while still reading as a plain count regression.
+    """
+
+    async def run() -> tuple[
+        tuple[int, tuple[hsm.Instance, ...], tuple[hsm.Instance, ...]],
+        tuple[int, tuple[hsm.Instance, ...], tuple[hsm.Instance, ...]],
+    ]:
+        world = World()
+        first_service = AttachablePhoneService()
+        second_service = AttachablePhoneService()
+        first = phone_device.Phone(service=first_service)
+        second = phone_device.Phone(service=second_service)
+
+        # Starting the phones is enough: each powers its own transducers.
+        for phone in (first, second):
+            _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        await _wait_until(lambda: device_firmware(first) is not None and device_firmware(second) is not None)
+
+        for phone, service, call_id in ((first, first_service, "call-first"), (second, second_service, "call-second")):
+            await service.receive(
+                phone.context(),
+                phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id)),
+            )
+            await phone.dispatch(
+                phone.context(),
+                phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id=call_id)),
+            )
+            await service.receive(
+                phone.context(),
+                phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id=call_id)),
+            )
+            await service.receive(
+                phone.context(),
+                phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id=call_id)),
+            )
+        await _wait_until(
+            lambda: _phone_firmware(first).state() == "/Phone/answered/media_ready"
+            and _phone_firmware(second).state() == "/Phone/answered/media_ready"
+        )
+        first_service.events.clear()
+        second_service.events.clear()
+
+        await world.broadcast(
+            SoundEvent.with_data(
+                SoundData(audio=b"spoken-chunk", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            )
+        )
+        await _wait_until(lambda: bool(_uplinks(first_service)) and bool(_uplinks(second_service)))
+        await asyncio.sleep(0)
+
+        return (
+            (len(_uplinks(first_service)), device_bots(phone_microphone(first)), (_phone_firmware(first),)),
+            (len(_uplinks(second_service)), device_bots(phone_microphone(second)), (_phone_firmware(second),)),
+        )
+
+    (first_uplinks, first_attached, first_own_firmware), (
+        second_uplinks,
+        second_attached,
+        second_own_firmware,
+    ) = asyncio.run(run())
+
+    assert first_uplinks == 1
+    assert second_uplinks == 1
+    # Exact membership, not just the count: a transducer fans out to everything attached to it,
+    # so a second attachment would restore the duplicate while still reading as a count bug.
+    assert first_attached == first_own_firmware
+    assert second_attached == second_own_firmware

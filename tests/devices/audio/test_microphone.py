@@ -7,8 +7,9 @@ import typing
 import hsm
 
 from bot.device import Device
+from bot.protocols import attachment
 from bot.world import SoundData, SoundEvent, World
-from tests.hsm_instance_state import device_firmware, device_peripherals
+from tests.hsm_instance_state import device_bots, device_peripherals
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -68,44 +69,42 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
     asyncio.run(run())
 
 
-def test_microphone_emits_one_audio_input_per_world_sound() -> None:
-    """One ``world.sound`` broadcast reaches microphone firmware once, so it captures once.
+def test_microphone_transduces_one_capture_per_world_sound_to_each_attached_controller() -> None:
+    """A microphone converts what it hears once, and hands it to whatever attached to it.
 
-    Presence is the device shell; firmware stays addressable in the world instance map and
-    hears the stimulus only through its shell's forward, never as a second broadcast recipient.
-
-    The recorder counts *emissions*, not deliveries: it overrides ``dispatch`` and does not
-    forward to its own firmware. How many times a captured ``devices.audio.input`` is delivered
-    downstream is an addressing-plane question this test says nothing about.
+    The capture runs on the shell, which is the world's only presence for this device, so one
+    ``world.sound`` yields exactly one ``devices.audio.input`` per attached controller. Delivery
+    is addressed, not broadcast: nothing that did not attach hears it.
     """
 
-    async def run() -> list[hsm.Event[typing.Any]]:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
         world = World()
         microphone = audio.Microphone()
-        listener = RecordingDevice()
+        controller = RecordingDevice()
+        bystander = RecordingDevice()
 
         _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="listener"))
-        await wait_until(lambda: device_firmware(microphone) is not None)
-        listener.events.clear()
+        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
+        _ = await hsm.started(world, bystander, bystander.model, hsm.Config(id="bystander"))
+        await microphone.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        await wait_until(lambda: microphone.state() == "/Device/attached")
+        controller.events.clear()
+        bystander.events.clear()
 
-        def audio_inputs() -> list[hsm.Event[typing.Any]]:
-            return [event for event in listener.events if event.name == audio.InputEvent.name]
+        def captures(device: RecordingDevice) -> list[hsm.Event[typing.Any]]:
+            return [event for event in device.events if event.name == audio.InputEvent.name]
 
-        # The capture runs in a firmware effect, so awaiting the broadcast does not guarantee it
-        # ran: HSM.dispatch can return the processing wait with the event still queued. Wait for
-        # the capture, then settle one turn so a second one would be counted rather than missed.
         await world.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )
         )
-        await wait_until(lambda: len(audio_inputs()) >= 1)
+        await wait_until(lambda: len(captures(controller)) >= 1)
         await asyncio.sleep(0)
 
-        return audio_inputs()
+        return captures(controller), captures(bystander)
 
-    captured = asyncio.run(run())
+    captured, overheard = asyncio.run(run())
 
     assert len(captured) == 1
     assert captured[0].data == audio.AudioInputData(
@@ -114,3 +113,94 @@ def test_microphone_emits_one_audio_input_per_world_sound() -> None:
         sample_rate_hz=16_000,
         channels=1,
     )
+    assert captured[0].source == "microphone"
+    assert captured[0].target == "controller"
+    # Nothing attached, nothing heard: a transducer feeds its controllers, not the world.
+    assert overheard == []
+
+
+def test_unattached_microphone_transduces_nothing() -> None:
+    """An unwired microphone produces no signal, exactly as its physical counterpart does not."""
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        world = World()
+        microphone = audio.Microphone()
+        listener = RecordingDevice()
+
+        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="listener"))
+        listener.events.clear()
+
+        await world.broadcast(
+            SoundEvent.with_data(
+                SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            )
+        )
+        await asyncio.sleep(0)
+
+        return [event for event in listener.events if event.name == audio.InputEvent.name]
+
+    assert asyncio.run(run()) == []
+
+
+def test_microphone_does_not_override_firmware_model() -> None:
+    """Capture lives on the shell, so a microphone declares no firmware model of its own.
+
+    It still *has* firmware — the inherited default really starts, so a lone microphone is two
+    machines in the addressing map. What is pinned here is only that this class does not declare
+    its own, which is what keeps transduction on the shell.
+    """
+
+    assert audio.Microphone.firmware_model is Device.firmware_model
+
+
+class HalfAttachedMicrophone(audio.Microphone):
+    """Microphone whose attach handshake never completes, holding it in ``attaching``."""
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+        if event.name == attachment.AttachCompleteEvent.name:
+            done = asyncio.get_running_loop().create_future()
+            done.set_result(None)
+            return done
+        return super().dispatch(ctx, event)
+
+
+def test_microphone_mid_attach_transduces_nothing() -> None:
+    """Signal must not flow before the attach handshake completes.
+
+    ``Attachment._attach`` records the actor on the edge *into* ``attaching``, so the attachment
+    list is already populated there and only the state gate holds transduction back. Without it,
+    audio goes up the wire during a window that lasts until the attach timeout.
+    """
+
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], tuple[hsm.Instance, ...]]:
+        world = World()
+        microphone = HalfAttachedMicrophone()
+        controller = RecordingDevice()
+
+        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
+        await microphone.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        await wait_until(lambda: microphone.state() == "/Device/attaching")
+        controller.events.clear()
+
+        await world.broadcast(
+            SoundEvent.with_data(
+                SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            )
+        )
+        await asyncio.sleep(0)
+
+        return (
+            microphone.state(),
+            [event for event in controller.events if event.name == audio.InputEvent.name],
+            device_bots(microphone),
+        )
+
+    state, captured, attached = asyncio.run(run())
+
+    assert state == "/Device/attaching"
+    # The attachment is already recorded, so the state gate is the only thing holding capture back.
+    assert len(attached) == 1
+    assert captured == []

@@ -6,53 +6,42 @@ import typing
 import hsm
 
 from bot.device import Device
-from bot.telemetry import observer
-from bot.world import SoundData, SoundEvent, World
+from bot.world import SoundData, SoundEvent
 
 
 class Microphone(Device):
-    """Transducer that hears the world and emits what it captures as audio input.
+    """Transducer that converts heard acoustic energy into audio input signal.
 
-    Event-driven only: nothing hands a microphone audio. It observes ``world.sound`` and
-    re-emits the acoustic energy as ``devices.audio.input`` for whichever device firmware
-    models a transition on it. A phone's mouthpiece is exactly this — the bot speaks into
-    the world, its phone microphone picks that up, and firmware carries it up the wire.
+    A microphone makes no routing decision. It hears ``world.sound`` and hands what it captured
+    to whatever is attached to it; the controller that attached — phone firmware, for a
+    mouthpiece — decides what the signal is for. It has no firmware of its own: a real
+    microphone is a transducer, not a computer.
+
+    Transduction happens only while attached, exactly as an unwired microphone produces nothing.
+    A phone's mouthpiece is therefore live precisely while its firmware holds the attachment.
     """
 
     input_event: typing.ClassVar[hsm.Event[AudioInputData]] = InputEvent
 
     @staticmethod
-    def _capture_world_sound(ctx: hsm.Context, instance: "Microphone", event: hsm.Event[typing.Any]) -> None:
-        """Re-emit heard acoustic energy as audio input for owning firmware to route."""
+    def _transduce(ctx: hsm.Context, instance: "Microphone", event: hsm.Event[typing.Any]) -> None:
+        """Convert heard acoustic energy to signal for every attached controller."""
 
         data = event.data
         if not isinstance(data, SoundData):
             return
-        captured = routed_audio_event(
-            Microphone.input_event,
-            AudioInputData(
-                audio=data.audio,
-                media_type=data.media_type,
-                sample_rate_hz=data.sample_rate_hz,
-                channels=data.channels,
-            ),
-            source=instance,
-            target=instance,
-            metadata=event.metadata,
+        captured = AudioInputData(
+            audio=data.audio,
+            media_type=data.media_type,
+            sample_rate_hz=data.sample_rate_hz,
+            channels=data.channels,
         )
-        _ = hsm.dispatch_all(World.from_context(ctx), captured)
+        for controller in instance._attachments:
+            _ = instance.dispatch_audio_input(ctx, controller, captured, metadata=event.metadata)
 
-    firmware_model: typing.ClassVar[hsm.Model] = hsm.define(
-        "MicrophoneFirmware",
-        hsm.initial(hsm.target("/MicrophoneFirmware/listening")),
-        hsm.state(
-            "listening",
-            hsm.transition(
-                hsm.on(SoundEvent),
-                hsm.effect(_capture_world_sound),
-            ),
-        ),
-        hsm.observe(observer),
+    model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
+        typing.cast(hsm.Model, Device.model),
+        hsm.transition(hsm.source("attached"), hsm.on(SoundEvent), hsm.effect(_transduce)),
     )
 
     def dispatch_audio_input(

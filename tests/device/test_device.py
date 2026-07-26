@@ -1070,7 +1070,12 @@ def test_device_firmware_is_addressable_but_never_a_broadcast_participant() -> N
     assert addressable
     # Presence plane: the shell is the only citizen, so its forward is the single delivery.
     assert broadcast_receipts == 1
-    # Addressing plane is untouched: dispatch_all still reaches firmware directly and via the shell.
+    # Still 2, but it no longer stands for a live defect. It used to be the residual double
+    # delivery the microphone's hsm.dispatch_all inflicted on every device in the world; that
+    # path is gone — transducers now deliver to the controllers attached to them, and nothing in
+    # src calls hsm.dispatch_all any more. What remains is a plain characterization of the
+    # addressing plane: reaching firmware by id reaches it directly and through its shell's
+    # forward. Nothing in the audio path depends on it.
     assert addressing_receipts == 2
 
 
@@ -1139,5 +1144,68 @@ def test_device_restart_rejects_the_devices_own_context() -> None:
 
         with pytest.raises(ValueError, match="outlives the device"):
             _ = await device.restart(device.context())
+
+    asyncio.run(run())
+
+
+def test_device_stop_powers_down_the_peripherals_it_started() -> None:
+    """Stop is the only teardown path a peripheral has, so it must reach the whole subtree.
+
+    Without it a peripheral outlives its owner: still started, still a world participant, still
+    receiving broadcasts a later activation sends.
+    """
+
+    async def run() -> tuple[bool, bool]:
+        world = World()
+        peripheral = Device()
+        owner = Device(peripherals=(peripheral,))
+
+        _ = await hsm.started(world, owner, owner.model)
+        await wait_until(lambda: bot.lifecycle.is_started(peripheral))
+        started_with_owner = bot.lifecycle.is_started(peripheral)
+
+        await owner.stop(world)
+
+        return started_with_owner, bot.lifecycle.is_started(peripheral)
+
+    started_with_owner, still_started = asyncio.run(run())
+
+    assert started_with_owner
+    assert not still_started
+
+
+def test_device_start_tolerates_a_peripheral_started_before_it() -> None:
+    """A peripheral someone else already powered is left alone, not started a second time."""
+
+    async def run() -> tuple[str, str]:
+        world = World()
+        peripheral = Device()
+        owner = Device(peripherals=(peripheral,))
+
+        _ = await hsm.started(world, peripheral, peripheral.model, hsm.Config(id="pre-started"))
+        before = hsm.id(peripheral)
+        # Must not raise "instance already has a running HSM".
+        _ = await hsm.started(world, owner, owner.model)
+        await wait_until(lambda: owner.state() == "/Device/detached")
+
+        return before, hsm.id(peripheral)
+
+    before, after = asyncio.run(run())
+
+    # Same id means the same running machine: it was skipped, not re-newed underneath its owner.
+    assert before == after == "pre-started"
+
+
+def test_device_start_rejects_a_cycle_in_its_peripherals() -> None:
+    """A cyclic peripheral graph fails loudly instead of recursing until the stack gives out."""
+
+    async def run() -> None:
+        world = World()
+        first = Device()
+        second = Device(peripherals=(first,))
+        object.__setattr__(first, "_peripherals", (second,))
+
+        with pytest.raises(RuntimeError, match="cycle"):
+            _ = await hsm.started(world, first, first.model)
 
     asyncio.run(run())

@@ -1149,7 +1149,9 @@ class Bot(hsm.Instance, abc.ABC):
                 if not _is_already_running_error(error):
                     raise
 
-            for device in _device_tree(*instance._devices.values()):
+            # Configured devices only: a device powers its own peripherals (Device.start), so
+            # walking the tree here would start them a second time.
+            for device in instance._devices.values():
                 require_world_scope(world, device, participant="Device")
                 model = device.model
                 if model is None:
@@ -1266,7 +1268,8 @@ class Bot(hsm.Instance, abc.ABC):
         await hsm.stop(instance._attachments, world)
         for ability in reversed(Bot._lifecycle_abilities(instance)):
             await hsm.stop(ability, lifetime)
-        for device in reversed(_device_tree(*instance._devices.values())):
+        # Device.stop stops the peripherals that device powers, so this owns configured devices only.
+        for device in reversed(list(instance._devices.values())):
             await device.stop(world)
         terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(

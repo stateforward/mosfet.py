@@ -10,8 +10,8 @@ from bot.abilities import processing
 
 from bot.abilities import speaking
 from bot.devices import audio
-from bot.world import SoundData, World
-from tests.hsm_instance_state import start_ability_tree
+from bot.world import SoundData, SoundEvent, World
+from tests.hsm_instance_state import device_bots, start_ability_tree
 
 
 class RecordingEncoder:
@@ -44,6 +44,27 @@ def test_speaking_input_is_call_event_for_cognition_selection() -> None:
     assert speaking.InputEvent.kind == processing.EventKind
 
 
+class SoundListener(hsm.Instance):
+    """World participant that records the ``world.sound`` a speaker transduces."""
+
+    def __init__(self, sounds: list[SoundData]) -> None:
+        super().__init__()
+        self._sounds = sounds
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "SoundListener", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        data = event.data
+        if isinstance(data, SoundData):
+            instance._sounds.append(data)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "SoundListener",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
+    )
+
+
 def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
     async def run() -> tuple[list[bytes], list[SoundData], speaking.OutputData | None]:
         encoder = RecordingEncoder(audio=b"\x00\x01")
@@ -57,30 +78,14 @@ def test_speaking_encodes_text_and_elevates_to_world_sound() -> None:
         )
         world = World()
         sounds: list[SoundData] = []
-
-        # Patch world dispatch_all via speaker path: capture by wrapping speaker method.
-        original_world = speaker.dispatch_audio_output_to_world
-
-        def capture_world(
-            ctx: hsm.Context,
-            data: audio.AudioOutputData,
-            *,
-            metadata: typing.Mapping[str, object] | None = None,
-        ) -> typing.Awaitable[None]:
-            sounds.append(
-                SoundData(
-                    audio=data.audio,
-                    media_type=data.media_type,
-                    sample_rate_hz=data.sample_rate_hz,
-                    channels=data.channels,
-                )
-            )
-            return original_world(ctx, data, metadata=metadata)
-
-        speaker.dispatch_audio_output_to_world = capture_world  # type: ignore[method-assign]
+        # Listen the way anything in the world does, rather than patching the speaker: the
+        # speaker transduces signal into world.sound and every participant hears it.
+        listener = SoundListener(sounds)
 
         await start_ability_tree(world, speaking_ability)
         _ = await hsm.started(world, speaker, speaker.model)
+        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="world-ear"))
+        world.join(listener)
 
         outputs: list[speaking.OutputData] = []
         original = speaking_ability.dispatch
@@ -215,3 +220,35 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
     assert calls == [b"hi from cognition"]
     assert len(inputs) == 1
     assert "bot.ability.speaking.input" in {event.name for event in inputs[0].schemas}
+
+
+def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
+    """Acquire once, release on stop.
+
+    The speaker is injected and often shared — in the phone_bot wiring it is the phone's own —
+    so this ability must not accumulate an attachment per utterance, nor hold one after it stops.
+    """
+
+    async def run() -> tuple[int, int]:
+        speaker = audio.Speaker()
+        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
+        world = World()
+        await start_ability_tree(world, speaking_ability)
+        _ = await hsm.started(world, speaker, speaker.model)
+
+        # Sequential utterances: let each finish so this pins "wired once", not a race with a
+        # deferred queue.
+        for _ in range(3):
+            _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=world)
+            await _wait_until(lambda: speaking_ability.state().endswith("/idle"))
+        while_speaking = len(device_bots(speaker))
+
+        await speaking_ability.stop(world)
+        await _wait_until(lambda: not device_bots(speaker))
+
+        return while_speaking, len(device_bots(speaker))
+
+    while_speaking, after_stop = asyncio.run(run())
+
+    assert while_speaking == 1
+    assert after_stop == 0

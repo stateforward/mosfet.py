@@ -2,13 +2,24 @@ from bot.devices import audio
 
 import asyncio
 import collections.abc
+import dataclasses
 import typing
 
 import hsm
 
 from bot.device import Device
+from bot.protocols import attachment
 from bot.world import SoundData, SoundEvent, World
 from tests.hsm_instance_state import device_peripherals
+
+
+async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            raise TimeoutError("Timed out waiting for condition.")
+        await asyncio.sleep(0)
 
 class RecordingDevice(Device):
     def __init__(self) -> None:
@@ -57,32 +68,45 @@ def test_speaker_dispatches_audio_output_to_target_device() -> None:
 
     asyncio.run(run())
 
-def test_speaker_dispatches_audio_output_to_world_scope() -> None:
+def test_speaker_transduces_attached_controller_signal_into_world_sound() -> None:
+    """A speaker converts signal into acoustic energy for the world, the mirror of a microphone.
+
+    ``devices.audio.output`` from the controller that attached becomes ``world.sound`` sourced at
+    the speaker, so bots hear playout as world stimulus rather than as raw device product.
+    """
+
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str]:
         world = World()
         speaker = audio.Speaker()
+        controller = RecordingDevice()
         inside = RecordingDevice()
         outside = RecordingDevice()
         _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(world, controller, controller.model, hsm.Config(id="controller"))
         _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside-speaker"))
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside-speaker"))
+        await speaker.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        await wait_until(lambda: speaker.state() == "/Device/attached")
         inside.events.clear()
         outside.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
-        await speaker.dispatch_audio_output_to_world(
+        await speaker.dispatch(
             world,
-            data,
-            metadata={"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"},
+            dataclasses.replace(
+                audio.OutputEvent.with_data(data),
+                metadata={"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"},
+            ),
         )
+        await wait_until(lambda: bool([event for event in inside.events if event.name == SoundEvent.name]))
 
         return inside.events, outside.events, hsm.id(speaker)
 
     inside_events, outside_events, speaker_id = asyncio.run(run())
 
-    assert len(inside_events) == 1
-    event = inside_events[0]
-    assert event.name == SoundEvent.name
+    sounds = [event for event in inside_events if event.name == SoundEvent.name]
+    assert len(sounds) == 1
+    event = sounds[0]
     assert event.data == SoundData(
         audio=b"playback-audio",
         media_type="audio/pcm",
@@ -93,3 +117,33 @@ def test_speaker_dispatches_audio_output_to_world_scope() -> None:
     assert event.target == "inside-speaker"
     assert event.metadata == {"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"}
     assert outside_events == []
+
+
+def test_unattached_speaker_transduces_nothing() -> None:
+    """An unwired speaker is silent, exactly as its physical counterpart is."""
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        world = World()
+        speaker = audio.Speaker()
+        inside = RecordingDevice()
+        _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside-speaker"))
+        inside.events.clear()
+        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+
+        await speaker.dispatch(world, audio.OutputEvent.with_data(data))
+        await asyncio.sleep(0)
+
+        return [event for event in inside.events if event.name == SoundEvent.name]
+
+    assert asyncio.run(run()) == []
+
+
+def test_speaker_does_not_override_firmware_model() -> None:
+    """Playout lives on the shell, so a speaker declares no firmware model of its own.
+
+    It still *has* firmware — the inherited default really starts. What is pinned here is only
+    that this class does not declare its own, which is what keeps transduction on the shell.
+    """
+
+    assert audio.Speaker.firmware_model is Device.firmware_model

@@ -125,9 +125,36 @@ class Device(hsm.Instance, attachment.Attachment):
             visit(root)
         return tuple(ordered)
 
+    @staticmethod
+    def _powered_peripherals(device: "Device") -> tuple["Device", ...]:
+        """Transitive peripherals a device powers, deduplicated, rejecting a cycle into the owner.
+
+        ``device_tree`` already dedupes a diamond; the cycle check is what keeps ``start`` and
+        ``stop`` — which recurse through the peripherals' own lifecycle methods — from recursing
+        without bound. Failing loudly beats a ``RecursionError`` raised from inside bring-up.
+        """
+
+        ordered = Device.device_tree(*device._peripherals)
+        if any(peripheral is device for peripheral in ordered):
+            raise RuntimeError(f"{type(device).__name__} peripherals form a cycle back into the device.")
+        return ordered
+
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
-        instance = await super().start(ctx, data)
+        # A device powers its own peripherals, the way a handset powers its own transducers, and
+        # powers them first: firmware wires itself to them during bring-up, so they have to be
+        # live before this device starts. Ownership decides this, never the caller's walk order.
+        # One resolved scope for the whole set, so a bare ``ctx`` cannot leave each machine in an
+        # instance map of its own — attaching across those would read as a foreign world.
+        scope = World.from_context(ctx)
+        for peripheral in Device._powered_peripherals(self):
+            if lifecycle.is_started(peripheral):
+                continue
+            model = type(peripheral).model
+            if model is None:
+                raise RuntimeError(f"{type(peripheral).__name__} has no lifecycle model.")
+            _ = await hsm.started(scope, peripheral, model)
+        instance = await super().start(scope, data)
         # Presence is a property of being started in a world, not of being owned by a bot.
         # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both
         # resolve that scope from self.context(), which is the authoritative one. A passed ctx may
@@ -188,24 +215,30 @@ class Device(hsm.Instance, attachment.Attachment):
         await hsm.Instance.stop(self, ctx)
 
         firmware = self._firmware
-        if firmware is None:
-            return
-        # Do not raise into Bot multi-device teardown by calling hsm.stop on a dead machine.
-        if not lifecycle.is_started(firmware):
-            if self._firmware is firmware:
-                self._firmware = None
-            return
-        firmware_id = hsm.id(firmware)
-        firmware_instances: object | None = firmware.context().value(hsm.Keys.Instances)
-        await hsm.stop(firmware)
-        if lifecycle.is_started(firmware):
-            raise RuntimeError("Device firmware remained started after Device stop.")
-        if firmware_id and isinstance(firmware_instances, collections.abc.MutableMapping):
-            typed_map = typing.cast(collections.abc.MutableMapping[str, object], firmware_instances)
-            if typed_map.get(firmware_id) is firmware:
-                _ = typed_map.pop(firmware_id, None)
-        if self._firmware is firmware:
-            self._firmware = None
+        if firmware is not None:
+            # Do not raise into Bot multi-device teardown by calling hsm.stop on a dead machine.
+            if not lifecycle.is_started(firmware):
+                if self._firmware is firmware:
+                    self._firmware = None
+            else:
+                firmware_id = hsm.id(firmware)
+                firmware_instances: object | None = firmware.context().value(hsm.Keys.Instances)
+                await hsm.stop(firmware)
+                if lifecycle.is_started(firmware):
+                    raise RuntimeError("Device firmware remained started after Device stop.")
+                if firmware_id and isinstance(firmware_instances, collections.abc.MutableMapping):
+                    typed_map = typing.cast(collections.abc.MutableMapping[str, object], firmware_instances)
+                    if typed_map.get(firmware_id) is firmware:
+                        _ = typed_map.pop(firmware_id, None)
+                if self._firmware is firmware:
+                    self._firmware = None
+
+        # Genuine reverse of start: firmware goes down before the transducers it holds
+        # attachments to, so it can never emit at an already-stopped peripheral, and the
+        # peripherals go last. Stopping one that never started is idempotent, which the Bot
+        # cleanup boundary relies on. This is the only teardown path peripherals have.
+        for peripheral in Device._powered_peripherals(self):
+            await peripheral.stop(ctx)
 
     @typing.override
     async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:

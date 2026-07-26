@@ -12,6 +12,7 @@ import bot.device
 
 from bot import lifecycle
 from bot.event_schema import validate_event_data
+from bot.protocols import attachment
 from bot.telemetry import observer
 from bot.world import SoundEvent, World, require_world_scope
 
@@ -568,12 +569,29 @@ class PhoneFirmware(hsm.Instance):
 
         ``data`` is passed through as the ``ServiceAudioData`` it already is. Flattening it to
         ``AudioOutputData`` used to erase where it came from, which is how receiver audio ended
-        up back on the wire. Nothing here reaches the service; the uplink is the microphone.
+        up back on the wire.
+
+        No call *here* reaches the service — but the loop this closes does. Far-end audio put
+        into the world is heard by this phone's own microphone, which carries it back up the
+        wire as uplink. That echo is an audibility problem, out of scope for the transducer
+        ownership work and tracked for Change B; do not read this docstring as saying the
+        receiver path cannot reach the service.
         """
 
         data = event.data
         assert isinstance(data, ServiceAudioData)
-        _ = instance._speaker.dispatch_audio_output_to_world(ctx, data, metadata=event.metadata)
+        _ = instance._speaker.dispatch(
+            ctx,
+            dataclasses.replace(
+                audio.OutputEvent.with_data(data),
+                # Correlation only, and only when there is an id to correlate with: the live
+                # transition already requires both machines started, so an unstarted one here
+                # means a direct call, not a delivery decision.
+                source=hsm.id(instance) if lifecycle.is_started(instance) else "",
+                target=hsm.id(instance._speaker) if lifecycle.is_started(instance._speaker) else "",
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -1224,7 +1242,17 @@ class Phone(bot.device.Device):
         if self._firmware is None:
             return
         # Service/media outlive firmware-init activity; attach under device lifetime context (HSM-CONTEXT-001).
-        await self._service.attach(World.from_context(self.context()), self._firmware)
+        world = World.from_context(self.context())
+        await self._service.attach(world, self._firmware)
+        # Firmware is the controller, so it wires itself to its own transducers. Wiring, not
+        # gating: this attach happens once at bring-up and nothing in src ever detaches, so the
+        # microphone transduces on EVERY world.sound for the phone's whole life — a per-broadcast
+        # hot path that runs whether or not a call is up — and firmware discards what arrives
+        # outside /Phone/answered/media_ready. Call state is gated by that transition's scope, not
+        # by the attachment. Anything changing what the mouthpiece costs when idle changes it here.
+        wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=self._firmware))
+        await self._microphone.attach(world, wired)
+        await self._speaker.attach(world, wired)
 
     @typing.override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:

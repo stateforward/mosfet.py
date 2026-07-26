@@ -18,6 +18,8 @@ import hsm
 from bot import event_schema
 import pydantic
 
+from bot import lifecycle
+from bot.protocols import attachment
 from bot.telemetry import observer
 
 if typing.TYPE_CHECKING:
@@ -159,6 +161,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     _encoder: encoding.Encoder[bytes, bytes]
     _speaker: Speaker | None
+    # Live record of an attachment this ability acquired, so stop can release exactly what start
+    # of speech took. The speaker is injected and often shared, so it is never ours to power.
+    _speaker_attached: bool
     _sample_rate_hz: int
     _channels: int
     _media_type: str
@@ -179,9 +184,21 @@ class Speaking(ability.Ability[InputData, OutputData]):
             raise ValueError("channels must be positive.")
         self._encoder = encoder
         self._speaker = speaker
+        self._speaker_attached = False
         self._sample_rate_hz = sample_rate_hz
         self._channels = channels
         self._media_type = media_type
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Release the speaker this ability wired itself to, then stop."""
+
+        speaker = self._speaker
+        if speaker is not None and self._speaker_attached:
+            self._speaker_attached = False
+            if lifecycle.is_started(speaker):
+                await speaker.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=self)))
+        await super().stop(ctx)
 
     @staticmethod
     def _dispatch_output(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -229,11 +246,20 @@ class Speaking(ability.Ability[InputData, OutputData]):
             )
             speaker = instance._speaker
             if speaker is not None:
-                # Elevate into world.sound so bot input (and call uplink paths) can hear playout.
-                await speaker.dispatch_audio_output_to_world(
+                # This ability is the speaker's controller: wire to it once, then hand it signal.
+                # The speaker is the transducer that turns that into world.sound, which is how bot
+                # input (and call uplink paths) hear playout. Wiring waits until first use because
+                # an injected speaker may start after this ability does; stop releases it.
+                if not instance._speaker_attached:
+                    await speaker.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)))
+                    instance._speaker_attached = True
+                await speaker.dispatch(
                     ctx,
-                    frame,
-                    metadata=dict(event.metadata),
+                    dataclasses.replace(
+                        audio.OutputEvent.with_data(frame),
+                        source=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
                 )
             product = OutputData(
                 text=text,
