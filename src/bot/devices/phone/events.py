@@ -48,6 +48,7 @@ FailureKind = typing.Literal[
     "remote_unavailable",
     "media_unavailable",
     "signaling_failed",
+    "call_declined",
     "transfer_rejected",
     "timeout",
     "unknown",
@@ -194,8 +195,12 @@ class DialFailedData(pydantic.BaseModel):
     )
 
     failure_kind: FailureKind = pydantic.Field(
-        description="Normalized low-cardinality reason the outbound attempt could not be placed.",
-        examples=["remote_unavailable", "provider_unavailable", "signaling_failed"],
+        description=(
+            "Normalized low-cardinality reason the outbound attempt did not become a call. "
+            "call_declined is not remote_unavailable: somebody answered and said no, which is a "
+            "different fact about the far end than nobody being there."
+        ),
+        examples=["remote_unavailable", "call_declined", "provider_unavailable", "signaling_failed"],
     )
 
 class AnswerRequestData(CallIdData):

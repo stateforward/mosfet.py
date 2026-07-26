@@ -21,11 +21,13 @@ from bot import lifecycle
 from bot.telemetry import observer
 from bot.environment import Environment, require_environment_scope
 
+from . import signaling
 from .audio import AudioBridge, create_audio_bridge
 from .pcm_batch import RemotePcmBatcher
 from .room_audio import (
     AudioStreamFactory,
     LocalAudioTrackFactory,
+    LocalParticipant,
     RoomAudioConnectData,
     RoomAudioConnectedData,
     RoomAudioTrackPath,
@@ -35,6 +37,11 @@ from .room_audio import (
 _DEFAULT_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
+# How long call setup has to reach the other phone and be acknowledged. Seconds, not the
+# half-minute an operation gets, because this budget covers a message crossing the room — not
+# the ring that follows it. Ring time belongs to phone firmware: how long to let it ring before
+# giving up is the caller's patience, not the exchange's.
+_DEFAULT_SETUP_TIMEOUT = datetime.timedelta(seconds=5)
 _PHONE_SERVICE_TARGET_DESCRIPTION = (
     "Process-local phone event target attached by the owning phone service lifecycle. This target has no JSON "
     "representation and is not a provider configuration field."
@@ -196,13 +203,51 @@ _RoomAudioStatusEvent = hsm.Event[RoomAudioConnectedData](
     schema=RoomAudioConnectedData,
 )
 
-_AnswerCompletedEvent = hsm.Event[phone.CallConnectedData](
-    name="bot.provider.livekit.phone.answer.completed",
+
+class _PeerLeftData(pydantic.BaseModel):
+    """One remote participant is no longer in the room.
+
+    A transduced observation and nothing more. Whether a departure is a dial that can never be
+    answered, a far end that crashed mid-call, or a stranger leaving a room this phone is not
+    talking into is decided by topology, which is the only thing that knows what this phone is
+    doing. The callback that raises this reports; it does not interpret.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": "A LiveKit participant that is no longer present in the room.",
+            "examples": [{"identity": "agent-b"}],
+        },
+    )
+
+    identity: str = pydantic.Field(
+        min_length=1,
+        description="LiveKit participant identity that left the room.",
+        examples=["agent-b"],
+    )
+
+
+# Private: room presence and the call-setup wire enter the service machine; guards decide meaning.
+_PeerLeftEvent = hsm.Event[_PeerLeftData](
+    name="bot.provider.livekit.phone.peer.left",
+    schema=_PeerLeftData,
+)
+_SetupDeliveredEvent = hsm.Event[None](
+    name="bot.provider.livekit.phone.setup.delivered",
     kind=hsm.CompletionEventKind,
+)
+_SetupAcceptedEvent = hsm.Event[phone.CallConnectedData](
+    name="bot.provider.livekit.phone.setup.accepted",
     schema=phone.CallConnectedData,
 )
-_DialCompletedEvent = hsm.Event[phone.CallConnectedData](
-    name="bot.provider.livekit.phone.dial.completed",
+_SetupDeclinedEvent = hsm.Event[phone.CallIdData](
+    name="bot.provider.livekit.phone.setup.declined",
+    schema=phone.CallIdData,
+)
+
+_AnswerCompletedEvent = hsm.Event[phone.CallConnectedData](
+    name="bot.provider.livekit.phone.answer.completed",
     kind=hsm.CompletionEventKind,
     schema=phone.CallConnectedData,
 )
@@ -321,6 +366,21 @@ def _active_operation_call_id(instance: "PhoneService") -> str | None:
     if active is None or not isinstance(active.data, phone.CallIdData):
         return None
     return active.data.call_id
+
+
+def _dial_call_id(instance: "PhoneService") -> str | None:
+    """Call id the in-flight dial minted, or None when no dial is in flight.
+
+    A SIP user agent mints the Call-ID when it sends the INVITE, and every later message about
+    that call carries it back. Here the dial operation's envelope id *is* that handle: it already
+    identifies the attempt end to end, so deriving the call from it means the two phones agree on
+    one name without either side storing a second one.
+    """
+
+    active = _active_operation(instance)
+    if active is None or not active.id or not isinstance(active.data, phone.DialData):
+        return None
+    return f"livekit:{active.id}"
 
 
 def _active_operation_transfer(instance: "PhoneService") -> phone.TransferRequestData | None:
@@ -589,15 +649,54 @@ def _has_call_id_completion(
     )
 
 
-def _has_dial_completion(
+def _has_setup_delivered(
     ctx: hsm.Context,
     instance: "PhoneService",
     event: hsm.Event[typing.Any],
 ) -> bool:
-    """Correlate a dial result by operation envelope alone — no call existed to name."""
+    """The acked setup belongs to *this* dial — correlated by envelope, since no call exists yet."""
 
     del ctx
-    return isinstance(event.data, phone.CallConnectedData) and _matches_active_operation_id(instance, event)
+    return _matches_active_operation_id(instance, event)
+
+
+def _has_setup_accepted(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> bool:
+    """The callee answered *this* attempt: the call it names is the one this dial minted."""
+
+    del ctx
+    data = event.data
+    return isinstance(data, phone.CallConnectedData) and data.call_id == _dial_call_id(instance)
+
+
+def _has_setup_declined(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> bool:
+    """The callee refused *this* attempt."""
+
+    del ctx
+    data = event.data
+    return isinstance(data, phone.CallIdData) and data.call_id == _dial_call_id(instance)
+
+
+def _has_abandoned_dial(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> bool:
+    """Firmware gave up on the attempt — nobody answered, or the operator hung up mid-ring.
+
+    Ring time is the caller's patience and firmware owns it, so the exchange learns the attempt
+    is over the same way a real one does: the calling handset stops asking.
+    """
+
+    del ctx
+    return isinstance(event.data, phone.NoCallData) and _dial_call_id(instance) is not None
 
 
 def _has_dial_failure(
@@ -803,12 +902,16 @@ class PhoneService(hsm.Instance):
     _local_audio_failed_chunks: int
     _local_audio_failed_bytes: int
     _media_call_id: str | None
+    # Who this phone is on a call with, or dialing. One peer on one call, the way a handset knows
+    # exactly one far end — not a dictionary of everyone who happens to be in the room.
+    _call_peer_identity: str | None
     _delivering_remote_audio: bool
     _attached_phone_target_ref: weakref.ReferenceType[hsm.Instance] | None
+    _directory: signaling.Directory | None
+    _setup_timeout: datetime.timedelta
     _presence_bound: bool
-    _presence_joined_callback: collections.abc.Callable[..., object] | None
     _presence_left_callback: collections.abc.Callable[..., object] | None
-    _presence_call_ids: dict[str, str]
+    _signaling_participant: LocalParticipant | None
 
     def __init__(
         self,
@@ -818,6 +921,8 @@ class PhoneService(hsm.Instance):
         track_name: str = "bot-audio",
         uplink_sample_rate_hz: int = 48_000,
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
+        setup_timeout: datetime.timedelta = _DEFAULT_SETUP_TIMEOUT,
+        directory: signaling.Directory | None = None,
         room: RoomHandle | None = None,
         stream_factory: AudioStreamFactory | None = None,
         local_track_factory: LocalAudioTrackFactory | None = None,
@@ -825,11 +930,14 @@ class PhoneService(hsm.Instance):
     ) -> None:
         super().__init__()
         _require_positive_timeout(operation_timeout)
+        _require_positive_timeout(setup_timeout)
         if (url is None) != (token is None):
             raise ValueError("url and token must both be provided or both omitted.")
         if not track_name:
             raise ValueError("track_name must be a non-empty string.")
         self._operation_timeout = operation_timeout
+        self._setup_timeout = setup_timeout
+        self._directory = directory
         self._uplink_sample_rate_hz = uplink_sample_rate_hz
         self._loop = loop
         self._room = room
@@ -850,12 +958,12 @@ class PhoneService(hsm.Instance):
         self._local_audio_failed_chunks = 0
         self._local_audio_failed_bytes = 0
         self._media_call_id = None
+        self._call_peer_identity = None
         self._delivering_remote_audio = False
         self._attached_phone_target_ref = None
         self._presence_bound = False
-        self._presence_joined_callback = None
         self._presence_left_callback = None
-        self._presence_call_ids = {}
+        self._signaling_participant = None
 
     def _room_media_enabled(self) -> bool:
         """True when this service is configured for LiveKit room media (not bare call-control stub)."""
@@ -874,10 +982,6 @@ class PhoneService(hsm.Instance):
             return sid
         return "remote"
 
-    @staticmethod
-    def _call_id_for_participant(identity: str) -> str:
-        return f"livekit:{identity}"
-
     def _sdk_ingress_open(self) -> bool:
         """True when attach effects opened provider ingress (not a ``state()`` probe).
 
@@ -888,76 +992,132 @@ class PhoneService(hsm.Instance):
         return self._attached_phone_target_ref is not None
 
     def _bind_room_presence(self, room: RoomHandle) -> None:
-        """Map remote room presence to phone call observations (ring / remote hang-up).
+        """Transduce room presence: a participant vanishing is the line going dead.
 
-        Does not auto-answer: the bot (or operator) decides whether to answer.
+        Arrival is not a call — being in the room is being reachable, and a phone that rang for
+        everyone who walked into the exchange would have no callers, only neighbours. Departure
+        still matters, because it is the only way to notice a far end that crashed instead of
+        hanging up.
+
+        The callback decides nothing. It reports who left; topology decides what that means for
+        the call this phone is actually on.
         """
 
         if self._presence_bound:
             return
         service_ref = weakref.ref(self)
 
-        def on_participant_connected(participant: object) -> object:
-            live_service = service_ref()
-            if live_service is None or not live_service._sdk_ingress_open():
-                return None
-            live_service._offer_incoming_call_for_participant(participant)
-            return None
-
         def on_participant_disconnected(participant: object) -> object:
             live_service = service_ref()
             if live_service is None or not live_service._sdk_ingress_open():
                 return None
-            live_service._hang_up_for_participant(participant)
+            _ = live_service.dispatch(
+                live_service.context(),
+                _PeerLeftEvent.with_data(
+                    _PeerLeftData(identity=PhoneService._participant_identity(participant)),
+                ),
+            )
             return None
 
-        _ = room.on("participant_connected", on_participant_connected)
         _ = room.on("participant_disconnected", on_participant_disconnected)
-        self._presence_joined_callback = on_participant_connected
         self._presence_left_callback = on_participant_disconnected
         self._presence_bound = True
 
-    def _scan_existing_remote_participants(self, room: RoomHandle) -> None:
-        """Ring for remotes already in the room when the bot joins late."""
+    def _bind_room_signaling(self, room: RoomHandle) -> None:
+        """Answer the four call-setup methods for as long as this phone is on the room.
 
-        remote_participants = getattr(room, "remote_participants", None)
-        if remote_participants is None:
-            return
-        values: collections.abc.Iterable[object]
-        if isinstance(remote_participants, collections.abc.Mapping):
-            values = typing.cast(collections.abc.Mapping[object, object], remote_participants).values()
-        elif isinstance(remote_participants, collections.abc.Iterable):
-            values = remote_participants
-        else:
-            return
-        for participant in values:
-            self._offer_incoming_call_for_participant(participant)
+        Registration waits for the room because ``Room.local_participant`` does not exist before
+        connect: a phone has no line until it is plugged in.
+        """
 
-    def _offer_incoming_call_for_participant(self, participant: object) -> None:
-        if not self._sdk_ingress_open():
+        if self._signaling_participant is not None:
             return
-        # One active media call at a time for this room-phone mapping.
-        if self._media_call_id is not None:
-            return
-        identity = PhoneService._participant_identity(participant)
-        call_id = PhoneService._call_id_for_participant(identity)
-        self._presence_call_ids[identity] = call_id
-        _ = self.dispatch(
-            self.context(),
-            ServiceIncomingCallEvent.with_data(phone.IncomingCallData(call_id=call_id, caller=identity)),
+        participant = room.local_participant
+        service_ref = weakref.ref(self)
+
+        def handler_for(
+            build: collections.abc.Callable[[str, signaling.MessageData], hsm.Event[typing.Any]],
+        ) -> collections.abc.Callable[[object], str]:
+            def handle(data: object) -> str:
+                caller_identity, message = signaling.invocation(data)
+                live_service = service_ref()
+                if live_service is None or not live_service._sdk_ingress_open():
+                    raise rtc.RpcError(
+                        rtc.RpcError.ErrorCode.RECIPIENT_NOT_FOUND,
+                        "This LiveKit phone is not attached to a handset and cannot take calls.",
+                    )
+                # Answer the wire now, and let the phone ring on its own time. Awaiting the
+                # dispatch would hold the caller's setup transaction open across a ring, a sound
+                # stimulus, and possibly a whole cognition turn — long past any RPC deadline.
+                _ = live_service.dispatch(live_service.context(), build(caller_identity, message))
+                return message.model_dump_json()
+
+            return handle
+
+        _ = participant.register_rpc_method(
+            signaling.SetupMethod,
+            handler_for(
+                lambda caller_identity, message: ServiceIncomingCallEvent.with_data(
+                    phone.IncomingCallData(call_id=message.call_id, caller=caller_identity),
+                ),
+            ),
         )
-
-    def _hang_up_for_participant(self, participant: object) -> None:
-        if not self._sdk_ingress_open():
-            return
-        identity = PhoneService._participant_identity(participant)
-        call_id = self._presence_call_ids.pop(identity, PhoneService._call_id_for_participant(identity))
-        if self._media_call_id is not None and self._media_call_id != call_id:
-            return
-        _ = self.dispatch(
-            self.context(),
-            ServiceRemoteHangUpEvent.with_data(phone.RemoteHangUpData(call_id=call_id)),
+        _ = participant.register_rpc_method(
+            signaling.AcceptMethod,
+            handler_for(
+                lambda caller_identity, message: _SetupAcceptedEvent.with_data(
+                    phone.CallConnectedData(call_id=message.call_id),
+                ),
+            ),
         )
+        _ = participant.register_rpc_method(
+            signaling.DeclineMethod,
+            handler_for(
+                lambda caller_identity, message: _SetupDeclinedEvent.with_data(
+                    phone.CallIdData(call_id=message.call_id),
+                ),
+            ),
+        )
+        _ = participant.register_rpc_method(
+            signaling.ByeMethod,
+            handler_for(
+                lambda caller_identity, message: ServiceRemoteHangUpEvent.with_data(
+                    phone.RemoteHangUpData(call_id=message.call_id),
+                ),
+            ),
+        )
+        self._signaling_participant = participant
+
+    def _unbind_room_signaling(self) -> None:
+        """Stop answering call setup. The phone is off the line; nothing may ring it."""
+
+        participant = self._signaling_participant
+        if participant is None:
+            return
+        self._signaling_participant = None
+        for method in signaling.Methods:
+            participant.unregister_rpc_method(method)
+
+    async def _signal_peer(self, method: str, call_id: str) -> None:
+        """Tell the other end what this phone just did.
+
+        No peer and no line means there is nothing to tell: a room-media phone with no signalling
+        wire still completes its own side locally, exactly as it did before there was one.
+        """
+
+        participant = self._signaling_participant
+        peer_identity = self._call_peer_identity
+        if participant is None or peer_identity is None:
+            return
+        try:
+            _ = await participant.perform_rpc(
+                destination_identity=peer_identity,
+                method=method,
+                payload=signaling.MessageData(call_id=call_id).model_dump_json(),
+                response_timeout=self._setup_timeout.total_seconds(),
+            )
+        except rtc.RpcError as error:
+            raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
 
     def _emit_media_ready_if_track_live(self, call_id: str) -> None:
         """If the room local track is already published, advance firmware to media_ready."""
@@ -1040,36 +1200,74 @@ class PhoneService(hsm.Instance):
             self._bind_room_presence(self._room)
         return bridge, track_path
 
-    async def dial(self, request: phone.DialData) -> phone.CallConnectedData:
-        """Dial an outbound LiveKit/SIP call. Default installation reports call control unavailable."""
+    async def dial(self, request: phone.DialData) -> None:
+        """Send call setup to the endpoint the directory resolves, and return once it is ringing.
 
-        del request
-        _raise_unavailable_call_control()
+        Returning does **not** mean connected. The ack on setup means the far end is ringing; the
+        connect arrives later, as an accept, because whether to answer is the callee's decision
+        and nothing here may make it for them.
+        """
+
+        directory = self._directory
+        if directory is None:
+            raise PhoneServiceError(
+                "This LiveKit phone has no directory, so it is registered with no exchange and cannot place calls.",
+                failure_kind="provider_unavailable",
+            )
+        call_id = _dial_call_id(self)
+        participant = self._signaling_participant
+        if call_id is None or participant is None:
+            raise PhoneServiceError(
+                "This LiveKit phone is not on a connected room, so there is no line to dial out on.",
+                failure_kind="provider_unavailable",
+            )
+        peer_identity = directory.resolve(request.target)
+        if peer_identity is None:
+            raise PhoneServiceError(
+                f"No LiveKit endpoint answers {request.target.kind} {request.target.value!r}.",
+                failure_kind="remote_unavailable",
+            )
+        # A phone that has dialled knows who it dialled, before it knows whether they will answer.
+        self._call_peer_identity = peer_identity
+        try:
+            _ = await participant.perform_rpc(
+                destination_identity=peer_identity,
+                method=signaling.SetupMethod,
+                payload=signaling.MessageData(call_id=call_id).model_dump_json(),
+                response_timeout=self._setup_timeout.total_seconds(),
+            )
+        except rtc.RpcError as error:
+            self._call_peer_identity = None
+            raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
 
     async def answer_call(self, request: phone.AnswerRequestData) -> None:
-        """Answer a call.
+        """Answer a call, and tell the caller so their phone stops ringing and connects.
 
-        Room-media installations complete answer locally (bot decides to answer; no SIP
+        Room-media installations complete answer locally (the bot decides to answer; no SIP
         gateway required). Pure call-control stubs without room media still report unavailable.
         """
 
-        del request
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
+        await self._signal_peer(signaling.AcceptMethod, request.call_id)
 
     async def decline_call(self, request: phone.DeclineRequestData) -> None:
-        """Decline a ringing call. Room-media installations complete decline locally."""
+        """Decline a ringing call, and tell the caller they were refused rather than unreachable."""
 
-        del request
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
+        await self._signal_peer(signaling.DeclineMethod, request.call_id)
 
     async def hang_up_call(self, request: phone.HangUpRequestData) -> None:
-        """Hang up an active call. Room-media installations complete hang-up locally."""
+        """Hang up an active call, and tell the other end.
 
-        del request
+        Signalling is the only way the far end can learn this: a bot that hangs up stays in the
+        room, so nothing about its presence changes when the call ends.
+        """
+
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
+        await self._signal_peer(signaling.ByeMethod, request.call_id)
 
     async def transfer_call(self, request: phone.TransferRequestData) -> None:
         """Transfer an active LiveKit/SIP call. Default installation reports call control unavailable."""
@@ -1084,7 +1282,8 @@ class PhoneService(hsm.Instance):
         _, track_path = self._ensure_media()
         if not lifecycle.is_started(track_path):
             _ = await hsm.started(environment, track_path, track_path.model)
-        # Start this service before room connect so participant_connected can ring.
+        # Start this service before room connect so its signaling handlers are registered by the
+        # time setup can arrive; an unattached phone answers RPC with RECIPIENT_NOT_FOUND.
         if not lifecycle.is_started(self):
             _ = await hsm.started(environment, self, self.model)
         require_environment_scope(environment, self, participant="PhoneService")
@@ -1098,9 +1297,6 @@ class PhoneService(hsm.Instance):
             )
         if self._room_connect is not None and self._local_track_sid is None:
             await track_path.connect_room(track_path.context(), self._room_connect)
-            room = self._room
-            assert room is not None
-            self._scan_existing_remote_participants(room)
 
     async def detach(self, environment: Environment, target: hsm.Instance) -> None:
         """Detach this service from the phone-owned firmware target."""
@@ -1130,14 +1326,12 @@ class PhoneService(hsm.Instance):
             track_path.context(),
             RoomAudioConnectData(url=url, token=token, track_name=track_name),
         )
-        room = self._room
-        assert room is not None
-        self._scan_existing_remote_participants(room)
 
     async def disconnect_room(self) -> None:
         """Disconnect room audio from the underlying LiveKit room."""
 
         _, track_path = self._ensure_media()
+        self._unbind_room_signaling()
         await track_path.disconnect_room(track_path.context())
 
     @typing.override
@@ -1148,6 +1342,7 @@ class PhoneService(hsm.Instance):
         # Ingress opens when attach holds a target ref; clear on stop so SDK callbacks
         # cannot deliver after the service is stopped (only detach effect cleared it before).
         self._attached_phone_target_ref = None
+        self._unbind_room_signaling()
         await hsm.Instance.stop(self, ctx)
         if track_path is None:
             return
@@ -1184,6 +1379,15 @@ class PhoneService(hsm.Instance):
     ) -> datetime.timedelta:
         del ctx, event
         return instance._operation_timeout
+
+    @staticmethod
+    def _setup_timeout_value(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> datetime.timedelta:
+        del ctx, event
+        return instance._setup_timeout
 
     @staticmethod
     def _matches_service_attachment(
@@ -1249,7 +1453,9 @@ class PhoneService(hsm.Instance):
         room = instance._room
         if room is not None:
             instance._bind_room_presence(room)
-            instance._scan_existing_remote_participants(room)
+            # The line goes live with the room: before connect there is no local participant to
+            # register call setup on, and after it this phone can both ring and be rung.
+            instance._bind_room_signaling(room)
         call_id = instance._media_call_id
         phone_event_target = PhoneService._phone_event_target(instance)
         if call_id is None or phone_event_target is None or data.local_track_sid is None:
@@ -1307,6 +1513,7 @@ class PhoneService(hsm.Instance):
         del ctx
         if isinstance(event.data, phone.PhoneHungUpData):
             instance._media_call_id = None
+            instance._call_peer_identity = None
 
     @staticmethod
     def _clear_media_and_maybe_active_operation(
@@ -1427,6 +1634,10 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.IncomingCallData)
         instance._media_call_id = data.call_id
+        # Caller ID is who the call is with. The callee adopts both the caller's call id and the
+        # caller themself from setup, so from here on both phones name the same call and the same
+        # peer.
+        instance._call_peer_identity = data.caller
         PhoneService._emit_phone_event(ctx, instance, event, phone.IncomingCallEvent.with_data(data))
 
     @staticmethod
@@ -1441,6 +1652,7 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.RemoteHangUpData)
         instance._media_call_id = None
+        instance._call_peer_identity = None
         PhoneService._emit_phone_event(ctx, instance, event, phone.RemoteHangUpEvent.with_data(data))
 
     @staticmethod
@@ -1448,6 +1660,7 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.DialFailedData)
         instance._media_call_id = None
+        instance._call_peer_identity = None
         PhoneService._emit_phone_event(ctx, instance, event, phone.ServiceDialFailedEvent.with_data(data))
 
     @staticmethod
@@ -1455,6 +1668,7 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.CallFailedData)
         instance._media_call_id = None
+        instance._call_peer_identity = None
         PhoneService._emit_phone_event(ctx, instance, event, phone.CallFailedEvent.with_data(data))
 
     @staticmethod
@@ -1481,6 +1695,108 @@ class PhoneService(hsm.Instance):
         assert isinstance(data, phone.CallConnectedData)
         instance._media_call_id = data.call_id
         PhoneService._emit_phone_event(ctx, instance, event, phone.CallConnectedEvent.with_data(data))
+
+    @staticmethod
+    def _has_dial_peer_left(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
+        """The endpoint this dial is ringing has left the room: nobody is there to answer."""
+
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, _PeerLeftData)
+            and _dial_call_id(instance) is not None
+            and instance._call_peer_identity == data.identity
+        )
+
+    @staticmethod
+    def _has_call_peer_left(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
+        """The far end of the call this phone is on left the room — the line went dead."""
+
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, _PeerLeftData)
+            and instance._media_call_id is not None
+            and instance._call_peer_identity == data.identity
+        )
+
+    @staticmethod
+    def _emit_dial_failed_on_peer_loss(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """A dial whose callee vanished never becomes a call, so there is none to fail."""
+
+        active = _active_operation(instance)
+        assert active is not None
+        PhoneService._emit_dial_failed(
+            ctx,
+            instance,
+            _with_operation_correlation(
+                _DialFailedEvent.with_data(phone.DialFailedData(failure_kind="remote_unavailable")),
+                operation_id=active.id,
+                metadata=event.metadata,
+            ),
+        )
+
+    @staticmethod
+    def _emit_setup_declined(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        """A refusal is not an absence: somebody was there, and they said no."""
+
+        active = _active_operation(instance)
+        assert active is not None
+        PhoneService._emit_dial_failed(
+            ctx,
+            instance,
+            _with_operation_correlation(
+                _DialFailedEvent.with_data(phone.DialFailedData(failure_kind="call_declined")),
+                operation_id=active.id,
+                metadata=event.metadata,
+            ),
+        )
+
+    @staticmethod
+    def _report_peer_hang_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        """A far end that vanished mid-call hung up without saying so; say it for them."""
+
+        call_id = instance._media_call_id
+        assert call_id is not None
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                ServiceRemoteHangUpEvent.with_data(phone.RemoteHangUpData(call_id=call_id)),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _cancel_dial(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        """Stop a ringing callee once the caller has given up on the attempt."""
+
+        del ctx, event
+        call_id = _dial_call_id(instance)
+        if call_id is None:
+            return
+        cancelled = asyncio.ensure_future(instance._signal_peer(signaling.ByeMethod, call_id))
+        instance._call_peer_identity = None
+
+        def _note_undelivered(done: asyncio.Future[None]) -> None:
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is None:
+                return
+            # Operationally load-bearing: the callee keeps ringing for a call nobody is on.
+            _LOG.warning("livekit phone abandoned dial not cancelled at the callee reason=%s", error)
+
+        cancelled.add_done_callback(_note_undelivered)
+
+    @staticmethod
+    def _unbind_signaling(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._unbind_room_signaling()
 
     @staticmethod
     def _emit_active_call_timeout(
@@ -1576,16 +1892,13 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.DialData)
         try:
-            connected = await instance.dial(data)
+            await instance.dial(data)
         except Exception as error:
             failure = phone.DialFailedData(failure_kind=_failure_kind(error))
             _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_DialFailedEvent.with_data(failure), event))
             return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _with_trigger_correlation(_DialCompletedEvent.with_data(connected), event),
-        )
+        # Setup was acknowledged: the far end is ringing. Not connected — that is theirs to decide.
+        _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_SetupDeliveredEvent, event))
 
     @staticmethod
     async def _run_decline_call(
@@ -1726,8 +2039,17 @@ class PhoneService(hsm.Instance):
             hsm.on(_ServiceDetachedEvent),
             hsm.guard(_matches_service_attachment),
             hsm.effect(_clear_active_operation),
+            hsm.effect(_unbind_signaling),
             hsm.effect(_clear_phone_event_target),
             hsm.target("/PhoneService/unconnected"),
+        ),
+        # A far end that vanished mid-call hung up: presence transduces, topology decides. Dialing
+        # overrides this from its own substates, because a callee who leaves while ringing never
+        # made a call to hang up.
+        hsm.transition(
+            hsm.on(_PeerLeftEvent),
+            hsm.guard(_has_call_peer_left),
+            hsm.effect(_report_peer_hang_up),
         ),
         # Remote room audio: deliver only when media call + phone target are ready; else drop observably.
         hsm.transition(
@@ -1875,7 +2197,6 @@ class PhoneService(hsm.Instance):
                 hsm.target("/PhoneService/hanging_up"),
             ),
             hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
-            hsm.activity(_run_dial),
             *_active_call_operation_resolution_transitions(
                 emit_remote_hang_up=_emit_remote_hang_up,
                 emit_call_failed=_emit_call_failed,
@@ -1883,22 +2204,63 @@ class PhoneService(hsm.Instance):
             ),
             _ignore_transfer_terminal_observation_transition(),
             hsm.transition(
-                hsm.on(_DialCompletedEvent),
-                hsm.guard(_has_dial_completion),
-                hsm.effect(_emit_call_connected),
-                hsm.effect(_clear_active_operation),
-                hsm.target("/PhoneService/ready"),
-            ),
-            hsm.transition(
                 hsm.on(_DialFailedEvent),
                 hsm.guard(_has_dial_failure),
                 hsm.effect(_emit_dial_failed),
                 hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
-            _active_call_operation_timeout_transition(
-                operation_timeout=_operation_timeout_value,
-                emit_active_call_timeout=_emit_active_call_timeout,
+            # A callee who left the room cannot answer, whether setup is still crossing the room
+            # or already ringing there.
+            hsm.transition(
+                hsm.on(_PeerLeftEvent),
+                hsm.guard(_has_dial_peer_left),
+                hsm.effect(_emit_dial_failed_on_peer_loss),
+                hsm.effect(_clear_active_operation),
+                hsm.target("/PhoneService/ready"),
+            ),
+            hsm.initial(hsm.target("/PhoneService/dialing/setup")),
+            # Two waits, two budgets. Getting call setup across the room is a transaction the
+            # exchange bounds in seconds; how long to let it ring afterwards is the caller's
+            # patience, which is firmware's to spend, not the provider's to cut short.
+            hsm.state(
+                "setup",
+                hsm.activity(_run_dial),
+                hsm.transition(
+                    hsm.on(_SetupDeliveredEvent),
+                    hsm.guard(_has_setup_delivered),
+                    hsm.target("/PhoneService/dialing/ringing"),
+                ),
+                _active_call_operation_timeout_transition(
+                    operation_timeout=_setup_timeout_value,
+                    emit_active_call_timeout=_emit_active_call_timeout,
+                ),
+            ),
+            hsm.state(
+                "ringing",
+                hsm.transition(
+                    hsm.on(_SetupAcceptedEvent),
+                    hsm.guard(_has_setup_accepted),
+                    hsm.effect(_emit_call_connected),
+                    hsm.effect(_clear_active_operation),
+                    hsm.target("/PhoneService/ready"),
+                ),
+                hsm.transition(
+                    hsm.on(_SetupDeclinedEvent),
+                    hsm.guard(_has_setup_declined),
+                    hsm.effect(_emit_setup_declined),
+                    hsm.effect(_clear_active_operation),
+                    hsm.target("/PhoneService/ready"),
+                ),
+                # Firmware stopped waiting (nobody answered, or the operator hung up mid-ring).
+                # Cancel at the callee so it does not keep ringing for a call nobody is on.
+                hsm.transition(
+                    hsm.on(phone.NoCallEvent),
+                    hsm.guard(_has_abandoned_dial),
+                    hsm.effect(_cancel_dial),
+                    hsm.effect(_clear_active_operation),
+                    hsm.target("/PhoneService/ready"),
+                ),
             ),
         ),
         hsm.state(

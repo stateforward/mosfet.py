@@ -49,6 +49,8 @@ def _count_log_stages(log_path: pathlib.Path, *, since_bytes: int) -> dict[str, 
     text = raw.decode("utf-8", errors="replace")
     keys = (
         "incoming_call",
+        "phone.dial",
+        "/Phone/dialing",
         "media_ready",
         "/Phone/answered",
         "/Phone/answered/media_ready",
@@ -77,6 +79,11 @@ async def _main() -> int:
     _ = parser.add_argument("--api-secret", default=os.environ.get("LIVEKIT_API_SECRET", "secret"))
     _ = parser.add_argument("--room", default=os.environ.get("LIVEKIT_ROOM", "bot-phone-bot"))
     _ = parser.add_argument("--identity", default="caller-agent")
+    _ = parser.add_argument(
+        "--dial",
+        default=os.environ.get("BOT_LIVEKIT_IDENTITY", "bot-phone-bot"),
+        help="Agent A participant identity that agent B places the call to.",
+    )
     _ = parser.add_argument("--phone-bot-log", type=pathlib.Path, default=pathlib.Path("/tmp/phone-bot-live.log"))
     _ = parser.add_argument("--speak-delay", type=float, default=4.0)
     _ = parser.add_argument("--listen-seconds", type=float, default=40.0)
@@ -216,6 +223,7 @@ async def _main() -> int:
             api_secret=str(args.api_secret),
             room_name=str(args.room),
             identity=str(args.identity),
+            dial_identity=str(args.dial),
             lines=lines,
             sample_rate_hz=sample_rate,
             voice=str(args.voice),

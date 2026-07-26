@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import dataclasses
+import json
 import typing
 
 from livekit import rtc
@@ -44,17 +45,35 @@ class FakeRemoteTrack:
 
 @dataclasses.dataclass(frozen=True)
 class FakeRemoteParticipant:
-    """Minimal remote participant for presence → incoming_call tests."""
+    """Minimal remote participant for presence-departure tests."""
 
     identity: str = "human"
     sid: str = "PA_remote"
 
 
+@dataclasses.dataclass(frozen=True)
+class FakeRpcCall:
+    """One addressed call-setup message this participant sent."""
+
+    destination_identity: str
+    method: str
+    payload: str
+
+
 @dataclasses.dataclass
 class FakeLocalParticipant:
+    """Local participant with a publish path and a call-setup RPC channel.
+
+    ``rpc_error`` injects the failure the SFU would have raised, so tests can exercise a callee
+    that is not in the room, one that does not answer calls, and a message lost in transit.
+    """
+
     publications: list[object] = dataclasses.field(default_factory=list)
     unpublished: list[str] = dataclasses.field(default_factory=list)
     unpublish_error: BaseException | None = None
+    rpc_calls: list[FakeRpcCall] = dataclasses.field(default_factory=list)
+    rpc_handlers: dict[str, collections.abc.Callable[[object], str]] = dataclasses.field(default_factory=dict)
+    rpc_error: BaseException | None = None
 
     async def publish_track(self, track: object, options: object | None = None) -> FakeTrackPublication:
         del options
@@ -66,10 +85,48 @@ class FakeLocalParticipant:
             raise self.unpublish_error
         self.unpublished.append(track_sid)
 
+    async def perform_rpc(
+        self,
+        *,
+        destination_identity: str,
+        method: str,
+        payload: str,
+        response_timeout: float | None = None,
+    ) -> str:
+        del response_timeout
+        self.rpc_calls.append(FakeRpcCall(destination_identity=destination_identity, method=method, payload=payload))
+        if self.rpc_error is not None:
+            raise self.rpc_error
+        return payload
+
+    def register_rpc_method(
+        self,
+        method_name: str,
+        handler: collections.abc.Callable[[object], str],
+    ) -> object:
+        self.rpc_handlers[method_name] = handler
+        return handler
+
+    def unregister_rpc_method(self, method: str) -> None:
+        _ = self.rpc_handlers.pop(method, None)
+
+    def invoke(self, method: str, *, caller_identity: str, call_id: str) -> str:
+        """Deliver one call-setup message from ``caller_identity``, the way the SFU would."""
+
+        handler = self.rpc_handlers[method]
+        return handler(
+            rtc.RpcInvocationData(
+                request_id="RQ_fake",
+                caller_identity=caller_identity,
+                payload=json.dumps({"call_id": call_id}),
+                response_timeout=5.0,
+            )
+        )
+
 
 @dataclasses.dataclass
 class FakeRoom:
-    """Minimal RoomHandle: connect can emit remote track_subscribed / participant events."""
+    """Minimal RoomHandle: connect can emit remote track_subscribed events."""
 
     local_participant: FakeLocalParticipant = dataclasses.field(default_factory=FakeLocalParticipant)
     connected: list[tuple[str, str]] = dataclasses.field(default_factory=list)
@@ -78,22 +135,16 @@ class FakeRoom:
     callbacks: dict[str, list[collections.abc.Callable[..., object]]] = dataclasses.field(default_factory=dict)
     off_calls: int = 0
     tracks_to_emit_on_connect: list[FakeRemoteTrack] = dataclasses.field(default_factory=list)
-    participants_to_emit_on_connect: list[FakeRemoteParticipant] = dataclasses.field(default_factory=list)
-    remote_participants: dict[str, FakeRemoteParticipant] = dataclasses.field(default_factory=dict)
 
     async def connect(self, url: str, token: str) -> None:
         self.connected.append((url, token))
         if self.connect_gate is not None:
             _ = await self.connect_gate.wait()
-        for participant in self.participants_to_emit_on_connect:
-            self.remote_participants[participant.sid] = participant
-            self.emit("participant_connected", participant)
         for track in self.tracks_to_emit_on_connect:
             self.emit("track_subscribed", track, FakeTrackPublication(sid="TR_remote"), object())
 
     async def disconnect(self) -> None:
         self.disconnected = True
-        self.remote_participants.clear()
 
     def on(
         self,

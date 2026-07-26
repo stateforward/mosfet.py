@@ -50,14 +50,21 @@ uv run phone-bot-example --env .env --connect-livekit --json
 Open that URL on **this machine** (local SFU is not reachable from other devices as-is).  
 Bare `https://meet.livekit.io/custom` shows “Missing LiveKit URL” — Meet reads the query params only.
 
-When you join the room, LiveKit `participant_connected` maps to a phone **incoming call**
-whose `caller` is your participant identity. The phone **rings** as `environment.sound`
-(`kind=phone.ringing`, `caller` = who is calling, `source` = phone id) into **Listening** input —
-not raw `phone.ringing` into cognition. The provider's call session handle stays on the
-service plane; nothing outside firmware sees it.
+Joining the room makes you reachable; it does not ring the bot. A phone rings when somebody
+**dials** it — call setup addressed to its participant identity over LiveKit RPC. The `caller`
+the phone shows is the identity LiveKit authenticated for whoever sent that setup.
+
+The phone **rings** as `environment.sound` (`kind=phone.ringing`, `caller` = who is calling,
+`source` = phone id) into **Listening** input — not raw `phone.ringing` into cognition. The
+provider's call session handle stays on the service plane; nothing outside firmware sees it.
 After answer, room media can flow `ServiceAudioReceived` → speaker → `environment.sound` →
 Listening. Local speaker uplink is published to the LiveKit track (remote delivery is
 suppressed to avoid echo).
+
+To let this bot place calls, give it a dial plan with `BOT_LIVEKIT_DIRECTORY`
+(`name=identity`, or a bare identity dialable by its own name). With no dial plan the bot is
+registered with no exchange: it can be called but cannot call. Answering, declining, and hanging
+up all stay the bot's decisions — nothing in the wiring makes them.
 
 ## What “connected” means
 
@@ -111,6 +118,20 @@ uv run python scripts/blackbox_livekit_dual_agent.py --start-phone-bot \
 Requires `BOT_GEMINI_API_KEY` in `.env` (plus cognition keys for full agent A replies).
 Verdict uses LiveKit media plus optional scrapes of `/tmp/phone-bot-live.log`
 (DecodingSpeech). Silero VAD loads are expected; local Whisper/Qwen STT/TTS loads fail the harness.
+
+## Blackbox two bots (caller and callee)
+
+Two real `phone-bot` processes, one of which can call the other:
+
+```bash
+uv run python scripts/blackbox_livekit_two_bots.py \
+  --caller phone-bot-alice --callee phone-bot-bob
+```
+
+The caller's env file gets `BOT_LIVEKIT_DIRECTORY=<callee identity>`; the callee's does not. That
+one line is the whole difference between the roles — a capability, not an instruction. Whether the
+caller dials, and whether the callee answers, stay judgment. The verdict prints `dialed=` for the
+caller and `rang=` for the callee, and both sides must be audible to pass.
 
 ## Unit tests (no LiveKit)
 

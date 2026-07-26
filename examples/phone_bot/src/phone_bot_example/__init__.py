@@ -35,7 +35,7 @@ from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
 from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.providers.livekit import PhoneService
+from bot.providers.livekit import MappingDirectory, PhoneService
 from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
 from bot.environment import Environment, space
@@ -146,6 +146,23 @@ def mint_livekit_access_token(
     return f"{segments}.{b64url(signature)}"
 
 
+def _directory_entries(value: str | None) -> tuple[tuple[str, str], ...]:
+    """Read a dial plan: ``name=identity`` pairs, or a bare identity dialable by its own name.
+
+    The identity on the right is the same string ``mint-livekit-token --identity`` is given, so a
+    reachable endpoint and a dialable name are one fact declared once.
+    """
+
+    entries: list[tuple[str, str]] = []
+    for item in (value or "").split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        name, separator, identity = entry.partition("=")
+        entries.append((name.strip(), identity.strip()) if separator else (name.strip(), name.strip()))
+    return tuple(entries)
+
+
 @dataclasses.dataclass(frozen=True)
 class LiveKitConfig:
     url: str | None = None
@@ -155,6 +172,8 @@ class LiveKitConfig:
     room: str = "bot-phone-bot"
     identity: str = "bot-phone-bot"
     track_name: str = DEFAULT_LIVEKIT_TRACK_NAME
+    # Who this phone can call. Empty means it is registered with no exchange and can only receive.
+    directory: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
@@ -183,6 +202,7 @@ class LiveKitConfig:
             room=room,
             identity=identity,
             track_name=track_name,
+            directory=_directory_entries(_env_first(env, "BOT_LIVEKIT_DIRECTORY", "LIVEKIT_DIRECTORY")),
         )
 
     def can_connect_room(self) -> bool:
@@ -1081,10 +1101,14 @@ async def run(
     conversation = _conversation(app_config.speech)
     livekit_url = app_config.livekit.url if connect_livekit and app_config.livekit.can_connect_room() else None
     livekit_token = app_config.livekit.token if connect_livekit and app_config.livekit.can_connect_room() else None
+    dial_plan = dict(app_config.livekit.directory)
     phone_service = PhoneService(
         url=livekit_url,
         token=livekit_token,
         track_name=app_config.livekit.track_name,
+        # A phone registered with no exchange cannot place calls. It can still take them, which
+        # is exactly what a bot with no dial plan configured should be able to do.
+        directory=MappingDirectory(dial_plan) if dial_plan else None,
         # One value decides the robot's voice rate: the TTS encoder, Speaking's label, and the
         # LiveKit source all take it from here. They used to be three defaults that happened to
         # agree in two places and not in the third, which is a silent mute rather than an error.
@@ -1129,7 +1153,7 @@ async def run(
         on_ready(summary)
     if hold:
         # Stay on the line until cancelled so a human can join the room.
-        # Remote participant join rings the phone; the bot decides whether to answer.
+        # Call setup addressed to this identity rings the phone; the bot decides whether to answer.
         # Periodically surface LiveKit media counters so deafness is obvious.
         while True:
             await asyncio.sleep(5.0)

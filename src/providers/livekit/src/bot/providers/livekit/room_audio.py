@@ -170,7 +170,11 @@ class TrackPublication(typing.Protocol):
 
 
 class LocalParticipant(typing.Protocol):
-    """LiveKit local participant shape used to publish and unpublish audio tracks."""
+    """LiveKit local participant shape used to publish audio and to signal call setup.
+
+    The participant is both the mouth and the line: audio goes out on a published track, and
+    addressed call-setup messages go out (and come back) over the same participant's RPC channel.
+    """
 
     def publish_track(
         self,
@@ -182,6 +186,29 @@ class LocalParticipant(typing.Protocol):
 
     def unpublish_track(self, track_sid: str) -> collections.abc.Awaitable[None]:
         """Unpublish a local LiveKit track by SID."""
+        ...
+
+    def perform_rpc(
+        self,
+        *,
+        destination_identity: str,
+        method: str,
+        payload: str,
+        response_timeout: float | None = None,
+    ) -> collections.abc.Awaitable[str]:
+        """Send one addressed RPC to a participant and await its response payload."""
+        ...
+
+    def register_rpc_method(
+        self,
+        method_name: str,
+        handler: collections.abc.Callable[[object], str],
+    ) -> object:
+        """Answer ``method_name`` with ``handler``; the handler receives the RPC invocation data."""
+        ...
+
+    def unregister_rpc_method(self, method: str) -> None:
+        """Stop answering ``method``."""
         ...
 
 

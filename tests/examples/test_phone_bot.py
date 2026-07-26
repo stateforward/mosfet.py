@@ -88,7 +88,7 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "_silero_voice_detector" in source
     assert "KindSoundClassifier" in source
     assert "from bot.devices import phone as phone_device" in source
-    assert "from bot.providers.livekit import PhoneService" in source
+    assert "from bot.providers.livekit import MappingDirectory, PhoneService" in source
     assert "from bot.providers.livekit.audio import PcmWavDecoder" in source
     assert "VoiceDecoder" not in source
     assert "RoomAudioEndpoint" not in source
@@ -121,6 +121,32 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "_mercury_intuition_client" in source
     assert "mercury2_intuition" in source
     assert "openai_terra_reasoning" in source
+
+
+def test_phone_bot_dial_plan_is_configuration_not_code() -> None:
+    """Who a bot can call is declared where its token is minted, and defaults to nobody.
+
+    An empty dial plan is a phone registered with no exchange: it can be called, but it cannot
+    place calls. That is the correct default for a bot nobody has given anyone to ring.
+    """
+
+    printed = _run_phone_bot_python(
+        "\n".join(
+            [
+                "import phone_bot_example",
+                "config = phone_bot_example.LiveKitConfig",
+                "print(config.from_env({}).directory)",
+                "print(config.from_env({'BOT_LIVEKIT_DIRECTORY': 'phone-bot-bob'}).directory)",
+                "print(config.from_env({'BOT_LIVEKIT_DIRECTORY': 'reception=agent-b, helpdesk=agent-c'}).directory)",
+            ]
+        )
+    )
+
+    assert printed.splitlines() == [
+        "()",
+        "(('phone-bot-bob', 'phone-bot-bob'),)",
+        "(('reception', 'agent-b'), ('helpdesk', 'agent-c'))",
+    ]
 
 
 def test_phone_cognition_preserves_shared_memory_collaboration() -> None:

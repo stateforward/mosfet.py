@@ -5,18 +5,24 @@ Both sides are real ``phone-bot`` processes with their own cognition, speech and
 Nothing is scripted: there is no TTS peer playing canned lines, so every utterance on the wire
 came from a bot deciding to speak.
 
-Ringing is presence-based. ``dial()`` reports call control unavailable, so neither bot places a
-call — each rings for the other's arrival in the room and decides independently whether to
-answer. That means there is no caller/callee asymmetry, which is a modelling gap rather than a
-harness one; this script reports what that looks like in practice.
+The two bots are not symmetric, because a call is not symmetric. One is the **caller**: it is
+given a dial plan (``BOT_LIVEKIT_DIRECTORY``) naming the other, so it *can* place a call. The
+other is the **callee**: it has no dial plan, so it can only be called. Being given the dial plan
+is a capability, not an instruction — whether to dial, and whether to answer, are the bots'
+decisions and this harness makes neither.
+
+That asymmetry is what the room gives them. A LiveKit room is an exchange: joining it makes a
+phone reachable, and dialing is call setup addressed to one participant. So the callee rings
+because the caller called it, not because the caller walked into the room — which is why both
+bots no longer end up as callees.
 
 Success is judged the way the single-bot harness learned to judge it: **both directions must
 carry audible audio**. Two bots that ring, answer and then sit in silence are a failure, however
-many pipeline stages fired.
+many pipeline stages fired. A run where the caller never dials is reported, not failed: a bot
+that judges there is nothing to call about is behaving, not broken.
 
 The observer is a third participant that publishes nothing and only subscribes, so it can measure
-each bot's outbound audio separately. It joins after both bots are up, by which point each has an
-active call with the other.
+each bot's outbound audio separately.
 """
 
 from __future__ import annotations
@@ -75,11 +81,20 @@ def _frame_pcm(event: object) -> tuple[bytes, int, int]:
     return pcm, int(getattr(frame, "sample_rate", 0)), int(getattr(frame, "num_channels", 1))
 
 
-def _bot_env_file(base: pathlib.Path, target: pathlib.Path, *, identity: str, room: str) -> pathlib.Path:
-    """One env file per bot: same room, distinct identity and track.
+def _bot_env_file(
+    base: pathlib.Path,
+    target: pathlib.Path,
+    *,
+    identity: str,
+    room: str,
+    dials: str | None,
+) -> pathlib.Path:
+    """One env file per bot: same room, distinct identity and track, and who it can call.
 
     Identity has to differ or the two processes collide on the SFU; track name differs so each
-    bot's audio is attributable to it in the observer's capture.
+    bot's audio is attributable to it in the observer's capture. ``dials`` is the other bot's
+    identity for the caller and ``None`` for the callee — the only difference between the two
+    roles, and the reason exactly one of them can originate a call.
     """
 
     values: dict[str, str] = {}
@@ -92,6 +107,10 @@ def _bot_env_file(base: pathlib.Path, target: pathlib.Path, *, identity: str, ro
     values["BOT_LIVEKIT_ROOM"] = room
     values["BOT_LIVEKIT_IDENTITY"] = identity
     values["BOT_LIVEKIT_TRACK_NAME"] = identity
+    if dials is None:
+        _ = values.pop("BOT_LIVEKIT_DIRECTORY", None)
+    else:
+        values["BOT_LIVEKIT_DIRECTORY"] = dials
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
@@ -167,8 +186,8 @@ async def _main() -> int:
     _ = parser.add_argument("--api-key", default=os.environ.get("LIVEKIT_API_KEY", "devkey"))
     _ = parser.add_argument("--api-secret", default=os.environ.get("LIVEKIT_API_SECRET", "secret"))
     _ = parser.add_argument("--room", default="bot-two-bots")
-    _ = parser.add_argument("--first", default="phone-bot-alice")
-    _ = parser.add_argument("--second", default="phone-bot-bob")
+    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot given a dial plan for the callee.")
+    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot with no dial plan; it can only be called.")
     _ = parser.add_argument("--observer", default="conversation-observer")
     _ = parser.add_argument("--converse-seconds", type=float, default=60.0)
     _ = parser.add_argument("--ready-timeout", type=float, default=120.0)
@@ -195,12 +214,20 @@ async def _main() -> int:
         record_dir = (example_root / record_dir).resolve()
     record_dir.mkdir(parents=True, exist_ok=True)
 
-    identities = [str(args.first), str(args.second)]
+    caller, callee = str(args.caller), str(args.callee)
+    identities = [caller, callee]
+    dial_plans = {caller: callee, callee: None}
     processes: dict[str, subprocess.Popen[str]] = {}
     logs: dict[str, pathlib.Path] = {}
     try:
         for identity in identities:
-            env_file = _bot_env_file(base_env, record_dir / f"{identity}.env", identity=identity, room=str(args.room))
+            env_file = _bot_env_file(
+                base_env,
+                record_dir / f"{identity}.env",
+                identity=identity,
+                room=str(args.room),
+                dials=dial_plans[identity],
+            )
             log_path = record_dir / f"{identity}.log"
             logs[identity] = log_path
             handle = log_path.open("w", encoding="utf-8")
@@ -257,6 +284,8 @@ async def _main() -> int:
 
     summary = {
         "room": str(args.room),
+        "caller": caller,
+        "callee": callee,
         "identities": identities,
         "audible_floor": int(args.audible_floor),
         "speech": speech,
@@ -268,10 +297,21 @@ async def _main() -> int:
     for identity in identities:
         stage = stages.get(identity, {})
         heard = speech[identity]
+        role = "caller" if identity == caller else "callee"
+        # Asymmetric on purpose: the caller dials and the callee rings. A `rang` on the caller
+        # would mean setup came back the other way, which is a different call.
         print(
-            f"  {identity}: rang={stage.get('incoming_call', 0)} answered={stage.get('/Phone/answered', 0)} "
+            f"  {identity} ({role}): dialed={stage.get('/Phone/dialing', 0)} "
+            f"rang={stage.get('incoming_call', 0)} answered={stage.get('/Phone/answered', 0)} "
             f"media_ready={stage.get('/Phone/answered/media_ready', 0)} decoded={stage.get('DecodingSpeech', 0)} "
             f"spoke_peak={heard['peak']} ({heard['seconds']}s over {heard['frames']} frames)",
+            flush=True,
+        )
+    if not stages.get(callee, {}).get("incoming_call", 0):
+        # Not a failure: dialing is the caller's judgement, and a bot that saw no reason to call
+        # is behaving. Say so plainly rather than reporting a silent conversation as a defect.
+        print(
+            f"[two-bots] NO CALL {caller} did not dial {callee} this run (judgment, not a defect)",
             flush=True,
         )
     print(f"  record_dir: {record_dir}", flush=True)

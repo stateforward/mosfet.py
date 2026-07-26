@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Join the phone_bot LiveKit room as a second participant and speak.
+"""Call the phone_bot over LiveKit as a second participant, then speak once it answers.
+
+Joining the room only makes this agent reachable. It **dials** the bot by name with addressed
+call setup, so the bot rings because it was called — and it speaks only into a call the bot chose
+to answer.
 
 Default speech path is **off-device Gemini TTS** (no local MLX, no macOS ``say``)
 so dual-agent runs do not burn on-device STT/TTS resources. Optional ``--tts say``
@@ -17,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import array
+import collections.abc
 import io
 import json
 import os
@@ -25,9 +30,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import wave
 
 from livekit import rtc
+
+from bot.providers.livekit import signaling
 
 # Repo example helpers (mint token + Gemini speech config).
 _EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -193,6 +201,7 @@ async def run_caller(
     api_secret: str,
     room_name: str,
     identity: str,
+    dial_identity: str,
     lines: list[str],
     sample_rate_hz: int,
     voice: str,
@@ -307,6 +316,45 @@ async def run_caller(
         }
     )
 
+    # Being in the room is being reachable. Ringing the bot means calling it: addressed call setup,
+    # the same four methods its own phone service speaks.
+    call_id = f"caller:{uuid.uuid4()}"
+    call_outcome: list[str] = []
+
+    def _record_outcome(name: str) -> collections.abc.Callable[[rtc.RpcInvocationData], str]:
+        def handle(data: rtc.RpcInvocationData) -> str:
+            print(f"[caller] {name} from {data.caller_identity}", flush=True)
+            call_outcome.append(name)
+            timeline.append(
+                {"t_ms": round(_elapsed_ms(), 1), "side": "room", "event": name, "identity": data.caller_identity}
+            )
+            return data.payload
+
+        return handle
+
+    for method, outcome in (
+        (signaling.AcceptMethod, "accepted"),
+        (signaling.DeclineMethod, "declined"),
+        (signaling.ByeMethod, "hung_up"),
+    ):
+        _ = room.local_participant.register_rpc_method(method, _record_outcome(outcome))
+
+    print(f"[caller] dialing {dial_identity} call_id={call_id}", flush=True)
+    try:
+        _ = await room.local_participant.perform_rpc(
+            destination_identity=dial_identity,
+            method=signaling.SetupMethod,
+            payload=signaling.MessageData(call_id=call_id).model_dump_json(),
+            response_timeout=5.0,
+        )
+        timeline.append({"t_ms": round(_elapsed_ms(), 1), "side": "b", "event": "ringing", "identity": dial_identity})
+        print(f"[caller] {dial_identity} is ringing", flush=True)
+    except rtc.RpcError as error:
+        # Say why rather than sitting silent: an unreachable callee and a refused call look
+        # identical from the outside, and only one of them is a harness problem.
+        print(f"[caller] call setup to {dial_identity} failed: {error}", flush=True)
+        timeline.append({"t_ms": round(_elapsed_ms(), 1), "side": "b", "event": "setup_failed", "reason": str(error)})
+
     # First utterance sets the publish rate (Gemini may be 24 kHz; macOS say uses --sample-rate).
     print(f"[caller] tts_backend={tts_backend}", flush=True)
     if speak_delay_seconds > 0:
@@ -412,12 +460,26 @@ async def run_caller(
         }
     )
     print(
-        f"[caller] done remote_audio_frames={remote_audio_frames} bots_seen={bot_participants}",
+        f"[caller] done remote_audio_frames={remote_audio_frames} bots_seen={bot_participants} "
+        f"call={call_outcome or ['no_answer']}",
         flush=True,
     )
+    if "hung_up" not in call_outcome and "declined" not in call_outcome:
+        # Leaving the room would end the call by accident. Hang up first, so the bot learns the
+        # call ended rather than that the line went dead.
+        try:
+            _ = await room.local_participant.perform_rpc(
+                destination_identity=dial_identity,
+                method=signaling.ByeMethod,
+                payload=signaling.MessageData(call_id=call_id).model_dump_json(),
+                response_timeout=5.0,
+            )
+        except rtc.RpcError as error:
+            print(f"[caller] hang-up not delivered: {error}", flush=True)
     await room.disconnect()
 
     result: dict[str, object] = {
+        "call_outcome": call_outcome,
         "remote_audio_frames": remote_audio_frames,
         # What B actually heard from A. Frame count alone cannot tell silence from speech: a mute
         # bot still publishes a full track of zeros.
@@ -547,6 +609,11 @@ def main() -> None:
     _ = parser.add_argument("--room", default="bot-phone-bot")
     _ = parser.add_argument("--identity", default="caller-agent")
     _ = parser.add_argument(
+        "--dial",
+        default="bot-phone-bot",
+        help="Participant identity to place the call to (the phone bot's BOT_LIVEKIT_IDENTITY).",
+    )
+    _ = parser.add_argument(
         "--tts",
         default="gemini",
         choices=("gemini", "say"),
@@ -611,6 +678,7 @@ def main() -> None:
             api_secret=str(args.api_secret),
             room_name=str(args.room),
             identity=str(args.identity),
+            dial_identity=str(args.dial),
             lines=lines,
             sample_rate_hz=sample_rate,
             voice=voice,
