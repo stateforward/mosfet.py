@@ -19,6 +19,7 @@ import dataclasses
 import datetime
 import inspect
 import typing
+import uuid
 
 import hsm
 import pydantic
@@ -29,6 +30,7 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_
 from bot.bot import Bot
 import bot.bot as bot_module
 from bot.device import Device
+from bot import event_schema
 from bot.event_schema import event_json_schema
 from bot.protocols import attachment
 
@@ -553,6 +555,43 @@ class AbilityAgent(Bot):
             assert isinstance(failure, bot.ProcessingFailedEventData)
             self.failures.append(failure)
         return super().dispatch(ctx, event)
+
+
+class IdleAgent(AbilityAgent):
+    """Bot whose moments come often enough to observe inside a test.
+
+    Only the interval is shortened. The occasion is otherwise the production one: no guard,
+    no directive, nothing about this bot that makes it want anything.
+    """
+
+    _idle_interval: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=5)
+    occasions: list[hsm.Event[typing.Any]]
+
+    def __init__(
+        self,
+        devices: collections.abc.Mapping[str, Device],
+        *,
+        cognition: abilities.Ability[typing.Any, typing.Any] | processing.Processing,
+    ) -> None:
+        self.occasions = []
+        super().__init__(devices=devices, cognition=cognition)
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name == bot.IdleEvent.name:
+            self.occasions.append(event)
+        return super().dispatch(ctx, event)
+
+
+def idle_occasion(active_bot: Bot) -> hsm.Event[bot.IdleEventData]:
+    """The occasion exactly as the body mints it: empty payload, self-addressed envelope."""
+
+    return dataclasses.replace(
+        bot.IdleEvent.with_data(bot.IdleEventData()),
+        id=uuid.uuid4().hex,
+        source=hsm.id(active_bot),
+        target=hsm.id(active_bot),
+    )
 
 
 class TimeoutAbilityAgent(AbilityAgent):
@@ -1298,6 +1337,7 @@ def test_bot_events_use_pydantic_schemas() -> None:
     deactivate_schema = object_dict(bot.DeactivateEvent.schema)
     reboot_schema = object_dict(bot.RebootEvent.schema)
     input_schema = object_dict(bot.InputEvent.schema)
+    idle_schema = object_dict(bot.IdleEvent.schema)
     completed_schema = object_dict(bot.ProcessingCompletedEvent.schema)
     failed_schema = object_dict(bot.ProcessingFailedEvent.schema)
     focus_device_schema = object_dict(bot.FocusDeviceEvent.schema)
@@ -1324,6 +1364,13 @@ def test_bot_events_use_pydantic_schemas() -> None:
     input_properties = typing.cast(collections.abc.Mapping[str, object], input_schema["properties"])
     assert "source_event" in input_properties
     assert "payload" in input_properties
+    assert bot.IdleEvent.name == "bot.idle"
+    assert idle_schema == bot.IdleEventData.model_json_schema()
+    assert idle_schema["description"]
+    assert idle_schema["examples"] == [{}]
+    # Body ingress, never a model tool: plain event kind, not the tool-offerable kind.
+    assert bot.IdleEvent.kind == hsm.EventKind
+    assert bot.IdleEvent.kind != event_schema.EventKind
     assert bot.FocusDeviceEvent.name == "bot.focus_device"
     assert focus_device_schema == bot.FocusDeviceEventData.model_json_schema()
     assert bot.ClearFocusEvent.name == "bot.clear_focus"
@@ -1422,6 +1469,18 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.input" in transitions["/Bot/active/focused"]
     assert "bot.ability.cognition.input" in transitions["/Bot/active/focused"]
     assert "*" not in transitions["/Bot/active/focused"]
+    # Being awake is the occasion: a recurring moment on both idle attention states, and the
+    # occasion event itself enters processing. Judgment decides what (if anything) it is for.
+    for idle_state in ("/Bot/active/unfocused", "/Bot/active/focused"):
+        assert any("_bot_idle_interval" in event for event in transitions[idle_state])
+        assert "bot.idle" in transitions[idle_state]
+        idle_transition = transitions[idle_state]["bot.idle"][0]
+        assert idle_transition.target == "/Bot/active/processing"
+        # An idle turn is not an attention change: no focus effect rides the occasion.
+        assert not any("_focus_event_target" in effect for effect in idle_transition.effect)
+    # A moment missed while busy is simply gone; stale occasions must not queue up.
+    assert "bot.idle" not in deferred_map.get("/Bot/active/processing", {})
+    assert "bot.idle" not in deferred_map.get("/Bot/active/cancelling_processing", {})
     assert "bot.ability.cognition.input" in deferred_map["/Bot/active/processing"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
@@ -3744,3 +3803,137 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
 
     assert after_far == 0
     assert after_near == 1
+
+
+def test_a_bot_that_was_told_nothing_still_gets_a_turn() -> None:
+    """Topology grants the occasion; it never grants the action.
+
+    Nothing is dispatched at this bot: no input, no sound, no device, no directive, and no
+    memory to have recalled one from. Being awake is the whole condition, so the turn happens
+    anyway — and judgment is the one that gets to decide the turn is a turn to do nothing.
+
+    This is the test that would fail if the idle transition ever grew a guard that read a
+    directive, a goal, or any other content.
+    """
+
+    async def run() -> tuple[list[processing.InputData], list[bot.ProcessingFailedEventData], str]:
+        ability = IgnoreAbility()
+        active_bot = IdleAgent(devices={}, cognition=ability)
+        environment = await start_bot_with_devices(active_bot)
+
+        await wait_until(lambda: bool(ability.calls))
+        turns = list(ability.calls)
+        failures = list(active_bot.failures)
+
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return turns, failures, active_bot.state()
+
+    turns, failures, state = asyncio.run(run())
+
+    stimulus = turns[0].input
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == bot.IdleEvent.name
+    # The occasion is content-blind: an empty payload is the entire stimulus.
+    assert stimulus.data == bot.IdleEventData()
+    assert failures == []
+    assert state == "/Bot/inactive"
+
+
+def test_the_idle_occasion_enters_processing_carrying_its_own_id() -> None:
+    """Time events arrive with no id and no data, so the body mints the occasion itself.
+
+    The minted envelope is what processing correlates the turn against, and it is what makes
+    ``bot.idle`` the recorded stimulus of the turn.
+    """
+
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], list[int]]:
+        release = asyncio.Event()
+        ability = BlockingAbility(release=release)
+        active_bot = IdleAgent(devices={}, cognition=ability)
+        environment = await start_bot_with_devices(active_bot)
+
+        await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
+        processing_state = active_bot.state()
+        occasions = list(active_bot.occasions)
+
+        _ = release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        _ = await active_bot.detach(environment)
+        return processing_state, occasions, list(ability.calls)
+
+    processing_state, occasions, calls = asyncio.run(run())
+
+    assert processing_state == "/Bot/active/processing"
+    assert occasions
+    assert all(occasion.id for occasion in occasions)
+    assert len({occasion.id for occasion in occasions}) == len(occasions)
+    assert calls
+
+
+def test_a_moment_missed_while_busy_does_not_queue_up_for_later() -> None:
+    """A person busy through a moment simply does not have that moment.
+
+    ``bot.input`` is deferred through processing because an interrupt is still owed an answer.
+    The occasion deliberately is not: queueing stale occasions builds a backlog of turns about
+    a world that has already moved on.
+
+    The bot here keeps the production interval, so its timer cannot fire inside this test —
+    every occasion observed is one the test minted.
+    """
+
+    async def run() -> tuple[int, list[bot.ProcessingFailedEventData], str]:
+        release = asyncio.Event()
+        ability = BlockingAbility(release=release)
+        active_bot = AbilityAgent(devices={}, cognition=ability)
+        environment = await start_bot_with_devices(active_bot)
+
+        await active_bot.dispatch(active_bot.context(), idle_occasion(active_bot))
+        await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
+
+        # A second occasion arrives while the body is occupied by the first turn.
+        await active_bot.dispatch(active_bot.context(), idle_occasion(active_bot))
+
+        _ = release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        await asyncio.sleep(0)
+        turns = len(ability.calls)
+        failures = list(active_bot.failures)
+
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return turns, failures, active_bot.state()
+
+    turns, failures, state = asyncio.run(run())
+
+    assert turns == 1
+    assert failures == []
+    assert state == "/Bot/inactive"
+
+
+def test_a_bot_that_is_not_awake_has_no_moments() -> None:
+    """Occasions belong to being awake, so an unattached or stopped body has none."""
+
+    async def run() -> tuple[int, int, int, int]:
+        ability = IgnoreAbility()
+        active_bot = IdleAgent(devices={}, cognition=ability)
+
+        # Constructed but never attached: no environment, no lifetime, no moments.
+        await asyncio.sleep(0.05)
+        before_attach = len(active_bot.occasions)
+
+        environment = await start_bot_with_devices(active_bot)
+        await wait_until(lambda: bool(active_bot.occasions))
+        while_awake = len(active_bot.occasions)
+
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        at_rest = len(active_bot.occasions)
+        await asyncio.sleep(0.05)
+        return before_attach, while_awake, at_rest, len(active_bot.occasions)
+
+    before_attach, while_awake, at_rest, after_rest = asyncio.run(run())
+
+    assert before_attach == 0
+    assert while_awake > 0
+    assert after_rest == at_rest

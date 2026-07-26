@@ -67,6 +67,17 @@ class RebootEventData(pydantic.BaseModel):
     )
 
 
+class IdleEventData(pydantic.BaseModel):
+    """No-payload occasion: the bot is awake with nothing occupying it right now."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{}],
+        },
+    )
+
+
 class InputEventData(pydantic.BaseModel):
     """Interrupt signal observed by an active bot."""
 
@@ -307,6 +318,12 @@ InputEvent = hsm.Event[InputEventData](
     name="bot.input",
     kind=InputEventKind,
     schema=InputEventData,
+)
+# Body ingress, never a model tool: the occasion of being awake is minted by body topology,
+# so this keeps the default event kind rather than the tool-offerable event_schema.EventKind.
+IdleEvent = hsm.Event[IdleEventData](
+    name="bot.idle",
+    schema=IdleEventData,
 )
 FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",
