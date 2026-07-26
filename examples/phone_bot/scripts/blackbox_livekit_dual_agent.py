@@ -263,6 +263,7 @@ async def _main() -> int:
             "stages": stages,
             "caller": {
                 "remote_audio_frames": caller_result.get("remote_audio_frames"),
+                "inbound_peak": caller_result.get("inbound_peak"),
                 "bots_seen": caller_result.get("bots_seen"),
             },
             "record_dir": str(record_dir),
@@ -273,6 +274,10 @@ async def _main() -> int:
         )
         print(f"[blackbox] wrote recording artifacts to {record_dir}", flush=True)
 
+    # A track of digital silence still arrives as thousands of frames, so the only honest proof
+    # that agent A spoke is amplitude. Anything at or below this is silence with dither.
+    audible_floor = 200
+    inbound_peak = int(caller_result.get("inbound_peak") or 0)
     decoding = stages.get("DecodingSpeech", 0)
     detecting = stages.get("DetectingVoice", 0)
     answered = stages.get("/Phone/answered", 0) + stages.get("phone.answer_call", 0)
@@ -289,6 +294,7 @@ async def _main() -> int:
     print(f"  agent_a_decoding_speech: {decoding}", flush=True)
     print(f"  agent_a_silero_vad_hits: {stages.get('silero-vad', 0)}", flush=True)
     print(f"  agent_a_heavy_local_stt_tts: {heavy_local_speech} (want 0)", flush=True)
+    print(f"  agent_a_audible_to_b: peak={inbound_peak} (want > {audible_floor})", flush=True)
     if record_dir is not None:
         print(f"  record_dir: {record_dir}", flush=True)
     if heavy_local_speech > 0:
@@ -298,8 +304,17 @@ async def _main() -> int:
             flush=True,
         )
         return 6
+    if inbound_peak <= audible_floor:
+        # Reporting PASS here would launder a mute robot as a working one, which is exactly what
+        # hid the WAV uplink defect: every inbound stage fired while agent B heard nothing.
+        print(
+            f"[blackbox] FAIL agent A never became audible to agent B (peak={inbound_peak}); "
+            f"inbound stages fired but nothing was spoken onto the wire",
+            flush=True,
+        )
+        return 7
     if decoding > 0:
-        print("[blackbox] PASS speech path entered DecodingSpeech via LiveKit media", flush=True)
+        print("[blackbox] PASS speech path entered DecodingSpeech and agent A was audible", flush=True)
         return 0
     if answered == 0:
         # Intuition/judgment chose not to answer — harness remains green on media path;

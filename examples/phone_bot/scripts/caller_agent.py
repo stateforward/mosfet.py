@@ -419,6 +419,9 @@ async def run_caller(
 
     result: dict[str, object] = {
         "remote_audio_frames": remote_audio_frames,
+        # What B actually heard from A. Frame count alone cannot tell silence from speech: a mute
+        # bot still publishes a full track of zeros.
+        "inbound_peak": _pcm_peak(bytes(inbound_pcm)),
         "bots_seen": bot_participants,
         "timeline": timeline,
         "record_dir": str(record_root) if record_root is not None else None,
