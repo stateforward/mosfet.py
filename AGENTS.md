@@ -122,6 +122,16 @@
 
 ## Architecture
 
+### Modeling fidelity
+
+- ALWAYS model the real thing, in software. Physical structure is the design, not a metaphor for it: a peripheral
+  transduces and makes no routing decision; a controller attaches to it and decides what the signal is for; a device is
+  powered, addressed, and wired the way its hardware counterpart is.
+- ALWAYS resolve an ambiguous topology question by asking how the real object works. That answer is authoritative over
+  whatever is convenient in code, and it usually yields the smaller design.
+- NEVER invent software-only structure with no counterpart in the thing being modeled — a machine that exists only to
+  host a transition, a field that exists only to reach a peer, a layer that exists only to pass data through.
+
 ### Layers and authority
 
 - **Body** owns lifetime, attention (focus), world-facing I/O ability attachment, and explicit handoff into judgment.
