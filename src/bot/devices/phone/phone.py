@@ -19,6 +19,7 @@ from bot.environment import SoundEvent, Environment, require_environment_scope, 
 from .events import (
     AnswerCallData,
     AnswerCallEvent,
+    AnswerRequestData,
     AnsweredEvent,
     CallConnectedData,
     CallConnectedEvent,
@@ -29,15 +30,19 @@ from .events import (
     CallTransferFailedEvent,
     DeclineCallData,
     DeclineCallEvent,
+    DeclineRequestData,
     DialData,
     DialEvent,
     HangUpCallData,
     HangUpCallEvent,
+    HangUpRequestData,
     HungUpEvent,
     IncomingCallData,
     IncomingCallEvent,
     MediaReadyData,
     MediaReadyEvent,
+    NoCallData,
+    NoCallEvent,
     PhoneCallData,
     PhoneHungUpData,
     PhoneSoundData,
@@ -51,6 +56,7 @@ from .events import (
     ServiceAudioData,
     ServiceAudioReceivedEvent,
     ServiceDeclineRequestedEvent,
+    ServiceDialFailedEvent,
     ServiceDialRequestedEvent,
     ServiceHangUpRequestedEvent,
     ServiceMediaReadyEvent,
@@ -63,6 +69,7 @@ from .events import (
     TransferCallEvent,
     TransferCompletedData,
     TransferFailedData,
+    TransferRequestData,
     TransferStartedEvent,
     TransferTarget,
 )
@@ -255,9 +262,10 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     Ringing is heard as ``environment.sound`` with ``source`` = the phone instance id. Device-plane
     ``phone.ringing`` still flows on the service/firmware path; bots do not receive it as a
     raw cognitive stimulus. Ring elevation selects on :class:`RingingData` payload type.
-    Live ``call_id`` is stamped on :class:`PhoneSoundData` (model-facing ``event.data``) and
-    mirrored on ``event.id`` for correlation. ``kind`` is the explicit provenance label
-    ``phone.ringing`` (not bare ``ring``, which is ambiguous for models).
+    What carries across is the caller — who is calling, which a ringing handset shows — not the
+    session handle, which has no counterpart on a handset and nothing outside firmware can use.
+    ``kind`` is the explicit provenance label ``phone.ringing`` (not bare ``ring``, which is
+    ambiguous for models).
     """
 
     data = event.data
@@ -270,11 +278,10 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
                     sample_rate_hz=16_000,
                     channels=1,
                     kind="phone.ringing",
-                    call_id=data.call_id,
+                    caller=data.caller,
                     amplitude_db=RINGER_DB,
                 )
             ),
-            id=data.call_id,
             source=hsm.id(owner),
             metadata=dict(event.metadata),
         )
@@ -371,16 +378,17 @@ class PhoneFirmware(hsm.Instance):
         return isinstance(data, IncomingCallData) and data.call_id not in instance._closed_call_ids
 
     @staticmethod
-    def _is_new_dial(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, DialData) and data.call_id not in instance._closed_call_ids
+    def _is_live_dial_observation(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+        """A service observation about the dial attempt in progress.
 
-    @staticmethod
-    def _matches_current_answer_command(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+        A dialing handset has no call id to match on — the exchange has not assigned one yet, and
+        it arrives with the connect. Only one attempt is ever outstanding, so any call-scoped
+        observation that is not left over from an already-closed call is about that attempt.
+        """
+
         del ctx
         data = event.data
-        return isinstance(data, AnswerCallData) and instance._current_call_id == data.call_id
+        return isinstance(data, CallIdData) and data.call_id not in instance._closed_call_ids
 
     @staticmethod
     def _matches_current_call_connected(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
@@ -393,18 +401,6 @@ class PhoneFirmware(hsm.Instance):
         del ctx
         data = event.data
         return isinstance(data, CallFailedData) and instance._current_call_id == data.call_id
-
-    @staticmethod
-    def _matches_current_decline_command(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, DeclineCallData) and instance._current_call_id == data.call_id
-
-    @staticmethod
-    def _matches_current_hang_up_command(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, HangUpCallData) and instance._current_call_id == data.call_id
 
     @staticmethod
     def _matches_current_incoming_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
@@ -438,12 +434,6 @@ class PhoneFirmware(hsm.Instance):
         del ctx
         data = event.data
         return isinstance(data, RemoteHangUpData) and instance._current_call_id == data.call_id
-
-    @staticmethod
-    def _matches_current_transfer_command(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        return isinstance(data, TransferCallData) and instance._current_call_id == data.call_id
 
     @staticmethod
     def _matches_current_transfer_accepted(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
@@ -497,10 +487,22 @@ class PhoneFirmware(hsm.Instance):
         return instance._transfer_timeout
 
     @staticmethod
+    def _current_call(instance: "PhoneFirmware") -> str:
+        """The call firmware is on. Only reachable from states that have one."""
+
+        call_id = instance._current_call_id
+        assert call_id is not None
+        return call_id
+
+    @staticmethod
     def _publish_answer_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, AnswerCallData)
-        PhoneFirmware._publish(ctx, instance, event, ServiceAnswerRequestedEvent.with_data(data))
+        # The command names no call; firmware stamps the line it is answering for the exchange.
+        PhoneFirmware._publish(
+            ctx,
+            instance,
+            event,
+            ServiceAnswerRequestedEvent.with_data(AnswerRequestData(call_id=PhoneFirmware._current_call(instance))),
+        )
 
     @staticmethod
     def _publish_dial_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -510,31 +512,48 @@ class PhoneFirmware(hsm.Instance):
 
     @staticmethod
     def _publish_decline_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, DeclineCallData)
-        PhoneFirmware._publish(ctx, instance, event, ServiceDeclineRequestedEvent.with_data(data))
+        PhoneFirmware._publish(
+            ctx,
+            instance,
+            event,
+            ServiceDeclineRequestedEvent.with_data(DeclineRequestData(call_id=PhoneFirmware._current_call(instance))),
+        )
 
     @staticmethod
     def _publish_hang_up_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, HangUpCallData)
-        PhoneFirmware._publish(ctx, instance, event, ServiceHangUpRequestedEvent.with_data(data))
+        PhoneFirmware._publish(
+            ctx,
+            instance,
+            event,
+            ServiceHangUpRequestedEvent.with_data(HangUpRequestData(call_id=PhoneFirmware._current_call(instance))),
+        )
 
     @staticmethod
     def _publish_transfer_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferCallData)
-        PhoneFirmware._publish(ctx, instance, event, ServiceTransferRequestedEvent.with_data(data))
+        PhoneFirmware._publish(
+            ctx,
+            instance,
+            event,
+            ServiceTransferRequestedEvent.with_data(
+                TransferRequestData(
+                    call_id=PhoneFirmware._current_call(instance),
+                    transfer_id=data.transfer_id,
+                    target=data.target,
+                )
+            ),
+        )
 
     @staticmethod
     def _publish_ringing(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, CallIdData)
+        assert isinstance(data, IncomingCallData)
         PhoneFirmware._queue_committed(
             ctx,
             instance,
             event,
-            _RingingCommittedEvent.with_data(RingingData(call_id=data.call_id)),
+            _RingingCommittedEvent.with_data(RingingData(caller=data.caller)),
         )
 
     @staticmethod
@@ -610,25 +629,41 @@ class PhoneFirmware(hsm.Instance):
 
     @staticmethod
     def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, CallIdData)
         PhoneFirmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=data.call_id, outcome="declined")),
+            _HungUpCommittedEvent.with_data(
+                PhoneHungUpData(call_id=PhoneFirmware._current_call(instance), outcome="declined")
+            ),
         )
 
     @staticmethod
     def _publish_local_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, CallIdData)
         PhoneFirmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=data.call_id, outcome="local_hang_up")),
+            _HungUpCommittedEvent.with_data(
+                PhoneHungUpData(call_id=PhoneFirmware._current_call(instance), outcome="local_hang_up")
+            ),
         )
+
+    @staticmethod
+    def _publish_nothing_to_answer(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="nothing_to_answer")))
+
+    @staticmethod
+    def _publish_dial_not_answered(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_not_answered")))
+
+    @staticmethod
+    def _publish_dial_abandoned(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_abandoned")))
+
+    @staticmethod
+    def _publish_dial_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_failed")))
 
     @staticmethod
     def _publish_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -683,7 +718,11 @@ class PhoneFirmware(hsm.Instance):
             instance,
             event,
             _TransferStartedCommittedEvent.with_data(
-                PhoneTransferData(call_id=data.call_id, transfer_id=data.transfer_id, target=data.target)
+                PhoneTransferData(
+                    call_id=PhoneFirmware._current_call(instance),
+                    transfer_id=data.transfer_id,
+                    target=data.target,
+                )
             ),
         )
 
@@ -838,59 +877,42 @@ class PhoneFirmware(hsm.Instance):
                 hsm.effect(_set_current_call),
                 hsm.target("/Phone/ringing"),
             ),
+            # Redial is always legal. A handset does not refuse a number because you just called
+            # it, and with no id on the command there is nothing to recognise as a repeat.
             hsm.transition(
                 hsm.on(DialEvent),
-                hsm.guard(_is_new_dial),
-                hsm.effect(_set_current_call, _publish_dial_requested),
+                hsm.effect(_publish_dial_requested),
                 hsm.target("/Phone/dialing"),
             ),
+            # Answering with nothing ringing does nothing, but it must not do it silently.
+            hsm.transition(
+                hsm.on(AnswerCallEvent),
+                hsm.effect(_publish_nothing_to_answer),
+            ),
         ),
+        # No current call here: the exchange assigns one on connect, so every exit that is not a
+        # connect ends an attempt that never became a call and reports phone.no_call.
         hsm.state(
             "dialing",
             hsm.transition(
                 hsm.on(CallConnectedEvent),
-                hsm.guard(_matches_current_call_connected),
-                hsm.effect(_publish_answered),
+                hsm.guard(_is_live_dial_observation),
+                hsm.effect(_set_current_call, _publish_answered),
                 hsm.target("/Phone/answered"),
             ),
             hsm.transition(
                 hsm.on(HangUpCallEvent),
-                hsm.guard(_matches_current_hang_up_command),
-                hsm.effect(
-                    _publish_hang_up_requested,
-                    _publish_local_hang_up,
-                    _remember_closed_call,
-                    _clear_current_call,
-                ),
+                hsm.effect(_publish_dial_abandoned),
                 hsm.target("/Phone/hung_up"),
             ),
             hsm.transition(
-                hsm.on(CallFailedEvent),
-                hsm.guard(_matches_current_call_failed),
-                hsm.effect(
-                    _publish_failed_hang_up,
-                    _remember_closed_call,
-                    _clear_current_call,
-                ),
-                hsm.target("/Phone/hung_up"),
-            ),
-            hsm.transition(
-                hsm.on(RemoteHangUpEvent),
-                hsm.guard(_matches_current_remote_hang_up),
-                hsm.effect(
-                    _publish_remote_hang_up,
-                    _remember_closed_call,
-                    _clear_current_call,
-                ),
+                hsm.on(ServiceDialFailedEvent),
+                hsm.effect(_publish_dial_failed),
                 hsm.target("/Phone/hung_up"),
             ),
             hsm.transition(
                 hsm.after(_answer_operation_timeout),
-                hsm.effect(
-                    _publish_answer_timeout,
-                    _remember_current_call_closed,
-                    _clear_current_call,
-                ),
+                hsm.effect(_publish_dial_not_answered),
                 hsm.target("/Phone/hung_up"),
             ),
         ),
@@ -904,17 +926,15 @@ class PhoneFirmware(hsm.Instance):
             ),
             hsm.transition(
                 hsm.on(AnswerCallEvent),
-                hsm.guard(_matches_current_answer_command),
                 hsm.effect(_publish_answer_requested),
                 hsm.target("/Phone/answering"),
             ),
             hsm.transition(
                 hsm.on(DeclineCallEvent),
-                hsm.guard(_matches_current_decline_command),
                 hsm.effect(
                     _publish_decline_requested,
                     _publish_declined,
-                    _remember_closed_call,
+                    _remember_current_call_closed,
                     _clear_current_call,
                 ),
                 hsm.target("/Phone/hung_up"),
@@ -954,22 +974,20 @@ class PhoneFirmware(hsm.Instance):
             ),
             hsm.transition(
                 hsm.on(DeclineCallEvent),
-                hsm.guard(_matches_current_decline_command),
                 hsm.effect(
                     _publish_decline_requested,
                     _publish_declined,
-                    _remember_closed_call,
+                    _remember_current_call_closed,
                     _clear_current_call,
                 ),
                 hsm.target("/Phone/hung_up"),
             ),
             hsm.transition(
                 hsm.on(HangUpCallEvent),
-                hsm.guard(_matches_current_hang_up_command),
                 hsm.effect(
                     _publish_hang_up_requested,
                     _publish_local_hang_up,
-                    _remember_closed_call,
+                    _remember_current_call_closed,
                     _clear_current_call,
                 ),
                 hsm.target("/Phone/hung_up"),
@@ -1019,11 +1037,10 @@ class PhoneFirmware(hsm.Instance):
             ),
             hsm.transition(
                 hsm.on(HangUpCallEvent),
-                hsm.guard(_matches_current_hang_up_command),
                 hsm.effect(
                     _publish_hang_up_requested,
                     _publish_local_hang_up,
-                    _remember_closed_call,
+                    _remember_current_call_closed,
                     _clear_current_call,
                 ),
                 hsm.target("/Phone/hung_up"),
@@ -1076,7 +1093,6 @@ class PhoneFirmware(hsm.Instance):
                 ),
                 hsm.transition(
                     hsm.on(TransferCallEvent),
-                    hsm.guard(_matches_current_transfer_command),
                     hsm.effect(
                         _publish_transfer_requested,
                         _set_current_transfer_target,
@@ -1125,11 +1141,10 @@ class PhoneFirmware(hsm.Instance):
             ),
             hsm.transition(
                 hsm.on(HangUpCallEvent),
-                hsm.guard(_matches_current_hang_up_command),
                 hsm.effect(
                     _publish_hang_up_requested,
                     _publish_local_hang_up,
-                    _remember_closed_call,
+                    _remember_current_call_closed,
                     _clear_current_transfer_target,
                     _clear_current_call,
                 ),
@@ -1238,7 +1253,7 @@ class Phone(bot.device.Device):
 
         if not isinstance(
             event.data,
-            PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
+            RingingData | PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
         ):
             return
         placement = self._placement

@@ -77,7 +77,7 @@ def assert_heard_phone_ring(
     input: bot.BotInputData,
     *,
     phone: phone_device.Phone | None = None,
-    call_id: str | None = None,
+    caller: str | None = None,
 ) -> None:
     """Ringing is environment.sound from the phone; cognition sees that sound stimulus, not phone.ringing."""
 
@@ -85,10 +85,9 @@ def assert_heard_phone_ring(
     assert input.name == SoundEvent.name
     assert isinstance(input.data, SoundData)
     assert input.data.kind == "phone.ringing"
-    if call_id is not None:
+    if caller is not None:
         assert isinstance(input.data, phone_device.PhoneSoundData)
-        assert input.data.call_id == call_id
-        assert input.id == call_id
+        assert input.data.caller == caller
     if phone is not None:
         assert input.source == hsm.id(phone)
 
@@ -1236,9 +1235,9 @@ async def wait_until(condition: typing.Callable[[], bool], *, timeout: float = 2
     raise TimeoutError("wait_until condition not met")
 
 
-async def ring_phone(phone: phone_device.Phone, call_id: str = "call-123") -> None:
+async def ring_phone(phone: phone_device.Phone, call_id: str = "call-123", caller: str | None = None) -> None:
     await emit_phone_service_event(
-        phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id))
+        phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller=caller))
     )
     await wait_until(lambda: device_firmware(phone) is not None and device_firmware(phone).state() == "/Phone/ringing")
 
@@ -1246,7 +1245,7 @@ async def ring_phone(phone: phone_device.Phone, call_id: str = "call-123") -> No
 async def answer_phone(phone: phone_device.Phone, call_id: str = "call-123") -> None:
     await ring_phone(phone, call_id=call_id)
     await phone.dispatch(
-        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id=call_id))
+        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData())
     )
     await emit_phone_service_event(
         phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id=call_id))
@@ -1639,7 +1638,7 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
         _ = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
         await wait_until(lambda: len(ability.calls) == 1 and bot_has_focus(active_bot))
-        await ring_phone(browser_phone, call_id="call-456")
+        await ring_phone(browser_phone, call_id="call-456", caller="Front desk")
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
 
         return ability.calls
@@ -1651,8 +1650,8 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert isinstance(observed_browser_input.input, hsm.Event)
     assert observed_browser_input.input.name == SoundEvent.name
     assert isinstance(observed_browser_input.input.data, SoundData)
-    # Call identity rides elevated event.id (not event.metadata) — HSM-COMPLETION-001.
-    assert observed_browser_input.input.id == "call-456"
+    # What a ringing phone carries out is who is calling, not which session is ringing.
+    assert observed_browser_input.input.data.caller == "Front desk"
     offered = {event.name for event in observed_browser_input.schemas}
     assert bot.FocusDeviceEvent.name in offered
     # Second turn while already focused: clear is on focused snapshot during processing entry.
@@ -2180,9 +2179,8 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
     async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
-                event=phone_device.AnswerCallEvent.name,
-                data={"call_id": "call-123"},
-                reason="answer incoming call",
+                event=phone_device.HangUpCallEvent.name,
+                reason="hang up a call the phone is not on",
             )
         )
         active_bot = AbilityAgent(devices={"phone": phone_device.Phone()}, cognition=ability)
@@ -2201,7 +2199,7 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
     assert state == "/Bot/active/focused"
     assert actions == []
     assert len(failures) == 1
-    assert failures[0].message == f"Processing selected unavailable event: {phone_device.AnswerCallEvent.name}."
+    assert failures[0].message == f"Processing selected unavailable event: {phone_device.HangUpCallEvent.name}."
 
 
 def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
@@ -2831,8 +2829,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
         await active_bot.dispatch(
             active_bot.context(),
             phone_device.DialEvent.with_data(
-                phone_device.DialData(
-                    call_id="call-123", target=phone_device.TransferTarget(kind="address", value="sip:bob@example.com")
+                phone_device.DialData(target=phone_device.TransferTarget(kind="address", value="sip:bob@example.com")
                 )
             ),
         )

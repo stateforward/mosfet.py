@@ -4,7 +4,7 @@
 Starts a local phone bot (no LiveKit room) and injects either:
 
 - **call** — firmware ``IncomingCall`` → elevated ``PhoneSoundData`` (``kind=phone.ringing``)
-- **ambient** — plain ``environment.sound`` with ``kind=ambient`` (no call_id)
+- **ambient** — plain ``environment.sound`` with ``kind=ambient`` (no caller)
 
 Records cognition outputs (answer / ignore / focus / other). Uses real Mercury intuition +
 Terra keys from repo ``.env`` and ``examples/phone_bot/.env``.
@@ -134,7 +134,7 @@ async def _inject_call(environment: Environment, body: PhoneBot, *, call_id: str
     await firmware.event_recorder().receive(
         phone.context(),
         phone_events.IncomingCallEvent.with_data(
-            phone_events.IncomingCallData(call_id=call_id, display_hint="experiment-caller")
+            phone_events.IncomingCallData(call_id=call_id, caller="experiment-caller")
         ),
     )
     # Ensure body sees elevated ring even if environment broadcast timing races.
@@ -150,10 +150,9 @@ async def _inject_call(environment: Environment, body: PhoneBot, *, call_id: str
                     sample_rate_hz=16_000,
                     channels=1,
                     kind="phone.ringing",
-                    call_id=call_id,
+                    caller="experiment-caller",
                 )
             ),
-            id=call_id,
             source=hsm.id(phone),
             target="",
         ),
@@ -217,7 +216,7 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
         before = len(body.outputs())
         before_fail = len(body.failures())
         behaviors_pre = _list_behaviors(body.memory())
-        call_id = f"livekit:exp-{index}-{uuid.uuid4().hex[:6]}"
+        call_id = f"exp-{index}-{uuid.uuid4().hex[:6]}"
         print(f"\n=== trial {index}/{trials} type={kind} ===", flush=True)
         # Clear previous call so firmware can ring again.
         await _hang_up_if_needed(body.phone(), active_call_id)

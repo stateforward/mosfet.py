@@ -31,11 +31,11 @@ def test_event_schema_projects_json_schema_from_pydantic_event_contract() -> Non
     assert schema["properties"] == phone.AnswerCallData.model_json_schema()["properties"]
 
 def test_event_schema_validates_data_with_pydantic_event_contract() -> None:
-    data = validate_event_data(phone.AnswerCallEvent, {"call_id": "call-123"})
+    data = validate_event_data(phone.IncomingCallEvent, {"call_id": "livekit:caller"})
 
-    assert data == phone.AnswerCallData(call_id="call-123")
+    assert data == phone.IncomingCallData(call_id="livekit:caller")
     with pytest.raises(pydantic.ValidationError):
-        _ = validate_event_data(phone.AnswerCallEvent, {})
+        _ = validate_event_data(phone.IncomingCallEvent, {})
 
 def test_event_schema_matches_supported_json_schema_subset() -> None:
     schema: dict[str, object] = {

@@ -415,7 +415,7 @@ def _live_behavior_answers_phone_call(
         await firmware.event_recorder().receive(
             phone.context(),
             phone_device.IncomingCallEvent.with_data(
-                phone_device.IncomingCallData(call_id=call_id, display_hint="caller")
+                phone_device.IncomingCallData(call_id=call_id, caller="caller")
             ),
         )
         deadline = asyncio.get_running_loop().time() + 2.0
@@ -585,7 +585,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
                 await firmware.event_recorder().receive(
                     phone.context(),
                     phone_device.IncomingCallEvent.with_data(
-                        phone_device.IncomingCallData(call_id=call_id, display_hint="caller")
+                        phone_device.IncomingCallData(call_id=call_id, caller="caller")
                     ),
                 )
             except Exception as error:  # noqa: BLE001 — phone may reject while busy

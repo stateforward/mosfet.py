@@ -25,6 +25,7 @@ PHONE_EVENTS = (
     phone.ServiceHangUpRequestedEvent,
     phone.ServiceTransferRequestedEvent,
     phone.RingingEvent,
+    phone.NoCallEvent,
     phone.AnsweredEvent,
     phone.MediaReadyEvent,
     phone.HungUpEvent,
@@ -48,10 +49,15 @@ def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     assert object_dict(phone.RemoteHangUpEvent.schema) == phone.RemoteHangUpData.model_json_schema()
     assert phone.CallFailedEvent.name == "phone.service.call_failed"
     assert object_dict(phone.CallFailedEvent.schema) == phone.CallFailedData.model_json_schema()
+    incoming = phone.IncomingCallData(call_id="livekit:caller", caller="Front desk")
+    assert incoming.caller == "Front desk"
+    # A withheld caller still rings.
+    assert phone.IncomingCallData(call_id="livekit:caller").caller is None
+    assert "display_hint" not in object_dict(phone.IncomingCallEvent.schema)["properties"]
 
 def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
     transfer_target = phone.TransferTarget(kind="address", value="helpdesk@example.com")
-    transfer_command = phone.TransferCallData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+    transfer_command = phone.TransferCallData(transfer_id="transfer-123", target=transfer_target)
     transfer_accepted = phone.TransferAcceptedData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
     transfer_completed = phone.TransferCompletedData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
     transfer_failed = phone.TransferFailedData(
@@ -72,7 +78,7 @@ def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
     assert object_dict(phone.ServiceTransferCompletedEvent.schema) == phone.TransferCompletedData.model_json_schema()
     assert phone.ServiceTransferFailedEvent.name == "phone.service.transfer_failed"
     assert object_dict(phone.ServiceTransferFailedEvent.schema) == phone.TransferFailedData.model_json_schema()
-    assert object_dict(phone.TransferCallEvent.schema)["required"] == ["call_id", "transfer_id", "target"]
+    assert object_dict(phone.TransferCallEvent.schema)["required"] == ["transfer_id", "target"]
     assert object_dict(phone.TransferAcceptedEvent.schema)["required"] == ["call_id", "transfer_id", "target"]
     assert object_dict(phone.ServiceTransferCompletedEvent.schema)["required"] == ["call_id", "transfer_id", "target"]
     assert object_dict(phone.ServiceTransferFailedEvent.schema)["required"] == ["call_id", "transfer_id", "failure_kind", "target"]
@@ -85,21 +91,15 @@ def test_phone_service_audio_data_describes_speaker_output_for_current_call() ->
     assert data.media_type == "audio/pcm"
     assert data.channels == 1
 
-def test_phone_command_events_are_separate_from_provider_request_contracts() -> None:
-    target = phone.TransferTarget(kind="address", value="sip:helpdesk@example.com")
-    dial_data = phone.DialData(call_id="call-123", target=target)
-    answer_data = phone.AnswerCallData(call_id="call-123")
-    decline_data = phone.DeclineCallData(call_id="call-123")
-    hang_up_data = phone.HangUpCallData(call_id="call-123")
+def test_phone_command_events_carry_no_call_identity() -> None:
+    """Operator commands name no call: firmware already holds the one they act on."""
 
-    assert dial_data.call_id == "call-123"
-    assert dial_data.target == target
-    assert answer_data.call_id == "call-123"
-    assert decline_data.call_id == "call-123"
-    assert hang_up_data.call_id == "call-123"
+    target = phone.TransferTarget(kind="address", value="sip:helpdesk@example.com")
+
+    assert phone.DialData(target=target).target == target
     assert phone.DialEvent.name == "phone.dial"
     assert object_dict(phone.DialEvent.schema) == phone.DialData.model_json_schema()
-    assert object_dict(phone.DialEvent.schema)["required"] == ["call_id", "target"]
+    assert object_dict(phone.DialEvent.schema)["required"] == ["target"]
     assert phone.AnswerCallEvent.name == "phone.answer_call"
     assert object_dict(phone.AnswerCallEvent.schema) == phone.AnswerCallData.model_json_schema()
     assert phone.DeclineCallEvent.name == "phone.decline_call"
@@ -108,16 +108,40 @@ def test_phone_command_events_are_separate_from_provider_request_contracts() -> 
     assert object_dict(phone.HangUpCallEvent.schema) == phone.HangUpCallData.model_json_schema()
     assert phone.TransferCallEvent.name == "phone.transfer_call"
     assert object_dict(phone.TransferCallEvent.schema) == phone.TransferCallData.model_json_schema()
+    for command in (phone.AnswerCallData, phone.DeclineCallData, phone.HangUpCallData):
+        assert command.model_fields == {}
+        assert "call_id" not in object_dict(command.model_json_schema()).get("properties", {})
+    assert "call_id" not in object_dict(phone.DialEvent.schema)["properties"]
+    assert "call_id" not in object_dict(phone.TransferCallEvent.schema)["properties"]
 
+
+def test_phone_service_request_events_carry_the_call_firmware_stamped() -> None:
+    """Firmware tells the service which call: the session handle lives only on this plane."""
+
+    target = phone.TransferTarget(kind="address", value="helpdesk@example.com")
+
+    assert phone.AnswerRequestData(call_id="livekit:caller").call_id == "livekit:caller"
+    assert phone.DeclineRequestData(call_id="livekit:caller").call_id == "livekit:caller"
+    assert phone.HangUpRequestData(call_id="livekit:caller").call_id == "livekit:caller"
+    transfer = phone.TransferRequestData(call_id="livekit:caller", transfer_id="transfer-123", target=target)
+    assert transfer.call_id == "livekit:caller"
+    assert transfer.target == target
     assert phone.ServiceAnswerRequestedEvent.name == "phone.service.answer_requested"
+    assert object_dict(phone.ServiceAnswerRequestedEvent.schema) == phone.AnswerRequestData.model_json_schema()
+    assert phone.ServiceDeclineRequestedEvent.name == "phone.service.decline_requested"
+    assert object_dict(phone.ServiceDeclineRequestedEvent.schema) == phone.DeclineRequestData.model_json_schema()
+    assert phone.ServiceHangUpRequestedEvent.name == "phone.service.hang_up_requested"
+    assert object_dict(phone.ServiceHangUpRequestedEvent.schema) == phone.HangUpRequestData.model_json_schema()
+    assert phone.ServiceTransferRequestedEvent.name == "phone.service.transfer_requested"
+    assert object_dict(phone.ServiceTransferRequestedEvent.schema) == phone.TransferRequestData.model_json_schema()
+    for request in (phone.AnswerRequestData, phone.DeclineRequestData, phone.HangUpRequestData):
+        assert object_dict(request.model_json_schema())["required"] == ["call_id"]
+    # Dial alone carries no call: the exchange assigns one on connect.
     assert phone.ServiceDialRequestedEvent.name == "phone.service.dial_requested"
     assert object_dict(phone.ServiceDialRequestedEvent.schema) == phone.DialData.model_json_schema()
-    assert phone.ServiceDeclineRequestedEvent.name == "phone.service.decline_requested"
-    assert phone.ServiceHangUpRequestedEvent.name == "phone.service.hang_up_requested"
-    assert phone.ServiceTransferRequestedEvent.name == "phone.service.transfer_requested"
 
 def test_phone_public_events_describe_committed_firmware_state() -> None:
-    ringing = phone.RingingData(call_id="call-123")
+    ringing = phone.RingingData(caller="Front desk")
     hung_up = phone.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
     transfer = phone.PhoneTransferData(
         call_id="call-123",
@@ -131,8 +155,11 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
         failure_kind="timeout",
     )
 
-    assert ringing.call_id == "call-123"
-    assert isinstance(ringing, phone.PhoneCallData)
+    assert ringing.caller == "Front desk"
+    # A ringing handset shows who is calling, not which session is ringing.
+    assert not isinstance(ringing, phone.PhoneCallData)
+    assert "call_id" not in object_dict(phone.RingingEvent.schema)["properties"]
+    assert phone.RingingData().caller is None
     assert hung_up.outcome == "remote_hang_up"
     assert transfer.target.kind == "address"
     assert transfer_failed.failure_kind == "timeout"
@@ -150,6 +177,16 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
     assert object_dict(phone.CallTransferCompletedEvent.schema) == phone.PhoneTransferData.model_json_schema()
     assert phone.CallTransferFailedEvent.name == "phone.transfer_failed"
     assert object_dict(phone.CallTransferFailedEvent.schema) == phone.PhoneTransferFailedData.model_json_schema()
+
+
+def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:
+    """Nothing to answer, and dials that never connect, are loud rather than dropped."""
+
+    assert phone.NoCallEvent.name == "phone.no_call"
+    assert object_dict(phone.NoCallEvent.schema) == phone.NoCallData.model_json_schema()
+    assert phone.NoCallData(reason="nothing_to_answer").reason == "nothing_to_answer"
+    # No call happened, so there is no call id to report it against.
+    assert "call_id" not in object_dict(phone.NoCallEvent.schema)["properties"]
 
 def test_phone_event_names_do_not_use_observed_suffix() -> None:
     event_names = [event.name for event in PHONE_EVENTS]

@@ -52,6 +52,7 @@ _SERVICE_ORIGINATING_EVENT_NAMES = frozenset(
         phone_device.IncomingCallEvent.name,
         phone_device.CallConnectedEvent.name,
         phone_device.CallFailedEvent.name,
+        phone_device.ServiceDialFailedEvent.name,
         phone_device.ServiceMediaReadyEvent.name,
         phone_device.RemoteHangUpEvent.name,
         phone_device.ServiceAudioReceivedEvent.name,
@@ -116,7 +117,7 @@ async def _emit_service_event(phone: phone_device.Phone, event: hsm.Event[typing
     await _phone_firmware(phone).event_recorder().receive(phone.context(), event)
 
 async def _answer_call(phone: phone_device.Phone, call_id: str) -> None:
-    await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id=call_id)))
+    await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
     await _emit_service_event(phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id=call_id)))
 
 def test_phone_has_no_speech_specific_operator_requirements() -> None:
@@ -181,7 +182,9 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
             event_name for transition in hsm.take_snapshot(None, phone).Transitions for event_name in transition.events
         }
         assert phone_device.IncomingCallEvent.name in snapshot_event_names
-        assert operation_names(phone) == [phone_device.DialEvent.name]
+        # Idle offers dial, and answer — which reports phone.no_call rather than dropping a stray
+        # answer in silence. The button exists on an idle handset; pressing it does nothing.
+        assert operation_names(phone) == [phone_device.DialEvent.name, phone_device.AnswerCallEvent.name]
 
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
 
@@ -204,7 +207,7 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-123", target=transfer_target)
             ),
         )
 
@@ -308,7 +311,7 @@ def test_phone_service_ingress_does_not_forward_non_service_events() -> None:
 
         await service.receive(
             phone.context(),
-            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
         )
         await asyncio.sleep(0)
 
@@ -346,7 +349,11 @@ def test_phone_firmware_model_tracks_call_lifecycle_and_transfer() -> None:
     assert "phone.service.incoming_call" in transitions["/Phone/hung_up"]
     assert "phone.service.call_connected" in transitions["/Phone/dialing"]
     assert "phone.hang_up_call" in transitions["/Phone/dialing"]
-    assert "phone.service.call_failed" in transitions["/Phone/dialing"]
+    # A dial that fails never became a call, so dialing hears a dial failure, not a call failure.
+    assert "phone.service.dial_failed" in transitions["/Phone/dialing"]
+    assert "phone.service.call_failed" not in transitions["/Phone/dialing"]
+    # Answering with nothing ringing is reported rather than dropped.
+    assert "phone.answer_call" in transitions["/Phone/hung_up"]
     assert "phone.service.incoming_call" in transitions["/Phone/ringing"]
     assert "phone.answer_call" in transitions["/Phone/ringing"]
     assert "phone.decline_call" in transitions["/Phone/ringing"]
@@ -403,16 +410,12 @@ def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(call_id="call-123", target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
         )
 
         assert device_firmware(phone).state() == "/Phone/dialing"
-        assert phone_current_call_id(firmware) == "call-123"
-        assert _event_names(firmware.event_recorder()) == [phone_device.ServiceDialRequestedEvent.name]
-
-        await _emit_service_event(phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-stale")))
-
-        assert device_firmware(phone).state() == "/Phone/dialing"
+        # Dialing holds no call: the exchange has not assigned one yet.
+        assert phone_current_call_id(firmware) is None
         assert _event_names(firmware.event_recorder()) == [phone_device.ServiceDialRequestedEvent.name]
 
         await _emit_service_event(phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-123")))
@@ -443,7 +446,9 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
         await _emit_service_event(
             phone,
             dataclasses.replace(
-                phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
+                phone_device.IncomingCallEvent.with_data(
+                    phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+                ),
                 metadata=metadata,
             ),
         )
@@ -464,7 +469,7 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert getattr(sound, "channels", None) == 1
     assert getattr(sound, "audio", b"").startswith(b"RIFF")
     assert getattr(sound, "audio", b"") == phone_device.RING_SOUND_WAV
-    assert inside_events[0].id == "call-123"
+    assert getattr(sound, "caller", "") == "Front desk"
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 
@@ -478,7 +483,7 @@ def test_phone_committed_observations_have_priority_over_queued_external_events(
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
 
         connected = asyncio.ensure_future(
             _emit_service_event(phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-123")))
@@ -487,7 +492,7 @@ def test_phone_committed_observations_have_priority_over_queued_external_events(
         hang_up = asyncio.ensure_future(
             phone.dispatch(
                 phone.context(),
-                phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData(call_id="call-123")),
+                phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()),
             )
         )
         _ = await asyncio.gather(connected, hang_up)
@@ -547,10 +552,10 @@ def test_phone_rejects_malformed_payloads_before_event_specific_effects() -> Non
         assert device_firmware(phone).state() == "/Phone/ringing"
         assert _event_names(firmware.event_recorder()) == [phone_device.RingingEvent.name]
 
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _emit_service_event(
             phone,
-            phone_device.CallConnectedEvent.with_data(invalid_value(phone_device.CallConnectedData, phone_device.AnswerCallData(call_id="call-123"))),
+            phone_device.CallConnectedEvent.with_data(invalid_value(phone_device.CallConnectedData, phone_device.AnswerCallData())),
         )
 
         assert device_firmware(phone).state() == "/Phone/answering"
@@ -561,7 +566,7 @@ def test_phone_rejects_malformed_payloads_before_event_specific_effects() -> Non
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-123", target=transfer_target)
             ),
         )
         await _emit_service_event(
@@ -607,7 +612,7 @@ def test_phone_emitted_events_preserve_trigger_metadata() -> None:
         await phone.dispatch(
             phone.context(),
             dataclasses.replace(
-                phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")),
+                phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
                 metadata=metadata,
             ),
         )
@@ -640,7 +645,7 @@ def test_phone_firmware_rejects_stale_service_events_by_call_id() -> None:
         assert device_firmware(phone).state() == "/Phone/ringing"
         assert _event_names(firmware.event_recorder()) == [phone_device.RingingEvent.name]
 
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _emit_service_event(phone, phone_device.RemoteHangUpEvent.with_data(phone_device.RemoteHangUpData(call_id="call-stale")))
 
         assert device_firmware(phone).state() == "/Phone/answering"
@@ -682,7 +687,7 @@ def test_phone_firmware_rejects_stale_service_events_by_call_id() -> None:
 
     asyncio.run(run())
 
-def test_phone_firmware_handles_decline_and_hang_up_commands_for_current_call() -> None:
+def test_phone_firmware_declines_and_hangs_up_the_call_it_holds() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, phone.model)
@@ -692,15 +697,15 @@ def test_phone_firmware_handles_decline_and_hang_up_commands_for_current_call() 
         firmware = _phone_firmware(phone)
 
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-stale")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
-        await phone.dispatch(phone.context(), phone_device.DeclineCallEvent.with_data(phone_device.DeclineCallData(call_id="call-stale")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        # Answering again while already answering is not a second answer.
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
 
         assert device_firmware(phone).state() == "/Phone/answering"
         assert phone_current_call_id(firmware) == "call-123"
         assert _event_names(firmware.event_recorder()) == [phone_device.RingingEvent.name, phone_device.ServiceAnswerRequestedEvent.name]
 
-        await phone.dispatch(phone.context(), phone_device.DeclineCallEvent.with_data(phone_device.DeclineCallData(call_id="call-123")))
+        await phone.dispatch(phone.context(), phone_device.DeclineCallEvent.with_data(phone_device.DeclineCallData()))
 
         assert device_firmware(phone).state() == "/Phone/hung_up"
         assert phone_current_call_id(firmware) is None
@@ -713,12 +718,11 @@ def test_phone_firmware_handles_decline_and_hang_up_commands_for_current_call() 
 
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-456")))
         await _answer_call(phone, "call-456")
-        await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData(call_id="call-stale")))
 
         assert device_firmware(phone).state() == "/Phone/answered/media_connecting"
         assert phone_current_call_id(firmware) == "call-456"
 
-        await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData(call_id="call-456")))
+        await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()))
 
         assert device_firmware(phone).state() == "/Phone/hung_up"
         assert phone_current_call_id(firmware) is None
@@ -800,8 +804,8 @@ def test_phone_service_audio_routes_through_speaker_to_environment_observers() -
         ring_data = observer.events[0].data
         assert isinstance(ring_data, phone_device.PhoneSoundData)
         assert ring_data.kind == "phone.ringing"
-        assert ring_data.call_id == "call-123"
-        assert observer.events[0].id == "call-123"
+        # A withheld caller still rings.
+        assert ring_data.caller is None
         observer.events.clear()
         await _emit_service_event(phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123")))
         await _wait_until(lambda: _event_names(firmware.event_recorder())[-1] == phone_device.MediaReadyEvent.name)
@@ -916,7 +920,7 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-123", target=transfer_target)
             ),
         )
         assert device_firmware(phone).state() == "/Phone/transferring"
@@ -978,8 +982,8 @@ def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect(
         firmware = _phone_firmware(phone)
 
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-123")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
 
         assert device_firmware(phone).state() == "/Phone/answering"
         assert _event_names(firmware.event_recorder()) == [phone_device.RingingEvent.name, phone_device.ServiceAnswerRequestedEvent.name]
@@ -1015,7 +1019,7 @@ def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect(
 
     asyncio.run(run())
 
-def test_phone_dialing_timeout_commits_failed_hangup_and_rejects_late_connect() -> None:
+def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> None:
     async def run() -> None:
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
         target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
@@ -1027,11 +1031,7 @@ def test_phone_dialing_timeout_commits_failed_hangup_and_rejects_late_connect() 
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(call_id="call-123", target=target)),
-        )
-        await phone.dispatch(
-            phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(call_id="call-123", target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
         )
 
         assert device_firmware(phone).state() == "/Phone/dialing"
@@ -1039,32 +1039,33 @@ def test_phone_dialing_timeout_commits_failed_hangup_and_rejects_late_connect() 
 
         await _wait_until(lambda: device_firmware(phone) is not None and device_firmware(phone).state() == "/Phone/hung_up")
 
+        # No call was ever assigned, so there is no hang-up to commit and nothing to close.
         assert phone_current_call_id(firmware) is None
-        assert "call-123" in phone_closed_call_ids(firmware)
+        assert phone_closed_call_ids(firmware) == frozenset()
         assert _event_names(firmware.event_recorder()) == [
             phone_device.ServiceDialRequestedEvent.name,
-            phone_device.HungUpEvent.name,
+            phone_device.NoCallEvent.name,
         ]
+        no_call = firmware.event_recorder().events[-1].data
+        assert isinstance(no_call, phone_device.NoCallData)
+        assert no_call.reason == "dial_not_answered"
 
+        # A connect arriving after the attempt is over is rejected by state, not by identity.
         await _emit_service_event(phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-123")))
 
         assert device_firmware(phone).state() == "/Phone/hung_up"
         assert _event_names(firmware.event_recorder()) == [
             phone_device.ServiceDialRequestedEvent.name,
-            phone_device.HungUpEvent.name,
+            phone_device.NoCallEvent.name,
         ]
 
+        # Redial is always legal: a handset does not refuse a number it just called.
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(call_id="call-123", target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
         )
 
-        assert device_firmware(phone).state() == "/Phone/hung_up"
-        assert phone_current_call_id(firmware) is None
-        assert _event_names(firmware.event_recorder()) == [
-            phone_device.ServiceDialRequestedEvent.name,
-            phone_device.HungUpEvent.name,
-        ]
+        assert device_firmware(phone).state() == "/Phone/dialing"
 
     asyncio.run(run())
 
@@ -1082,18 +1083,22 @@ def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
         target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(call_id="dialing-call", target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
         )
         await _emit_service_event(
             phone,
-            phone_device.CallFailedEvent.with_data(phone_device.CallFailedData(call_id="dialing-call", failure_kind="signaling_failed")),
+            phone_device.ServiceDialFailedEvent.with_data(phone_device.DialFailedData(failure_kind="signaling_failed")),
         )
 
         assert device_firmware(phone) is not None
         assert device_firmware(phone).state() == "/Phone/hung_up"
+        # Nothing was ever assigned, so there is no call to close.
         assert phone_current_call_id(firmware) is None
-        assert "dialing-call" in phone_closed_call_ids(firmware)
-        assert _event_names(firmware.event_recorder()) == [phone_device.ServiceDialRequestedEvent.name, phone_device.HungUpEvent.name]
+        assert phone_closed_call_ids(firmware) == frozenset()
+        assert _event_names(firmware.event_recorder()) == [
+            phone_device.ServiceDialRequestedEvent.name,
+            phone_device.NoCallEvent.name,
+        ]
 
         phone, firmware = await started_phone()
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="ringing-call")))
@@ -1110,7 +1115,7 @@ def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
 
         phone, firmware = await started_phone()
         await _emit_service_event(phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="answering-call")))
-        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="answering-call")))
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _emit_service_event(
             phone,
             phone_device.CallFailedEvent.with_data(phone_device.CallFailedData(call_id="answering-call", failure_kind="media_unavailable")),
@@ -1153,7 +1158,7 @@ def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="transfer-call", transfer_id="transfer-123", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-123", target=transfer_target)
             ),
         )
         await _emit_service_event(
@@ -1195,7 +1200,7 @@ def test_phone_firmware_owns_transfer_state_and_rejects_stale_transfer_events() 
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-stale", transfer_id="transfer-stale", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-stale", target=transfer_target)
             ),
         )
 
@@ -1211,7 +1216,7 @@ def test_phone_firmware_owns_transfer_state_and_rejects_stale_transfer_events() 
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-123", target=transfer_target)
             ),
         )
 
@@ -1296,7 +1301,7 @@ def test_phone_firmware_owns_transfer_state_and_rejects_stale_transfer_events() 
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-456", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-456", target=transfer_target)
             ),
         )
         await _emit_service_event(
@@ -1333,7 +1338,7 @@ def test_phone_transfer_timeout_returns_to_answered_and_publishes_failure() -> N
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-1", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-1", target=transfer_target)
             ),
         )
         await _wait_until(
@@ -1348,7 +1353,7 @@ def test_phone_transfer_timeout_returns_to_answered_and_publishes_failure() -> N
         await phone.dispatch(
             phone.context(),
             phone_device.TransferCallEvent.with_data(
-                phone_device.TransferCallData(call_id="call-123", transfer_id="transfer-2", target=transfer_target)
+                phone_device.TransferCallData(transfer_id="transfer-2", target=transfer_target)
             ),
         )
         await _emit_service_event(
@@ -1395,13 +1400,10 @@ def test_phone_dispatch_coerces_dict_command_payload_to_firmware() -> None:
         _ = await hsm.started(None, phone, phone.model)
         raw = dataclasses.replace(
             phone_device.DialEvent,
-            data={
-                "call_id": "call-dict",
-                "target": {"kind": "address", "value": "sip:desk@example.com"},
-            },
+            data={"target": {"kind": "address", "value": "sip:desk@example.com"}},
         )
         await phone.dispatch(phone.context(), raw)
-        await _wait_until(lambda: phone_current_call_id(_phone_firmware(phone)) == "call-dict")
+        await _wait_until(lambda: (device_firmware(phone) or phone).state() == "/Phone/dialing")
         return device_firmware(phone).state() or ""
 
     assert asyncio.run(run()).endswith("/dialing")
@@ -1611,7 +1613,7 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
             )
             await phone.dispatch(
                 phone.context(),
-                phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id=call_id)),
+                phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
             )
             await service.receive(
                 phone.context(),
@@ -1715,7 +1717,7 @@ async def _handset_on_a_call(
         phone.context(), phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
     )
     await phone.dispatch(
-        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-1"))
+        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData())
     )
     await service.receive(
         phone.context(), phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1"))

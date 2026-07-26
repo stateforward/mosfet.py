@@ -51,8 +51,10 @@ Open that URL on **this machine** (local SFU is not reachable from other devices
 Bare `https://meet.livekit.io/custom` shows “Missing LiveKit URL” — Meet reads the query params only.
 
 When you join the room, LiveKit `participant_connected` maps to a phone **incoming call**
-(`call_id=livekit:<identity>`). The phone **rings** as `environment.sound` (`kind=phone.ringing`,
-`source` = phone id) into **Listening** input — not raw `phone.ringing` into cognition.
+whose `caller` is your participant identity. The phone **rings** as `environment.sound`
+(`kind=phone.ringing`, `caller` = who is calling, `source` = phone id) into **Listening** input —
+not raw `phone.ringing` into cognition. The provider's call session handle stays on the
+service plane; nothing outside firmware sees it.
 After answer, room media can flow `ServiceAudioReceived` → speaker → `environment.sound` →
 Listening. Local speaker uplink is published to the LiveKit track (remote delivery is
 suppressed to avoid echo).

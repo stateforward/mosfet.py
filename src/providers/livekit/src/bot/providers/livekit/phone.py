@@ -75,13 +75,16 @@ class _PhoneServiceAttachmentData(pydantic.BaseModel):
 
 
 _ACTIVE_OPERATION_ATTRIBUTE = "active_operation"
+# Firmware-stamped service requests. Every one but dial carries the call it is about; a dial has
+# no call yet, because the exchange assigns it on connect.
 _ActiveRequestData = (
     phone.DialData
-    | phone.AnswerCallData
-    | phone.DeclineCallData
-    | phone.HangUpCallData
-    | phone.TransferCallData
+    | phone.AnswerRequestData
+    | phone.DeclineRequestData
+    | phone.HangUpRequestData
+    | phone.TransferRequestData
 )
+_ActiveCallRequestData = phone.AnswerRequestData | phone.DeclineRequestData | phone.HangUpRequestData
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -208,10 +211,10 @@ _AnswerFailedEvent = hsm.Event[phone.CallFailedData](
     kind=hsm.ErrorEventKind,
     schema=phone.CallFailedData,
 )
-_DialFailedEvent = hsm.Event[phone.CallFailedData](
+_DialFailedEvent = hsm.Event[phone.DialFailedData](
     name="bot.provider.livekit.phone.dial.failed",
     kind=hsm.ErrorEventKind,
-    schema=phone.CallFailedData,
+    schema=phone.DialFailedData,
 )
 _DeclineCompletedEvent = hsm.Event[phone.CallIdData](
     name="bot.provider.livekit.phone.decline.completed",
@@ -299,7 +302,7 @@ def _set_active_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm
     data = event.data
     if not event.id or not isinstance(
         data,
-        phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData | phone.TransferCallData,
+        _ActiveRequestData,
     ):
         _ = instance.set(_ACTIVE_OPERATION_ATTRIBUTE, None)
         return
@@ -312,21 +315,24 @@ def _clear_active_operation(ctx: hsm.Context, instance: "PhoneService", event: h
 
 
 def _active_operation_call_id(instance: "PhoneService") -> str | None:
+    """Call the active request is about, or None while dialing (no call assigned yet)."""
+
     active = _active_operation(instance)
-    if active is None:
+    if active is None or not isinstance(active.data, phone.CallIdData):
         return None
     return active.data.call_id
 
 
-def _active_operation_transfer(instance: "PhoneService") -> phone.TransferCallData | None:
+def _active_operation_transfer(instance: "PhoneService") -> phone.TransferRequestData | None:
     active = _active_operation(instance)
-    if active is None or not isinstance(active.data, phone.TransferCallData):
+    if active is None or not isinstance(active.data, phone.TransferRequestData):
         return None
     return active.data
 
 
 def _matches_active_call(instance: "PhoneService", call_id: str) -> bool:
-    return _active_operation_call_id(instance) == call_id
+    active = _active_operation_call_id(instance)
+    return active is not None and active == call_id
 
 
 def _matches_active_operation_id(instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -400,7 +406,7 @@ def _has_transfer_terminal_observation(
 
 def _has_answer_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, phone.AnswerCallData)
+    return isinstance(event.data, phone.AnswerRequestData)
 
 
 def _has_dial_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -410,17 +416,17 @@ def _has_dial_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Eve
 
 def _has_decline_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, phone.DeclineCallData)
+    return isinstance(event.data, phone.DeclineRequestData)
 
 
 def _has_hang_up_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, phone.HangUpCallData)
+    return isinstance(event.data, phone.HangUpRequestData)
 
 
 def _has_transfer_request(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, phone.TransferCallData)
+    return isinstance(event.data, phone.TransferRequestData)
 
 
 def _has_hung_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -538,15 +544,13 @@ def _has_uncorrelated_transfer_failed(ctx: hsm.Context, instance: "PhoneService"
 def _has_active_call_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, event
     active = _active_operation(instance)
-    return active is not None and isinstance(
-        active.data, phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData
-    )
+    return active is not None and isinstance(active.data, phone.DialData | _ActiveCallRequestData)
 
 
 def _has_active_transfer_operation(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
     del ctx, event
     active = _active_operation(instance)
-    return active is not None and isinstance(active.data, phone.TransferCallData)
+    return active is not None and isinstance(active.data, phone.TransferRequestData)
 
 
 async def _await_call_control_operation(
@@ -583,6 +587,26 @@ def _has_call_id_completion(
         and _matches_active_call(instance, event.data.call_id)
         and _matches_active_operation_id(instance, event)
     )
+
+
+def _has_dial_completion(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> bool:
+    """Correlate a dial result by operation envelope alone — no call existed to name."""
+
+    del ctx
+    return isinstance(event.data, phone.CallConnectedData) and _matches_active_operation_id(instance, event)
+
+
+def _has_dial_failure(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> bool:
+    del ctx
+    return isinstance(event.data, phone.DialFailedData) and _matches_active_operation_id(instance, event)
 
 
 def _has_transfer_accepted_completion(
@@ -920,7 +944,7 @@ class PhoneService(hsm.Instance):
         self._presence_call_ids[identity] = call_id
         _ = self.dispatch(
             self.context(),
-            ServiceIncomingCallEvent.with_data(phone.IncomingCallData(call_id=call_id, display_hint=identity)),
+            ServiceIncomingCallEvent.with_data(phone.IncomingCallData(call_id=call_id, caller=identity)),
         )
 
     def _hang_up_for_participant(self, participant: object) -> None:
@@ -1022,7 +1046,7 @@ class PhoneService(hsm.Instance):
         del request
         _raise_unavailable_call_control()
 
-    async def answer_call(self, request: phone.AnswerCallData) -> None:
+    async def answer_call(self, request: phone.AnswerRequestData) -> None:
         """Answer a call.
 
         Room-media installations complete answer locally (bot decides to answer; no SIP
@@ -1033,21 +1057,21 @@ class PhoneService(hsm.Instance):
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
 
-    async def decline_call(self, request: phone.DeclineCallData) -> None:
+    async def decline_call(self, request: phone.DeclineRequestData) -> None:
         """Decline a ringing call. Room-media installations complete decline locally."""
 
         del request
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
 
-    async def hang_up_call(self, request: phone.HangUpCallData) -> None:
+    async def hang_up_call(self, request: phone.HangUpRequestData) -> None:
         """Hang up an active call. Room-media installations complete hang-up locally."""
 
         del request
         if not self._room_media_enabled():
             _raise_unavailable_call_control()
 
-    async def transfer_call(self, request: phone.TransferCallData) -> None:
+    async def transfer_call(self, request: phone.TransferRequestData) -> None:
         """Transfer an active LiveKit/SIP call. Default installation reports call control unavailable."""
 
         del request
@@ -1420,6 +1444,13 @@ class PhoneService(hsm.Instance):
         PhoneService._emit_phone_event(ctx, instance, event, phone.RemoteHangUpEvent.with_data(data))
 
     @staticmethod
+    def _emit_dial_failed(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, phone.DialFailedData)
+        instance._media_call_id = None
+        PhoneService._emit_phone_event(ctx, instance, event, phone.ServiceDialFailedEvent.with_data(data))
+
+    @staticmethod
     def _emit_call_failed(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, phone.CallFailedData)
@@ -1461,7 +1492,18 @@ class PhoneService(hsm.Instance):
         active = _active_operation(instance)
         assert active is not None
         data = active.data
-        assert isinstance(data, phone.DialData | phone.AnswerCallData | phone.DeclineCallData | phone.HangUpCallData)
+        assert isinstance(data, phone.DialData | _ActiveCallRequestData)
+        if not isinstance(data, phone.CallIdData):
+            # A dial that timed out has no call to fail: the exchange never assigned one.
+            PhoneService._emit_dial_failed(
+                ctx,
+                instance,
+                _with_operation_correlation(
+                    _DialFailedEvent.with_data(phone.DialFailedData(failure_kind="timeout")),
+                    operation_id=active.id,
+                ),
+            )
+            return
         failure = phone.CallFailedData(call_id=data.call_id, failure_kind="timeout")
         # Stamp envelope id from the active request (same correlation path as activity completions).
         PhoneService._emit_call_failed(
@@ -1482,7 +1524,7 @@ class PhoneService(hsm.Instance):
         del event
         active = _active_operation(instance)
         assert active is not None
-        assert isinstance(active.data, phone.TransferCallData)
+        assert isinstance(active.data, phone.TransferRequestData)
         data = active.data
         failure = phone.TransferFailedData(
             call_id=data.call_id,
@@ -1506,7 +1548,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert isinstance(data, phone.AnswerCallData)
+        assert isinstance(data, phone.AnswerRequestData)
         failure_kind = await _await_call_control_operation(instance.answer_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
@@ -1536,7 +1578,7 @@ class PhoneService(hsm.Instance):
         try:
             connected = await instance.dial(data)
         except Exception as error:
-            failure = phone.CallFailedData(call_id=data.call_id, failure_kind=_failure_kind(error))
+            failure = phone.DialFailedData(failure_kind=_failure_kind(error))
             _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_DialFailedEvent.with_data(failure), event))
             return
         _ = hsm.dispatch(
@@ -1552,7 +1594,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert isinstance(data, phone.DeclineCallData)
+        assert isinstance(data, phone.DeclineRequestData)
         failure_kind = await _await_call_control_operation(instance.decline_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
@@ -1571,7 +1613,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert isinstance(data, phone.HangUpCallData)
+        assert isinstance(data, phone.HangUpRequestData)
         failure_kind = await _await_call_control_operation(instance.hang_up_call(data))
         if failure_kind is not None:
             failure = phone.CallFailedData(call_id=data.call_id, failure_kind=failure_kind)
@@ -1590,7 +1632,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert isinstance(data, phone.TransferCallData)
+        assert isinstance(data, phone.TransferRequestData)
         failure_kind = await _await_call_control_operation(instance.transfer_call(data))
         if failure_kind is not None:
             failure = phone.TransferFailedData(
@@ -1842,15 +1884,15 @@ class PhoneService(hsm.Instance):
             _ignore_transfer_terminal_observation_transition(),
             hsm.transition(
                 hsm.on(_DialCompletedEvent),
-                hsm.guard(_has_call_connected_completion),
+                hsm.guard(_has_dial_completion),
                 hsm.effect(_emit_call_connected),
                 hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
             hsm.transition(
                 hsm.on(_DialFailedEvent),
-                hsm.guard(_has_call_failed_completion),
-                hsm.effect(_emit_call_failed),
+                hsm.guard(_has_dial_failure),
+                hsm.effect(_emit_dial_failed),
                 hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),

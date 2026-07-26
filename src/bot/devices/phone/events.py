@@ -12,13 +12,23 @@ CallId = typing.Annotated[
     pydantic.Field(
         min_length=1,
         description=(
-            "Provider-neutral identifier for one phone call. Firmware uses this value to reject stale service "
-            "callbacks and commands for a previous call. "
-            "When answering or declining a ring elevated as environment.sound, copy this from the stimulus "
-            "event.data.call_id (also mirrored on event.id for correlation) — never a documentation "
-            "example such as call-123."
+            "Provider-neutral session handle for one phone call. Firmware and the phone service use it to reject "
+            "stale service callbacks belonging to an earlier call. It is a transport handle with no counterpart on "
+            "a handset, so it never appears on an operator command: firmware already knows which call it has."
         ),
         examples=["livekit:caller", "sip:session-9f3a"],
+    ),
+]
+Caller = typing.Annotated[
+    str,
+    pydantic.Field(
+        min_length=1,
+        description=(
+            "Who the call is with, as the phone service reports it — the caller ID a handset would show. Not a "
+            "session handle and not unique: the same caller may ring repeatedly. Absent when the caller withheld "
+            "identification."
+        ),
+        examples=["Front desk", "+15555550123", "Support queue"],
     ),
 ]
 TransferId = typing.Annotated[
@@ -43,6 +53,7 @@ FailureKind = typing.Literal[
     "unknown",
 ]
 HangUpOutcome = typing.Literal["local_hang_up", "declined", "remote_hang_up", "failed", "transferred"]
+NoCallReason = typing.Literal["nothing_to_answer", "dial_not_answered", "dial_abandoned", "dial_failed"]
 
 class CallIdData(pydantic.BaseModel):
     """Payload scoped to one provider-neutral call identifier."""
@@ -88,32 +99,23 @@ class IncomingCallData(CallIdData):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"call_id": "call-123", "display_hint": "Front desk"}],
+            "examples": [{"call_id": "livekit:caller", "caller": "Front desk"}],
         },
     )
 
-    display_hint: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Optional provider-neutral text that may help an operator decide whether to answer. Firmware must not "
-            "treat this as stable caller identity."
-        ),
-        examples=["Front desk", "Support queue"],
-    )
+    caller: Caller | None = None
 
-class DialData(CallIdData):
-    """Command from an operator or owner asking firmware to dial an outbound call."""
+class DialData(pydantic.BaseModel):
+    """Command from an operator or owner asking firmware to dial an outbound call.
+
+    Carries no call id. You dial a destination and the exchange assigns the call, so the session
+    handle arrives from the provider on connect and there is nothing for a caller to supply.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [
-                {
-                    "call_id": "call-123",
-                    "target": {"kind": "address", "value": "sip:helpdesk@example.com"},
-                }
-            ],
+            "examples": [{"target": {"kind": "address", "value": "sip:helpdesk@example.com"}}],
         },
     )
 
@@ -125,24 +127,42 @@ class DialData(CallIdData):
         examples=[{"kind": "address", "value": "sip:helpdesk@example.com"}],
     )
 
-class AnswerCallData(CallIdData):
-    """Command from an operator or owner asking firmware to answer the current ringing call."""
+class AnswerCallData(pydantic.BaseModel):
+    """Command from an operator or owner asking firmware to answer the call that is ringing.
 
-class DeclineCallData(CallIdData):
-    """Command from an operator or owner asking firmware to decline the current ringing call."""
+    Fieldless, like the answer button on a handset: it answers whatever is ringing. Firmware
+    already holds the call, so naming one could only name the wrong one.
+    """
 
-class HangUpCallData(CallIdData):
-    """Command from an operator or owner asking firmware to hang up the current active call."""
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{}]},
+    )
 
-class TransferCallData(CallIdData):
-    """Command from an operator or owner asking firmware to transfer the current active call."""
+class DeclineCallData(pydantic.BaseModel):
+    """Command from an operator or owner asking firmware to decline the call that is ringing."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{}]},
+    )
+
+class HangUpCallData(pydantic.BaseModel):
+    """Command from an operator or owner asking firmware to hang up the call it is on."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{}]},
+    )
+
+class TransferCallData(pydantic.BaseModel):
+    """Command from an operator or owner asking firmware to transfer the call it is on."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
             "examples": [
                 {
-                    "call_id": "call-123",
                     "transfer_id": "transfer-123",
                     "target": {"kind": "address", "value": "helpdesk@example.com"},
                 }
@@ -156,6 +176,60 @@ class TransferCallData(CallIdData):
             "Provider-neutral transfer destination. The provider owns the transport mechanics; phone firmware owns "
             "the user-visible transfer state."
         ),
+        examples=[{"kind": "address", "value": "helpdesk@example.com"}],
+    )
+
+class DialFailedData(pydantic.BaseModel):
+    """Signal from a phone service provider that an outbound dial never became a call.
+
+    Distinct from :class:`CallFailedData` because there is no call to name: the attempt failed
+    before the exchange assigned one.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{"failure_kind": "remote_unavailable"}],
+        },
+    )
+
+    failure_kind: FailureKind = pydantic.Field(
+        description="Normalized low-cardinality reason the outbound attempt could not be placed.",
+        examples=["remote_unavailable", "provider_unavailable", "signaling_failed"],
+    )
+
+class AnswerRequestData(CallIdData):
+    """Firmware asking the phone service to answer one identified call.
+
+    The operator command is fieldless; firmware stamps the call it already holds. Two acts by two
+    parties: pressing answer, and telling the exchange which line is being answered.
+    """
+
+class DeclineRequestData(CallIdData):
+    """Firmware asking the phone service to decline one identified call."""
+
+class HangUpRequestData(CallIdData):
+    """Firmware asking the phone service to hang up one identified call."""
+
+class TransferRequestData(CallIdData):
+    """Firmware asking the phone service to transfer one identified call."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "call_id": "livekit:caller",
+                    "transfer_id": "transfer-123",
+                    "target": {"kind": "address", "value": "helpdesk@example.com"},
+                }
+            ],
+        },
+    )
+
+    transfer_id: TransferId
+    target: TransferTarget = pydantic.Field(
+        description="Provider-neutral transfer destination for the requested transfer.",
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
 
@@ -286,20 +360,29 @@ class PhoneCallData(CallIdData):
     """Committed public phone state for a specific call."""
 
 
-class RingingData(PhoneCallData):
+class RingingData(pydantic.BaseModel):
     """Committed public phone state that a call is ringing.
 
-    Distinct from :class:`PhoneCallData` used by answered/media-ready so environment elevation
-    can select ring acoustics by payload type without ``event.name`` discrimination.
+    Carries who is calling, not which session is ringing: a ringing handset shows caller ID, and
+    the session handle has no counterpart on it. Distinct from :class:`PhoneCallData` so
+    environment elevation can select ring acoustics by payload type, never by ``event.name``.
     """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{"caller": "Front desk"}, {}],
+        },
+    )
+
+    caller: Caller | None = None
 
 
 class PhoneSoundData(SoundData):
     """``environment.sound`` payload elevated from phone ringing (or call-scoped acoustic energy).
 
-    Subclasses :class:`~bot.environment.SoundData` with a typed ``call_id`` so models copy
-    ``event.data.call_id`` into answer/decline tools instead of inferring from ``event.id``.
-    Elevation also mirrors ``call_id`` onto ``event.id`` for HSM correlation.
+    Subclasses :class:`~bot.environment.SoundData` with the caller ID, so what a bot perceives
+    when a phone rings is who is calling. ``None`` is a real ring: a withheld caller still rings.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -308,8 +391,8 @@ class PhoneSoundData(SoundData):
         val_json_bytes="base64",
         json_schema_extra={
             "description": (
-                "Phone-elevated acoustic stimulus for environment.sound. Includes call_id so tool "
-                "arguments can copy event.data.call_id directly."
+                "Phone-elevated acoustic stimulus for environment.sound. Carries the caller ID the "
+                "phone reports, or null when the caller is unknown or withheld."
             ),
             "examples": [
                 {
@@ -318,18 +401,19 @@ class PhoneSoundData(SoundData):
                     "sample_rate_hz": 16000,
                     "channels": 1,
                     "kind": "phone.ringing",
-                    "call_id": "livekit:caller",
+                    "caller": "Front desk",
                 }
             ],
         },
     )
 
-    call_id: CallId = pydantic.Field(
+    caller: Caller | None = pydantic.Field(
+        default=None,
         description=(
-            "Live provider-neutral call identifier for this elevated phone sound. When kind is "
-            "phone.ringing or phone.call, answer/decline tools must use this value as call_id."
+            "Who this call is with, as the phone reports it. Null when the caller is unknown or "
+            "withheld — an anonymous call rings exactly like an identified one."
         ),
-        examples=["livekit:caller", "sip:session-9f3a"],
+        examples=["Front desk", "+15555550123"],
     )
 
 
@@ -346,6 +430,30 @@ class PhoneHungUpData(CallIdData):
     outcome: HangUpOutcome = pydantic.Field(
         description="Provider-neutral reason the phone firmware now considers the call ended.",
         examples=["local_hang_up", "declined", "remote_hang_up", "failed", "transferred"],
+    )
+
+class NoCallData(pydantic.BaseModel):
+    """Committed public phone state that a requested call action left the phone with no call.
+
+    The thing that was asked for did not happen, and no call exists to report it against — so
+    there is no call id here, and inventing one would fabricate the call that never was.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{"reason": "nothing_to_answer"}, {"reason": "dial_not_answered"}],
+        },
+    )
+
+    reason: NoCallReason = pydantic.Field(
+        description=(
+            "Why no call resulted: nothing_to_answer when answering with nothing ringing, "
+            "dial_not_answered when an outbound attempt timed out unconnected, dial_abandoned "
+            "when the attempt was hung up before it connected, dial_failed when the service "
+            "reported the attempt could not be completed."
+        ),
+        examples=["nothing_to_answer", "dial_not_answered", "dial_abandoned", "dial_failed"],
     )
 
 class PhoneTransferData(CallIdData):
@@ -454,25 +562,31 @@ TransferCallEvent = hsm.Event[TransferCallData](
     schema=TransferCallData,
 )
 
-ServiceAnswerRequestedEvent = hsm.Event[AnswerCallData](
+ServiceAnswerRequestedEvent = hsm.Event[AnswerRequestData](
     name="phone.service.answer_requested",
-    schema=AnswerCallData,
+    schema=AnswerRequestData,
 )
+# Dial alone carries no call id: the exchange assigns the call, so the handle comes back on
+# connect rather than going out with the request.
 ServiceDialRequestedEvent = hsm.Event[DialData](
     name="phone.service.dial_requested",
     schema=DialData,
 )
-ServiceDeclineRequestedEvent = hsm.Event[DeclineCallData](
+ServiceDialFailedEvent = hsm.Event[DialFailedData](
+    name="phone.service.dial_failed",
+    schema=DialFailedData,
+)
+ServiceDeclineRequestedEvent = hsm.Event[DeclineRequestData](
     name="phone.service.decline_requested",
-    schema=DeclineCallData,
+    schema=DeclineRequestData,
 )
-ServiceHangUpRequestedEvent = hsm.Event[HangUpCallData](
+ServiceHangUpRequestedEvent = hsm.Event[HangUpRequestData](
     name="phone.service.hang_up_requested",
-    schema=HangUpCallData,
+    schema=HangUpRequestData,
 )
-ServiceTransferRequestedEvent = hsm.Event[TransferCallData](
+ServiceTransferRequestedEvent = hsm.Event[TransferRequestData](
     name="phone.service.transfer_requested",
-    schema=TransferCallData,
+    schema=TransferRequestData,
 )
 
 RingingEvent = hsm.Event[RingingData](
@@ -490,6 +604,10 @@ MediaReadyEvent = hsm.Event[PhoneCallData](
 HungUpEvent = hsm.Event[PhoneHungUpData](
     name="phone.hung_up",
     schema=PhoneHungUpData,
+)
+NoCallEvent = hsm.Event[NoCallData](
+    name="phone.no_call",
+    schema=NoCallData,
 )
 TransferStartedEvent = hsm.Event[PhoneTransferData](
     name="phone.transfer_started",

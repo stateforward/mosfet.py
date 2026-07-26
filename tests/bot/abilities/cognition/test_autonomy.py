@@ -253,12 +253,10 @@ def always(event):
     return True
 
 def answer_ring(event):
-    # Prefer PhoneSoundData.call_id; event.id is the same for correlation.
-    call_id = event["data"].get("call_id") or event["id"]
+    # Answering names no call: the phone answers whatever it has ringing.
     hsm.dispatch(output_event, {
         "event": "phone.answer_call",
         "target": "phone",
-        "data": {"call_id": call_id},
         "reason": "practiced ring answer",
     })
 
@@ -306,7 +304,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
         await firmware.event_recorder().receive(
             phone.context(),
             phone_device.IncomingCallEvent.with_data(
-                phone_device.IncomingCallData(call_id=call_id, display_hint="caller")
+                phone_device.IncomingCallData(call_id=call_id, caller="caller")
             ),
         )
         await _wait_until(lambda: "ringing" in (firmware.state() or ""), timeout=2.0)
@@ -319,7 +317,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
                     sample_rate_hz=16_000,
                     channels=1,
                     kind="phone.ringing",
-                    call_id=call_id,
+                    caller="caller",
                 )
             ),
             id=call_id,
@@ -361,8 +359,8 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
     answer_selections = [item for item in output.output if item.event == phone_device.AnswerCallEvent.name]
     assert answer_selections, f"expected phone.answer_call, got {output.output!r}"
     assert answer_selections[0].target == "phone"
-    # Behavior read call_id from event["id"], not a hardcoded string.
-    assert answer_selections[0].data == {"call_id": call_id}
+    # Nothing to carry: the command has no identity to get wrong.
+    assert answer_selections[0].data is None
     assert phone_device.ServiceAnswerRequestedEvent.name in published, (
         f"phone never requested answer; published={published!r} state={phone_state!r}"
     )

@@ -100,22 +100,21 @@ def _minimal_wav() -> bytes:
     )
 
 
-def _ring_stimulus(*, include_audio: bool, call_id: str = _CALL_ID) -> hsm.Event[PhoneSoundData]:
+def _ring_stimulus() -> hsm.Event[PhoneSoundData]:
     """Match phone ring elevation: kind=phone.ringing, PhoneSoundData.call_id, event.id."""
 
-    audio = RING_SOUND_WAV if include_audio else _minimal_wav()
     return dataclasses.replace(
         SoundEvent.with_data(
             PhoneSoundData(
-                audio=audio,
+                audio=RING_SOUND_WAV,
                 media_type="audio/wav",
                 sample_rate_hz=16_000,
                 channels=1,
                 kind="phone.ringing",
-                call_id=call_id,
+                call_id=_CALL_ID,
             )
         ),
-        id=call_id,
+        id=_CALL_ID,
         source="phone-eval",
         target="",
     )
@@ -184,65 +183,10 @@ def mercury_processor() -> Processor:
     return _mercury_processor()
 
 
-def test_mercury_dispatch_tool_call_ring_with_audio_selects_answer(mercury_processor: Processor) -> None:
-    """Ring WAV + kind=phone.ringing → Mercury issues phone.answer_call (tool-calling works)."""
-
-    stimulus = _ring_stimulus(include_audio=True)
-    events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
-    _report("ring_with_audio", events)
-
-    answers = _answer_selections(events)
-    assert answers, (
-        f"expected phone.answer_call in Mercury selection for ring+audio; got {_event_names(events)}"
-    )
-    answer = answers[0]
-    assert isinstance(answer.data, dict)
-    assert answer.confidence is not None, "expected integer confidence from EventPatch unpatch"
-    assert 0 <= int(answer.confidence) <= 100
-
-
-def test_mercury_dispatch_tool_call_ring_with_audio_uses_stimulus_data_call_id(
-    mercury_processor: Processor,
-) -> None:
-    """call_id must be stimulus event.data.call_id, not AnswerCallData schema example ``call-123``.
-
-    Live runs have shown Mercury selecting answer_call with example ``call-123`` when the
-    full ring WAV is present; stamping call_id on SoundData makes the copy path explicit.
-    """
-
-    stimulus = _ring_stimulus(include_audio=True)
-    events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
-    _report("ring_with_audio_call_id", events)
-
-    answers = _answer_selections(events)
-    assert answers, f"expected phone.answer_call; got {_event_names(events)}"
-    assert isinstance(answers[0].data, dict)
-    got = answers[0].data.get("call_id")
-    assert got == _CALL_ID, (
-        "Mercury selected answer_call but call_id did not match stimulus event.data.call_id "
-        f"{_CALL_ID!r}; got {got!r} (schema example is often 'call-123')."
-    )
-
-
-def test_mercury_dispatch_tool_call_ring_kind_only_selects_answer(mercury_processor: Processor) -> None:
-    """Tiny WAV + kind=phone.ringing (no full clip) — often cleaner call_id than full-audio case."""
-
-    stimulus = _ring_stimulus(include_audio=False)
-    events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
-    _report("ring_kind_only", events)
-
-    answers = _answer_selections(events)
-    assert answers, (
-        f"expected phone.answer_call for kind=phone.ringing without full clip; got {_event_names(events)}"
-    )
-    assert isinstance(answers[0].data, dict)
-    assert answers[0].data.get("call_id") == _CALL_ID
-
-
 def test_mercury_dispatch_tool_call_returns_parseable_offered_events(mercury_processor: Processor) -> None:
     """Smoke: Mercury returns parseable dispatch selections without transport/schema failure."""
 
-    stimulus = _ring_stimulus(include_audio=True)
+    stimulus = _ring_stimulus()
     events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
     _report("parseable_dispatch", events)
     offered = {event.name for event in _phone_bot_intuition_schemas()}

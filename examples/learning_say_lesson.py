@@ -6,7 +6,7 @@ the phone firmware produces the stimulus and this script only observes typed eve
 
 1. **Experience** — an injected :class:`~bot.devices.phone.PhoneEventRecorder` delivers a
    provider incoming call. Firmware rings and elevates that ring to a real ``environment.sound``
-   stimulus (``PhoneSoundData`` with the packaged ring WAV plus ``call_id``). Intuition
+   stimulus (``PhoneSoundData`` with the packaged ring WAV plus ``caller``). Intuition
    deliberates that turn live against the phone's offered call events, and the turn is
    stored in memory as a cognitive episode.
 2. **Lesson** — macOS ``say`` renders *When the phone rings make sure you answer it* to WAV.
@@ -363,12 +363,12 @@ async def ringing_phone(
     elevated = collector.expect(
         lambda event: event.name == SoundEvent.name
         and isinstance(event.data, phone_device.PhoneSoundData)
-        and event.data.call_id == call_id
+        and event.data.caller == call_id
     )
     await watcher.receive(
         phone.context(),
         phone_device.IncomingCallEvent.with_data(
-            phone_device.IncomingCallData(call_id=call_id, display_hint="caller")
+            phone_device.IncomingCallData(call_id=call_id, caller=call_id)
         ),
     )
     _ = await awaited(ringing, timeout=_DEVICE_TIMEOUT_S, what=f"{phone_device.RingingEvent.name} for {call_id}")
@@ -409,7 +409,7 @@ def describe_stimulus(stimulus: hsm.Event[typing.Any]) -> str:
         return f"{stimulus.name} data={type(data).__name__}"
     packaged = data.audio == phone_device.RING_SOUND_WAV
     return (
-        f"{stimulus.name} kind={data.kind!r} call_id={data.call_id!r} "
+        f"{stimulus.name} kind={data.kind!r} caller={data.caller!r} "
         f"audio_bytes={len(data.audio)} media_type={data.media_type!r} "
         f"sample_rate_hz={data.sample_rate_hz} channels={data.channels} device_ring_wav={packaged}"
     )

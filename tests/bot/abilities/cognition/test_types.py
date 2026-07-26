@@ -1,13 +1,10 @@
 import asyncio
-import dataclasses
 
 import bot
 from bot.abilities import processing
 from bot.abilities.cognition import types
 from bot.device import Device
 from bot.devices.phone import events as phone_events
-from bot.devices.phone.events import PhoneSoundData
-from bot.environment import SoundData, SoundEvent
 import hsm
 import pytest
 
@@ -111,106 +108,3 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
         )
         is None
     )
-
-
-def test_bind_phone_call_id_from_ring_stimulus_overwrites_example_call_id() -> None:
-    """Models copy schema example call-123; host rebinds from PhoneSoundData.call_id."""
-
-    call_id = "livekit:caller-agent"
-    stimulus = dataclasses.replace(
-        SoundEvent.with_data(
-            PhoneSoundData(
-                audio=b"ring",
-                media_type="audio/wav",
-                sample_rate_hz=16_000,
-                channels=1,
-                kind="phone.ringing",
-                call_id=call_id,
-            )
-        ),
-        id=call_id,
-        source="phone",
-        target="",
-    )
-    input = processing.InputData(input=stimulus, schemas=(phone_events.AnswerCallEvent,))
-    selections = (
-        processing.SelectedEvent(
-            event=phone_events.AnswerCallEvent.name,
-            data={"call_id": "call-123", "confidence": 90},
-            confidence=90,
-        ),
-        processing.SelectedEvent(
-            event=bot.FocusDeviceEvent.name,
-            data={"device": "phone"},
-        ),
-    )
-    bound = types.bind_phone_call_id_from_stimulus(input, selections)
-    assert bound[0].event == phone_events.AnswerCallEvent.name
-    assert bound[0].data == {"call_id": call_id, "confidence": 90}
-    assert bound[1].event == bot.FocusDeviceEvent.name
-
-
-def test_bind_phone_call_id_prefers_phone_sound_data_call_id_over_event_id() -> None:
-    """event.data.call_id is the model-facing source of truth when both are stamped."""
-
-    stimulus = dataclasses.replace(
-        SoundEvent.with_data(
-            PhoneSoundData(
-                audio=b"ring",
-                media_type="audio/wav",
-                sample_rate_hz=16_000,
-                channels=1,
-                kind="phone.ringing",
-                call_id="from-data",
-            )
-        ),
-        id="from-event-id",
-        source="phone",
-        target="",
-    )
-    input = processing.InputData(input=stimulus, schemas=(phone_events.AnswerCallEvent,))
-    selections = (processing.SelectedEvent(event=phone_events.AnswerCallEvent.name, data={"call_id": "call-123"}),)
-    bound = types.bind_phone_call_id_from_stimulus(input, selections)
-    assert bound[0].data == {"call_id": "from-data"}
-
-
-def test_bind_phone_call_id_falls_back_to_event_id_without_phone_sound_data() -> None:
-    stimulus = dataclasses.replace(
-        SoundEvent.with_data(
-            SoundData(audio=b"ring", media_type="audio/wav", sample_rate_hz=16_000, channels=1, kind="phone.ringing")
-        ),
-        id="only-on-event-id",
-        source="phone",
-        target="",
-    )
-    input = processing.InputData(input=stimulus, schemas=(phone_events.AnswerCallEvent,))
-    selections = (processing.SelectedEvent(event=phone_events.AnswerCallEvent.name, data={"call_id": "call-123"}),)
-    bound = types.bind_phone_call_id_from_stimulus(input, selections)
-    assert bound[0].data == {"call_id": "only-on-event-id"}
-
-
-def test_bind_phone_call_id_skips_non_ring_sound() -> None:
-    stimulus = dataclasses.replace(
-        SoundEvent.with_data(
-            PhoneSoundData(
-                audio=b"noise",
-                media_type="audio/wav",
-                sample_rate_hz=16_000,
-                channels=1,
-                kind="ambient",
-                call_id="should-not-bind",
-            )
-        ),
-        id="not-a-call",
-        source="environment",
-        target="",
-    )
-    input = processing.InputData(input=stimulus, schemas=(phone_events.AnswerCallEvent,))
-    selections = (
-        processing.SelectedEvent(
-            event=phone_events.AnswerCallEvent.name,
-            data={"call_id": "call-123"},
-        ),
-    )
-    bound = types.bind_phone_call_id_from_stimulus(input, selections)
-    assert bound[0].data == {"call_id": "call-123"}
