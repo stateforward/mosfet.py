@@ -149,11 +149,22 @@ def _record_observation_failure(
         pass
 
 
+def _failure_message(event: hsm.Event[typing.Any]) -> str:
+    """The human-readable reason carried by a failure event, if it carries one."""
+
+    message = getattr(event.data, "message", None)
+    return message if isinstance(message, str) and message else ""
+
+
 def observer(ctx: hsm.Context, instance: hsm.Instance, observation: hsm.Event[typing.Any]) -> None:
     """Record one HSM observation as metrics and a short trace span.
 
     When the ``bot.telemetry.hsm`` logger is at DEBUG, also emit a structured log line
     with low-cardinality machine/event fields (no payloads, IDs, or audio bytes).
+
+    A failure that carries a reason is logged at ERROR *with* that reason. Metric and span
+    attributes stay low-cardinality and payload-free, but a machine reporting why it failed and
+    nothing printing it is how a mute robot looks identical to a working one in a log.
     """
 
     del ctx
@@ -161,6 +172,16 @@ def observer(ctx: hsm.Context, instance: hsm.Instance, observation: hsm.Event[ty
         return
     event = observed_event(observation)
     attributes = observation_attributes(observation, instance=instance, outcome="observed")
+    if event.kind == hsm.ErrorEventKind:
+        reason = _failure_message(event)
+        if reason:
+            _LOG.error(
+                "hsm failure component=%s state=%s event=%s reason=%s",
+                attributes.get("bot.component.name"),
+                attributes.get("hsm.machine.state"),
+                attributes.get("hsm.event.name"),
+                reason,
+            )
     if _LOG.isEnabledFor(logging.DEBUG):
         _LOG.debug(
             "hsm observe component=%s state=%s occurrence=%s event=%s kind=%s has_data=%s",

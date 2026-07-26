@@ -1,8 +1,10 @@
 import asyncio
 import datetime
+import logging
 import typing
 
 import hsm
+import pydantic
 import pytest
 
 import bot.telemetry.hsm as telemetry
@@ -237,3 +239,39 @@ def test_hsm_observe_metric_failure_does_not_block_domain_transition(monkeypatch
     assert "hsm/initial" in failed_event_names
     assert "demo.go" in failed_event_names
     assert all(attributes["bot.outcome"] == "failed" for _, attributes in failure_counter.calls)
+
+
+def test_observer_logs_the_reason_a_failure_carries(caplog: pytest.LogCaptureFixture) -> None:
+    """A failure that knows why it failed must say so, not report ``has_data=True``.
+
+    Every ability failure in the system was invisible this way: the message reached typed event
+    data and nothing printed it, so a mute robot and a working one produced identical logs.
+    """
+
+    class FailureData(pydantic.BaseModel):
+        message: str
+
+    failed = hsm.Event[FailureData](
+        name="bot.ability.test.apply.failed",
+        kind=hsm.ErrorEventKind,
+        schema=FailureData,
+    ).with_data(FailureData(message="Device is not started in this environment."))
+
+    with caplog.at_level(logging.ERROR, logger="bot.telemetry.hsm"):
+        telemetry.observer(hsm.Context(), _DemoInstance(), _observation_for(failed))
+
+    failures = [record for record in caplog.records if "hsm failure" in record.getMessage()]
+    assert len(failures) == 1
+    assert "Device is not started in this environment." in failures[0].getMessage()
+    assert "bot.ability.test.apply.failed" in failures[0].getMessage()
+
+
+def test_observer_stays_quiet_for_ordinary_events(caplog: pytest.LogCaptureFixture) -> None:
+    """Only failures are raised to ERROR; ordinary traffic keeps its DEBUG line."""
+
+    ordinary = hsm.Event[None](name="bot.ability.test.applied")
+
+    with caplog.at_level(logging.ERROR, logger="bot.telemetry.hsm"):
+        telemetry.observer(hsm.Context(), _DemoInstance(), _observation_for(ordinary))
+
+    assert [record for record in caplog.records if "hsm failure" in record.getMessage()] == []
