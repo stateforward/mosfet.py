@@ -162,17 +162,30 @@ class SpeechEncoder(abilities.Encoder[bytes, bytes]):
         except Exception as error:
             raise SpeechEncodingError("Gemini speech encoding failed.") from error
 
+        reported_rate: int | None = None
+        output_audio = _mapping(response.get("output_audio"))
+        if output_audio is not None:
+            sample_rate = output_audio.get("sample_rate")
+            if isinstance(sample_rate, int) and sample_rate > 0:
+                reported_rate = sample_rate
+
         format_name = self.output_format.strip().lower()
         if format_name in {"", "pcm", "raw", "audio/l16", "audio/pcm"}:
+            # Raw PCM carries no header, so the rate this encoder is configured with is the rate
+            # the audio gets played at downstream — nothing here can correct a disagreement, and
+            # a silent one is heard as a wrong-speed voice rather than raised as an error. Say so
+            # instead. Absent report means the API did not tell us; the configured value stands.
+            if reported_rate is not None and reported_rate != self.sample_rate_hz:
+                raise SpeechEncodingError(
+                    f"Gemini returned {reported_rate} Hz PCM but this encoder is configured for "
+                    f"{self.sample_rate_hz} Hz. Raw PCM has no header to carry the difference, so "
+                    f"playing it would sound wrong rather than fail. Configure sample_rate_hz to "
+                    f"{reported_rate}, or use output_format='wav' to carry the rate in-band."
+                )
             return pcm
         if format_name in {"wav", "wave", "audio/wav"}:
-            rate = self.sample_rate_hz
-            output_audio = _mapping(response.get("output_audio"))
-            if output_audio is not None:
-                sample_rate = output_audio.get("sample_rate")
-                if isinstance(sample_rate, int) and sample_rate > 0:
-                    rate = sample_rate
-            return pcm_to_wav(pcm, sample_rate_hz=rate)
+            # A container carries the rate in-band, so the reported one can simply be used.
+            return pcm_to_wav(pcm, sample_rate_hz=reported_rate or self.sample_rate_hz)
         raise SpeechEncodingError(f"Unsupported Gemini speech output format: {self.output_format}.")
 
 

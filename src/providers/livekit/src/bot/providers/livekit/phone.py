@@ -704,6 +704,8 @@ class MediaSnapshot(pydantic.BaseModel):
                     "remote_audio_bytes": 3840,
                     "remote_audio_dropped_chunks": 1,
                     "remote_audio_dropped_bytes": 960,
+                    "local_audio_failed_chunks": 1,
+                    "local_audio_failed_bytes": 960,
                 }
             ],
         },
@@ -735,6 +737,22 @@ class MediaSnapshot(pydantic.BaseModel):
     remote_audio_dropped_bytes: int = pydantic.Field(
         ge=0,
         description="Number of remote audio bytes rejected by PhoneService HSM guards.",
+        examples=[960],
+    )
+    local_audio_failed_chunks: int = pydantic.Field(
+        default=0,
+        ge=0,
+        description=(
+            "Number of local playout chunks that failed to publish onto the LiveKit track, "
+            "usually because the audio was not raw PCM. The outbound mirror of "
+            "remote_audio_dropped_chunks: a mute bot is observable here rather than only in logs."
+        ),
+        examples=[1],
+    )
+    local_audio_failed_bytes: int = pydantic.Field(
+        default=0,
+        ge=0,
+        description="Number of local playout bytes that failed to publish onto the LiveKit track.",
         examples=[960],
     )
 
@@ -1123,6 +1141,8 @@ class PhoneService(hsm.Instance):
             remote_audio_bytes=self._remote_audio_bytes,
             remote_audio_dropped_chunks=self._remote_audio_dropped_chunks,
             remote_audio_dropped_bytes=self._remote_audio_dropped_bytes,
+            local_audio_failed_chunks=self._local_audio_failed_chunks,
+            local_audio_failed_bytes=self._local_audio_failed_bytes,
         )
 
     @staticmethod

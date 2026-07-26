@@ -15,6 +15,7 @@ from bot.devices import audio as audio_device
 from bot.devices import phone as phone_device
 
 from bot.providers.livekit import (
+    MediaSnapshot,
     ServiceCallFailedEvent,
     ServiceIncomingCallEvent,
     ServiceMediaReadyEvent,
@@ -2281,11 +2282,19 @@ def test_local_audio_uplink_publish_failure_is_surfaced(caplog: pytest.LogCaptur
             ),
         )
         await _wait_until(lambda: any(record.levelname == "ERROR" for record in caplog.records))
+        captured.append(service.media_snapshot())
 
+    captured: list[MediaSnapshot] = []
     with caplog.at_level(logging.ERROR, logger="bot.providers.livekit.phone"):
         asyncio.run(run())
+    snapshot = captured[0] if captured else None
 
     failures = [record for record in caplog.records if "local audio uplink publish failed" in record.getMessage()]
     assert len(failures) == 1
     # The media type is in the message because it is almost always the reason.
     assert "audio/wav" in failures[0].getMessage()
+    # And it is observable without reading logs, the way a dropped inbound chunk already is.
+    assert snapshot is not None
+    assert snapshot.local_audio_failed_chunks == 1
+    assert snapshot.local_audio_failed_bytes == 4
+    assert snapshot.remote_audio_dropped_chunks == 0

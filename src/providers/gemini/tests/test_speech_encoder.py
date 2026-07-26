@@ -7,6 +7,8 @@ import dataclasses
 import io
 import wave
 
+import pytest
+
 from bot.providers.gemini import SpeechEncoder, SpeechEncodingError
 from bot.providers.gemini.speech_encoder import pcm_to_wav
 
@@ -134,3 +136,50 @@ def test_pcm_to_wav_roundtrip() -> None:
     with wave.open(io.BytesIO(wav), "rb") as stream:
         assert stream.getframerate() == 16_000
         assert stream.readframes(stream.getnframes()) == pcm
+
+
+def test_pcm_output_rejects_a_sample_rate_the_api_disagrees_with() -> None:
+    """Raw PCM has no header, so a rate disagreement is heard, not raised — unless we raise it.
+
+    The label this encoder is configured with is what downstream plays the audio at. If Gemini
+    returns a different rate there is nowhere to record the difference, so the voice comes out at
+    the wrong speed and looks like a model problem. Fail with both numbers instead.
+    """
+
+    pcm = b"\x01\x00\x02\x00"
+    client = FakeContentClient(response=_tts_response(pcm, sample_rate=48_000))
+    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
+
+    with pytest.raises(SpeechEncodingError) as failure:
+        _ = asyncio.run(encoder.encode(b"hello"))
+
+    assert "48000" in str(failure.value)
+    assert "24000" in str(failure.value)
+
+
+def test_pcm_output_accepts_a_matching_reported_rate() -> None:
+    pcm = b"\x01\x00\x02\x00"
+    client = FakeContentClient(response=_tts_response(pcm, sample_rate=24_000))
+    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
+
+    assert asyncio.run(encoder.encode(b"hello")) == pcm
+
+
+def test_pcm_output_falls_back_to_the_configured_rate_when_none_is_reported() -> None:
+    """An unreported rate is not an error: the configured value stands, as it always has."""
+
+    pcm = b"\x01\x00\x02\x00"
+    client = FakeContentClient(response={"output_audio": {"data": base64.b64encode(pcm).decode("ascii")}})
+    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
+
+    assert asyncio.run(encoder.encode(b"hello")) == pcm
+
+
+def test_wav_output_uses_the_reported_rate_over_the_configured_one() -> None:
+    """The container can carry the difference, so it does — the mirror of the PCM branch."""
+
+    pcm = b"\x01\x00\x02\x00"
+    client = FakeContentClient(response=_tts_response(pcm, sample_rate=16_000))
+    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="wav")
+
+    assert asyncio.run(encoder.encode(b"hello")) == pcm_to_wav(pcm, sample_rate_hz=16_000)
