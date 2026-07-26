@@ -8,8 +8,10 @@ import io
 import wave
 
 import pytest
+from google.genai import errors as genai_errors
 
-from bot.providers.gemini import SpeechEncoder, SpeechEncodingError
+from bot.providers.gemini import ChatClient, SpeechEncoder, SpeechEncodingError
+from bot.providers.gemini import client as gemini_client
 from bot.providers.gemini.speech_encoder import pcm_to_wav
 
 
@@ -55,6 +57,47 @@ class FakeContentClient:
         if self.error is not None:
             raise self.error
         return self.response
+
+
+@dataclasses.dataclass
+class FailingResource:
+    """SDK resource that fails the way the live API does."""
+
+    error: Exception
+
+    def create(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+    def generate_content(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+
+@dataclasses.dataclass
+class FailingSdkClient:
+    """google-genai client shape whose every call raises one SDK error."""
+
+    interactions: gemini_client.GeminiInteractionsResource
+    models: gemini_client.GeminiModelsResource
+
+
+def _failing_sdk_client(error: Exception) -> FailingSdkClient:
+    resource = FailingResource(error=error)
+    return FailingSdkClient(interactions=resource, models=resource)
+
+
+def _quota_error() -> genai_errors.ClientError:
+    return genai_errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "message": "Quota exceeded for quota metric 'Generate requests per minute'.",
+            }
+        },
+    )
 
 
 def _tts_response(pcm: bytes, *, sample_rate: int = 24_000) -> dict[str, object]:
@@ -128,6 +171,78 @@ def test_speech_encoder_rejects_missing_audio() -> None:
         assert "output_audio" in str(error)
     else:
         raise AssertionError("Expected SpeechEncodingError.")
+
+
+def test_speech_encoding_failure_names_the_underlying_sdk_error() -> None:
+    """A refused request must say what refused it, in the message the caller can see.
+
+    Abilities turn a raised encoder error into typed failure data with ``str(error)``, so the
+    exception message is the whole diagnostic budget for a live run: whatever it omits is gone
+    by the time anything logs it. ``__cause__`` survives on the exception object and no boundary
+    reads it. One generic line for a quota refusal, a timeout, and a malformed response is how a
+    mute robot and a throttled one look identical afterwards.
+    """
+
+    client = FakeContentClient(response={}, error=_quota_error())
+    encoder = SpeechEncoder(client=client)
+
+    with pytest.raises(SpeechEncodingError) as failure:
+        _ = asyncio.run(encoder.encode(b"hello"))
+
+    message = str(failure.value)
+    assert "429" in message
+    assert "RESOURCE_EXHAUSTED" in message
+    assert "Quota exceeded" in message
+    assert "ClientError" in message
+
+
+def test_speech_encoding_failure_names_the_cause_through_the_real_client() -> None:
+    """The live path is encoder → ChatClient → SDK, and every layer must pass the reason up.
+
+    ``ChatClient`` wraps SDK exceptions in ``RequestError`` before the encoder ever sees them, so
+    a reason that only the encoder preserves is still lost in production.
+    """
+
+    client = ChatClient(model="gemini-3.1-flash-tts-preview", client=_failing_sdk_client(_quota_error()))
+    encoder = SpeechEncoder(client=client)
+
+    with pytest.raises(SpeechEncodingError) as failure:
+        _ = asyncio.run(encoder.encode(b"hello"))
+
+    message = str(failure.value)
+    assert "429" in message
+    assert "RESOURCE_EXHAUSTED" in message
+    assert "Quota exceeded" in message
+    # Each layer names itself once: a reason repeated per wrapper is noise an operator has to read past.
+    assert message.count("Gemini interactions.create request failed") == 1
+    assert message.count("Quota exceeded") == 1
+
+
+def test_speech_encoding_failure_names_a_transport_error_without_a_status() -> None:
+    """Timeouts carry no HTTP status, and the message still has to identify them."""
+
+    client = FakeContentClient(response={}, error=TimeoutError("request timed out after 30s"))
+    encoder = SpeechEncoder(client=client)
+
+    with pytest.raises(SpeechEncodingError) as failure:
+        _ = asyncio.run(encoder.encode(b"hello"))
+
+    message = str(failure.value)
+    assert "TimeoutError" in message
+    assert "request timed out after 30s" in message
+
+
+def test_speech_encoding_failure_keeps_the_original_exception_chained() -> None:
+    """Naming the cause in the message must not cost the chain a debugger can walk."""
+
+    error = _quota_error()
+    client = FakeContentClient(response={}, error=error)
+    encoder = SpeechEncoder(client=client)
+
+    with pytest.raises(SpeechEncodingError) as failure:
+        _ = asyncio.run(encoder.encode(b"hello"))
+
+    assert failure.value.__cause__ is error
 
 
 def test_pcm_to_wav_roundtrip() -> None:

@@ -17,6 +17,38 @@ class RequestError(RuntimeError):
     """Raised when a Gemini SDK request fails."""
 
 
+def error_detail(error: BaseException) -> str:
+    """Name a raised SDK exception: its type, HTTP status, and the reason the API gave.
+
+    This provider is the last layer that can still see a real ``google.genai`` exception. Callers
+    above it project a raised error into typed failure data as ``str(error)``, so whatever the
+    wrapper message omits is unrecoverable by the time anything logs it — ``raise ... from`` keeps
+    the chain on the object, and nothing upstream reads ``__cause__``. Without this, a quota
+    refusal, a timeout, and a malformed response all print one identical line.
+
+    Attributes are read defensively: the SDK raises ``APIError`` subclasses carrying ``code`` and
+    ``status`` alongside plain transport exceptions that carry neither. High-cardinality text
+    belongs in the message only; metric and span attributes stay normalized upstream.
+    """
+
+    if isinstance(error, RequestError):
+        # Already a detail produced here; re-labelling it would nest the same line inside itself.
+        return str(error)
+
+    parts = [type(error).__name__]
+    code = getattr(error, "code", None)
+    if isinstance(code, int) and code:
+        parts.append(f"status={code}")
+    status = getattr(error, "status", None)
+    if isinstance(status, str) and status:
+        parts.append(f"status_text={status}")
+    api_message = getattr(error, "message", None)
+    reason = api_message if isinstance(api_message, str) and api_message else str(error)
+    if reason:
+        parts.append(f"reason={reason}")
+    return " ".join(parts)
+
+
 def _empty_config() -> dict[str, object]:
     return {}
 
@@ -196,7 +228,7 @@ class ChatClient(ContentClient):
         try:
             response = sdk_client.models.generate_content(**kwargs)
         except Exception as error:
-            message = "Gemini generate_content request failed."
+            message = f"Gemini generate_content request failed: {error_detail(error)}"
             raise RequestError(message) from error
         return _response_object(response, kind="generate_content")
 
@@ -237,7 +269,7 @@ class ChatClient(ContentClient):
         try:
             response = sdk_client.interactions.create(**body)
         except Exception as error:
-            message = "Gemini interactions.create request failed."
+            message = f"Gemini interactions.create request failed: {error_detail(error)}"
             raise RequestError(message) from error
         return _response_object(response, kind="interactions.create")
 
@@ -279,6 +311,7 @@ __all__ = [
     "GeminiModelsResource",
     "GeminiSdkClient",
     "RequestError",
+    "error_detail",
     "jsonable",
     "jsonable_mapping",
 ]

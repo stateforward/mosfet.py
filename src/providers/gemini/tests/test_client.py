@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from google.genai import errors as genai_errors
 
 import hsm
 
@@ -202,6 +203,66 @@ def test_chat_client_vertex_mode(monkeypatch: pytest.MonkeyPatch) -> None:
             "location": "us-central1",
         }
     ]
+
+
+@dataclasses.dataclass
+class FailingResource:
+    error: Exception
+
+    def create(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+    def generate_content(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+
+def test_request_error_names_the_sdk_status_and_reason() -> None:
+    """``RequestError`` is the last place the SDK's own error is still in scope.
+
+    Everything above it sees only this message: abilities project a raised exception into typed
+    failure data with ``str(error)``, and the ``raise ... from`` chain never crosses that boundary.
+    A request error that does not name its status therefore erases the one fact needed to tell a
+    throttled robot from a broken one.
+    """
+
+    error = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded."}},
+    )
+    resource = FailingResource(error=error)
+    client = ChatClient(
+        model="gemini-3.5-flash",
+        client=FakeSdkClient(
+            models=resource,
+            interactions=resource,
+        ),
+    )
+
+    with pytest.raises(gemini_client.RequestError) as failure:
+        _ = client.create_interaction(model="gemini-3.1-flash-tts-preview", input="hi")
+
+    message = str(failure.value)
+    assert "interactions.create" in message
+    assert "429" in message
+    assert "RESOURCE_EXHAUSTED" in message
+    assert "Quota exceeded." in message
+    assert failure.value.__cause__ is error
+
+
+def test_request_error_names_a_transport_failure_with_no_status() -> None:
+    error = TimeoutError("read timed out")
+    resource = FailingResource(error=error)
+    client = ChatClient(model="gemini-3.5-flash", client=FakeSdkClient(models=resource, interactions=resource))
+
+    with pytest.raises(gemini_client.RequestError) as failure:
+        _ = client.generate_content(contents=[{"role": "user", "parts": [{"text": "hello"}]}])
+
+    message = str(failure.value)
+    assert "generate_content" in message
+    assert "TimeoutError" in message
+    assert "read timed out" in message
 
 
 def test_chat_client_rejects_non_object_responses() -> None:

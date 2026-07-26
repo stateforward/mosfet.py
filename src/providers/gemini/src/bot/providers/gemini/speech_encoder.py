@@ -10,7 +10,7 @@ import io
 import typing
 import wave
 
-from .client import ContentClient, RequestError
+from .client import ContentClient, error_detail
 
 
 _DEFAULT_TTS_MODEL = "gemini-3.1-flash-tts-preview"
@@ -157,10 +157,8 @@ class SpeechEncoder(abilities.Encoder[bytes, bytes]):
             pcm = audio_bytes_from_interaction_response(response)
         except SpeechEncodingError:
             raise
-        except RequestError as error:
-            raise SpeechEncodingError("Gemini speech encoding failed.") from error
         except Exception as error:
-            raise SpeechEncodingError("Gemini speech encoding failed.") from error
+            raise SpeechEncodingError(f"Gemini speech encoding failed: {error_detail(error)}") from error
 
         reported_rate: int | None = None
         output_audio = _mapping(response.get("output_audio"))

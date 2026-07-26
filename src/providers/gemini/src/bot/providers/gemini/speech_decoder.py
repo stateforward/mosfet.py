@@ -8,7 +8,7 @@ import collections.abc
 import dataclasses
 import typing
 
-from .client import ContentClient, RequestError
+from .client import ContentClient, error_detail
 
 
 _DEFAULT_STT_MODEL = "gemini-3.5-flash"
@@ -114,10 +114,8 @@ class SpeechDecoder(speech.SpeechDecoder):
             transcript = transcript_from_interaction_response(response)
         except SpeechDecodingError:
             raise
-        except RequestError as error:
-            raise SpeechDecodingError("Gemini speech decoding failed.") from error
         except Exception as error:
-            raise SpeechDecodingError("Gemini speech decoding failed.") from error
+            raise SpeechDecodingError(f"Gemini speech decoding failed: {error_detail(error)}") from error
         return transcript.encode("utf-8")
 
 

@@ -6,6 +6,9 @@ import collections.abc
 import dataclasses
 import typing
 
+import pytest
+from google.genai import errors as genai_errors
+
 from bot.providers.gemini import SpeechDecoder, SpeechDecodingError
 
 
@@ -114,3 +117,28 @@ def test_speech_decoder_rejects_missing_transcript() -> None:
         assert "output_text" in str(error) or "failed" in str(error).lower()
     else:
         raise AssertionError("Expected SpeechDecodingError.")
+
+
+def test_speech_decoding_failure_names_the_underlying_sdk_error() -> None:
+    """Transcription refusals need the same named cause speech encoding needs.
+
+    Abilities carry a raised decoder error into typed failure data as ``str(error)``, so a
+    generic message makes a quota refusal, a timeout, and a bad response shape indistinguishable
+    in the only artifact a live run leaves behind.
+    """
+
+    error = genai_errors.ClientError(
+        429,
+        {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded for STT."}},
+    )
+    client = FakeContentClient(response={}, error=error)
+    decoder = SpeechDecoder(client=client)
+
+    with pytest.raises(SpeechDecodingError) as failure:
+        _ = asyncio.run(decoder.decode(b"audio"))
+
+    message = str(failure.value)
+    assert "429" in message
+    assert "RESOURCE_EXHAUSTED" in message
+    assert "Quota exceeded for STT." in message
+    assert failure.value.__cause__ is error

@@ -6,6 +6,7 @@ from .client import (
     GeminiModelsResource,
     GeminiSdkClient,
     RequestError,
+    error_detail,
 )
 from .processing import Processor, ProcessingError
 from .speech_decoder import SpeechDecoder, SpeechDecodingError
@@ -31,4 +32,5 @@ __all__ = [
     "TextGenerationError",
     "TextGenerator",
     "__version__",
+    "error_detail",
 ]
