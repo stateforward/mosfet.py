@@ -11,9 +11,7 @@ from ._mlx import (
     VoiceDetectionModel,
     VoiceDetectionModelLoader,
     coerce_iterable,
-    get_member,
     load_voice_detection_model,
-    optional_float,
 )
 
 # Process-local warm cache: frozen VoiceDetector cannot store a loaded model after first use.
@@ -52,7 +50,9 @@ class VoiceDetector(voice.VoiceDetector):
             message = "MLX Audio voice detection failed."
             raise VoiceDetectionError(message) from error
 
-        return voice.detection.OutputData(is_voice=bool(timestamps), confidence=_confidence_from_timestamps(timestamps))
+        # `confidence` stays unset: MLX Audio derives these records from per-frame speech
+        # probabilities but emits only `{"start", "end"}`, so no score survives the call.
+        return voice.detection.OutputData(is_voice=bool(timestamps))
 
     def _resolve_model(self) -> VoiceDetectionModel:
         if self.model is not None:
@@ -66,16 +66,6 @@ class VoiceDetector(voice.VoiceDetector):
         loaded = self.load_model(self.model_id)
         _VOICE_DETECTION_MODEL_CACHE[self.model_id] = loaded
         return loaded
-
-def _confidence_from_timestamps(timestamps: tuple[object, ...]) -> float | None:
-    confidence_values: list[float] = []
-    for timestamp in timestamps:
-        confidence = optional_float(get_member(timestamp, "confidence", "probability", "score"))
-        if confidence is not None:
-            confidence_values.append(confidence)
-    if not confidence_values:
-        return None
-    return max(confidence_values)
 
 __all__ = [
     "VoiceDetectionError",
