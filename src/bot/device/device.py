@@ -127,7 +127,15 @@ class Device(hsm.Instance, attachment.Attachment):
 
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
-        return await super().start(ctx, data)
+        instance = await super().start(ctx, data)
+        # Presence is a property of being started in a world, not of being owned by a bot.
+        # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both
+        # resolve that scope from self.context(), which is the authoritative one. A passed ctx may
+        # be a bare context, or a different scope than the device actually started in; either
+        # resolves to a throwaway World whose participant set is empty, so the operation would
+        # silently do nothing.
+        World.from_context(self.context()).join(self)
+        return instance
 
     @typing.override
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
@@ -167,6 +175,16 @@ class Device(hsm.Instance, attachment.Attachment):
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
+        # Pairs with the join in start and resolves the same way, for the reason given there.
+        # Still valid on an already-stopped device: Instance.context() keeps the last started
+        # context, and a never-started one yields a bare context, so this is a no-op rather than
+        # an error — Bot activation cleanup stops the whole configured device set regardless.
+        # No test can observe this: hsm.Started re-news the machine with a fresh id and
+        # dispatch_to de-dupes on snapshot ID, so a stale entry can never mis-deliver. It is
+        # ownership completeness and map hygiene — the presence analogue of the firmware-entry
+        # cleanup below, which exists because HSM never prunes Keys.Instances on stop. Do not
+        # delete it as untested.
+        World.from_context(self.context()).leave(self)
         await hsm.Instance.stop(self, ctx)
 
         firmware = self._firmware
@@ -191,20 +209,28 @@ class Device(hsm.Instance, attachment.Attachment):
 
     @typing.override
     async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:
-        restart_ctx = ctx
+        """Stop and start again under ``ctx``, the scope the device comes back up in.
+
+        ``ctx`` MUST outlive this device's own context, which ``stop`` cancels — pass the world,
+        or another durable scope. The device does not synthesize a replacement context: a
+        synthesized one carries the addressing map but no world scope, so the device would come
+        back addressable yet absent from world presence, and every later broadcast from it would
+        silently reach nobody.
+
+        This deliberately diverges from ``hsm.HSM.restart``, which still synthesizes a parentless
+        context when handed the machine's own. Devices require the caller to name the scope, so
+        ``hsm.restart(device)`` — which defaults ``ctx`` to ``sm.context()`` — raises here.
+        """
+
         if ctx is self.context():
-            values: dict[typing.Hashable, object] = {}
-            instances = ctx.value(hsm.Keys.Instances)
-            owner = ctx.value(hsm.Keys.Owner)
-            if instances is not None:
-                values[hsm.Keys.Instances] = instances
-            if owner is not None:
-                values[hsm.Keys.HSM] = owner
-            restart_ctx = hsm.Context(values=values)
-        if restart_ctx.is_done():
+            raise ValueError(
+                "Device.restart needs a scope that outlives the device; self.context() is canceled by stop."
+            )
+        if ctx.is_done():
             return None
-        await self.stop(restart_ctx)
-        _ = await super().start(restart_ctx, data)
+        await self.stop(ctx)
+        # Device.start, not hsm.Instance.start: restart must re-join the presence stop left.
+        _ = await self.start(ctx, data)
         return self
 
     @typing.override

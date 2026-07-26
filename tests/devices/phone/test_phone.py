@@ -424,6 +424,7 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_world() -> No
 
         _ = await hsm.started(world, phone, phone.model)
         _ = await hsm.started(world, inside, inside.model, hsm.Config(id="inside"))
+        world.join(inside)
         _ = await hsm.started(None, outside, outside.model, hsm.Config(id="outside"))
         phone_id = hsm.id(phone)
 
@@ -753,6 +754,7 @@ def test_phone_service_audio_routes_through_speaker_to_world_observers() -> None
         _ = await hsm.started(world, phone, phone.model)
         _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
         _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
+        world.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -821,6 +823,7 @@ def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audi
 
         _ = await hsm.started(world, phone, phone.model)
         _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
+        world.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 
@@ -877,6 +880,7 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
         _ = await hsm.started(world, phone, phone.model)
         _ = await hsm.started(world, speaker, speaker.model, hsm.Config(id="phone-speaker"))
         _ = await hsm.started(world, observer, observer.model, hsm.Config(id="observer"))
+        world.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
 

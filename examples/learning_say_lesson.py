@@ -296,7 +296,9 @@ class TerminalCollector(hsm.Instance):
 
 async def started_collector(world: World) -> TerminalCollector:
     collector = TerminalCollector()
-    return await hsm.started(world, collector, typing.cast(hsm.Model, TerminalCollector.model))
+    _ = await hsm.started(world, collector, typing.cast(hsm.Model, TerminalCollector.model))
+    world.join(collector)
+    return collector
 
 
 async def attach_ability(

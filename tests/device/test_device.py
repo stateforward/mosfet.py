@@ -1002,3 +1002,131 @@ def test_device_firmware_initializing_event_uses_completion_kind() -> None:
     assert FirmwareInitializingDoneEvent.kind == hsm.CompletionEventKind
     assert FirmwareInitializingFailedEvent.name == "device.firmware.initializing.failed"
     assert FirmwareInitializingFailedEvent.kind == hsm.ErrorEventKind
+
+
+_WorldProbeEvent = hsm.Event[None](name="device.test.world.probe")
+
+
+class ProbeFirmware(hsm.Instance):
+    """Firmware that counts every receipt of a world-shaped probe event."""
+
+    receipts: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.receipts = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "ProbeFirmware", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.receipts.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "ProbeFirmware",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle", hsm.transition(hsm.on(_WorldProbeEvent), hsm.effect(_record))),
+    )
+
+
+class ProbeFirmwareDevice(Device):
+    firmware_model: typing.ClassVar[hsm.Model] = ProbeFirmware.model
+
+    @override
+    def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
+        del ctx, event
+        return ProbeFirmware()
+
+
+def test_device_firmware_is_addressable_but_never_a_broadcast_participant() -> None:
+    async def run() -> tuple[bool, int, int]:
+        world = World()
+        device = ProbeFirmwareDevice()
+
+        _ = await hsm.started(world, device, device.model)
+        await wait_until(lambda: device_firmware(device) is not None)
+        firmware = typing.cast(ProbeFirmware, device_firmware(device))
+        instances = world.value(hsm.Keys.Instances)
+        assert isinstance(instances, collections.abc.Mapping)
+        addressable = instances[hsm.id(firmware)] is firmware
+
+        await world.broadcast(_WorldProbeEvent)
+        broadcast_receipts = len(firmware.receipts)
+        firmware.receipts.clear()
+        await hsm.dispatch_all(world, _WorldProbeEvent)
+        addressing_receipts = len(firmware.receipts)
+
+        return addressable, broadcast_receipts, addressing_receipts
+
+    addressable, broadcast_receipts, addressing_receipts = asyncio.run(run())
+
+    # Addressing plane: firmware stays in the world instance map and reachable by id.
+    assert addressable
+    # Presence plane: the shell is the only citizen, so its forward is the single delivery.
+    assert broadcast_receipts == 1
+    # Addressing plane is untouched: dispatch_all still reaches firmware directly and via the shell.
+    assert addressing_receipts == 2
+
+
+def test_device_started_in_world_is_a_broadcast_recipient_without_a_bot() -> None:
+    """Presence follows Device.start. No Bot is involved in putting a device into a world."""
+
+    async def run() -> int:
+        world = World()
+        device = ProbeFirmwareDevice()
+
+        _ = await hsm.started(world, device, device.model)
+        await wait_until(lambda: device_firmware(device) is not None)
+        firmware = typing.cast(ProbeFirmware, device_firmware(device))
+        firmware.receipts.clear()
+
+        await world.broadcast(_WorldProbeEvent)
+
+        return len(firmware.receipts)
+
+    assert asyncio.run(run()) == 1
+
+
+def test_restarted_device_keeps_world_presence() -> None:
+    """Restart runs through Device.start/stop, so the leave/join pair round-trips presence.
+
+    The caller supplies the scope the device comes back up in; under the world, the device stays
+    a broadcast recipient instead of returning addressable but silent.
+    """
+
+    async def run() -> tuple[int, bool]:
+        world = World()
+        device = ProbeFirmwareDevice()
+
+        _ = await hsm.started(world, device, device.model)
+        await wait_until(lambda: device_firmware(device) is not None)
+
+        restarted = await device.restart(world)
+        assert restarted is not None
+        await wait_until(lambda: device_firmware(device) is not None)
+        firmware = typing.cast(ProbeFirmware, device_firmware(device))
+        firmware.receipts.clear()
+
+        await world.broadcast(_WorldProbeEvent)
+
+        return len(firmware.receipts), World.from_context(device.context()) is world
+
+    receipts, in_world_scope = asyncio.run(run())
+
+    assert receipts == 1
+    assert in_world_scope
+
+
+def test_device_restart_rejects_the_devices_own_context() -> None:
+    """The caller owns supplying a durable scope; stop cancels the device's own context."""
+
+    async def run() -> None:
+        world = World()
+        device = ProbeFirmwareDevice()
+
+        _ = await hsm.started(world, device, device.model)
+        await wait_until(lambda: device_firmware(device) is not None)
+
+        with pytest.raises(ValueError, match="outlives the device"):
+            _ = await device.restart(device.context())
+
+    asyncio.run(run())

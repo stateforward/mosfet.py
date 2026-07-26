@@ -259,14 +259,14 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
 
 def _broadcast_observation(owner: "Phone", ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
     # Elevate committed public observation payloads only — not service-request payloads
-    # (MediaReadyData / DialData etc.) which must not re-enter the phone shell via world dispatch_all.
+    # (MediaReadyData / DialData etc.) which must not re-enter the phone shell via world broadcast.
     # Committed media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
     if not isinstance(
         event.data,
         PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
     ):
         return
-    _ = hsm.dispatch_all(World.from_context(ctx), _world_observation_event(owner, event))
+    _ = World.from_context(ctx).broadcast(_world_observation_event(owner, event))
 
 
 class PhoneFirmware(hsm.Instance):

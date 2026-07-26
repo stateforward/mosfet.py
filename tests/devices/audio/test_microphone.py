@@ -7,7 +7,18 @@ import typing
 import hsm
 
 from bot.device import Device
-from tests.hsm_instance_state import device_peripherals
+from bot.world import SoundData, SoundEvent, World
+from tests.hsm_instance_state import device_firmware, device_peripherals
+
+
+async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            raise TimeoutError("Timed out waiting for condition.")
+        await asyncio.sleep(0)
+
 
 class RecordingDevice(Device):
     def __init__(self) -> None:
@@ -55,3 +66,44 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
         assert event.metadata == {"traceparent": "00-00000000000000000000000000000000-0000000000000000-00"}
 
     asyncio.run(run())
+
+
+def test_microphone_emits_one_audio_input_per_world_sound() -> None:
+    """One ``world.sound`` broadcast reaches microphone firmware once, so it captures once.
+
+    Presence is the device shell; firmware stays addressable in the world instance map and
+    hears the stimulus only through its shell's forward, never as a second broadcast recipient.
+
+    The recorder counts *emissions*, not deliveries: it overrides ``dispatch`` and does not
+    forward to its own firmware. How many times a captured ``devices.audio.input`` is delivered
+    downstream is an addressing-plane question this test says nothing about.
+    """
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        world = World()
+        microphone = audio.Microphone()
+        listener = RecordingDevice()
+
+        _ = await hsm.started(world, microphone, microphone.model, hsm.Config(id="microphone"))
+        _ = await hsm.started(world, listener, listener.model, hsm.Config(id="listener"))
+        await wait_until(lambda: device_firmware(microphone) is not None)
+        listener.events.clear()
+
+        await world.broadcast(
+            SoundEvent.with_data(
+                SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            )
+        )
+        await asyncio.sleep(0)
+
+        return [event for event in listener.events if event.name == audio.InputEvent.name]
+
+    captured = asyncio.run(run())
+
+    assert len(captured) == 1
+    assert captured[0].data == audio.AudioInputData(
+        audio=b"heard-audio",
+        media_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+    )

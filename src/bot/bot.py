@@ -293,11 +293,13 @@ def _device_tree(*roots: Device) -> tuple[Device, ...]:
 
 
 def _private_scope(parent: hsm.Context) -> hsm.Context:
-    """Child context with a private Instances map, off the world broadcast set.
+    """Child context with a private Instances map, off the world addressing map.
 
-    World ``dispatch_all`` delivers to every instance in the world's Instances map. Actors
+    ``hsm.dispatch_all`` delivers to every instance in the surrounding Instances map. Actors
     started under this scope (bot-owned abilities, ephemeral reply and timer actors) receive
-    events only through explicit dispatch, and cancel with ``parent``.
+    events only through explicit dispatch, and cancel with ``parent``. The world presence set
+    is deliberately *not* shadowed: an actor here can emit into the world without ever being a
+    broadcast recipient, which is presence's job to decide.
     """
 
     values: dict[typing.Hashable, object] = {hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()}
@@ -360,6 +362,9 @@ class Bot(hsm.Instance, abc.ABC):
         except Exception as error:
             if not _is_already_running_error(error):
                 raise
+        # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
+        # Unconditional: the already-running branch above swallows its error, and join is idempotent.
+        world.join(self)
         await self.dispatch(world, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
@@ -371,6 +376,12 @@ class Bot(hsm.Instance, abc.ABC):
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
             if not _is_not_started_error(error):
                 raise
+        # Presence is attachment-scoped, not activation-scoped: a deactivated but still attached
+        # bot is legitimately in the world, so only detach ends it — reboot deactivates without
+        # detaching and keeps presence. Pairs with the join in attach; no test can observe the
+        # removal (a stopped or inactive bot ignores broadcasts either way), so this is ownership
+        # completeness and map hygiene. Do not delete it as untested.
+        world.leave(self)
         return self
 
     @staticmethod

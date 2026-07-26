@@ -53,4 +53,4 @@ class Speaker(Device):
             source=hsm.id(self),
             metadata=dict(metadata) if metadata is not None else {},
         )
-        return hsm.dispatch_all(World.from_context(ctx), sound)
+        return World.from_context(ctx).broadcast(sound)
