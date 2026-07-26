@@ -89,14 +89,21 @@ def test_microphone_emits_one_audio_input_per_world_sound() -> None:
         await wait_until(lambda: device_firmware(microphone) is not None)
         listener.events.clear()
 
+        def audio_inputs() -> list[hsm.Event[typing.Any]]:
+            return [event for event in listener.events if event.name == audio.InputEvent.name]
+
+        # The capture runs in a firmware effect, so awaiting the broadcast does not guarantee it
+        # ran: HSM.dispatch can return the processing wait with the event still queued. Wait for
+        # the capture, then settle one turn so a second one would be counted rather than missed.
         await world.broadcast(
             SoundEvent.with_data(
                 SoundData(audio=b"heard-audio", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
             )
         )
+        await wait_until(lambda: len(audio_inputs()) >= 1)
         await asyncio.sleep(0)
 
-        return [event for event in listener.events if event.name == audio.InputEvent.name]
+        return audio_inputs()
 
     captured = asyncio.run(run())
 

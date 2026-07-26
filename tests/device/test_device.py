@@ -1049,10 +1049,17 @@ def test_device_firmware_is_addressable_but_never_a_broadcast_participant() -> N
         assert isinstance(instances, collections.abc.Mapping)
         addressable = instances[hsm.id(firmware)] is firmware
 
+        # Awaiting the dispatch is not enough: HSM.dispatch returns the processing wait, which can
+        # return with the event still queued when a push races the drain loop's exit. Wait for the
+        # receipts, then settle one turn so a duplicate would be counted rather than missed.
         await world.broadcast(_WorldProbeEvent)
+        await wait_until(lambda: len(firmware.receipts) >= 1)
+        await asyncio.sleep(0)
         broadcast_receipts = len(firmware.receipts)
         firmware.receipts.clear()
         await hsm.dispatch_all(world, _WorldProbeEvent)
+        await wait_until(lambda: len(firmware.receipts) >= 2)
+        await asyncio.sleep(0)
         addressing_receipts = len(firmware.receipts)
 
         return addressable, broadcast_receipts, addressing_receipts
@@ -1080,6 +1087,8 @@ def test_device_started_in_world_is_a_broadcast_recipient_without_a_bot() -> Non
         firmware.receipts.clear()
 
         await world.broadcast(_WorldProbeEvent)
+        await wait_until(lambda: len(firmware.receipts) >= 1)
+        await asyncio.sleep(0)
 
         return len(firmware.receipts)
 
@@ -1107,6 +1116,8 @@ def test_restarted_device_keeps_world_presence() -> None:
         firmware.receipts.clear()
 
         await world.broadcast(_WorldProbeEvent)
+        await wait_until(lambda: len(firmware.receipts) >= 1)
+        await asyncio.sleep(0)
 
         return len(firmware.receipts), World.from_context(device.context()) is world
 
