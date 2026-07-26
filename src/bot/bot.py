@@ -22,7 +22,7 @@ from . import events
 
 from bot.device import Device
 from bot.telemetry import observer
-from bot.world import SoundEvent, VisualEvent, World, require_world_scope
+from bot.world import SoundEvent, VisualEvent, World, require_world_scope, space
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
@@ -355,7 +355,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._acquired_abilities = tuple(acquired_abilities)
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
 
-    async def attach(self, world: World) -> typing.Self:
+    async def attach(self, world: World, *, placement: space.Placement | None = None) -> typing.Self:
         require_world_scope(world, self, participant="Bot")
         try:
             _ = await hsm.started(world, self, self.model)
@@ -364,7 +364,7 @@ class Bot(hsm.Instance, abc.ABC):
                 raise
         # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
         # Unconditional: the already-running branch above swallows its error, and join is idempotent.
-        world.join(self)
+        world.join(self, placement=placement)
         await self.dispatch(world, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 

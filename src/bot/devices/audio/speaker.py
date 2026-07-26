@@ -7,7 +7,7 @@ import typing
 import hsm
 
 from bot.device import Device
-from bot.world import SoundData, SoundEvent, World
+from bot.world import SoundData, SoundEvent, World, space
 
 
 class Speaker(Device):
@@ -23,6 +23,21 @@ class Speaker(Device):
 
     output_event: typing.ClassVar[hsm.Event[AudioOutputData]] = OutputEvent
 
+    _amplitude_db: float | None
+
+    def __init__(
+        self,
+        *,
+        peripherals: collections.abc.Iterable[Device] = (),
+        placement: space.Placement | None = None,
+        amplitude_db: float | None = None,
+    ) -> None:
+        super().__init__(peripherals=peripherals, placement=placement)
+        # How loud this transducer plays, measured at the reference distance. A handset earpiece
+        # and a room speaker are different hardware; without a value the sound carries everywhere,
+        # which is what keeps geometry opt-in.
+        self._amplitude_db = amplitude_db
+
     @staticmethod
     def _transduce(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
         """Convert signal from an attached controller into acoustic energy in the world.
@@ -35,6 +50,7 @@ class Speaker(Device):
         data = event.data
         if not isinstance(data, AudioOutputData):
             return
+        placement = instance._placement
         sound = dataclasses.replace(
             SoundEvent.with_data(
                 SoundData(
@@ -42,12 +58,14 @@ class Speaker(Device):
                     media_type=data.media_type,
                     sample_rate_hz=data.sample_rate_hz,
                     channels=data.channels,
+                    amplitude_db=instance._amplitude_db,
                 )
             ),
             source=hsm.id(instance),
             metadata=dict(event.metadata),
         )
-        _ = World.from_context(ctx).broadcast(sound)
+        # The world works out what reaches whom; this only says how loud, and from where.
+        _ = World.from_context(ctx).broadcast(sound, origin=None if placement is None else placement.position)
 
     model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
         typing.cast(hsm.Model, Device.model),

@@ -19,7 +19,7 @@ from bot.device.events import (
     FirmwareInitializingFailedEventData,
 )
 from bot.telemetry import observer
-from bot.world import World, require_world_scope
+from bot.world import World, require_world_scope, space
 
 _DEFAULT_FIRMWARE = hsm.define(
     "DeviceFirmware",
@@ -76,6 +76,7 @@ class Device(hsm.Instance, attachment.Attachment):
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
     required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
     _peripherals: tuple["Device", ...]
+    _placement: space.Placement | None
     _firmware: hsm.Instance | None
     # Live capability tokens for firmware init/cleanup activities (typed event data carries the same id).
     _firmware_init_operation_id: str | None
@@ -96,8 +97,13 @@ class Device(hsm.Instance, attachment.Attachment):
         self,
         *,
         peripherals: collections.abc.Iterable["Device"] = (),
+        placement: space.Placement | None = None,
     ) -> None:
         super().__init__()
+        # Where this device is, and how quiet a sound can get before it stops hearing. No class
+        # default: a device cannot know where the robot holding it stands, and defaulting would
+        # silently co-locate every device at the origin — perfect cross-talk with no error.
+        self._placement = placement
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._peripherals = tuple(peripherals)
@@ -161,7 +167,7 @@ class Device(hsm.Instance, attachment.Attachment):
         # be a bare context, or a different scope than the device actually started in; either
         # resolves to a throwaway World whose participant set is empty, so the operation would
         # silently do nothing.
-        World.from_context(self.context()).join(self)
+        World.from_context(self.context()).join(self, placement=self._placement)
         return instance
 
     @typing.override

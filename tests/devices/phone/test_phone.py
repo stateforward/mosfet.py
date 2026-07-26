@@ -15,7 +15,7 @@ from bot.device import Device
 from bot.devices import phone as phone_device
 from bot.protocols import attachment
 
-from bot.world import SoundData, SoundEvent, World
+from bot.world import SoundData, SoundEvent, World, space
 from tests.hsm_instance_state import (
     device_peripherals,
     device_firmware,
@@ -1653,3 +1653,152 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
     # so a second attachment would restore the duplicate while still reading as a count bug.
     assert first_attached == first_own_firmware
     assert second_attached == second_own_firmware
+
+
+_MOUTHPIECE_THRESHOLD_DB = 70.0
+_EARPIECE_DB = 25.0
+_VOICE_DB = 60.0
+_EARS_THRESHOLD_DB = 20.0
+
+
+class Ears(hsm.Instance):
+    """A robot's own hearing, placed where the robot is."""
+
+    heard: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard = []
+
+    @staticmethod
+    def _hear(ctx: hsm.Context, instance: "Ears", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.heard.append(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "Ears",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_hear))),
+    )
+
+
+async def _handset_on_a_call(
+    world: World,
+    service: AttachablePhoneService,
+) -> tuple[phone_device.Phone, audio_device.Speaker, Ears]:
+    """A placed handset at the robot's ear, its voice at its mouth, on a connected call."""
+
+    ear = space.Position(x=0.0, y=0.0)
+    mouth = space.Position(x=phone_device.MOUTH_OFFSET_M, y=0.0)
+    phone = phone_device.Phone(
+        service=service,
+        speaker=audio_device.Speaker(placement=space.Placement(position=ear), amplitude_db=_EARPIECE_DB),
+        microphone=audio_device.Microphone(
+            placement=space.Placement(position=mouth, threshold_db=_MOUTHPIECE_THRESHOLD_DB)
+        ),
+        placement=space.Placement(position=ear),
+    )
+    voice = audio_device.Speaker(placement=space.Placement(position=mouth), amplitude_db=_VOICE_DB)
+    ears = Ears()
+
+    _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+    _ = await hsm.started(world, voice, typing.cast(hsm.Model, audio_device.Speaker.model))
+    _ = await hsm.started(world, ears, Ears.model, hsm.Config(id="ears"))
+    world.join(ears, placement=space.Placement(position=ear, threshold_db=_EARS_THRESHOLD_DB))
+    # Speaking is this speaker's controller in production; a transducer needs one to emit.
+    controller = hsm.Instance()
+    _ = await hsm.started(world, controller, hsm.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s")))
+    await voice.attach(world, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+
+    await _wait_until(lambda: device_firmware(phone) is not None)
+    await service.receive(
+        phone.context(), phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+    )
+    await phone.dispatch(
+        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData(call_id="call-1"))
+    )
+    await service.receive(
+        phone.context(), phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1"))
+    )
+    await service.receive(
+        phone.context(), phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1"))
+    )
+    await _wait_until(lambda: _phone_firmware(phone).state() == "/Phone/answered/media_ready")
+    return phone, voice, ears
+
+
+def test_far_end_audio_does_not_come_back_up_the_wire() -> None:
+    """The echo: what the caller hears must not be carried back to the caller.
+
+    The earpiece plays at the robot's ear. By the time that reaches the mouthpiece 15 cm away it
+    is 28.5 dB under the close-talk threshold, so the mouthpiece does not pick it up. Nothing
+    suppresses it by name or by source — it is simply too quiet where the mouthpiece is.
+    """
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        world = World()
+        service = AttachablePhoneService()
+        phone, _, _ = await _handset_on_a_call(world, service)
+        service.events.clear()
+
+        await service.receive(
+            phone.context(),
+            phone_device.ServiceAudioReceivedEvent.with_data(
+                phone_device.ServiceAudioData(
+                    call_id="call-1", audio=b"far-end", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                )
+            ),
+        )
+        await asyncio.sleep(0)
+
+        return _uplinks(service)
+
+    assert asyncio.run(run()) == []
+
+
+def test_the_robot_hears_its_own_earpiece() -> None:
+    """The same earpiece that is inaudible at the mouthpiece is loud at the ear: 45 dB over."""
+
+    async def run() -> int:
+        world = World()
+        service = AttachablePhoneService()
+        phone, _, ears = await _handset_on_a_call(world, service)
+        ears.heard.clear()
+
+        await service.receive(
+            phone.context(),
+            phone_device.ServiceAudioReceivedEvent.with_data(
+                phone_device.ServiceAudioData(
+                    call_id="call-1", audio=b"far-end", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                )
+            ),
+        )
+        await _wait_until(lambda: bool(ears.heard))
+
+        return len(ears.heard)
+
+    assert asyncio.run(run()) == 1
+
+
+def test_the_robots_own_voice_goes_up_the_wire() -> None:
+    """The mouthpiece is not deaf, it is selective: the voice at the mouth clears it by 30 dB."""
+
+    async def run() -> int:
+        world = World()
+        service = AttachablePhoneService()
+        _, voice, _ = await _handset_on_a_call(world, service)
+        service.events.clear()
+
+        await voice.dispatch(
+            World.from_context(voice.context()),
+            audio_device.OutputEvent.with_data(
+                audio_device.AudioOutputData(
+                    audio=b"local speech", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                )
+            ),
+        )
+        await _wait_until(lambda: bool(_uplinks(service)))
+
+        return len(_uplinks(service))
+
+    assert asyncio.run(run()) == 1

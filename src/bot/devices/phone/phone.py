@@ -14,7 +14,7 @@ from bot import lifecycle
 from bot.event_schema import validate_event_data
 from bot.protocols import attachment
 from bot.telemetry import observer
-from bot.world import SoundEvent, World, require_world_scope
+from bot.world import SoundEvent, World, require_world_scope, space
 
 from .events import (
     AnswerCallData,
@@ -66,6 +66,14 @@ from .events import (
     TransferStartedEvent,
     TransferTarget,
 )
+
+MOUTH_OFFSET_M = 0.15
+"""Distance from a handset's earpiece to its mouthpiece, in metres.
+
+Device-intrinsic: it is how a handset is shaped, and it holds wherever the handset is held. Where
+the handset *is* stays with the wiring, which composes this offset onto whatever the robot's own
+position is — a device cannot know that.
+"""
 
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
@@ -1167,13 +1175,20 @@ class Phone(bot.device.Device):
         microphone: audio.Microphone | None = None,
         speaker: audio.Speaker | None = None,
         peripherals: collections.abc.Iterable[bot.device.Device] = (),
+        placement: space.Placement | None = None,
         service: PhoneService | None = None,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
         resolved_microphone = microphone if microphone is not None else audio.Microphone()
         resolved_speaker = speaker if speaker is not None else audio.Speaker()
-        super().__init__(peripherals=(resolved_microphone, resolved_speaker, *tuple(peripherals)))
+        # Where the handset is. Its transducers carry their own placements: the earpiece is at the
+        # ear and the mouthpiece MOUTH_OFFSET_M away, which is the whole point of them being
+        # separate devices.
+        super().__init__(
+            peripherals=(resolved_microphone, resolved_speaker, *tuple(peripherals)),
+            placement=placement,
+        )
         self._microphone = resolved_microphone
         self._speaker = resolved_speaker
         observation_service = _PhoneObservationService(

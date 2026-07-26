@@ -32,7 +32,7 @@ from bot.device import Device
 from bot.event_schema import event_json_schema
 from bot.protocols import attachment
 
-from bot.world import SoundData, SoundEvent, VisualData, VisualEvent, World
+from bot.world import SoundData, SoundEvent, VisualData, VisualEvent, World, space
 from tests.hsm_instance_state import (
     device_firmware,
     bot_has_focus,
@@ -654,9 +654,9 @@ def configured_devices(*references: str) -> dict[str, Device]:
     return {reference: Device() for reference in references}
 
 
-async def start_bot_with_devices(active_bot: Bot) -> World:
+async def start_bot_with_devices(active_bot: Bot, *, placement: space.Placement | None = None) -> World:
     world = World()
-    _ = await active_bot.attach(world)
+    _ = await active_bot.attach(world, placement=placement)
     await wait_until(lambda: active_bot.state() != "/Bot/activating")
     return world
 
@@ -3703,3 +3703,47 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
 
 def test_bot_processing_does_not_define_coordination_metadata_keys() -> None:
     assert_metadata_key_prefix_is_absent(bot_module, "_PROCESSING_")
+
+
+def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
+    """A bot's placement is its ears: it hears the near source and not the far one.
+
+    Pins that ``Bot.attach`` carries the placement through to presence. Without it the bot is
+    unplaced, which means unselective, and both broadcasts arrive.
+    """
+
+    async def run() -> tuple[int, int]:
+        ability = IgnoreAbility()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(ring_hearing(),))
+        here = space.Position(x=0.0, y=0.0)
+
+        world = await start_bot_with_devices(
+            active_bot, placement=space.Placement(position=here, threshold_db=20.0)
+        )
+        ability.calls.clear()
+
+        def sound(audio_bytes: bytes) -> hsm.Event[typing.Any]:
+            return SoundEvent.with_data(
+                SoundData(
+                    audio=audio_bytes,
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    kind="ambient",
+                    amplitude_db=60.0,
+                )
+            )
+
+        await world.broadcast(sound(b"far-away"), origin=space.Position(x=500.0, y=0.0))
+        await asyncio.sleep(0)
+        after_far = len(ability.calls)
+
+        await world.broadcast(sound(b"right-here"), origin=here)
+        await wait_until(lambda: len(ability.calls) > after_far)
+
+        return after_far, len(ability.calls)
+
+    after_far, after_near = asyncio.run(run())
+
+    assert after_far == 0
+    assert after_near == 1
