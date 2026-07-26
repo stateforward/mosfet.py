@@ -1809,7 +1809,9 @@ def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
 
     The ringer declares its level and the phone says where it is; the environment does the rest. Before
     this, a ring reached every participant at any distance — the same "reaches everyone regardless
-    of geometry" shape that produced the cross-call leak, just off the uplink path.
+    of geometry" shape that let one handset's earpiece arrive at another's mouthpiece, just off the
+    uplink path. Neither was ever a leak: without positions, sound crossed over unconditionally.
+    Standing close enough to overhear a call is what proximity does, and the model now says so.
     """
 
     async def run() -> tuple[int, int]:
