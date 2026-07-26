@@ -38,7 +38,7 @@ from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
 from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
-from bot.world import World
+from bot.world import World, space
 
 _LOG = logging.getLogger("phone_bot_example.hsm")
 
@@ -573,6 +573,60 @@ def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening
     )
 
 
+# Where this robot is and how loud its parts are. dB SPL at one metre.
+#
+# The handset earpiece sits at the robot's head, so it is loud in the robot's own ears (45 dB of
+# margin) and far too quiet by the time it reaches the mouthpiece 15 cm away (28.5 dB below the
+# mouthpiece threshold) — which is what stops the far end hearing itself. The bot's voice comes
+# out at the mouth, right at the mouthpiece, 30 dB over the threshold, so it goes up the wire.
+_BOT_ORIGIN = space.Position(x=0.0, y=0.0)
+_MOUTH = space.Position(x=phone_device.MOUTH_OFFSET_M, y=0.0)
+
+_EARPIECE_DB = 25.0
+"""Handset receiver at one metre: about 65 dB at the ear, where the ear actually is."""
+
+_VOICE_DB = 60.0
+"""Normal conversational speech at one metre."""
+
+_EARS_THRESHOLD_DB = 20.0
+"""Quiet-room hearing floor for the robot's own ears."""
+
+_MOUTHPIECE_THRESHOLD_DB = 70.0
+"""Close-talk handset mouthpiece: it hears the mouth it is held next to, and little else."""
+
+
+def _earpiece() -> audio.Speaker:
+    """The handset receiver: at the robot's ear, quiet, for the robot to hear the far end."""
+
+    return audio.Speaker(
+        placement=space.Placement(position=_BOT_ORIGIN),
+        amplitude_db=_EARPIECE_DB,
+    )
+
+
+def _voice() -> audio.Speaker:
+    """The robot's mouth: at the mouthpiece, conversational, for the far end to hear it."""
+
+    return audio.Speaker(placement=space.Placement(position=_MOUTH), amplitude_db=_VOICE_DB)
+
+
+def _mouthpiece() -> audio.Microphone:
+    """The handset transmitter: close-talk, so it picks up the mouth and not the earpiece."""
+
+    return audio.Microphone(placement=space.Placement(position=_MOUTH, threshold_db=_MOUTHPIECE_THRESHOLD_DB))
+
+
+def _handset(*, service: phone_device.PhoneService | None = None) -> phone_device.Phone:
+    """A handset held to the robot's ear, with its own transducers placed on it."""
+
+    return phone_device.Phone(
+        service=service,
+        speaker=_earpiece(),
+        microphone=_mouthpiece(),
+        placement=space.Placement(position=_BOT_ORIGIN),
+    )
+
+
 def _speaking(
     *,
     speaker: audio.Speaker,
@@ -719,15 +773,13 @@ class PhoneBot(Bot):
         memory: memory.Memory | None = None,
     ) -> None:
         self._label = label
-        if phone is None and speaking is None:
-            speaker = audio.Speaker()
-            self._phone = phone_device.Phone(speaker=speaker)
-            speaking_instance = _speaking(speaker=speaker, speech_config=speech_config)
-        else:
-            self._phone = phone if phone is not None else phone_device.Phone()
-            if speaking is None:
-                raise ValueError("An injected phone requires an injected Speaking ability sharing its speaker.")
-            speaking_instance = speaking
+        # Two transducers, because one object cannot be both at the ear and at the mouth. The
+        # earpiece belongs to the handset; the voice belongs to the robot. Nothing to enforce
+        # between them any more — World.join rejects a speaker placed in two places.
+        self._phone = phone if phone is not None else _handset()
+        speaking_instance = (
+            speaking if speaking is not None else _speaking(speaker=_voice(), speech_config=speech_config)
+        )
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
             cognition if cognition is not None else _phone_cognition(cognition_config, memory=self._memory)
@@ -868,7 +920,7 @@ async def start_bot(
     )
 
     world = World()
-    _ = await body.attach(world)
+    _ = await body.attach(world, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
     await _wait_for_active_bot(body)
     if connect_livekit and app_config.livekit.can_connect_room():
         if phone_service is None:
@@ -1024,11 +1076,10 @@ async def run(
         token=livekit_token,
         track_name=app_config.livekit.track_name,
     )
-    speaker = audio.Speaker()
-    phone = phone_device.Phone(service=phone_service, speaker=speaker)
+    phone = _handset(service=phone_service)
     # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).
     listening_ability = _listening(app_config.speech)
-    speaking_ability = _speaking(speaker=speaker, speech_config=app_config.speech)
+    speaking_ability = _speaking(speaker=_voice(), speech_config=app_config.speech)
     _LOG.info(
         "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
         "tts_voice=%s vad_provider=silero vad_model_id=%s api_key_loaded=%s",

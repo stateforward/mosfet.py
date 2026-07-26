@@ -282,8 +282,12 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     assert "--audio-file" not in source
     assert "remote_audio_sink" not in source
     assert "PhoneService(" in source
-    assert "phone_device.Phone(service=phone_service, speaker=speaker)" in source
-    assert "_speaking(speaker=speaker" in source
+    assert "_handset(service=phone_service)" in source
+    # The handset earpiece and the robot's voice are separate transducers, in separate places.
+    # Sharing one object would put the same speaker at the ear and at the mouth, which is how the
+    # far end ends up hearing itself.
+    assert "_speaking(speaker=_voice()" in source
+    assert "_speaking(speaker=speaker" not in source
     assert "ensure_future" not in source
 
 
