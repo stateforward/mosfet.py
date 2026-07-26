@@ -36,7 +36,9 @@ def test_placement_defaults_to_no_threshold() -> None:
         (25.0, space.D_MIN, 25.0 + 40.0),
     ],
 )
-def test_received_level_db_follows_inverse_square_law(amplitude_db: float, distance_m: float, expected_db: float) -> None:
+def test_received_level_db_follows_inverse_square_law(
+    amplitude_db: float, distance_m: float, expected_db: float
+) -> None:
     assert space.received_level_db(amplitude_db, distance_m) == pytest.approx(expected_db, abs=1e-3)
 
 
