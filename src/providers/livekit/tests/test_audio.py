@@ -108,8 +108,14 @@ def test_livekit_audio_frame_encoder_uses_configured_pcm_defaults() -> None:
     assert frame.num_channels == 1
     assert frame.samples_per_channel == 2
 
-@pytest.mark.parametrize("media_type", ["audio/opus", "audio/mpeg"])
+@pytest.mark.parametrize("media_type", ["audio/opus", "audio/mpeg", "audio/wav"])
 def test_livekit_audio_frame_encoder_rejects_non_pcm_audio(media_type: str) -> None:
+    """audio/wav is in this list for a reason: TTS that returns a container reaches here.
+
+    Framing a RIFF header as samples would be worse than refusing it — garbled audio on the call
+    instead of an error — so a container type must be rejected rather than assumed decodable.
+    """
+
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
 
     with pytest.raises(AudioFrameError, match="PCM"):

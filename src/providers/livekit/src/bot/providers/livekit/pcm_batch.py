@@ -11,9 +11,12 @@ from bot.devices import audio
 
 import array
 import asyncio
+import logging
 import collections.abc
 import dataclasses
 
+
+_LOG = logging.getLogger(__name__)
 
 def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
     if sample_rate_hz <= 0 or channels <= 0 or not pcm:
@@ -133,7 +136,17 @@ class RemotePcmBatcher:
 
         def _on_idle() -> None:
             self._idle_handle = None
-            _ = asyncio.ensure_future(self._idle_flush(), loop=loop)
+            flushed = asyncio.ensure_future(self._idle_flush(), loop=loop)
+
+            def _surface_failure(done: asyncio.Future[None]) -> None:
+                # Same hazard as the uplink publish: nothing awaits this flush, so a failing
+                # emit would lose the buffered audio and leave only an unretrieved-task warning.
+                # This batcher has no machine to report to, so saying it once is the floor.
+                if done.cancelled() or done.exception() is None:
+                    return
+                _LOG.error("livekit remote pcm idle flush failed reason=%s", done.exception())
+
+            flushed.add_done_callback(_surface_failure)
 
         self._idle_handle = loop.call_later(delay, _on_idle)
 

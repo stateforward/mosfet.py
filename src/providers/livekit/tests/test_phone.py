@@ -4,6 +4,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import logging
 import typing
 
 import hsm
@@ -2254,3 +2255,37 @@ def test_livekit_phone_service_room_path_forwards_service_audio_to_phone_firmwar
         assert service.media_snapshot().remote_audio_chunks == 1
 
     asyncio.run(run())
+
+
+def test_local_audio_uplink_publish_failure_is_surfaced(caplog: pytest.LogCaptureFixture) -> None:
+    """A publish that fails must say so, rather than dying in an orphaned task.
+
+    This is the defect a WAV-typed uplink tripped: the encoder rejected the chunk, the exception
+    was never retrieved, and the only symptom was a mute bot. The failure is now a typed outcome
+    the service reports on, so "the far end hears nothing" has a reason attached to it.
+    """
+
+    async def run() -> None:
+        phone, service, _ = await _start_livekit_phone_service()
+        del phone
+
+        await service.dispatch(
+            service.context(),
+            audio_device.OutputEvent.with_data(
+                audio_device.AudioOutputData(
+                    audio=b"\x01\x00\x02\x00",
+                    media_type="audio/wav",
+                    sample_rate_hz=24_000,
+                    channels=1,
+                )
+            ),
+        )
+        await _wait_until(lambda: any(record.levelname == "ERROR" for record in caplog.records))
+
+    with caplog.at_level(logging.ERROR, logger="bot.providers.livekit.phone"):
+        asyncio.run(run())
+
+    failures = [record for record in caplog.records if "local audio uplink publish failed" in record.getMessage()]
+    assert len(failures) == 1
+    # The media type is in the message because it is almost always the reason.
+    assert "audio/wav" in failures[0].getMessage()

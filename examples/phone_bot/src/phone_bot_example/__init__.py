@@ -536,7 +536,9 @@ def _gemini_speech_encoder(config: SpeechConfig) -> GeminiSpeechEncoder:
         model=config.tts_model,
         voice_name=config.voice_name,
         sample_rate_hz=config.output_sample_rate_hz,
-        output_format="wav",
+        # Raw PCM, not a WAV container: this audio ends up on the LiveKit uplink, and
+        # AudioFrameEncoder frames the bytes as samples. A RIFF header would be framed as audio.
+        output_format="pcm",
     )
 
 
@@ -640,7 +642,7 @@ def _speaking(
         speaker=speaker,
         sample_rate_hz=config.output_sample_rate_hz,
         channels=config.output_channels,
-        media_type="audio/wav",
+        media_type="audio/pcm",
     )
 
 

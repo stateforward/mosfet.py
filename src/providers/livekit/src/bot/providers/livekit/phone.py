@@ -8,6 +8,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import logging
 import typing
 import weakref
 
@@ -57,6 +58,9 @@ _PhoneServiceTarget = typing.Annotated[
 ]
 
 
+_LOG = logging.getLogger(__name__)
+
+
 class _PhoneServiceAttachmentData(pydantic.BaseModel):
     """Private attachment payload connecting a LiveKit phone service to a phone event target."""
 
@@ -100,6 +104,41 @@ _ServiceAttachmentRejectedEvent = hsm.Event[_PhoneServiceAttachmentData](
     name="bot.provider.livekit.phone.attachment.rejected",
     kind=hsm.ErrorEventKind,
     schema=_PhoneServiceAttachmentData,
+)
+
+
+class _LocalAudioPublishFailedData(pydantic.BaseModel):
+    """Why one local playout chunk never made it onto the LiveKit track."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": "Uplink publish failure for a single local audio chunk.",
+            "examples": [{"message": "LiveKit audio frames only support raw PCM input.", "chunk_bytes": 960}],
+        },
+    )
+
+    message: str = pydantic.Field(
+        min_length=1,
+        description="Human-readable reason the chunk could not be published.",
+        examples=["LiveKit audio frames only support raw PCM input from stateforward.bot audio output data."],
+    )
+    media_type: str | None = pydantic.Field(
+        default=None,
+        description="Media type the rejected chunk declared, which is usually why it was rejected.",
+        examples=["audio/wav"],
+    )
+    chunk_bytes: int = pydantic.Field(
+        ge=0,
+        description="Size of the chunk that was dropped, in bytes.",
+        examples=[960],
+    )
+
+
+_LocalAudioPublishFailedEvent = hsm.Event[_LocalAudioPublishFailedData](
+    name="bot.provider.livekit.phone.local_audio.publish_failed",
+    kind=hsm.ErrorEventKind,
+    schema=_LocalAudioPublishFailedData,
 )
 
 
@@ -415,7 +454,29 @@ def _publish_local_audio_uplink(
     del ctx
     data = event.data
     assert isinstance(data, audio.AudioOutputData)
-    _ = asyncio.ensure_future(instance.publish_audio(data))
+    published = asyncio.ensure_future(instance.publish_audio(data))
+
+    def _surface_failure(done: asyncio.Future[None]) -> None:
+        # Without this the encoder's exception dies in an orphaned task: the bot goes mute and the
+        # only trace is an unretrieved-task warning. A publish that fails is a typed outcome.
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is None:
+            return
+        _ = hsm.dispatch(
+            instance.context(),
+            instance,
+            _LocalAudioPublishFailedEvent.with_data(
+                _LocalAudioPublishFailedData(
+                    message=str(error) or type(error).__name__,
+                    media_type=data.media_type,
+                    chunk_bytes=len(data.audio),
+                )
+            ),
+        )
+
+    published.add_done_callback(_surface_failure)
 
 
 def _has_provider_transfer_completed(
@@ -696,6 +757,8 @@ class PhoneService(hsm.Instance):
     _remote_audio_bytes: int
     _remote_audio_dropped_chunks: int
     _remote_audio_dropped_bytes: int
+    _local_audio_failed_chunks: int
+    _local_audio_failed_bytes: int
     _media_call_id: str | None
     _delivering_remote_audio: bool
     _attached_phone_target_ref: weakref.ReferenceType[hsm.Instance] | None
@@ -739,6 +802,8 @@ class PhoneService(hsm.Instance):
         self._remote_audio_bytes = 0
         self._remote_audio_dropped_chunks = 0
         self._remote_audio_dropped_bytes = 0
+        self._local_audio_failed_chunks = 0
+        self._local_audio_failed_bytes = 0
         self._media_call_id = None
         self._delivering_remote_audio = False
         self._attached_phone_target_ref = None
@@ -1247,6 +1312,27 @@ class PhoneService(hsm.Instance):
             instance._delivering_remote_audio = False
 
     @staticmethod
+    def _note_local_audio_publish_failure(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        data = event.data
+        assert isinstance(data, _LocalAudioPublishFailedData)
+        instance._local_audio_failed_chunks += 1
+        instance._local_audio_failed_bytes += data.chunk_bytes
+        # Operationally load-bearing: this is the difference between "the bot is mute" and knowing
+        # why. Media type is low-cardinality; the message is the provider's own rejection reason.
+        _LOG.error(
+            "livekit local audio uplink publish failed media_type=%s chunk_bytes=%d failed_chunks=%d reason=%s",
+            data.media_type,
+            data.chunk_bytes,
+            instance._local_audio_failed_chunks,
+            data.message,
+        )
+
+    @staticmethod
     def _drop_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         del ctx
         data = event.data
@@ -1590,6 +1676,11 @@ class PhoneService(hsm.Instance):
             hsm.on(audio.OutputEvent),
             hsm.guard(_has_local_audio_uplink),
             hsm.effect(_publish_local_audio_uplink),
+        ),
+        # ... and what happened to it when the track would not take it.
+        hsm.transition(
+            hsm.on(_LocalAudioPublishFailedEvent),
+            hsm.effect(_note_local_audio_publish_failure),
         ),
         hsm.state(
             "unconnected",
