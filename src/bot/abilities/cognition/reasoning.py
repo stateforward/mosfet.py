@@ -15,11 +15,14 @@ import pydantic
 from bot.telemetry import observer
 
 from bot.behavior import BreakData, ChangeData, CreateData
+from . import directives
 from . import episodes
 from . import types
 
 DEFAULT_INSTRUCTIONS = (
     "Return the best typed result for the input; use prior_episodes when present; "
+    "treat standing_directives as things you were told and still owe, and decide for yourself "
+    "whether this moment is one to act on them; "
     "set create/change/break only for clear repeated behavior patterns; else omit them."
 )
 _InitializingCompleteEvent = hsm.Event[object](
@@ -89,6 +92,14 @@ class ProcessorInput(pydantic.BaseModel):
         description=(
             "Prior or similar cognition episodes recalled from memory for this turn. Empty when no "
             "memory collaborator is configured or nothing matched."
+        ),
+    )
+    standing_directives: tuple[directives.Directive, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Standing instructions the bot was told and has not been released from, recalled from "
+            "memory for this turn. Empty when no memory collaborator is configured or nothing "
+            "matched. Whether this turn is the one to act on them is your decision."
         ),
     )
 
@@ -216,6 +227,7 @@ class _RecalledEventData(pydantic.BaseModel):
     capability: _ReasoningCapability
     host_input: processing.InputData
     prior_episodes: tuple[episodes.CognitiveEpisode, ...] = ()
+    standing_directives: tuple[directives.Directive, ...] = ()
     memory_consulted: bool = False
 
 
@@ -558,14 +570,24 @@ class Reasoning(processing.Processing):
                     capability=capability,
                     host_input=input,
                     prior_episodes=(),
+                    standing_directives=(),
                     memory_consulted=False,
                 ),
             )
             return
         try:
-            select_input = episodes.episode_select_input(context_ref=_context_ref_from_input(input))
+            context_ref = _context_ref_from_input(input)
+            # One apply, one transaction, two statements: prior turns and standing directives
+            # are recalled together so a turn never reasons from half a memory.
+            select_input = memory.InputData(
+                statements=(
+                    *episodes.episode_select_input(context_ref=context_ref).statements,
+                    *directives.directive_select_input(context_ref=context_ref).statements,
+                )
+            )
             recalled = store.execute(select_input)
-            prior = episodes.episodes_from_output(recalled)
+            prior = episodes.episodes_from_output(recalled, statement_index=0)
+            standing = directives.directives_from_output(recalled, statement_index=1)
         except Exception as error:
             dispatch_stage(
                 _ReasoningStageFailedEvent,
@@ -583,6 +605,7 @@ class Reasoning(processing.Processing):
                 capability=capability,
                 host_input=input,
                 prior_episodes=prior,
+                standing_directives=standing,
                 memory_consulted=True,
             ),
         )
@@ -625,6 +648,7 @@ class Reasoning(processing.Processing):
         reasoning_input = ProcessorInput(
             host_input=data.host_input,
             prior_episodes=data.prior_episodes,
+            standing_directives=data.standing_directives,
         )
         # Keep host tools/actors; nest reasoning payload as the process input.
         child_input = processing.Processing._input_for_processor(

@@ -152,3 +152,109 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
 
     assert output.output == ()
     assert state.endswith("/idle")
+
+
+class CapturingProcessor(processing.Processor):
+    inputs: list[processing.InputData]
+
+    def __init__(self) -> None:
+        self.inputs = []
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        self.inputs.append(input)
+        return ()
+
+
+def _reasoning_frame(processor: CapturingProcessor) -> reasoning_module.ProcessorInput:
+    assert len(processor.inputs) == 1
+    frame = processor.inputs[0].input
+    assert isinstance(frame, reasoning_module.ProcessorInput)
+    return frame
+
+
+def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> None:
+    """One apply, one transaction, two statements: the turn never sees half a memory."""
+
+    async def run() -> reasoning_module.ProcessorInput:
+        store = memory.Memory()
+        _ = store.execute(
+            cognition.episodes.episode_insert_input(
+                cognition.episodes.CognitiveEpisode(stimulus_name="bot.idle", output=()),
+                context_ref=None,
+            )
+        )
+        _ = store.execute(
+            cognition.directives.directive_insert_input(
+                cognition.directives.Directive(text="Call Bob when you get a chance."),
+                context_ref=None,
+            )
+        )
+        processor = CapturingProcessor()
+        reasoning = cognition.Reasoning(processor=processor, memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, reasoning)
+
+        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+        _ = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(stimulus), timeout=0.2)
+        return _reasoning_frame(processor)
+
+    frame = asyncio.run(run())
+
+    assert [directive.text for directive in frame.standing_directives] == ["Call Bob when you get a chance."]
+    assert [episode.stimulus_name for episode in frame.prior_episodes] == ["bot.idle"]
+
+
+def test_reasoning_without_memory_recalls_no_standing_directives() -> None:
+    async def run() -> reasoning_module.ProcessorInput:
+        processor = CapturingProcessor()
+        reasoning = cognition.Reasoning(processor=processor)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, reasoning)
+
+        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+        _ = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(stimulus), timeout=0.2)
+        return _reasoning_frame(processor)
+
+    frame = asyncio.run(run())
+
+    assert frame.standing_directives == ()
+    assert frame.prior_episodes == ()
+
+
+def test_reasoning_recall_decodes_both_statements_from_one_transaction() -> None:
+    """The two SELECTs are positional inside a single committed transaction."""
+
+    store = memory.Memory()
+    _ = store.execute(
+        cognition.episodes.episode_insert_input(
+            cognition.episodes.CognitiveEpisode(stimulus_name="bot.idle", output=()),
+            context_ref=None,
+        )
+    )
+    _ = store.execute(
+        cognition.directives.directive_insert_input(
+            cognition.directives.Directive(text="Water the plants."),
+            context_ref=None,
+        )
+    )
+
+    recalled = store.execute(
+        memory.InputData(
+            statements=(
+                *cognition.episodes.episode_select_input().statements,
+                *cognition.directives.directive_select_input().statements,
+            )
+        )
+    )
+
+    assert len(recalled.results) == 2
+    assert [
+        episode.stimulus_name for episode in cognition.episodes.episodes_from_output(recalled, statement_index=0)
+    ] == ["bot.idle"]
+    assert [
+        directive.text for directive in cognition.directives.directives_from_output(recalled, statement_index=1)
+    ] == ["Water the plants."]
+    # Each statement decodes only its own rows: episodes are not directives and never leak across.
+    assert cognition.episodes.episodes_from_output(recalled, statement_index=1) == ()
+    assert cognition.directives.directives_from_output(recalled, statement_index=0) == ()
