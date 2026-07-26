@@ -67,6 +67,20 @@ from .events import (
     TransferTarget,
 )
 
+RINGER_DB = 80.0
+"""How loud a handset ringer is, in dB SPL measured one metre away.
+
+Device-intrinsic like a speaker's output level: it is what this hardware does, while how far the
+ring carries is the world's to work out from where the phone is.
+
+Known interaction, deliberately not engineered around: at this level a ring clears a close-talk
+mouthpiece threshold from 15 cm away (about 96 dB against 70), so a ringing phone would carry its
+own ring up the wire. It cannot today, because a ringing phone is not a connected one and the
+uplink transition only exists in ``/Phone/answered/media_ready``. If call-waiting is ever modelled
+— a second call ringing while the first is connected — this is the interaction to handle, and it
+is known rather than overlooked.
+"""
+
 MOUTH_OFFSET_M = 0.15
 """Distance from a handset's earpiece to its mouthpiece, in metres.
 
@@ -135,6 +149,10 @@ def _completed_phone_service_event() -> asyncio.Future[None]:
 class _PhoneObservationService:
     owner: "Phone"
     service: "PhoneService"
+    # Injected by the phone that owns this service: elevating a committed observation into a world
+    # stimulus is the phone's behaviour, not the transport's, and the phone is what knows where it
+    # is standing.
+    elevate: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]
     target: hsm.Instance | None = dataclasses.field(default=None, init=False)
 
     async def attach(self, world: World, target: hsm.Instance) -> None:
@@ -169,7 +187,7 @@ class _PhoneObservationService:
                 metadata=dict(event.metadata),
             ),
         )
-        _broadcast_observation(self.owner, ctx, event)
+        self.elevate(ctx, event)
 
 
 class PhoneService(typing.Protocol):
@@ -253,6 +271,7 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
                     channels=1,
                     kind="phone.ringing",
                     call_id=data.call_id,
+                    amplitude_db=RINGER_DB,
                 )
             ),
             id=data.call_id,
@@ -264,18 +283,6 @@ def _world_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hs
         source=hsm.id(owner),
         metadata=dict(event.metadata),
     )
-
-
-def _broadcast_observation(owner: "Phone", ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-    # Elevate committed public observation payloads only — not service-request payloads
-    # (MediaReadyData / DialData etc.) which must not re-enter the phone shell via world broadcast.
-    # Committed media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
-    if not isinstance(
-        event.data,
-        PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
-    ):
-        return
-    _ = World.from_context(ctx).broadcast(_world_observation_event(owner, event))
 
 
 class PhoneFirmware(hsm.Instance):
@@ -1194,6 +1201,7 @@ class Phone(bot.device.Device):
         observation_service = _PhoneObservationService(
             owner=self,
             service=service if service is not None else PhoneEventRecorder(),
+            elevate=self._broadcast_observation,
         )
         self._service = observation_service
         self._firmware_instance = PhoneFirmware(
@@ -1202,6 +1210,25 @@ class Phone(bot.device.Device):
             microphone=resolved_microphone,
             answer_timeout=answer_timeout,
             transfer_timeout=transfer_timeout,
+        )
+
+    def _broadcast_observation(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        """Elevate a committed observation into a world stimulus, from where this phone stands.
+
+        Committed public payloads only — not service-request payloads (MediaReadyData / DialData
+        and friends), which must not re-enter the phone shell as world sound. Committed
+        media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
+        """
+
+        if not isinstance(
+            event.data,
+            PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData,
+        ):
+            return
+        placement = self._placement
+        _ = World.from_context(ctx).broadcast(
+            _world_observation_event(self, event),
+            origin=None if placement is None else placement.position,
         )
 
     @typing.override

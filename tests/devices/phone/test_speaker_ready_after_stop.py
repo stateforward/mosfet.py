@@ -32,7 +32,13 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
         speaker = audio.Speaker()
         owner = hsm.Instance()
         target = hsm.Instance()
-        observation = _PhoneObservationService(owner=owner, service=object())  # type: ignore[arg-type]
+        # This test is about attach/liveness gating, not elevation; the phone injects the real
+        # elevation, so a no-op stands in here.
+        observation = _PhoneObservationService(
+            owner=owner,  # type: ignore[arg-type]
+            service=object(),  # type: ignore[arg-type]
+            elevate=lambda ctx, event: None,
+        )
         firmware = PhoneFirmware(service=observation, speaker=speaker)
         firmware._current_call_id = "call-1"
         event = _service_audio("call-1")

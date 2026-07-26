@@ -1802,3 +1802,48 @@ def test_the_robots_own_voice_goes_up_the_wire() -> None:
         return len(_uplinks(service))
 
     assert asyncio.run(run()) == 1
+
+
+def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
+    """A ring is a sound something makes at a place, not an announcement to the whole world.
+
+    The ringer declares its level and the phone says where it is; the world does the rest. Before
+    this, a ring reached every participant at any distance — the same "reaches everyone regardless
+    of geometry" shape that produced the cross-call leak, just off the uplink path.
+    """
+
+    async def run() -> tuple[int, int]:
+        world = World()
+        service = AttachablePhoneService()
+        here = space.Position(x=0.0, y=0.0)
+        phone = phone_device.Phone(
+            service=service,
+            placement=space.Placement(position=here),
+        )
+        nearby = Ears()
+        across_the_room = Ears()
+
+        _ = await hsm.started(world, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await hsm.started(world, nearby, Ears.model, hsm.Config(id="nearby"))
+        _ = await hsm.started(world, across_the_room, Ears.model, hsm.Config(id="across-the-room"))
+        world.join(nearby, placement=space.Placement(position=space.Position(x=2.0, y=0.0), threshold_db=20.0))
+        world.join(
+            across_the_room,
+            placement=space.Placement(position=space.Position(x=5_000.0, y=0.0), threshold_db=20.0),
+        )
+        await _wait_until(lambda: device_firmware(phone) is not None)
+        nearby.heard.clear()
+        across_the_room.heard.clear()
+
+        await service.receive(
+            phone.context(),
+            phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),
+        )
+        await _wait_until(lambda: bool(nearby.heard))
+
+        return len(nearby.heard), len(across_the_room.heard)
+
+    heard_nearby, heard_across_the_room = asyncio.run(run())
+
+    assert heard_nearby == 1
+    assert heard_across_the_room == 0

@@ -54,6 +54,7 @@ from bot.devices.phone.events import (
 )
 from bot.devices.phone.phone import (
     MOUTH_OFFSET_M,
+    RINGER_DB,
     RING_SOUND_WAV,
     Phone,
     PhoneEventRecorder,
@@ -63,6 +64,7 @@ from bot.devices.phone.phone import (
 
 __all__ = [
     "MOUTH_OFFSET_M",
+    "RINGER_DB",
     "MOUTH_OFFSET_M",
     "phone",
     "AnswerCallData",
