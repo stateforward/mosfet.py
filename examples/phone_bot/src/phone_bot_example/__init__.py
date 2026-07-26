@@ -766,6 +766,7 @@ class PhoneBot(Bot):
         label: str,
         *,
         phone: phone_device.Phone | None = None,
+        voice: audio.Speaker | None = None,
         cognition_config: CognitionConfig | None = None,
         speech_config: SpeechConfig | None = None,
         cognition: cognition.Cognition | None = None,
@@ -779,8 +780,12 @@ class PhoneBot(Bot):
         # earpiece belongs to the handset; the voice belongs to the robot. Nothing to enforce
         # between them any more — Environment.join rejects a speaker placed in two places.
         self._phone = phone if phone is not None else _handset()
+        # The voice transducer is the robot's own device, not a peripheral of its telephone: the
+        # robot speaks, and the handset is only what it holds to its ear. Registering it here is
+        # what powers it — Speaking attaches to it, but device lifetime belongs to the body.
+        self._voice = voice if voice is not None else _voice()
         speaking_instance = (
-            speaking if speaking is not None else _speaking(speaker=_voice(), speech_config=speech_config)
+            speaking if speaking is not None else _speaking(speaker=self._voice, speech_config=speech_config)
         )
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
@@ -790,7 +795,8 @@ class PhoneBot(Bot):
         self._speaking = speaking_instance
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
         super().__init__(
-            devices={"phone": self._phone},
+            # Phone first: an unfocused turn falls back to the first configured device.
+            devices={"phone": self._phone, "voice": self._voice},
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),
@@ -901,6 +907,7 @@ async def start_bot(
     config: AppConfig | None = None,
     connect_livekit: bool = False,
     phone: phone_device.Phone | None = None,
+    voice: audio.Speaker | None = None,
     phone_service: PhoneService | None = None,
     cognition: cognition.Cognition | None = None,
     listening: listening.Listening | None = None,
@@ -912,6 +919,7 @@ async def start_bot(
     body = PhoneBot(
         label,
         phone=phone,
+        voice=voice,
         cognition_config=app_config.cognition,
         speech_config=app_config.speech,
         cognition=cognition,
@@ -1081,7 +1089,8 @@ async def run(
     phone = _handset(service=phone_service)
     # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).
     listening_ability = _listening(app_config.speech)
-    speaking_ability = _speaking(speaker=_voice(), speech_config=app_config.speech)
+    voice = _voice()
+    speaking_ability = _speaking(speaker=voice, speech_config=app_config.speech)
     _LOG.info(
         "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
         "tts_voice=%s vad_provider=silero vad_model_id=%s api_key_loaded=%s",
@@ -1096,6 +1105,7 @@ async def run(
         config=app_config,
         connect_livekit=False,
         phone=phone,
+        voice=voice,
         phone_service=phone_service,
         cognition=cognition_ability,
         listening=listening_ability,

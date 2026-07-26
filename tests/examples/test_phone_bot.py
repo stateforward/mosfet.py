@@ -286,8 +286,11 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     # The handset earpiece and the robot's voice are separate transducers, in separate places.
     # Sharing one object would put the same speaker at the ear and at the mouth, which is how the
     # far end ends up hearing itself.
-    assert "_speaking(speaker=_voice()" in source
+    assert "_speaking(speaker=voice" in source
     assert "_speaking(speaker=speaker" not in source
+    # The voice transducer is one of the robot's own devices, so the body powers it. Handing
+    # Speaking a speaker nobody starts is what left the bot mute on a live call.
+    assert '"voice": self._voice' in source
     assert "ensure_future" not in source
 
 
@@ -456,3 +459,36 @@ def test_phone_bot_example_does_not_report_livekit_attempt_without_credentials()
         ]
     )
     assert _run_phone_bot_python(code) == "False False"
+
+
+def test_phone_bot_powers_the_voice_transducer_it_speaks_through() -> None:
+    """The body starts the voice speaker, so Speaking has something live to attach to.
+
+    Regression: the speaker split gave Speaking its own transducer and nothing started it, so the
+    first utterance raised "Device is not started in this environment" and the bot never spoke.
+    """
+
+    code = """
+import asyncio
+import bot.lifecycle as lifecycle
+import phone_bot_example as example
+from bot.environment import Environment
+
+
+async def main() -> None:
+    body = example.PhoneBot("probe")
+    environment = Environment()
+    _ = await body.attach(environment)
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if body.state().startswith("/PhoneBot/active"):
+            break
+    voice = object.__getattribute__(body, "_voice")
+    print(lifecycle.is_started(voice))
+    print(voice.state())
+
+
+asyncio.run(main())
+"""
+
+    assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/attached"])
