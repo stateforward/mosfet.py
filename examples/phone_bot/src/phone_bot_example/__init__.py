@@ -1085,6 +1085,10 @@ async def run(
         url=livekit_url,
         token=livekit_token,
         track_name=app_config.livekit.track_name,
+        # One value decides the robot's voice rate: the TTS encoder, Speaking's label, and the
+        # LiveKit source all take it from here. They used to be three defaults that happened to
+        # agree in two places and not in the third, which is a silent mute rather than an error.
+        uplink_sample_rate_hz=app_config.speech.output_sample_rate_hz,
     )
     phone = _handset(service=phone_service)
     # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).

@@ -291,6 +291,9 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     # The voice transducer is one of the robot's own devices, so the body powers it. Handing
     # Speaking a speaker nobody starts is what left the bot mute on a live call.
     assert '"voice": self._voice' in source
+    # One value for the robot's voice rate, reaching the encoder, Speaking, and the LiveKit
+    # source. Three independent defaults is how a 24 kHz voice met a 48 kHz source and went mute.
+    assert "uplink_sample_rate_hz=app_config.speech.output_sample_rate_hz" in source
     assert "ensure_future" not in source
 
 

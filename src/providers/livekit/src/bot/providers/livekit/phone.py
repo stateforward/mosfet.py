@@ -761,6 +761,7 @@ class PhoneService(hsm.Instance):
     """stateforward.bot-native LiveKit phone service that adapts LiveKit call control and room media to phone firmware events."""
 
     _operation_timeout: datetime.timedelta
+    _uplink_sample_rate_hz: int
     _loop: asyncio.AbstractEventLoop | None
     _room: RoomHandle | None
     _room_media_configured: bool
@@ -791,6 +792,7 @@ class PhoneService(hsm.Instance):
         url: str | None = None,
         token: str | None = None,
         track_name: str = "bot-audio",
+        uplink_sample_rate_hz: int = 48_000,
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
         room: RoomHandle | None = None,
         stream_factory: AudioStreamFactory | None = None,
@@ -804,6 +806,7 @@ class PhoneService(hsm.Instance):
         if not track_name:
             raise ValueError("track_name must be a non-empty string.")
         self._operation_timeout = operation_timeout
+        self._uplink_sample_rate_hz = uplink_sample_rate_hz
         self._loop = loop
         self._room = room
         self._room_media_configured = room is not None or url is not None
@@ -984,7 +987,11 @@ class PhoneService(hsm.Instance):
                 return
             _ = live_service.dispatch(live_service.context(), _RoomAudioStatusEvent.with_data(data))
 
-        bridge = create_audio_bridge(loop=self._loop)
+        # A LiveKit audio source is fixed at construction, so the rate the robot speaks at has to
+        # be declared here rather than discovered from the first frame: the local track is
+        # published at connect time, before anything is ever spoken. A frame that disagrees is
+        # refused outright ("sample_rate and num_channels don't match"), which is a mute call.
+        bridge = create_audio_bridge(sample_rate_hz=self._uplink_sample_rate_hz, loop=self._loop)
         room = self._room
         if room is None:
             room = typing.cast(RoomHandle, typing.cast(object, rtc.Room(loop=self._loop)))

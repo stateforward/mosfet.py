@@ -2327,3 +2327,24 @@ def test_a_replacement_phone_can_attach_to_the_same_service() -> None:
 
     assert first_state == ""
     assert second_state == "/Device/detached"
+
+
+@pytest.mark.parametrize("uplink_sample_rate_hz", [24_000, 48_000])
+def test_the_audio_source_is_built_at_the_configured_uplink_rate(uplink_sample_rate_hz: int) -> None:
+    """The rate the robot speaks at is declared, not defaulted.
+
+    A LiveKit audio source is fixed at construction and refuses a frame at any other rate, so a
+    24 kHz voice published into a 48 kHz source is a mute call with an ``InvalidState`` error.
+    Wiring owns the number; the provider carries what it is told.
+    """
+
+    async def run() -> tuple[int, int]:
+        service = PhoneService(uplink_sample_rate_hz=uplink_sample_rate_hz, loop=asyncio.get_running_loop())
+        bridge, _ = service._ensure_media()
+        source = bridge.source_writer.source
+        return int(source.sample_rate), int(source.num_channels)
+
+    sample_rate, channels = asyncio.run(run())
+
+    assert sample_rate == uplink_sample_rate_hz
+    assert channels == 1
