@@ -122,6 +122,22 @@
 
 ## Architecture
 
+### What a bot is
+
+- A bot perceives, decides, and acts. Behavior is what the bot *does* with what it perceives — never what the
+  topology *makes* it do. Model the capacity to perceive and the capacity to act. NEVER model the decision between
+  them.
+- NEVER write a behavior the bot should have chosen. A transition of the form "when X happens, do Y" where Y is a
+  judgment call has replaced the bot with a script. The test: if something in the bot's position could reasonably have
+  done otherwise, the bot must be the one choosing.
+- A bot that does nothing is not thereby broken. Silence, inaction, declining, and waiting are legitimate outcomes of
+  judgment. When a bot does not act, the first question is what it was given to act on — never how to make it act.
+- Determinism is not the goal. A bot whose output you can predict from reading its topology is a script wearing a
+  bot's clothes. Pin capabilities and perception in tests; never pin the choice.
+- A missing behavior is almost always a missing capability: something the bot cannot perceive, cannot do, or was never
+  told. Supply the capability and let the behavior follow. Supplying the behavior directly is the failure this file
+  exists to prevent.
+
 ### Modeling fidelity
 
 - ALWAYS model the real thing, in software. Physical structure is the design, not a metaphor for it: a peripheral
