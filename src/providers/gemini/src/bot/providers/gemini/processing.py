@@ -16,7 +16,6 @@ from .client import ContentClient, jsonable
 from .text_generator import TextGenerator as ProviderTextGenerator
 
 
-
 class ProcessingError(RuntimeError):
     """Raised when an Gemini processing response cannot be validated."""
 
@@ -298,9 +297,7 @@ def _events_from_dispatch_tool_calls(
     if not tool_calls:
         return ()
     # Prefer the dedicated dispatch tool; ignore unexpected names.
-    dispatch_calls = [
-        call for call in tool_calls if call.name == processing.DISPATCH_TOOL_NAME
-    ]
+    dispatch_calls = [call for call in tool_calls if call.name == processing.DISPATCH_TOOL_NAME]
     if not dispatch_calls:
         names = ", ".join(sorted({call.name for call in tool_calls}))
         raise _StructuredOutputValidationError(
@@ -330,6 +327,7 @@ def _events_from_dispatch_tool_calls(
             _validate_event_payload(event, payload, patch=patch)
             merged.append(selection)
     return tuple(merged)
+
 
 _MISSING = object()
 
@@ -407,6 +405,7 @@ def _events_from_content(
     if offered:
         _validate_selection_payloads(selections, offered, patch=patch)
     return selections
+
 
 def _schema_type_matches(value: object, schema_type: str) -> bool:
     if schema_type == "null":
@@ -631,9 +630,7 @@ class Processor(processing.Processor):
     async def process(self, input: processing.InputData) -> processing.Events:
         instructions = (input.instructions or "").strip()
         if not instructions:
-            raise ProcessingError(
-                "Gemini processing requires non-blank instructions stamped by Processing."
-            )
+            raise ProcessingError("Gemini processing requires non-blank instructions stamped by Processing.")
         operation_tools: tuple[dict[str, object], ...] = ()
         if input.schemas:
             operation_tools = (processing.dispatch_tool(input.schemas, patch=input.patch),)

@@ -307,8 +307,10 @@ class TextGenerator(text.TextGenerator):
         tool_calls = _tool_calls_from_parts(parts)
         content = _text_from_parts(parts)
         # AUTO tool selection may produce neither tools nor text (decline / empty selection).
-        if not tool_calls and not content and not (
-            input.tools and input.tool_selection == text.ToolSelectionPolicy.AUTO
+        if (
+            not tool_calls
+            and not content
+            and not (input.tools and input.tool_selection == text.ToolSelectionPolicy.AUTO)
         ):
             raise TextGenerationError("Gemini generate_content message did not include text content.")
         _validate_tool_selection(input, tool_calls)
