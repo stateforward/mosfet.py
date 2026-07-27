@@ -1321,7 +1321,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 authority=instance._attachments[0] if instance._attachments else instance,
             )
             # Deliver only when the turn already provides host actors (bot/devices). A
-            # judgment-only actor map (e.g. authority injected as "cognition") is not a
+            # cognition-only actor map (e.g. authority injected as "cognition") is not a
             # body/device delivery surface — still complete with the selection product.
             if cognition_input.actors and output:
                 selections = processing.coerce_event_selections(output)

@@ -1,7 +1,7 @@
 """Identity: a bot is born nameless, may be given a name, and only then can be addressed.
 
 Every test here pins a *capability* and never a choice. Adoption always happens because the test
-dispatched the adopt event itself, standing in for judgment; nothing asserts that a bot presented
+dispatched the adopt event itself, standing in for cognition; nothing asserts that a bot presented
 with a name takes it. A bot that declines every name it is ever offered passes this whole file.
 """
 
@@ -133,7 +133,7 @@ async def hear(ability: RecordingIdentity, ctx: hsm.Context, transcript: str, *,
 
 
 async def be_told_a_name(ability: RecordingIdentity, ctx: hsm.Context, name: str) -> None:
-    """Stand in for judgment selecting adoption. The bot is never made to do this."""
+    """Stand in for cognition selecting adoption. The bot is never made to do this."""
 
     await hsm.dispatch(ctx, ability, identity.AdoptEvent.with_data(identity.AdoptData(name=name)))
     await wait_until(lambda: ability.state().endswith(_LISTENING))
@@ -202,7 +202,7 @@ def test_a_nameless_bot_only_hears_words() -> None:
 def test_an_adopted_name_is_what_makes_being_addressed_possible() -> None:
     """The other half: the same sound, after adoption, is the bot being addressed.
 
-    The only difference between this test and the one above is that judgment took the name.
+    The only difference between this test and the one above is that the bot took the name.
     """
 
     async def run() -> tuple[list[identity.AddressedData], list[object]]:
@@ -246,7 +246,7 @@ def test_hearing_a_name_never_adopts_it() -> None:
     """The test that fails if adoption ever becomes automatic on hearing a name.
 
     A bot is told, in as plain a sentence as exists, what its name is — and nothing in this
-    ability may act on that. Adoption happens only through the modeled event that judgment
+    ability may act on that. Adoption happens only through the modeled event that cognition
     selects. If any code ever parsed the utterance, this bot would come out of it named, and the
     assertions below would fail.
     """
@@ -384,11 +384,11 @@ def test_a_recognizer_failure_is_reported_rather_than_read_as_silence() -> None:
     assert state.endswith(_LISTENING), "a failed recognition leaves the bot listening, not stuck"
 
 
-def test_being_addressed_reaches_judgment_as_a_stimulus_carrying_no_words() -> None:
+def test_being_addressed_reaches_cognition_as_a_stimulus_carrying_no_words() -> None:
     """The product is "I was addressed" and nothing else.
 
     What was said arrives from listening; identity contributes only the fact of being addressed,
-    and what that means is judgment's to decide.
+    and what that means is the bot's to decide.
     """
 
     async def run() -> tuple[list[cognition_input.InputData], list[object]]:
@@ -479,8 +479,8 @@ def test_a_name_must_be_a_name(offered: str) -> None:
         _ = identity.AdoptData(name=offered.strip())
 
 
-class JudgmentRecorder(abilities.Ability[cognition_input.InputData, object]):
-    """Stands in for judgment: records the turns the body hands it and decides nothing."""
+class CognitionRecorder(abilities.Ability[cognition_input.InputData, object]):
+    """Stands in for cognition: records the turns the body hands it and decides nothing."""
 
     input_event: typing.ClassVar[hsm.Event[cognition_input.InputData]] = cognition.InputEvent
     turns: list[cognition_input.InputData]
@@ -490,15 +490,15 @@ class JudgmentRecorder(abilities.Ability[cognition_input.InputData, object]):
         self.turns = []
 
     @staticmethod
-    def _record(ctx: hsm.Context, instance: "JudgmentRecorder", event: hsm.Event[typing.Any]) -> None:
+    def _record(ctx: hsm.Context, instance: "CognitionRecorder", event: hsm.Event[typing.Any]) -> None:
         del ctx
         data = event.data
         if isinstance(data, cognition_input.InputData):
             instance.turns.append(data)
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
-        "JudgmentRecorder",
-        hsm.initial(hsm.target("/JudgmentRecorder/idle")),
+        "CognitionRecorder",
+        hsm.initial(hsm.target("/CognitionRecorder/idle")),
         hsm.state("idle", hsm.transition(hsm.on(input_event), hsm.effect(_record))),
     )
 
@@ -515,10 +515,10 @@ class AddressableBot(bot.Bot):
         super().__init__(devices={}, cognition=cognition, input=input)
 
 
-def test_being_addressed_reaches_judgment_through_the_body() -> None:
+def test_being_addressed_reaches_cognition_through_the_body() -> None:
     """Identity is usable as an input ability with no change to the body.
 
-    The body fans environment sound to it, and its product comes back as the explicit judgment
+    The body fans environment sound to it, and its product comes back as the explicit cognition
     input every other input ability hands over. Adopting is on the turn's menu because the live
     topology of the identity actor offers it — not because anything enumerated it.
     """
@@ -530,8 +530,8 @@ def test_being_addressed_reaches_judgment_through_the_body() -> None:
                 recognizer=identity.SpeechNameRecognizer(decoder=RecordingSpeechDecoder()),
                 memory=store,
             )
-            judgment = JudgmentRecorder()
-            body = AddressableBot(cognition=judgment, input=(ears,))
+            recorder = CognitionRecorder()
+            body = AddressableBot(cognition=recorder, input=(ears,))
             environment = Environment()
             _ = await body.attach(environment)
             await wait_until(lambda: body.state() != "/Bot/activating")
@@ -539,15 +539,15 @@ def test_being_addressed_reaches_judgment_through_the_body() -> None:
             heard = SoundEvent.with_data(sound("Bob, are you there?"))
             await environment.broadcast(heard)
             await settle()
-            while_nameless = len(judgment.turns)
+            while_nameless = len(recorder.turns)
 
             await hsm.dispatch(body.context(), ears, identity.AdoptEvent.with_data(identity.AdoptData(name="Bob")))
             await wait_until(lambda: ears.state().endswith(_LISTENING))
             offered = tuple(event.name for event in processing.enabled_call_events(ears))
 
             await environment.broadcast(heard)
-            await wait_until(lambda: bool(judgment.turns))
-            stimuli = [turn.stimulus.name if isinstance(turn.stimulus, hsm.Event) else "" for turn in judgment.turns]
+            await wait_until(lambda: bool(recorder.turns))
+            stimuli = [turn.stimulus.name if isinstance(turn.stimulus, hsm.Event) else "" for turn in recorder.turns]
             _ = await body.detach(environment)
             return while_nameless, stimuli, offered
         finally:
@@ -555,6 +555,6 @@ def test_being_addressed_reaches_judgment_through_the_body() -> None:
 
     while_nameless, stimuli, offered = asyncio.run(run())
 
-    assert while_nameless == 0, "a nameless bot hands judgment nothing about being addressed"
+    assert while_nameless == 0, "a nameless bot hands cognition nothing about being addressed"
     assert stimuli == [identity.AddressedEvent.name]
     assert identity.AdoptEvent.name in offered

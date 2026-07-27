@@ -282,7 +282,7 @@ def _environment_actions(
 ) -> types.OutputData:
     """Action events safe to fire before handing an uncertain turn to deliberate reasoning.
 
-    Cognition ignore is judgment-only (not an environment action) and is never pre-fired on escalate.
+    Cognition ignore is internal (not an environment action) and is never pre-fired on escalate.
     """
 
     schemas = {event.name: event for event in current_input.schemas}

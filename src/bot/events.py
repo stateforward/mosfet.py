@@ -71,7 +71,7 @@ class InputEventData(pydantic.BaseModel):
     """Interrupt signal observed by an active bot.
 
     This is how something that happens to a bot becomes an occasion for it. A device reports
-    its own state change here; the body grants the turn on device identity alone and judgment
+    its own state change here; the body grants the turn on device identity alone and cognition
     decides what, if anything, the change is worth doing about.
     """
 

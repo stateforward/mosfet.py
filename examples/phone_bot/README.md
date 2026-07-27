@@ -175,7 +175,7 @@ Somebody walks up to the caller and says `Call Bob at 555-0142.` out loud; nobod
 the callee. The harness writes the sentence to the caller's stdin once it is awake, and the bot
 hears it as sound. Their env files are identical — same room, same dial plan, both bots able to
 dial — so the whole difference between the roles is that one of them was spoken to. Whether the
-caller dials, and whether the callee answers, stay judgment. The verdict prints `dialed=` for the
+caller dials, and whether the callee answers, stay theirs to decide. The verdict prints `dialed=` for the
 caller, `rang=` for the callee and `decoded=` for whoever turned audio into words, and both sides
 must be audible to pass. A run where the caller never dials is reported, not failed.
 

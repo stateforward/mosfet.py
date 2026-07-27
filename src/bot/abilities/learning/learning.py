@@ -137,7 +137,7 @@ _INPUT_EVENT = ability.ability_input_event(
     ),
     examples=[{"content": "When you hear a knock, say hello.", "media_type": "text/plain"}],
 )
-# Model-callable so judgment can select learning from a live turn, the same way Speaking is
+# Model-callable so cognition can select learning from a live turn, the same way Speaking is
 # selected. Programmatic callers still dispatch this event directly.
 InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
 

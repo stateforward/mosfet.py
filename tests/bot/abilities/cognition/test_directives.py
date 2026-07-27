@@ -36,7 +36,7 @@ def test_a_directive_round_trips_as_an_instruction_row_on_the_existing_schema() 
 def test_a_directive_carries_no_device_deadline_priority_or_done_flag() -> None:
     """What is absent is the design.
 
-    "Call Bob" is not about the phone until judgment decides the phone is how you reach Bob,
+    "Call Bob" is not about the phone until the bot decides the phone is how you reach Bob,
     and nothing marks a directive done — a real agent knows it already called because it
     remembers calling, and episodes carry that. A completion flag here would make topology
     track goal state.

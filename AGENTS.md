@@ -3,8 +3,8 @@
 ## Operating Context
 
 - stateforward.bot is a Python 3.13 event-driven software-robot framework for deterministic, realtime robot behavior.
-- Treat the current source tree and tests as the source of truth. Memory and adventure notes are judgment context, not
-  permission to resurrect stale contracts.
+- Treat the current source tree and tests as the source of truth. Memory and adventure notes inform how you read the
+  tree; they are not permission to resurrect stale contracts.
 - Keep this file a concise project contract. Do not turn it into a design notebook, tutorial, changelog, or per-actor
   playbook. Domain-specific topology lives in source and focused rules under `rules/`.
 - Core packages own provider-neutral domain contracts, shared HSM patterns, typed events, and low-cardinality telemetry.
@@ -15,11 +15,11 @@
 
 ### Process and change control
 
-- NEVER hardcode behavior. Product policy, judgment selections, answer/decline/hang-up, retries, routing, and other
-  agent decisions live in modeled topology, typed events, behaviors/skills under judgment, and injected dependencies —
-  never in body observe side-effects, example "demo policies," ad-hoc suppressors, event-name special cases, or
-  one-off workarounds that short-circuit the architecture. A model/intuition miss is judgment evidence, not permission
-  to hardcode the missing selection into body, devices, providers, or examples.
+- NEVER hardcode behavior. Product policy, cognition's selections, answer/decline/hang-up, retries, routing, and other
+  agent decisions live in modeled topology, typed events, behaviors/skills under cognition, and injected dependencies
+  — never in body observe side-effects, example "demo policies," ad-hoc suppressors, event-name special cases, or
+  one-off workarounds that short-circuit the architecture. A model/intuition miss tells you what the bot lacked; it is
+  never permission to hardcode the missing selection into body, devices, providers, or examples.
 - ALWAYS implement stateful behavior, lifecycle, coordination, retries, timeouts, and async flows with
   `stateforward-hsm` through the repo's `import hsm` API.
 - ALWAYS do hard cutovers for renames, moves, contract changes, and package rehomes: update all callers, tests, and
@@ -127,11 +127,12 @@
 - A bot perceives, decides, and acts. Behavior is what the bot *does* with what it perceives — never what the
   topology *makes* it do. Model the capacity to perceive and the capacity to act. NEVER model the decision between
   them.
-- NEVER write a behavior the bot should have chosen. A transition of the form "when X happens, do Y" where Y is a
-  judgment call has replaced the bot with a script. The test: if something in the bot's position could reasonably have
-  done otherwise, the bot must be the one choosing.
-- A bot that does nothing is not thereby broken. Silence, inaction, declining, and waiting are legitimate outcomes of
-  judgment. When a bot does not act, the first question is what it was given to act on — never how to make it act.
+- NEVER write a behavior the bot should have chosen. A transition of the form "when X happens, do Y" where Y is the
+  bot's to decide has replaced the bot with a script. The test: if something in the bot's position could reasonably
+  have done otherwise, the bot must be the one choosing.
+- A bot that does nothing is not thereby broken. Silence, inaction, declining, and waiting are decisions the bot is
+  entitled to make. When a bot does not act, the first question is what it was given to act on — never how to make
+  it act.
 - Determinism is not the goal. A bot whose output you can predict from reading its topology is a script wearing a
   bot's clothes. Pin capabilities and perception in tests; never pin the choice.
 - A missing behavior is almost always a missing capability: something the bot cannot perceive, cannot do, or was never
@@ -150,15 +151,15 @@
 
 ### Layers and authority
 
-- **Body** owns lifetime, attention (focus), environment-facing I/O ability attachment, and explicit handoff into judgment.
-  It does not interpret stimuli, arbitrate behaviors, build deliberative processing frames, or apply judgment
-  selections.
-- **Judgment** owns interpretation, behavior/skill selection, deliberative processing, and dispatch of selected modeled
-  events to body, devices, and abilities. Judgment builds its own deliberative inputs from live body context.
+- **Body** owns lifetime, environment-facing I/O ability attachment, stimulus fan-out, and explicit handoff into
+  cognition. It does not interpret stimuli, arbitrate behaviors, build deliberative processing frames, or apply
+  cognition's selections.
+- **Cognition** owns interpretation, behavior/skill selection, deliberative processing, and dispatch of selected
+  modeled events to body, devices, and abilities. Cognition builds its own deliberative inputs from live body context.
 - **Environment** is a broadcast/parenting scope (`hsm.Context` subclass), not a registry, factory, or service locator. Pass
   `environment` directly to start/dispatch APIs; pass dependencies explicitly at construction or attachment.
 - **Devices** are environment-facing and bot-agnostic: they may notify and expose affordances but must not force body
-  or judgment policy. Ownership (identity, lifecycle, peripherals) stays separate from control (firmware/OS-like
+  or cognition policy. Ownership (identity, lifecycle, peripherals) stays separate from control (firmware/OS-like
   bring-up, service exposure, device policy).
 - **Providers** own transport, SDKs, and raw provider errors. Core sees provider-neutral IDs, payloads, failure kinds,
   and service protocols.
@@ -170,24 +171,24 @@
 
 - Environment stimuli are explicit typed events only—not catch-all ingress. The body fans those stimuli to **input**
   abilities in parallel; **output** abilities are effectors, not on that fan-out path.
-- Input abilities produce typed products for the body; the body hands judgment an explicit judgment-input event after
-  enriching live body context. Judgment never receives raw environment/device media as deliberative ingress.
+- Input abilities produce typed products for the body; the body hands cognition an explicit cognition input event after
+  enriching live body context. Cognition never receives raw environment/device media as deliberative ingress.
 - When a boundary elevates device-plane observations into environment stimuli, that elevation is the contract: body and
-  judgment consume the environment form, not a parallel denylist of device event names on the body.
+  cognition consume the environment form, not a parallel denylist of device event names on the body.
 - Body-owned abilities attach under body lifetime with private instance maps so they are not double-delivered via environment
   broadcast.
-- Body transitions cover body machinery only (lifecycle, attention, fan-out, judgment handoff and terminals). Unmatched
-  events fall through normal HSM ignore semantics—never `hsm.AnyEvent` as body ingress.
+- Body transitions cover body machinery only (lifecycle, fan-out, cognition handoff and terminals). Unmatched events
+  fall through normal HSM ignore semantics—never `hsm.AnyEvent` as body ingress.
 
-### Judgment, behaviors, and skills
+### Cognition, behaviors, and skills
 
-- Judgment owns ordering among its stages (including non-deliberative behavior matching before deliberative steps when
+- Cognition owns ordering among its stages (including non-deliberative behavior matching before deliberative steps when
   those stages are composed). Sibling stages must not hard-code knowledge of each other beyond typed terminals.
-- Behaviors are automatic, event-only programs under judgment—not body arbitration and not deliberative processing.
-  Skills are learned instruction sources selectable inside judgment. Behavior learning stays separate from
+- Behaviors are automatic, event-only programs under cognition—not body arbitration and not deliberative processing.
+  Skills are learned instruction sources selectable inside cognition. Behavior learning stays separate from
   runtime invocation.
-- Model tool menus for a turn come from live offered events on actors (snapshots / enabled call events). Explicit
-  pass/no-op judgment, when modeled, is an event on the judgment host—not a body control event and not an empty-tool
+- Model tool menus for a turn come from live offered events on actors (snapshots / enabled call events). An explicit
+  pass/no-op selection, when modeled, is an event on the cognition host—not a body control event and not an empty-tool
   workaround hard-coded per caller.
 
 ### Composition
@@ -195,6 +196,11 @@
 - NEVER let parents mutate child machine fields; coordinate through modeled events.
 - ALWAYS decompose independent lifecycles into separate machines when they have their own failures, dependencies, or
   reusable behavior.
-- Finite attention lives on the body; interrupts may request it, but only the body changes focus. Meaning of the
-  interrupt stays in judgment.
+- Attention belongs to cognition, not the body. Cognition biases what the bot is sensitive to; perception applies that
+  bias mechanically, so nothing arbitrates per stimulus.
+- NEVER rank stimuli in the body. A priority table ("a ring outranks a thought") is writing the behavior the bot should
+  have chosen.
+- The body owns only the reflex floor—the level no bias can tune away—so a bot can never make itself permanently
+  unreachable.
+- Effector exclusivity (one mouth says one thing at a time) is device-local contention, NEVER a bot-wide focus concept.
 - ALWAYS keep examples outside `src/`, with example-local deps/lockfiles when the example must stay runnable.

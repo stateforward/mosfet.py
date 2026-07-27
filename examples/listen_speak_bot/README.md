@@ -2,7 +2,7 @@
 
 Device-free stateforward.bot demo: **Listening** → mixed cognition → **Speaking**.
 
-No phone or LiveKit. Heard/reply audio uses macOS `say` / `afconvert`. Judgment uses
+No phone or LiveKit. Heard/reply audio uses macOS `say` / `afconvert`. Cognition uses
 **Mercury 2** intuition (OpenAI-compatible, Inception) and **Gemini** reasoning /
 reflection (`gemini-3.5-flash` by default).
 

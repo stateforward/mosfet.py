@@ -167,7 +167,7 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
 
 
 class Cognition(ability.Ability[InputData, OutputData]):
-    """Judgment ability: autonomy → intuition → reasoning, then reflection.
+    """Cognitive ability: autonomy → intuition → reasoning, then reflection.
 
     Chart states are lifecycle phases only. The active turn rides the child request
     and terminal event chain, not instance fields (HSM-COMPLETION-001).
@@ -959,7 +959,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Acknowledge an explicit ignore selection; judgment only (no body/device work)."""
+        """Acknowledge an explicit ignore selection; cognition only (no body/device work)."""
 
         del ctx, instance, event
 

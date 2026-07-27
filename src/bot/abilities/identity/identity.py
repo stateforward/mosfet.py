@@ -3,13 +3,13 @@
 A bot is born nameless. Nothing constructs it with a name, no environment variable supplies one,
 and no code reads a name out of what it hears. A name arrives the way it does for a person:
 someone in the environment says one, and the bot may take it — :data:`AdoptEvent` is the modeled,
-model-callable act of taking it. Hearing words is perception; deciding those words name you is
-judgment, and judgment lives on the other side of that event.
+model-callable act of taking it. Hearing words is perception; deciding those words name you is not,
+and that decision lives on the other side of that event.
 
 Once a bot has a name it can notice being addressed. That noticing is perception again — a lookup
 for a token it already has, in :mod:`bot.abilities.identity.recognition` — and its product is a
-stimulus, not an action: "I was addressed." What being addressed *means* is judgment's, exactly as
-an interrupt may request attention while its meaning stays in judgment.
+stimulus, not an action: "I was addressed." What being addressed *means* is cognition's, exactly as
+an interrupt may request attention while its meaning stays in cognition.
 
 A bot that is told a name and does not adopt it is working correctly, and so is a bot that hears
 its name and does nothing. Both are decisions this ability makes available and never makes.
@@ -92,7 +92,7 @@ class AddressedData(pydantic.BaseModel):
             "description": (
                 "Stimulus product: the bot heard the name it answers to. It carries no words and no "
                 "audio — what was said arrives separately from listening, and what being addressed "
-                "means is a judgment call."
+                "means is the bot's to decide."
             ),
             "examples": [{"name": "Bob", "confidence": 0.82}],
         },
@@ -288,7 +288,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         """Take the selected name and write it down before answering to it.
 
         Fail-closed: a name that could not be written down is a name the bot did not take, and the
-        failure says so. Judgment can select adoption again.
+        failure says so. Cognition can select adoption again.
         """
 
         request = event.data
@@ -387,7 +387,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
 
     @staticmethod
     def _dispatch_addressed(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
-        """Hand the body a judgment input whose stimulus is "I was addressed"."""
+        """Hand the body a cognition input whose stimulus is "I was addressed"."""
 
         data = event.data
         if not isinstance(data, _RecognizedData):
@@ -453,7 +453,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
                     hsm.effect(_dispatch_addressed),
                     hsm.target("/Identity/knowing/listening"),
                 ),
-                # Not addressed is a real outcome and produces nothing. Judgment is never given a
+                # Not addressed is a real outcome and produces nothing. Cognition is never given a
                 # turn about every sound that failed to be the bot's name.
                 hsm.transition(
                     hsm.on(_RecognizedEvent),

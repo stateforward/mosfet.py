@@ -9,7 +9,7 @@ import hsm
 import pytest
 
 
-def test_dispatch_ignore_only_is_judgment_no_actor_delivery() -> None:
+def test_dispatch_ignore_only_is_cognition_no_actor_delivery() -> None:
     """Ignore is stripped before actor dispatch (handled product, no body/device effect)."""
 
     async def run() -> None:

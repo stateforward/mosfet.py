@@ -17,7 +17,7 @@ that audio as `environment.sound` into a bot with no devices, runs **Listening**
 **Mercury 2** intuition (OpenAI-compatible) / Gemini **reasoning**
 (`gemini-3.5-flash`) → **Speaking**, and writes a reply WAV under
 `examples/listen_speak_bot/assets/`. STT is a fixed offline transcript and TTS is
-macOS `say`; judgment requires `BOT_MERCURY_API_KEY` (intuition) and
+macOS `say`; cognition requires `BOT_MERCURY_API_KEY` (intuition) and
 `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or phone device.
 Pass `--play` to `afplay` the heard and reply audio.
 

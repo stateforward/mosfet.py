@@ -1,6 +1,6 @@
 """Bot behavior primitives for stateforward.bot.
 
-A behavior is a Starlark-backed executable program under judgment. Automatic and
+A behavior is a Starlark-backed executable program under cognition. Automatic and
 learned programs share this inventory — they are both behaviors, not separate
 domains. Fast intuition / Autonomy can invoke ACTIVE behaviors before deliberation.
 

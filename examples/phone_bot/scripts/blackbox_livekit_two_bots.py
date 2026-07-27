@@ -351,10 +351,10 @@ async def _main() -> int:
             flush=True,
         )
     if not stages.get(callee, {}).get("incoming_call", 0):
-        # Not a failure: dialing is the caller's judgement, and a bot that saw no reason to call
+        # Not a failure: dialing is the caller's to decide, and a bot that saw no reason to call
         # is behaving. Say so plainly rather than reporting a silent conversation as a defect.
         print(
-            f"[two-bots] NO CALL {caller} did not dial {args.callee_number} this run (judgment, not a defect)",
+            f"[two-bots] NO CALL {caller} did not dial {args.callee_number} this run (its choice, not a defect)",
             flush=True,
         )
     print(f"  record_dir: {record_dir}", flush=True)

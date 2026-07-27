@@ -1490,7 +1490,7 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.ability.cognition.input" in transitions["/Bot/active/focused"]
     assert "*" not in transitions["/Bot/active/focused"]
     # Something happening to the bot is the occasion, and it enters processing from either
-    # attention state. Judgment decides what (if anything) it is for. Nothing wakes the body
+    # attention state. Cognition decides what (if anything) it is for. Nothing wakes the body
     # on a clock: no timer transition survives on either attention state.
     for attention_state in ("/Bot/active/unfocused", "/Bot/active/focused"):
         occasion = transitions[attention_state]["bot.input"][0]
@@ -3889,7 +3889,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
     The whole path is real: a mouth in the environment, ``Environment.broadcast`` with a level
     and an origin, the bot's own placement deciding it is loud enough where it stands, body
     fan-out to Listening, voice detection, speech decoding, and the decoded product handed to
-    judgment. The decoded bytes carry the utterance forward through every stage, so this cannot
+    cognition. The decoded bytes carry the utterance forward through every stage, so this cannot
     pass on a pipeline that dropped the audio and substituted something else.
 
     What it refuses to assert is anything the bot does about it. No device is dialed, nothing is
@@ -3955,7 +3955,7 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
 
     Nothing is dispatched at this bot: no input is minted by the test, no sound, no directive,
     and no memory to have recalled one from. A device it owns simply becomes something, and
-    that is the whole condition for the turn — judgment is the one that gets to decide the
+    that is the whole condition for the turn — the bot is the one that gets to decide the
     turn is a turn to do nothing.
 
     The guard reads which device the interrupt arrived from and nothing else. This is the test

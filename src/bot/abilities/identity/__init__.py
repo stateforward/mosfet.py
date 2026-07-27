@@ -1,6 +1,6 @@
 """Identity: a bot's sense of who it is.
 
-A bot starts with no name. Someone in its environment says one, judgment may select
+A bot starts with no name. Someone in its environment says one, cognition may select
 ``identity.AdoptEvent``, and only then can the bot tell it is being addressed.
 
     from bot.abilities import identity

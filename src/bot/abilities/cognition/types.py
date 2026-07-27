@@ -76,7 +76,7 @@ OutputData: typing.TypeAlias = tuple[EventData, ...]
 
 
 class IgnoreData(pydantic.BaseModel):
-    """Explicit judgment that this cognition turn should run no environment or body actions.
+    """Explicit decision that this cognition turn should run no environment or body actions.
 
     Prefer selecting this event over an empty ``events`` array so models have a named
     branch under required tool-calling. Host treats ignore-only as handled (no cascade
@@ -122,7 +122,7 @@ def is_ignore_event(event_name: str) -> bool:
 
 
 def without_ignore_selections(selections: processing.Events) -> processing.Events:
-    """Drop cognition ignore selections (they are judgment only, not dispatch targets)."""
+    """Drop cognition ignore selections (they are cognition only, not dispatch targets)."""
 
     return tuple(item for item in selections if not is_ignore_event(item.event))
 
@@ -199,9 +199,9 @@ async def dispatch_selected_events(
 
     Cognition ignore is offered from the host model-offerable snapshot and may appear in
     selections as a handled terminal product, but it is not a body/device dispatch target
-    (judgment only). Strip it before actor delivery.
+    (cognition only). Strip it before actor delivery.
 
-    Body attention policy (focus/clear legality) is owned by ``bot.Bot``; judgment only
+    Body attention policy (focus/clear legality) is owned by ``bot.Bot``; cognition only
     fails closed on that policy before dispatch so illegal selections are not silent drops.
     ``focused_device`` is the body-stamped current focus for this turn (not a private field read).
     """

@@ -1,7 +1,7 @@
 """Someone standing in the bot's environment who can say something out loud.
 
 A person is not a bot and is not modelled as one. They perceive nothing here, decide nothing
-here, and hold no judgment: the only part of them inside the simulation is the part a bot can
+here, and choose nothing here: the only part of them inside the simulation is the part a bot can
 actually encounter — a mouth, somewhere in the room, at some loudness. The words come from
 outside, from whoever is at the terminal, and they arrive already chosen.
 
@@ -110,7 +110,7 @@ class Person(hsm.Instance):
 
     ``enter`` puts them in the room and ``say`` is the only thing they can do. They cannot hear,
     cannot see, and cannot act on anything, because none of that is theirs to do — the only party
-    in this room with judgment is the bot.
+    in this room deciding anything is the bot.
     """
 
     _mouth: audio.Speaker

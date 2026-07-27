@@ -6,7 +6,7 @@ interprets what was said.
 
 This module is the single place where a bot checks heard audio for a name, and it is deliberately
 narrow: it is given a name the bot has **already adopted** and answers yes or no. It never decides
-that an utterance confers a name — that is judgment's, through ``identity.AdoptEvent``.
+that an utterance confers a name — that is cognition's, through ``identity.AdoptEvent``.
 """
 
 from __future__ import annotations

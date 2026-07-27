@@ -676,7 +676,7 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> str | None:
         """Return a fail-closed error for illegal body-attention selections, else None.
 
-        Body owns attention policy. Judgment calls this before dispatch so illegal
+        Body owns attention policy. Cognition calls this before dispatch so illegal
         focus/clear selections fail the turn instead of silently dropping at a guard.
         """
 
@@ -1498,7 +1498,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.entry(_clear_focus),
                 # Something happening to this bot is the occasion. The guard reads device
                 # identity and nothing else — never what happened — so the turn is granted
-                # blind to content. What (if anything) to do with it is judgment's, and
+                # blind to content. What (if anything) to do with it is cognition's, and
                 # ignoring is a real answer. An unoccupied body also turns to look: an
                 # interrupt requests attention and the body is what grants it.
                 hsm.transition(

@@ -4,7 +4,7 @@ A directive is an instruction memory row (``kind=instruction``, ``query_tags=sta
 on the existing ``bot_memory`` schema — no new table, no migration.
 
 Nothing here names a device, a deadline, a priority, or a completion flag. "Call Bob" is not
-about the phone until judgment decides the phone is how you reach Bob, and a bot knows it
+about the phone until cognition decides the phone is how you reach Bob, and a bot knows it
 already called because it *remembers calling* — episodes carry that. A completion flag would
 make topology track goal state.
 """

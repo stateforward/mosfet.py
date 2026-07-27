@@ -299,7 +299,7 @@ async def _main() -> int:
     print("  livekit_sfu: ok", flush=True)
     print(f"  agent_b_tts: {args.tts}", flush=True)
     print("  agent_b_spoke: yes (see caller log peaks)", flush=True)
-    print(f"  agent_a_answer: {answered} (judgment; not a harness hard-fail if 0)", flush=True)
+    print(f"  agent_a_answer: {answered} (the bot's choice; not a harness hard-fail if 0)", flush=True)
     print(f"  agent_a_media_ready: {media_ready}", flush=True)
     print(f"  agent_a_detecting_voice: {detecting}", flush=True)
     print(f"  agent_a_decoding_speech: {decoding}", flush=True)
@@ -328,10 +328,10 @@ async def _main() -> int:
         print("[blackbox] PASS speech path entered DecodingSpeech and agent A was audible", flush=True)
         return 0
     if answered == 0:
-        # Intuition/judgment chose not to answer — harness remains green on media path;
+        # The bot chose not to answer — harness remains green on media path;
         # call media never elevates until answer, so STT is not expected this run.
         print(
-            "[blackbox] PARTIAL no answer this run (judgment); media STT path not entered",
+            "[blackbox] PARTIAL no answer this run (the bot chose not to); media STT path not entered",
             flush=True,
         )
         return 0
