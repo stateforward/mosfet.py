@@ -6,12 +6,12 @@ Nothing is scripted: there is no TTS peer playing canned lines, so every utteran
 came from a bot deciding to speak.
 
 The two bots are not symmetric, because a call is not symmetric. One is the **caller**: it is
-given a dial plan (``BOT_LIVEKIT_DIRECTORY``) naming the other, so it *can* place a call. The
-other is the **callee**: it has no dial plan, so it can only be called. Being given the dial plan
-is a capability, not an instruction — whether to dial, and whether to answer, are the bots'
-decisions and this harness makes neither.
+*told* the other bot's number (``--tell "Call phone-bot-bob."``), so it has something to call
+about and a number to call. The other is told nothing. Both have the same phone and both can
+dial; being told a number is a thing the caller knows, not a thing it must do — whether to dial,
+and whether to answer, are the bots' decisions and this harness makes neither.
 
-That asymmetry is what the room gives them. A LiveKit room is an exchange: joining it makes a
+The room is what makes the call itself possible. A LiveKit room is an exchange: joining it makes a
 phone reachable, and dialing is call setup addressed to one participant. So the callee rings
 because the caller called it, not because the caller walked into the room — which is why both
 bots no longer end up as callees.
@@ -87,14 +87,13 @@ def _bot_env_file(
     *,
     identity: str,
     room: str,
-    dials: str | None,
 ) -> pathlib.Path:
-    """One env file per bot: same room, distinct identity and track, and who it can call.
+    """One env file per bot: same room, distinct identity and track.
 
     Identity has to differ or the two processes collide on the SFU; track name differs so each
-    bot's audio is attributable to it in the observer's capture. ``dials`` is the other bot's
-    identity for the caller and ``None`` for the callee — the only difference between the two
-    roles, and the reason exactly one of them can originate a call.
+    bot's audio is attributable to it in the observer's capture. Nothing here distinguishes
+    caller from callee: the two configurations are identical, and the only difference between
+    the roles is what one of them was told.
     """
 
     values: dict[str, str] = {}
@@ -107,10 +106,8 @@ def _bot_env_file(
     values["BOT_LIVEKIT_ROOM"] = room
     values["BOT_LIVEKIT_IDENTITY"] = identity
     values["BOT_LIVEKIT_TRACK_NAME"] = identity
-    if dials is None:
-        _ = values.pop("BOT_LIVEKIT_DIRECTORY", None)
-    else:
-        values["BOT_LIVEKIT_DIRECTORY"] = dials
+    # A shared .env telling both bots the same thing would make both of them callers.
+    _ = values.pop("BOT_TELL", None)
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
@@ -186,8 +183,14 @@ async def _main() -> int:
     _ = parser.add_argument("--api-key", default=os.environ.get("LIVEKIT_API_KEY", "devkey"))
     _ = parser.add_argument("--api-secret", default=os.environ.get("LIVEKIT_API_SECRET", "secret"))
     _ = parser.add_argument("--room", default="bot-two-bots")
-    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot given a dial plan for the callee.")
-    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot with no dial plan; it can only be called.")
+    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot told the callee's number.")
+    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot told nothing.")
+    _ = parser.add_argument(
+        "--tell",
+        default=None,
+        metavar="TEXT",
+        help="What the caller is told before it starts (default: 'Call <callee>.').",
+    )
     _ = parser.add_argument("--observer", default="conversation-observer")
     _ = parser.add_argument("--converse-seconds", type=float, default=60.0)
     _ = parser.add_argument("--ready-timeout", type=float, default=120.0)
@@ -216,7 +219,9 @@ async def _main() -> int:
 
     caller, callee = str(args.caller), str(args.callee)
     identities = [caller, callee]
-    dial_plans = {caller: callee, callee: None}
+    # The callee's number, in words, to the one bot that is told anything at all. On LiveKit the
+    # destination identity is the number, so this is the number and nothing resolves it.
+    told = {caller: str(args.tell) if args.tell is not None else f"Call {callee}.", callee: None}
     processes: dict[str, subprocess.Popen[str]] = {}
     logs: dict[str, pathlib.Path] = {}
     try:
@@ -226,20 +231,31 @@ async def _main() -> int:
                 record_dir / f"{identity}.env",
                 identity=identity,
                 room=str(args.room),
-                dials=dial_plans[identity],
             )
+            instruction = told[identity]
             log_path = record_dir / f"{identity}.log"
             logs[identity] = log_path
             handle = log_path.open("w", encoding="utf-8")
             processes[identity] = subprocess.Popen(
-                ["uv", "run", "phone-bot", "-v", "--env", str(env_file)],
+                [
+                    "uv",
+                    "run",
+                    "phone-bot",
+                    "-v",
+                    "--env",
+                    str(env_file),
+                    *(() if instruction is None else ("--tell", instruction)),
+                ],
                 cwd=str(example_root),
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 text=True,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
-            print(f"[two-bots] started {identity} pid={processes[identity].pid} log={log_path}", flush=True)
+            print(
+                f"[two-bots] started {identity} pid={processes[identity].pid} log={log_path} told={instruction!r}",
+                flush=True,
+            )
 
         for identity in identities:
             if not await _await_ready(logs[identity], processes[identity], timeout=float(args.ready_timeout)):
@@ -287,6 +303,7 @@ async def _main() -> int:
         "caller": caller,
         "callee": callee,
         "identities": identities,
+        "told": told,
         "audible_floor": int(args.audible_floor),
         "speech": speech,
         "stages": stages,

@@ -9,6 +9,9 @@ from bot.abilities import listening
 from bot.abilities import memory
 from bot.abilities import participating
 from bot.abilities import speaking
+
+# ``start_bot`` binds ``cognition`` as a parameter, so directives are imported by module name.
+from bot.abilities.cognition import directives
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -35,7 +38,7 @@ from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
 from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.providers.livekit import MappingDirectory, PhoneService
+from bot.providers.livekit import PhoneService
 from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
 from bot.environment import Environment, space
@@ -146,23 +149,6 @@ def mint_livekit_access_token(
     return f"{segments}.{b64url(signature)}"
 
 
-def _directory_entries(value: str | None) -> tuple[tuple[str, str], ...]:
-    """Read a dial plan: ``name=identity`` pairs, or a bare identity dialable by its own name.
-
-    The identity on the right is the same string ``mint-livekit-token --identity`` is given, so a
-    reachable endpoint and a dialable name are one fact declared once.
-    """
-
-    entries: list[tuple[str, str]] = []
-    for item in (value or "").split(","):
-        entry = item.strip()
-        if not entry:
-            continue
-        name, separator, identity = entry.partition("=")
-        entries.append((name.strip(), identity.strip()) if separator else (name.strip(), name.strip()))
-    return tuple(entries)
-
-
 @dataclasses.dataclass(frozen=True)
 class LiveKitConfig:
     url: str | None = None
@@ -172,8 +158,6 @@ class LiveKitConfig:
     room: str = "bot-phone-bot"
     identity: str = "bot-phone-bot"
     track_name: str = DEFAULT_LIVEKIT_TRACK_NAME
-    # Who this phone can call. Empty means it is registered with no exchange and can only receive.
-    directory: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
@@ -202,7 +186,6 @@ class LiveKitConfig:
             room=room,
             identity=identity,
             track_name=track_name,
-            directory=_directory_entries(_env_first(env, "BOT_LIVEKIT_DIRECTORY", "LIVEKIT_DIRECTORY")),
         )
 
     def can_connect_room(self) -> bool:
@@ -321,6 +304,9 @@ class AppConfig:
     cognition: CognitionConfig = dataclasses.field(default_factory=CognitionConfig)
     livekit: LiveKitConfig = dataclasses.field(default_factory=LiveKitConfig)
     speech: SpeechConfig = dataclasses.field(default_factory=SpeechConfig)
+    # Things this bot was told, in the words they were told in. They become standing directives
+    # in its memory before the first turn; the example never reads them.
+    told: tuple[str, ...] = ()
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
@@ -330,6 +316,9 @@ class AppConfig:
             env.update(load_env(_REPO_ENV_PATH))
         if path is not None and path.exists():
             env.update(load_env(path))
+        # One thing the env file can say to the bot. `--tell` is the repeatable form; a KEY=VALUE
+        # line holds one instruction and cannot hold two without splitting somebody's prose.
+        told = _env_first(env, "BOT_TELL")
         openai_api_key = _env_first(env, "BOT_OPENAI_API_KEY", "OPENAI_API_KEY")
         openai_base_url = _env_first(env, "BOT_OPENAI_BASE_URL", "OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
         return cls(
@@ -371,6 +360,7 @@ class AppConfig:
             ),
             livekit=LiveKitConfig.from_env(env),
             speech=SpeechConfig.from_env(env),
+            told=() if told is None else (told,),
         )
 
     def with_cognition_overrides(self, *, model: str | None) -> typing.Self:
@@ -948,6 +938,13 @@ async def start_bot(
         conversation=conversation,
         memory=memory,
     )
+    # What this bot was told, written where a bot keeps what it was told, before it is awake to
+    # have a turn about any of it. The text is opaque here: nothing reads it, nothing routes on
+    # it, and a bot that recalls "Call Bob" is as free to ignore that as a person would be.
+    for instruction in app_config.told:
+        _ = body.memory().execute(
+            directives.directive_insert_input(directives.Directive(text=instruction), context_ref=None)
+        )
 
     environment = Environment()
     _ = await body.attach(environment, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
@@ -1043,6 +1040,9 @@ def _summary_for(
             "base_url": app_config.cognition.intuition_base_url,
             "api_key_loaded": bool(app_config.cognition.intuition_api_key),
         },
+        # How many things this bot was told, not what they were: the operator gets confirmation
+        # that the words were heard without the readiness summary quoting them back.
+        "told": len(app_config.told),
         "livekit_room_audio_attempted": room_attempted,
         "livekit_room_audio_configured": app_config.livekit.can_connect_room(),
         "livekit_room_audio_connected": room_connected,
@@ -1101,14 +1101,10 @@ async def run(
     conversation = _conversation(app_config.speech)
     livekit_url = app_config.livekit.url if connect_livekit and app_config.livekit.can_connect_room() else None
     livekit_token = app_config.livekit.token if connect_livekit and app_config.livekit.can_connect_room() else None
-    dial_plan = dict(app_config.livekit.directory)
     phone_service = PhoneService(
         url=livekit_url,
         token=livekit_token,
         track_name=app_config.livekit.track_name,
-        # A phone registered with no exchange cannot place calls. It can still take them, which
-        # is exactly what a bot with no dial plan configured should be able to do.
-        directory=MappingDirectory(dial_plan) if dial_plan else None,
         # One value decides the robot's voice rate: the TTS encoder, Speaking's label, and the
         # LiveKit source all take it from here. They used to be three defaults that happened to
         # agree in two places and not in the third, which is a silent mute rather than an error.
@@ -1191,12 +1187,23 @@ def main() -> None:
         help="Override the OpenAI Terra reasoning model (default gpt-5.6-terra).",
     )
     _ = parser.add_argument("--connect-livekit", action="store_true", help="Attempt the configured LiveKit room join.")
+    _ = parser.add_argument(
+        "--tell",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="Tell the bot something before it starts, in plain words. Repeatable.",
+    )
     args = parser.parse_args()
     env_arg = typing.cast(str | None, getattr(args, "env", None))
     env_path = pathlib.Path(env_arg).expanduser() if env_arg is not None else None
     config = AppConfig.from_env_file(env_path)
     config = config.with_cognition_overrides(
         model=typing.cast(str | None, getattr(args, "reasoning_model", None)),
+    )
+    config = dataclasses.replace(
+        config,
+        told=(*config.told, *typing.cast(list[str], getattr(args, "tell", []))),
     )
     summary = asyncio.run(
         run(

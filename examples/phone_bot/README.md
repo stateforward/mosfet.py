@@ -69,10 +69,25 @@ handset. The other ways to end up with no call — nothing was ringing, the bot 
 nobody answered — make **no sound**, because no telephone makes one for them; they stay on the
 service plane as `phone.no_call`. What the bot does about a busy tone is its own call.
 
-To let this bot place calls, give it a dial plan with `BOT_LIVEKIT_DIRECTORY`
-(`name=identity`, or a bare identity dialable by its own name). With no dial plan the bot is
-registered with no exchange: it can be called but cannot call. Answering, declining, and hanging
-up all stay the bot's decisions — nothing in the wiring makes them.
+## Telling the bot something
+
+```bash
+uv run phone-bot --tell "Call phone-bot-bob."
+```
+
+`--tell` is repeatable, and `BOT_TELL=` in the env file says one thing. Each becomes a standing
+directive in the bot's memory before its first turn, recalled alongside prior turns the way any
+instruction it was given is.
+
+There is no directory: a LiveKit destination identity *is* the number, so "call phone-bot-bob"
+names the thing you would dial, and nothing resolves it to something else. Every bot can dial —
+this one now has a number and a reason.
+
+Being told is not being made to. The example never reads the text: it does not look for a number
+in it, does not match on "call", and has no transition anywhere of the form "directive present →
+dial". A bot that recalls `Call phone-bot-bob.` and decides this is not the moment has decided,
+and that is a legitimate outcome. Answering, declining, dialing, and hanging up all stay the
+bot's decisions — nothing in the wiring makes them.
 
 ## What “connected” means
 
@@ -136,10 +151,11 @@ uv run python scripts/blackbox_livekit_two_bots.py \
   --caller phone-bot-alice --callee phone-bot-bob
 ```
 
-The caller's env file gets `BOT_LIVEKIT_DIRECTORY=<callee identity>`; the callee's does not. That
-one line is the whole difference between the roles — a capability, not an instruction. Whether the
-caller dials, and whether the callee answers, stay judgment. The verdict prints `dialed=` for the
-caller and `rang=` for the callee, and both sides must be audible to pass.
+The caller is started with `--tell "Call <callee>."`; the callee is told nothing. Their env files
+are identical and both bots can dial — the whole difference between the roles is that one of them
+knows a number and has been asked. Whether the caller dials, and whether the callee answers, stay
+judgment. The verdict prints `dialed=` for the caller and `rang=` for the callee, and both sides
+must be audible to pass.
 
 ## Unit tests (no LiveKit)
 

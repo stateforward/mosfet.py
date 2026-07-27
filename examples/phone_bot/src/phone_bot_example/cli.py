@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections.abc
+import dataclasses
 import json
 import logging
 import os
@@ -229,6 +230,17 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Do not docker-compose up LiveKit (still joins if URL is reachable).",
     )
+    _ = parser.add_argument(
+        "--tell",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help=(
+            "Tell the bot something before it starts, in plain words "
+            '(e.g. --tell "Call phone-bot-bob."). Repeatable; BOT_TELL in the env file '
+            "says one thing. It is an instruction the bot recalls, not one it obeys."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Default: hold the line so a human can join. --json / --once are smoke-only.
@@ -268,6 +280,11 @@ def main(argv: list[str] | None = None) -> None:
         config = AppConfig.from_env_file(merged_env)
         config = config.with_cognition_overrides(
             model=typing.cast(str | None, args.reasoning_model),
+        )
+        # Whatever the env file said, then whatever the operator said on the command line.
+        config = dataclasses.replace(
+            config,
+            told=(*config.told, *typing.cast(list[str], args.tell)),
         )
         if not config.livekit.can_connect_room():
             raise RuntimeError("LiveKit URL/token still missing after phone-bot setup.")

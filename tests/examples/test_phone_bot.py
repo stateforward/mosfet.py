@@ -88,7 +88,7 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "_silero_voice_detector" in source
     assert "KindSoundClassifier" in source
     assert "from bot.devices import phone as phone_device" in source
-    assert "from bot.providers.livekit import MappingDirectory, PhoneService" in source
+    assert "from bot.providers.livekit import PhoneService" in source
     assert "from bot.providers.livekit.audio import PcmWavDecoder" in source
     assert "VoiceDecoder" not in source
     assert "RoomAudioEndpoint" not in source
@@ -123,30 +123,173 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "openai_terra_reasoning" in source
 
 
-def test_phone_bot_dial_plan_is_configuration_not_code() -> None:
-    """Who a bot can call is declared where its token is minted, and defaults to nobody.
+def test_a_bot_can_be_told_something_before_it_starts_and_still_recall_it() -> None:
+    """Telling a bot something is a memory it has, not a branch the example takes.
 
-    An empty dial plan is a phone registered with no exchange: it can be called, but it cannot
-    place calls. That is the correct default for a bot nobody has given anyone to ring.
+    The instruction is written as a standing directive before the body is awake, and it is
+    still there — recalled by the same query Reasoning recalls with, out of the same in-process
+    ``ShortTermMemory`` the reasoning ability holds — once the bot is running.
+
+    What this refuses to assert is anything about what the bot then does. It does not dial, it
+    is not asked to dial, and this test would pass unchanged if it never dialed in its life.
     """
 
-    printed = _run_phone_bot_python(
-        "\n".join(
-            [
-                "import phone_bot_example",
-                "config = phone_bot_example.LiveKitConfig",
-                "print(config.from_env({}).directory)",
-                "print(config.from_env({'BOT_LIVEKIT_DIRECTORY': 'phone-bot-bob'}).directory)",
-                "print(config.from_env({'BOT_LIVEKIT_DIRECTORY': 'reception=agent-b, helpdesk=agent-c'}).directory)",
-            ]
-        )
+    code = "\n".join(
+        [
+            "import asyncio, phone_bot_example",
+            "from bot.abilities.cognition import directives",
+            "async def main():",
+            "    config = phone_bot_example.AppConfig(",
+            "        told=('Call phone-bot-bob.', 'Keep it brief.'),",
+            "    )",
+            "    body = await phone_bot_example.start_bot('probe', config=config)",
+            "    recalled = directives.directives_from_output(",
+            "        body.memory().execute(directives.directive_select_input(context_ref='phone'))",
+            "    )",
+            "    print([item.text for item in recalled])",
+            "    print(body.state())",
+            "asyncio.run(main())",
+        ]
     )
 
-    assert printed.splitlines() == [
-        "()",
-        "(('phone-bot-bob', 'phone-bot-bob'),)",
-        "(('reception', 'agent-b'), ('helpdesk', 'agent-c'))",
-    ]
+    assert _run_phone_bot_python(code) == "\n".join(
+        [
+            "['Call phone-bot-bob.', 'Keep it brief.']",
+            "/PhoneBot/active/unfocused",
+        ]
+    )
+
+
+def test_the_command_line_is_how_you_tell_a_running_bot_something(tmp_path: pathlib.Path) -> None:
+    """``--tell`` repeats, and the env file says one thing; both reach the same bot.
+
+    Only the count is asserted here, because the count is all the readiness summary reports —
+    the words go to the bot, not to the operator's console.
+    """
+
+    env_path = tmp_path / ".env"
+    _ = env_path.write_text("BOT_TELL=Call phone-bot-bob.\n", encoding="utf-8")
+
+    from_env = _run_phone_bot_example("--env", str(env_path))
+    from_flags = _run_phone_bot_example(
+        "--env",
+        str(env_path),
+        "--tell",
+        "Ask them how the demo went.",
+        "--tell",
+        "Keep it brief.",
+    )
+    told_nothing = _run_phone_bot_example("--env", str(tmp_path / "absent.env"))
+
+    assert from_env["told"] == 1
+    assert from_flags["told"] == 3
+    assert told_nothing["told"] == 0
+
+
+def test_the_turnkey_command_carries_every_tell_through_to_the_bot(tmp_path: pathlib.Path) -> None:
+    """``phone-bot --tell`` is the same words in the same order, plus whatever the env file said.
+
+    The turnkey command rewrites its env file on the way through (minted token, resolved room),
+    so this pins that what the operator says survives that rewrite. LiveKit and the bot itself
+    are stubbed out: this is about the words reaching the config, not about a call.
+    """
+
+    env_path = tmp_path / ".env"
+    _ = env_path.write_text("BOT_TELL=Call phone-bot-bob.\n", encoding="utf-8")
+    code = "\n".join(
+        [
+            "import phone_bot_example.cli as cli",
+            "told = []",
+            "async def fake_run(config, **kwargs):",
+            "    told.extend(config.told)",
+            "    return {'livekit_room_audio_connected': True}",
+            "cli.run = fake_run",
+            "cli.main([",
+            f"    '--json', '--skip-livekit-start', '--env', {str(env_path)!r},",
+            "    '--tell', 'Ask how the demo went.', '--tell', 'Keep it brief.',",
+            "])",
+            "print(told)",
+        ]
+    )
+
+    assert _run_phone_bot_python(code) == "['Call phone-bot-bob.', 'Ask how the demo went.', 'Keep it brief.']"
+
+
+def test_a_bot_that_was_told_a_number_is_offered_its_phone_and_nothing_more() -> None:
+    """The bot is given the instruction and a phone; the choice between them is its own.
+
+    ``phone.dial`` is offered because the handset is resting on the hook, which is true of every
+    bot in this example whether it was told anything or not. Nothing about being told a number
+    enables it, and nothing about being told a number dials it — the assertion here is that both
+    the words and the capability reached the bot, never that one caused the other.
+    """
+
+    code = "\n".join(
+        [
+            "import asyncio, phone_bot_example",
+            "from bot.abilities import processing",
+            "from bot.devices import phone",
+            "async def main():",
+            "    told = await phone_bot_example.start_bot(",
+            "        'told', config=phone_bot_example.AppConfig(told=('Call phone-bot-bob.',))",
+            "    )",
+            "    silent = await phone_bot_example.start_bot('silent', config=phone_bot_example.AppConfig())",
+            "    for body in (told, silent):",
+            "        offered = tuple(event.name for event in processing.enabled_call_events(body.phone()))",
+            "        print(body.label(), phone.DialEvent.name in offered)",
+            "asyncio.run(main())",
+        ]
+    )
+
+    assert _run_phone_bot_python(code) == "\n".join(["told True", "silent True"])
+
+
+def test_the_example_never_reads_what_the_bot_was_told() -> None:
+    """The text is opaque: no parse, no number extraction, no "directive present → dial".
+
+    A telling interface that inspected the instruction would be this example choosing for the
+    bot. The only thing the example does with the words is write them down.
+    """
+
+    source = _example_source()
+    cli = (_repo_root() / "examples" / "phone_bot" / "src" / "phone_bot_example" / "cli.py").read_text(encoding="utf-8")
+
+    assert "directives.Directive(text=instruction)" in source
+    for reading_the_words in (
+        "told.startswith",
+        "told.lower",
+        "instruction.lower",
+        "instruction.split",
+        '"call" in',
+        "DialEvent",
+        "DialData",
+        "phone.dial",
+    ):
+        assert reading_the_words not in source, reading_the_words
+        assert reading_the_words not in cli, reading_the_words
+
+
+def test_the_example_has_no_dial_plan_left_to_resolve_a_number_through() -> None:
+    """A LiveKit destination identity is the number; a directory would be a layer inventing one.
+
+    The mapping had no counterpart in a real handset, so it is gone rather than deprecated: no
+    env key, no config field, no provider directory object reaching ``PhoneService``.
+    """
+
+    source = _example_source()
+    env_example = (_repo_root() / "examples" / "phone_bot" / ".env.example").read_text(encoding="utf-8")
+    readme = (_repo_root() / "examples" / "phone_bot" / "README.md").read_text(encoding="utf-8")
+    harness = (_repo_root() / "examples" / "phone_bot" / "scripts" / "blackbox_livekit_two_bots.py").read_text(
+        encoding="utf-8"
+    )
+
+    for text in (source, env_example, readme, harness):
+        assert "BOT_LIVEKIT_DIRECTORY" not in text
+        assert "LIVEKIT_DIRECTORY" not in text
+        assert "MappingDirectory" not in text
+    assert "directory=" not in source
+    assert "_directory_entries" not in source
+    assert "from bot.providers.livekit import PhoneService" in source
 
 
 def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
