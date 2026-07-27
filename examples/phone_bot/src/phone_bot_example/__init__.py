@@ -40,6 +40,7 @@ from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
+from bot.providers.livekit import signaling
 from bot.providers.livekit.audio import PcmWavDecoder
 from bot.telemetry import observed_event, observed_occurrence
 from bot.environment import Environment, space
@@ -159,6 +160,13 @@ class LiveKitConfig:
     room: str = "bot-phone-bot"
     identity: str = "bot-phone-bot"
     track_name: str = DEFAULT_LIVEKIT_TRACK_NAME
+    dial_plan: dict[str, str] = dataclasses.field(default_factory=dict)
+    """The exchange's numbering plan: which number rings which participant identity.
+
+    Provisioned by whoever mints the tokens, because "this identity is on the room" and "this
+    number rings it" are the same registration written down once. The bot never reads it — it
+    dials digits, and this is what the room does with them.
+    """
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
@@ -179,6 +187,14 @@ class LiveKitConfig:
                 identity=identity,
                 room=room,
             )
+        dial_plan: dict[str, str] = {}
+        for entry in (_env_first(env, "BOT_LIVEKIT_DIAL_PLAN") or "").split(","):
+            if not entry.strip():
+                continue
+            number, separator, endpoint = entry.partition("=")
+            if not separator or not number.strip() or not endpoint.strip():
+                raise ValueError(f"BOT_LIVEKIT_DIAL_PLAN entry {entry.strip()!r} is not `number=identity`.")
+            dial_plan[number.strip()] = endpoint.strip()
         return cls(
             url=url,
             token=token,
@@ -187,6 +203,7 @@ class LiveKitConfig:
             room=room,
             identity=identity,
             track_name=track_name,
+            dial_plan=dial_plan,
         )
 
     def can_connect_room(self) -> bool:
@@ -1016,6 +1033,11 @@ def _warnings(config: AppConfig, *, connect_livekit: bool) -> list[str]:
         )
     if config.livekit.can_connect_room() and not connect_livekit:
         warnings.append("LiveKit room config is loaded but connection is opt-in; pass --connect-livekit to attempt it.")
+    if not config.livekit.dial_plan:
+        warnings.append(
+            "BOT_LIVEKIT_DIAL_PLAN is empty; this phone is registered with no exchange, so it can be called "
+            "but no number leads anywhere from it."
+        )
     try:
         person.require_local_speech_tools()
     except RuntimeError as error:
@@ -1090,6 +1112,9 @@ def _summary_for(
             "room": app_config.livekit.room,
             "identity": app_config.livekit.identity,
             "track_name": app_config.livekit.track_name,
+            # How many numbers this exchange can route, not which ones: an operator needs to know
+            # whether the phone can place a call at all, and a readiness report is not a directory.
+            "dial_plan_entries": len(app_config.livekit.dial_plan),
         },
         "speech": {
             "voice_name": app_config.speech.voice_name,
@@ -1125,6 +1150,10 @@ async def run(
         url=livekit_url,
         token=livekit_token,
         track_name=app_config.livekit.track_name,
+        # The exchange this phone is registered with. Empty means registered with none: it can be
+        # called, and no number leads anywhere from it — which is a real state for a phone to be
+        # in, not a configuration error to paper over.
+        dial_plan=(signaling.MappingDialPlan(app_config.livekit.dial_plan) if app_config.livekit.dial_plan else None),
         # One value decides the robot's voice rate: the TTS encoder, Speaking's label, and the
         # LiveKit source all take it from here. They used to be three defaults that happened to
         # agree in two places and not in the third, which is a silent mute rather than an error.

@@ -911,6 +911,7 @@ class PhoneService(hsm.Instance):
     _presence_bound: bool
     _presence_left_callback: collections.abc.Callable[..., object] | None
     _signaling_participant: LocalParticipant | None
+    _dial_plan: signaling.DialPlan | None
 
     def __init__(
         self,
@@ -924,6 +925,7 @@ class PhoneService(hsm.Instance):
         room: RoomHandle | None = None,
         stream_factory: AudioStreamFactory | None = None,
         local_track_factory: LocalAudioTrackFactory | None = None,
+        dial_plan: signaling.DialPlan | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__()
@@ -961,6 +963,7 @@ class PhoneService(hsm.Instance):
         self._presence_bound = False
         self._presence_left_callback = None
         self._signaling_participant = None
+        self._dial_plan = dial_plan
 
     def _room_media_enabled(self) -> bool:
         """True when this service is configured for LiveKit room media (not bare call-control stub)."""
@@ -1181,12 +1184,15 @@ class PhoneService(hsm.Instance):
         return bridge, track_path
 
     async def dial(self, request: phone.DialData) -> None:
-        """Send call setup to the number dialled, and return once it is ringing.
+        """Route the number dialled to an endpoint, send call setup there, and return once it is ringing.
 
-        The number *is* the address: a LiveKit participant identity is the name an endpoint
-        answers to, so setup goes to it as given. Whether anybody answers to that name is the
-        room's answer to give, and it gives it on the wire — a number nobody has comes back
-        ``RECIPIENT_NOT_FOUND``, which is the far end being absent, not a lookup that failed here.
+        The number is not the address. A number is digits somebody can say and press; the address
+        is a LiveKit participant identity, and the dial plan is what turns one into the other —
+        which is the work an exchange does and the reason a handset never holds an identity.
+
+        A number nothing is registered against is a wrong number: ``remote_unavailable``, the same
+        verdict the room gives for an endpoint that is not there. Both are the far end being
+        absent, which is all a caller ever learns from either.
 
         Returning does **not** mean connected. The ack on setup means the far end is ringing; the
         connect arrives later, as an accept, because whether to answer is the callee's decision
@@ -1200,11 +1206,25 @@ class PhoneService(hsm.Instance):
                 "This LiveKit phone is not on a connected room, so there is no line to dial out on.",
                 failure_kind="provider_unavailable",
             )
+        dial_plan = self._dial_plan
+        if dial_plan is None:
+            raise PhoneServiceError(
+                "This LiveKit phone is registered with no exchange, so no number leads anywhere from it.",
+                failure_kind="provider_unavailable",
+            )
+        endpoint = dial_plan.endpoint(request.number)
+        if endpoint is None:
+            # Deliberately says nothing about which number: a wrong number is all a caller is told,
+            # and a log line is not the place to start keeping a record of who was dialled.
+            raise PhoneServiceError(
+                "No line is registered against the number dialled.",
+                failure_kind="remote_unavailable",
+            )
         # A phone that has dialled knows who it dialled, before it knows whether they will answer.
-        self._call_peer_identity = request.number
+        self._call_peer_identity = endpoint
         try:
             _ = await participant.perform_rpc(
-                destination_identity=request.number,
+                destination_identity=endpoint,
                 method=signaling.SetupMethod,
                 payload=signaling.MessageData(call_id=call_id).model_dump_json(),
                 response_timeout=self._setup_timeout.total_seconds(),
@@ -1670,6 +1690,34 @@ class PhoneService(hsm.Instance):
         PhoneService._emit_phone_event(ctx, instance, event, phone.CallConnectedEvent.with_data(data))
 
     @staticmethod
+    def _emit_media_ready_for_connected_call(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Media for a call that just connected, when this phone's track is already published.
+
+        Media is ready once two things hold: a connected call, and a published local track. They
+        arrive in either order and whichever lands second is what makes media ready. This is the
+        half where the call lands second — both when the callee answers and when the caller's
+        setup is accepted, because either is the same moment for the phone it happens on.
+        ``_apply_room_audio_status`` is the half where the track lands second.
+        """
+
+        data = event.data
+        assert isinstance(data, phone.CallConnectedData)
+        if instance._local_track_sid is None:
+            return
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=data.call_id)),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
     def _has_dial_peer_left(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
         """The endpoint this dial is ringing has left the room: nobody is there to answer."""
 
@@ -1851,14 +1899,6 @@ class PhoneService(hsm.Instance):
                 event,
             ),
         )
-        # After answer completes, if the room local track is already live, advance media_ready
-        # (participant may have joined after the bot already connected the room).
-        if instance._local_track_sid is not None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=data.call_id)),
-            )
 
     @staticmethod
     async def _run_dial(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
@@ -2215,6 +2255,7 @@ class PhoneService(hsm.Instance):
                     hsm.on(_SetupAcceptedEvent),
                     hsm.guard(_has_setup_accepted),
                     hsm.effect(_emit_call_connected),
+                    hsm.effect(_emit_media_ready_for_connected_call),
                     hsm.effect(_clear_active_operation),
                     hsm.target("/PhoneService/ready"),
                 ),
@@ -2264,6 +2305,7 @@ class PhoneService(hsm.Instance):
                 hsm.on(_AnswerCompletedEvent),
                 hsm.guard(_has_call_connected_completion),
                 hsm.effect(_emit_call_connected),
+                hsm.effect(_emit_media_ready_for_connected_call),
                 hsm.effect(_clear_active_operation),
                 hsm.target("/PhoneService/ready"),
             ),
@@ -2435,6 +2477,7 @@ class Phone(phone.Phone):
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
+        dial_plan: signaling.DialPlan | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__(
@@ -2446,6 +2489,7 @@ class Phone(phone.Phone):
                 token=token,
                 track_name=track_name,
                 operation_timeout=operation_timeout,
+                dial_plan=dial_plan,
                 loop=loop,
             ),
             answer_timeout=answer_timeout,

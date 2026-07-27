@@ -61,11 +61,34 @@ _FORWARDED_PHONE_EVENT_NAMES = frozenset(
 )
 
 
-DIAL_NUMBER = "phone-bot-bob"
-"""The number the tests dial. It is also the identity that answers to it — there is only one name."""
+ALICE_IDENTITY = "phone-bot-alice"
+"""The phone under test, as a LiveKit participant identity: where packets go, not a number."""
 
-CALLER_NUMBER = "human"
-"""The far end that dials this phone, and the number its answer/decline/bye go back to."""
+BOB_IDENTITY = "phone-bot-bob"
+"""The endpoint DIAL_NUMBER rings — and it rings it only because the dial plan says so."""
+
+CALLER_IDENTITY = "human"
+"""The far end that dials this phone, and where its answer/decline/bye go back to."""
+
+ALICE_NUMBER = "5550141"
+DIAL_NUMBER = "5550142"
+"""The number the tests dial. Fictional 555-01xx, so nothing here resembles a real subscriber."""
+
+ABSENT_NUMBER = "5550143"
+"""A number with a line registered against it whose endpoint is not in the room: nobody home."""
+
+UNLISTED_NUMBER = "5550199"
+"""A number no line is registered against. A wrong number, which is a thing a real phone dials."""
+
+DIAL_PLAN_ENTRIES: typing.Final[dict[str, str]] = {
+    ALICE_NUMBER: ALICE_IDENTITY,
+    DIAL_NUMBER: BOB_IDENTITY,
+    ABSENT_NUMBER: "phone-bot-nobody",
+}
+"""The exchange's numbering plan for these tests. UNLISTED_NUMBER is deliberately absent from it."""
+
+DIAL_PLAN: typing.Final[signaling.DialPlan] = signaling.MappingDialPlan(DIAL_PLAN_ENTRIES)
+"""The exchange these phones are registered with. Passing ``None`` instead is being registered with none."""
 
 
 async def await_value[T](value: collections.abc.Awaitable[T]) -> T:
@@ -247,9 +270,18 @@ async def _start_phone_on_room(
     sfu: FakeSfu,
     *,
     setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
+    dial_plan: signaling.DialPlan | None = DIAL_PLAN,
     forwarded_events: list[hsm.Event[typing.Any]] | None = None,
+    connect_room: bool = True,
 ) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
-    """A real PhoneService answering to ``identity`` on ``sfu``, connected, call-setup wire live."""
+    """A real PhoneService answering to ``identity`` on ``sfu``, connected, call-setup wire live.
+
+    Registered with the exchange whose plan is DIAL_PLAN, because a phone that is on a line but
+    on no numbering plan can be called and cannot call.
+
+    ``connect_room=False`` leaves the handset plugged into nothing: it has a room configured and
+    no line on it yet, which is the only way to hold a call and its media apart in time.
+    """
 
     room = FakeRoom(local_participant=FakeLocalParticipant(identity=identity, sfu=sfu))
     service = PhoneService(
@@ -258,13 +290,15 @@ async def _start_phone_on_room(
         room=room,
         stream_factory=fake_pcm_stream(rtc_pcm_frame(b"\x01\x00")),
         local_track_factory=fake_local_track_factory,
+        dial_plan=dial_plan,
     )
     recording_service = RecordingPhoneService(service, forwarded_events=forwarded_events)
     phone = phone_device.Phone(service=recording_service)
     _ = await hsm.started(None, phone, phone.model)
     await _wait_until(lambda: service.state() == "/PhoneService/ready")
-    await service.connect_room(url="wss://livekit.example.com", token="token")
-    await _wait_until(lambda: signaling.SetupMethod in room.local_participant.rpc_handlers)
+    if connect_room:
+        await service.connect_room(url="wss://livekit.example.com", token="token")
+        await _wait_until(lambda: signaling.SetupMethod in room.local_participant.rpc_handlers)
     return phone, service, room, recording_service
 
 
@@ -275,19 +309,20 @@ async def _start_signalling_livekit_phone(
 ) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
     """One phone under test, in a room that already holds the endpoints these tests talk to.
 
-    Both are there because a message only reaches an endpoint that is: the number the tests dial,
-    and the caller that dials them and their answer, decline, and bye go back to.
+    Both are there because a message only reaches an endpoint that is: the line the dialled number
+    is registered against, and the caller that dials this phone and their answer, decline, and bye
+    go back to.
     """
 
     sfu = FakeSfu()
     started = await _start_phone_on_room(
-        "phone-bot-alice",
+        ALICE_IDENTITY,
         sfu,
         setup_timeout=setup_timeout,
         forwarded_events=forwarded_events,
     )
-    _ = _endpoint_in_room(sfu, DIAL_NUMBER)
-    _ = _endpoint_in_room(sfu, CALLER_NUMBER)
+    _ = _endpoint_in_room(sfu, BOB_IDENTITY)
+    _ = _endpoint_in_room(sfu, CALLER_IDENTITY)
     return started
 
 
@@ -461,11 +496,11 @@ def test_phone_service_default_call_control_is_unavailable() -> None:
 
 
 def test_livekit_phone_dials_the_number_it_was_given() -> None:
-    """Dialing is call setup addressed to the number, and it connects only when they accept.
+    """A dialled number reaches the endpoint the exchange routes it to, and connects on accept.
 
-    The number is the address: setup goes to it as dialled, with nothing in between translating
-    it. And the acked setup leaves the caller *dialing* — the connect arrives later, from the
-    callee, because answering was theirs to decide.
+    The number is not the address: the handset dials digits and the dial plan is what turns them
+    into the participant identity setup is addressed to. And the acked setup leaves the caller
+    *dialing* — the connect arrives later, from the callee, because answering was theirs to decide.
     """
 
     async def run() -> None:
@@ -479,20 +514,21 @@ def test_livekit_phone_dials_the_number_it_was_given() -> None:
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
         setup = participant.rpc_calls[0]
-        assert setup.destination_identity == DIAL_NUMBER
+        assert setup.destination_identity == BOB_IDENTITY
         assert setup.method == signaling.SetupMethod
         call_id = _dialed_call_id(room)
         assert call_id.startswith("livekit:")
         # Acked setup means ringing, not connected.
         assert _require_firmware(phone).state() == "/Phone/dialing"
 
-        _ = participant.invoke(signaling.AcceptMethod, caller_identity=DIAL_NUMBER, call_id=call_id)
+        _ = participant.invoke(signaling.AcceptMethod, caller_identity=BOB_IDENTITY, call_id=call_id)
         await _wait_until(lambda: _is_answered(phone))
 
-        answered = _phone_events(recording_service)[-1]
-        assert answered.name == phone_device.AnsweredEvent.name
+        answered = [
+            event for event in _phone_events(recording_service) if event.name == phone_device.AnsweredEvent.name
+        ]
         # Both phones name the call the caller minted; nobody invented a second handle.
-        assert answered.data == phone_device.PhoneCallData(call_id=call_id)
+        assert [event.data for event in answered] == [phone_device.PhoneCallData(call_id=call_id)]
 
     asyncio.run(run())
 
@@ -511,7 +547,7 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
 
         _ = room.local_participant.invoke(
             signaling.DeclineMethod,
-            caller_identity=DIAL_NUMBER,
+            caller_identity=BOB_IDENTITY,
             call_id=_dialed_call_id(room),
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
@@ -523,11 +559,42 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
     asyncio.run(run())
 
 
-def test_livekit_phone_reports_a_number_nobody_answers_to_as_remote_unavailable() -> None:
-    """A number nobody has still gets dialled. The room is what says nobody is there.
+def test_a_number_reaches_the_same_phone_however_it_was_written_down() -> None:
+    """The whole path, once per way a transcriber might have written the number down.
 
-    Setup goes out and comes back RECIPIENT_NOT_FOUND, which is the far end being absent — a fact
-    the exchange establishes, not one a local table could have predicted.
+    Nothing between the bot and the wire may treat punctuation as part of the number: the plan is
+    keyed on a written form here on purpose, and every variant still has to arrive at the one
+    endpoint registered against it. A plan keyed on an exact literal would fail on a hyphen the
+    bot never chose, and that would look exactly like a bot dialling the wrong number.
+    """
+
+    async def run() -> None:
+        for written in ("5550142", "555-0142", "555 0142", "(555) 0142", "555.0142"):
+            sfu = FakeSfu()
+            phone, service, room, _recording = await _start_phone_on_room(
+                ALICE_IDENTITY,
+                sfu,
+                # Registered as somebody would write it down, dialled as somebody would say it.
+                dial_plan=signaling.MappingDialPlan({"(555) 0142": BOB_IDENTITY}),
+            )
+            _ = _endpoint_in_room(sfu, BOB_IDENTITY)
+
+            await phone.dispatch(
+                phone.context(),
+                phone_device.DialEvent.with_data(phone_device.DialData(number=written)),
+            )
+            await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
+
+            assert room.local_participant.rpc_calls[0].destination_identity == BOB_IDENTITY, written
+
+    asyncio.run(run())
+
+
+def test_livekit_phone_reports_a_line_that_is_not_there_as_remote_unavailable() -> None:
+    """The number is in the plan and the line it names is not in the room. Nobody home.
+
+    Setup goes out to the endpoint the plan gave and comes back RECIPIENT_NOT_FOUND, which is the
+    far end being absent — a fact the room establishes and the plan could not have predicted.
     """
 
     async def run() -> None:
@@ -536,15 +603,82 @@ def test_livekit_phone_reports_a_number_nobody_answers_to_as_remote_unavailable(
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(number="nobody-answers-to-this")),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=ABSENT_NUMBER)),
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert room.local_participant.rpc_calls[0].destination_identity == "nobody-answers-to-this"
+        assert room.local_participant.rpc_calls[0].destination_identity == DIAL_PLAN_ENTRIES[ABSENT_NUMBER]
         failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
         assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
 
     asyncio.run(run())
+
+
+def test_livekit_phone_reports_a_wrong_number_as_remote_unavailable() -> None:
+    """A number no line is registered against is a wrong number, and nothing goes on the wire.
+
+    The exchange answers this one itself, the way it does when digits lead nowhere: the caller
+    hears the same unreachable verdict as for a line that is simply not there, because from the
+    caller's end those are the same fact. Nothing is addressed anywhere, because there is nowhere.
+    """
+
+    async def run() -> None:
+        forwarded: list[hsm.Event[typing.Any]] = []
+        phone, _service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
+
+        await phone.dispatch(
+            phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=UNLISTED_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
+
+        assert room.local_participant.rpc_calls == []
+        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
+        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
+
+    asyncio.run(run())
+
+
+def test_livekit_phone_with_no_exchange_cannot_place_a_call() -> None:
+    """On a line but on no numbering plan: it can be called, and no number leads anywhere from it."""
+
+    async def run() -> None:
+        forwarded: list[hsm.Event[typing.Any]] = []
+        sfu = FakeSfu()
+        phone, _service, room, _recording = await _start_phone_on_room(
+            ALICE_IDENTITY,
+            sfu,
+            dial_plan=None,
+            forwarded_events=forwarded,
+        )
+        _ = _endpoint_in_room(sfu, BOB_IDENTITY)
+
+        await phone.dispatch(
+            phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
+
+        assert room.local_participant.rpc_calls == []
+        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
+        assert failures[-1].data == phone_device.DialFailedData(failure_kind="provider_unavailable")
+
+    asyncio.run(run())
+
+
+def test_a_dial_plan_only_registers_numbers_a_handset_could_dial() -> None:
+    """The plan is checked against the same rule a dialled number is, so the two cannot disagree."""
+
+    plan = signaling.MappingDialPlan({"(555) 555-0142": BOB_IDENTITY})
+
+    # Written separators are stripped on the way into the plan exactly as they are on the keypad.
+    assert plan.endpoint("5555550142") == BOB_IDENTITY
+    assert plan.endpoint(UNLISTED_NUMBER) is None
+    for not_a_number in ("phone-bot-bob", "", "reception"):
+        with pytest.raises(ValueError):
+            _ = signaling.MappingDialPlan({not_a_number: BOB_IDENTITY})
+    with pytest.raises(ValueError):
+        _ = signaling.MappingDialPlan({DIAL_NUMBER: ""})
 
 
 def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() -> None:
@@ -552,7 +686,7 @@ def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() ->
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -561,7 +695,7 @@ def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() ->
         await _wait_until(lambda: _is_answered(phone))
 
         accepted = participant.rpc_calls[-1]
-        assert accepted.destination_identity == CALLER_NUMBER
+        assert accepted.destination_identity == CALLER_IDENTITY
         assert accepted.method == signaling.AcceptMethod
         assert signaling.MessageData.model_validate_json(accepted.payload).call_id == "livekit:human-1"
 
@@ -573,7 +707,7 @@ def test_livekit_phone_decline_tells_the_caller_they_were_refused() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -582,7 +716,7 @@ def test_livekit_phone_decline_tells_the_caller_they_were_refused() -> None:
         await _wait_until(lambda: bool(participant.rpc_calls))
 
         declined = participant.rpc_calls[-1]
-        assert declined.destination_identity == CALLER_NUMBER
+        assert declined.destination_identity == CALLER_IDENTITY
         assert declined.method == signaling.DeclineMethod
 
     asyncio.run(run())
@@ -595,7 +729,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -609,7 +743,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
         await _wait_until(lambda: any(call.method == signaling.ByeMethod for call in participant.rpc_calls))
 
         goodbye = participant.rpc_calls[-1]
-        assert goodbye.destination_identity == CALLER_NUMBER
+        assert goodbye.destination_identity == CALLER_IDENTITY
         assert signaling.MessageData.model_validate_json(goodbye.payload).call_id == "livekit:human-1"
         assert room.disconnected is False
 
@@ -621,7 +755,7 @@ def test_livekit_phone_bye_from_the_far_end_ends_the_call() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -629,7 +763,7 @@ def test_livekit_phone_bye_from_the_far_end_ends_the_call() -> None:
         )
         await _wait_until(lambda: _is_answered(phone))
 
-        _ = participant.invoke(signaling.ByeMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.ByeMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
     asyncio.run(run())
@@ -642,7 +776,7 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
         phone, _service, room, recording_service = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -650,7 +784,7 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
         )
         await _wait_until(lambda: _is_answered(phone))
 
-        room.emit("participant_disconnected", FakeRemoteParticipant(identity=CALLER_NUMBER))
+        room.emit("participant_disconnected", FakeRemoteParticipant(identity=CALLER_IDENTITY))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert any(
@@ -670,7 +804,7 @@ def test_a_stranger_leaving_the_room_is_not_a_hang_up() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -697,7 +831,7 @@ def test_a_callee_that_leaves_while_ringing_cannot_answer() -> None:
         )
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
-        room.emit("participant_disconnected", FakeRemoteParticipant(identity=DIAL_NUMBER))
+        room.emit("participant_disconnected", FakeRemoteParticipant(identity=BOB_IDENTITY))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
@@ -1155,8 +1289,8 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
 
     async def run() -> None:
         sfu = FakeSfu()
-        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room("phone-bot-alice", sfu)
-        bob_phone, _bob_service, _bob_room, bob_recording = await _start_phone_on_room(DIAL_NUMBER, sfu)
+        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
 
         await alice_phone.dispatch(
             alice_phone.context(),
@@ -1166,7 +1300,7 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
 
         # Bob's phone shows the caller the SFU authenticated, not a name the message claimed.
         ringing = [event for event in _phone_events(bob_recording) if event.name == phone_device.RingingEvent.name]
-        assert ringing[-1].data == phone_device.RingingData(caller="phone-bot-alice")
+        assert ringing[-1].data == phone_device.RingingData(caller=ALICE_IDENTITY)
         # Alice is dialling, not connected: acked setup only means the far end is ringing.
         assert _require_firmware(alice_phone).state() == "/Phone/dialing"
 
@@ -1197,6 +1331,111 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
             and event.data.outcome == "remote_hang_up"
             for event in _phone_events(alice_recording)
         )
+
+    asyncio.run(run())
+
+
+def test_an_accepted_dial_opens_the_callers_line_too() -> None:
+    """A caller whose call was answered can speak on it, not just hear that it connected.
+
+    Answering brings the callee's media up; an accept has to do the same for the caller, or the
+    call is one-way by construction. The mouthpiece is live only in ``/Phone/answered/media_ready``
+    (``bot/devices/phone/phone.py`` — the ``audio.InputEvent`` transition), so a caller left in
+    ``media_connecting`` uplinks nothing however much it tries to talk. That is what a two-bot run
+    over a real SFU measured: the caller sat in ``media_connecting`` through fifty-nine speaking
+    turns and the callee decoded none of them.
+    """
+
+    async def run() -> None:
+        sfu = FakeSfu()
+        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+
+        await alice_phone.dispatch(
+            alice_phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
+
+        call_id = _dialed_call_id(alice_room)
+        await bob_phone.dispatch(
+            bob_phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+
+        # Both ends of one call, both able to talk on it.
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/answered/media_ready")
+        await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/answered/media_ready")
+
+        # And the caller says so once — a line does not open twice for one call.
+        media_ready = [
+            event for event in _phone_events(alice_recording) if event.name == phone_device.MediaReadyEvent.name
+        ]
+        assert [event.data for event in media_ready] == [phone_device.PhoneCallData(call_id=call_id)]
+
+    asyncio.run(run())
+
+
+def test_a_caller_cannot_open_its_line_on_a_phone_that_is_only_ringing() -> None:
+    """Acked setup means ringing. Whether the call connects is the callee's to decide, not the wire's.
+
+    The caller holds in ``/Phone/dialing`` for as long as the callee is deciding, and no part of
+    bringing media up may reach ``media_ready`` ahead of an accept.
+    """
+
+    async def run() -> None:
+        sfu = FakeSfu()
+        alice_phone, _alice_service, _alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+
+        await alice_phone.dispatch(
+            alice_phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
+
+        # Bob's phone rings on, and nobody answers it for him.
+        await asyncio.sleep(0.05)
+
+        assert _require_firmware(alice_phone).state() == "/Phone/dialing"
+        assert _require_firmware(bob_phone).state() == "/Phone/ringing"
+        assert not [
+            event for event in _phone_events(alice_recording) if event.name == phone_device.MediaReadyEvent.name
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_call_connected_before_the_line_is_up_opens_when_it_comes_up() -> None:
+    """Media that lands after the call connects still opens the line, rather than being missed.
+
+    The room track and the call are two facts arriving in either order, and media is ready once
+    both hold. An accept cannot arrive in this order — the call-setup wire only goes live once the
+    local track has landed, so a caller's accept always finds one there — so the order is pinned on
+    the leg that can produce it: a call answered on a phone whose room audio comes up afterwards.
+    """
+
+    async def run() -> None:
+        phone, service, _room, recording_service = await _start_phone_on_room(
+            ALICE_IDENTITY,
+            FakeSfu(),
+            connect_room=False,
+        )
+
+        await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+
+        # Connected, and with nothing to talk over yet.
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_connecting")
+
+        await service.connect_room(url="wss://livekit.example.com", token="token")
+
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
+        media_ready = [
+            event for event in _phone_events(recording_service) if event.name == phone_device.MediaReadyEvent.name
+        ]
+        assert [event.data for event in media_ready] == [phone_device.PhoneCallData(call_id="call-123")]
 
     asyncio.run(run())
 
@@ -2351,13 +2590,13 @@ def test_livekit_phone_service_call_setup_rings_phone_without_auto_answer() -> N
 
         _ = room.local_participant.invoke(
             signaling.SetupMethod,
-            caller_identity=CALLER_NUMBER,
+            caller_identity=CALLER_IDENTITY,
             call_id="livekit:human-1",
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
 
         assert resolved._media_call_id == "livekit:human-1"
-        assert resolved._call_peer_identity == CALLER_NUMBER
+        assert resolved._call_peer_identity == CALLER_IDENTITY
         assert room.connected == [("wss://livekit.example.com", "token")]
         # Do not answer here — answering is bot/operator policy.
         assert _require_firmware(phone).state() == "/Phone/ringing"
@@ -2371,7 +2610,7 @@ def test_livekit_phone_service_does_not_ring_for_a_participant_that_merely_joins
     async def run() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
 
-        room.emit("participant_connected", FakeRemoteParticipant(identity=CALLER_NUMBER))
+        room.emit("participant_connected", FakeRemoteParticipant(identity=CALLER_IDENTITY))
         await asyncio.sleep(0.01)
 
         assert _require_firmware(phone).state() == "/Phone/hung_up"

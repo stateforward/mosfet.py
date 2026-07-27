@@ -2890,7 +2890,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
 
         await active_bot.dispatch(
             active_bot.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(number="phone-bot-bob")),
+            phone_device.DialEvent.with_data(phone_device.DialData(number="5550142")),
         )
         assert len(ability.calls) == 1
         _ = release.set()
@@ -3869,7 +3869,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
         )
         ability.calls.clear()
 
-        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=1.0))
+        _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=1.0))
 
         await wait_until(lambda: bool(ability.calls), timeout=10.0)
         return [call.input for call in ability.calls if isinstance(call.input, hsm.Event)]
@@ -3877,7 +3877,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
     stimuli = asyncio.run(run())
 
     assert [stimulus.name for stimulus in stimuli] == [speech.SpeechDecoding.output_event.name]
-    assert stimuli[0].data == b"decoded:spoken:Call Bob at phone-bot-bob."
+    assert stimuli[0].data == b"decoded:spoken:Call Bob at 555-0142."
 
 
 def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
@@ -3898,12 +3898,12 @@ def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
         )
         ability.calls.clear()
 
-        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=500.0))
+        _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=500.0))
         # Long enough for the near case to have finished decoding twice over.
         await asyncio.sleep(0.5)
         shouted_from_far = len(ability.calls)
 
-        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=1.0))
+        _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=1.0))
         await wait_until(lambda: bool(ability.calls), timeout=10.0)
         return shouted_from_far, len(ability.calls)
 

@@ -1,6 +1,11 @@
 from bot.devices import phone
 
+import json
+import re
+
 import hsm
+import pydantic
+import pytest
 
 from tests.type_helpers import object_dict
 
@@ -94,7 +99,7 @@ def test_phone_service_audio_data_describes_speaker_output_for_current_call() ->
 def test_phone_command_events_carry_no_call_identity() -> None:
     """Operator commands name no call: firmware already holds the one they act on."""
 
-    assert phone.DialData(number="phone-bot-bob").number == "phone-bot-bob"
+    assert phone.DialData(number="5550142").number == "5550142"
     assert phone.DialEvent.name == "phone.dial"
     assert object_dict(phone.DialEvent.schema) == phone.DialData.model_json_schema()
     assert object_dict(phone.DialEvent.schema)["required"] == ["number"]
@@ -111,6 +116,72 @@ def test_phone_command_events_carry_no_call_identity() -> None:
         assert "call_id" not in object_dict(command.model_json_schema()).get("properties", {})
     assert "call_id" not in object_dict(phone.DialEvent.schema)["properties"]
     assert "call_id" not in object_dict(phone.TransferCallEvent.schema)["properties"]
+
+
+def test_a_phone_number_is_digits() -> None:
+    """What makes a number sayable, writable and dialable is that it is digits.
+
+    A name, an address, or an endpoint handle is none of those things, and a phone that accepted
+    one would be accepting something no keypad can produce.
+    """
+
+    assert phone.DialData(number="5550142").number == "5550142"
+    assert phone.DialData(number="+15555550142").number == "+15555550142"
+    # Separators are how a number is written down, not part of the number: a hand leaves them on
+    # the paper on the way to the keypad.
+    assert phone.DialData(number="(555) 555-0142").number == "5555550142"
+    for not_a_number in (
+        "phone-bot-bob",
+        "bob",
+        "",
+        "+",
+        "5",
+        "sip:bob@example.com",
+        "*67",
+        "5550142x22",
+        "+1-555-555-0142-555-555",
+    ):
+        with pytest.raises(pydantic.ValidationError):
+            _ = phone.DialData(number=not_a_number)
+
+
+def test_a_number_written_differently_is_the_same_number() -> None:
+    """A number has to survive being said out loud, and formatting does not survive with it.
+
+    The instruction is spoken by a synthesizer, crosses a room as sound, passes a voice detector
+    and comes back through speech recognition. Whether the transcript says 555-0142 or 5550142 or
+    (555) 0142 is the transcriber's choice, not the bot's — so treating them as different numbers
+    would report a punctuation difference nobody controlled as a bot that dialled wrong.
+    """
+
+    spoken_back = ("5550142", "555-0142", "555 0142", "(555) 0142", "555.0142", "555–0142", "555 0142")
+
+    assert {phone.DialData(number=written).number for written in spoken_back} == {"5550142"}
+    # A trailing full stop is the end of the sentence it was said in, not part of the number.
+    assert phone.DialData(number="555-0142.").number == "5550142"
+    assert phone.DialData(number="+1 (555) 555-0142").number == "+15555550142"
+
+
+def test_the_dial_schema_names_no_number_to_dial() -> None:
+    """A concrete example in a tool schema acts as a default.
+
+    Measured: a bot heard "Call bob at bob" and dialled the example off this schema instead —
+    a number it had never been told. Every number is deployment-specific, so there is no example
+    that is both useful and safe, and the field's description has to carry the meaning alone.
+
+    The digit sweep is the real guard: a number is just as dialable sitting in a description as
+    in an ``examples`` list, so nothing that looks like one may appear anywhere in the schema.
+    """
+
+    schema = phone.DialData.model_json_schema()
+
+    assert "examples" not in schema
+    assert "examples" not in schema["properties"]["number"]
+    # Canonical form, which is what a model should emit even though the validator forgives more.
+    assert schema["properties"]["number"]["pattern"] == r"^\+?[0-9]{2,15}$"
+    # ensure_ascii=False so a — escape is not read as the digits 2014.
+    printed = json.dumps(schema, ensure_ascii=False)
+    assert re.search(r"\d{3,}", printed) is None, printed
 
 
 def test_phone_service_request_events_carry_the_call_firmware_stamped() -> None:

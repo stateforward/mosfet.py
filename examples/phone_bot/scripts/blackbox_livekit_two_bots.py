@@ -6,19 +6,23 @@ Nothing is scripted: there is no TTS peer playing canned lines, so every utteran
 came from a bot deciding to speak.
 
 The two bots are not symmetric, because a call is not symmetric. Somebody walks up to one of them
-and **says something out loud** — "Call Bob at phone-bot-bob." — which reaches it as sound in its
+and **says something out loud** — "Call Bob at 555-0142." — which reaches it as sound in its
 environment, through its ears, its voice detector and its speech decoder, the same way anything
-else it hears does. Nobody says anything to the other one. Both have the same phone and both can
-dial; having heard a sentence is a thing that happened to the caller, not a thing it must act on
-— whether to dial, and whether to answer, are the bots' decisions and this harness makes neither.
+else it hears does. Nobody says anything to the other one. Both have the same phone, both are on
+the same exchange and both can dial; having heard a sentence is a thing that happened to the
+caller, not a thing it must act on — whether to dial, and whether to answer, are the bots'
+decisions and this harness makes neither.
 
 The words go in on the caller's stdin and are spoken by a mouth standing a metre in front of it.
 They are never parsed here, and the bot is never handed them as anything but audio.
 
 The room is what makes the call itself possible. A LiveKit room is an exchange: joining it makes a
-phone reachable, and dialing is call setup addressed to one participant. So the callee rings
-because the caller called it, not because the caller walked into the room — which is why both
-bots no longer end up as callees.
+phone reachable, dialing is call setup addressed to one participant, and the dial plan is what
+turns a dialled number into which participant. So the callee rings because the caller called its
+number, not because the caller walked into the room.
+
+The numbers come from the 555-0100..555-0199 range that exists so nothing written down can ring a
+real subscriber.
 
 Success is judged the way the single-bot harness learned to judge it: **both directions must
 carry audible audio**. Two bots that ring, answer and then sit in silence are a failure, however
@@ -91,13 +95,15 @@ def _bot_env_file(
     *,
     identity: str,
     room: str,
+    dial_plan: dict[str, str],
 ) -> pathlib.Path:
-    """One env file per bot: same room, distinct identity and track.
+    """One env file per bot: same room and same exchange, distinct identity and track.
 
     Identity has to differ or the two processes collide on the SFU; track name differs so each
-    bot's audio is attributable to it in the observer's capture. Nothing here distinguishes
-    caller from callee: the two configurations are identical, and the only difference between
-    the roles is that somebody spoke to one of them.
+    bot's audio is attributable to it in the observer's capture. Both get the whole dial plan,
+    because both are lines on one exchange and either could call the other. Nothing here
+    distinguishes caller from callee: the two configurations are identical, and the only
+    difference between the roles is that somebody spoke to one of them.
     """
 
     values: dict[str, str] = {}
@@ -110,6 +116,7 @@ def _bot_env_file(
     values["BOT_LIVEKIT_ROOM"] = room
     values["BOT_LIVEKIT_IDENTITY"] = identity
     values["BOT_LIVEKIT_TRACK_NAME"] = identity
+    values["BOT_LIVEKIT_DIAL_PLAN"] = ",".join(f"{number}={endpoint}" for number, endpoint in dial_plan.items())
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
@@ -187,11 +194,13 @@ async def _main() -> int:
     _ = parser.add_argument("--room", default="bot-two-bots")
     _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot somebody speaks to.")
     _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot nobody speaks to.")
+    _ = parser.add_argument("--caller-number", default="555-0141", help="Number the exchange rings the caller on.")
+    _ = parser.add_argument("--callee-number", default="555-0142", help="Number the exchange rings the callee on.")
     _ = parser.add_argument(
         "--say",
         default=None,
         metavar="TEXT",
-        help="What somebody says out loud to the caller (default: 'Call Bob at <callee>.').",
+        help="What somebody says out loud to the caller (default: 'Call Bob at <callee-number>.').",
     )
     _ = parser.add_argument("--observer", default="conversation-observer")
     _ = parser.add_argument("--converse-seconds", type=float, default=60.0)
@@ -221,10 +230,15 @@ async def _main() -> int:
 
     caller, callee = str(args.caller), str(args.callee)
     identities = [caller, callee]
+    # One exchange, both lines on it. Numbers are what a bot can be told and can dial; identities
+    # are where the packets go, and only this map connects the two.
+    dial_plan = {str(args.caller_number): caller, str(args.callee_number): callee}
     # A sentence with the callee's number in it, said out loud to the one bot somebody talks to.
-    # On LiveKit the destination identity is the number, so this is the number and nothing
-    # resolves it — and nothing on this side reads the sentence either.
-    said = {caller: str(args.say) if args.say is not None else f"Call Bob at {callee}.", callee: None}
+    # Nothing on this side reads the sentence back, and nothing resolves the number for the bot.
+    said = {
+        caller: str(args.say) if args.say is not None else f"Call Bob at {args.callee_number}.",
+        callee: None,
+    }
     processes: dict[str, subprocess.Popen[str]] = {}
     logs: dict[str, pathlib.Path] = {}
     try:
@@ -234,6 +248,7 @@ async def _main() -> int:
                 record_dir / f"{identity}.env",
                 identity=identity,
                 room=str(args.room),
+                dial_plan=dial_plan,
             )
             utterance = said[identity]
             log_path = record_dir / f"{identity}.log"
@@ -311,6 +326,7 @@ async def _main() -> int:
         "caller": caller,
         "callee": callee,
         "identities": identities,
+        "dial_plan": dial_plan,
         # How much was said to each bot, not what. The console line says it this way too; a
         # recording that quotes the sentence back is the first step toward reading it.
         "said_characters": {identity: None if text is None else len(text) for identity, text in said.items()},
@@ -338,7 +354,7 @@ async def _main() -> int:
         # Not a failure: dialing is the caller's judgement, and a bot that saw no reason to call
         # is behaving. Say so plainly rather than reporting a silent conversation as a defect.
         print(
-            f"[two-bots] NO CALL {caller} did not dial {callee} this run (judgment, not a defect)",
+            f"[two-bots] NO CALL {caller} did not dial {args.callee_number} this run (judgment, not a defect)",
             flush=True,
         )
     print(f"  record_dir: {record_dir}", flush=True)

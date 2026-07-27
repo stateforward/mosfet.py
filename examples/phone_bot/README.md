@@ -74,7 +74,7 @@ service plane as `phone.no_call`. What the bot does about a busy tone is its own
 ```bash
 uv run phone-bot
 # ...
-Call Bob at phone-bot-bob.          # type it, press enter
+Call Bob at 555-0142.              # type it, press enter
 ```
 
 Every line you type is **said out loud** in the robot's room. A mouth — the same
@@ -85,12 +85,22 @@ sound → its ears (its placement's `threshold_db`) → Listening → voice dete
 decoding → cognition. Step far enough away, or raise its hearing floor, and it genuinely does not
 hear you. Nothing is dispatched at the body.
 
-There is no directory: a LiveKit destination identity *is* the number, so "call phone-bot-bob"
-names the thing you would dial, and nothing resolves it to something else. Every bot can dial.
+A number is digits, because that is what makes it sayable out loud and pressable on a keypad.
+Set `BOT_LIVEKIT_DIAL_PLAN` (`number=identity`, comma separated) and the exchange knows which
+LiveKit participant a dialled number rings; the bot only ever handles the digits. Unset it and
+the phone is registered with no exchange: it can be called, and no number leads anywhere from it.
+Use the fictional `555-0100`–`555-0199` range so nothing here can resemble a real subscriber.
+
+Say it the way you would say it. The number goes out of your mouth as sound and comes back
+through speech recognition, which chooses its own punctuation — so `555-0142`, `5550142`,
+`555 0142` and `(555) 0142` are one number, in the dial plan and on the keypad alike. Spelled-out
+digits ("five five five…") are **not** a number and the dial is refused; if your STT returns words
+rather than figures, that is a real limit and you will see it as a rejected dial rather than a
+wrong one.
 
 Being spoken to is not being made to. The example never reads the words: it does not look for a
 number in them, does not match on "call", and has no transition anywhere of the form "heard X →
-do Y". A bot that hears `Call Bob at phone-bot-bob.` and decides this is not the moment has
+do Y". A bot that hears `Call Bob at 555-0142.` and decides this is not the moment has
 decided, and that is a legitimate outcome. Answering, declining, dialing, and hanging up all stay
 the bot's decisions — nothing in the wiring makes them.
 
@@ -153,20 +163,21 @@ Verdict uses LiveKit media plus optional scrapes of `/tmp/phone-bot-live.log`
 
 ## Blackbox two bots (caller and callee)
 
-Two real `phone-bot` processes, one of which can call the other:
+Two real `phone-bot` processes, two lines on one exchange:
 
 ```bash
 uv run python scripts/blackbox_livekit_two_bots.py \
-  --caller phone-bot-alice --callee phone-bot-bob
+  --caller phone-bot-alice --callee phone-bot-bob \
+  --caller-number 555-0141 --callee-number 555-0142
 ```
 
-Somebody walks up to the caller and says `Call Bob at <callee>.` out loud; nobody says anything to
+Somebody walks up to the caller and says `Call Bob at 555-0142.` out loud; nobody says anything to
 the callee. The harness writes the sentence to the caller's stdin once it is awake, and the bot
-hears it as sound. Their env files are identical and both bots can dial — the whole difference
-between the roles is that one of them was spoken to. Whether the caller dials, and whether the
-callee answers, stay judgment. The verdict prints `dialed=` for the caller, `rang=` for the
-callee and `decoded=` for whoever turned audio into words, and both sides must be audible to
-pass. A run where the caller never dials is reported, not failed.
+hears it as sound. Their env files are identical — same room, same dial plan, both bots able to
+dial — so the whole difference between the roles is that one of them was spoken to. Whether the
+caller dials, and whether the callee answers, stay judgment. The verdict prints `dialed=` for the
+caller, `rang=` for the callee and `decoded=` for whoever turned audio into words, and both sides
+must be audible to pass. A run where the caller never dials is reported, not failed.
 
 ## Unit tests (no LiveKit)
 

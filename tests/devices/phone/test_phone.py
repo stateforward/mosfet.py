@@ -31,8 +31,8 @@ from tests.hsm_instance_state import (
 from tests.hsm_model import transition_map
 from tests.type_helpers import invalid_value
 
-DIAL_NUMBER = "phone-bot-bob"
-"""A number to dial. Nothing translates it: it is the address the far phone answers to."""
+DIAL_NUMBER = "5550142"
+"""A number to dial. Digits, from the fictional 555-01xx range, the way a real number is."""
 
 def _phone_firmware(phone: phone_device.Phone) -> phone_device.PhoneFirmware:
     firmware = phone_firmware(phone)

@@ -19,20 +19,54 @@ CallId = typing.Annotated[
         examples=["livekit:caller", "sip:session-9f3a"],
     ),
 ]
+_WRITTEN_SEPARATORS = str.maketrans("", "", " \t -‐‑‒–—―−.()/")
+"""Every character a number is *printed* with and none it is dialled with.
+
+Typographic dashes and the non-breaking space are in here beside the ASCII ones because a number
+that has been through a text round trip is not written the way it was typed, and an en dash is
+still somebody writing a hyphen.
+"""
+
+
+def _dialed_digits(value: object) -> object:
+    """Read a written number the way a hand does: the separators stay on the paper.
+
+    The digits are the number and the formatting is not. A number is printed with spaces, dashes
+    and brackets and dialled without them, because a keypad has no key for any of them — and a
+    number that has been said out loud, crossed a room and come back through speech recognition
+    has whatever punctuation the transcriber chose, none of which the caller controlled. So
+    ``555-0142``, ``5550142``, ``555 0142`` and ``(555) 0142`` are one number here, exactly as
+    they are to a person.
+
+    Anything else is left exactly as it came in, so what is not a number is rejected as one rather
+    than quietly turned into one.
+    """
+
+    if isinstance(value, str):
+        return value.translate(_WRITTEN_SEPARATORS)
+    return value
+
+
 PhoneNumber = typing.Annotated[
     str,
+    # Field before BeforeValidator, and not the other way round: a validator listed first hides
+    # the pattern from the generated JSON schema, which is the one thing a model reads to learn
+    # what a number looks like. The validator still runs first at validation time.
     pydantic.Field(
-        min_length=1,
+        pattern=r"^\+?[0-9]{2,15}$",
         description=(
-            "The number to dial. This is the callee's address on the network — the same string that reaches them, "
-            "used exactly as given. Nothing translates it and there is no dial plan behind it, so it must be the "
-            "address the far phone actually answers to; an approximation of one reaches nobody. Unlike call_id it "
-            "belongs to the phone rather than to a call: it is the same before, during, and after every call, and "
-            "dialling it twice reaches the same phone twice. Dialling a number nothing answers is a real outcome, "
-            "not an error to avoid — the attempt comes back unreachable, the way it does for a person."
+            "The number to dial: digits, optionally with a leading + for an international number. That is what "
+            "makes a number a number — it can be said out loud, written down, and pressed on a keypad. A name, an "
+            "address, or a handle is none of those and reaches nobody, however confidently it is dialled. Write it "
+            "however it was given to you: spaces, dashes, dots and brackets are how a number is printed rather than "
+            "part of it, so a number written with them and the same number written without them are one number and "
+            "reach one phone. Unlike call_id a number belongs to the phone rather than to a call: it is the same "
+            "before, during, and after every call, and dialling it twice reaches the same phone twice. Dialling a "
+            "number nothing answers is a real outcome, not an error to avoid — the attempt comes back unreachable, "
+            "the way it does for a person."
         ),
-        examples=["phone-bot-bob"],
     ),
+    pydantic.BeforeValidator(_dialed_digits),
 ]
 Caller = typing.Annotated[
     str,
@@ -126,14 +160,13 @@ class DialData(pydantic.BaseModel):
 
     Carries no call id. You dial a number and the exchange assigns the call, so the session
     handle arrives from the provider on connect and there is nothing for a caller to supply.
+
+    No example number, deliberately. Every number is deployment-specific, and a concrete one in a
+    tool schema acts as a default: a bot that is unsure what it was told dials the number printed
+    here instead of the one it heard.
     """
 
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "examples": [{"number": "phone-bot-bob"}],
-        },
-    )
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     number: PhoneNumber
 

@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import typing
@@ -199,7 +200,7 @@ async def main() -> None:
         amplitude_db=60.0,
     )
     _ = await someone.enter(environment)
-    _ = await someone.say("Call Bob at phone-bot-bob.", ctx=environment)
+    _ = await someone.say("Call Bob at 555-0142.", ctx=environment)
     for _ in range(500):
         await asyncio.sleep(0.01)
         if near:
@@ -215,7 +216,7 @@ asyncio.run(main())
     assert _run_phone_bot_python(code) == "\n".join(
         [
             "1 0",
-            "spoken:Call Bob at phone-bot-bob. 60.0 audio/wav 16000",
+            "spoken:Call Bob at 555-0142. 60.0 audio/wav 16000",
         ]
     )
 
@@ -286,7 +287,7 @@ import subprocess
 
 from phone_bot_example import person
 
-SAID = "Call Bob at phone-bot-bob and mention the budget"
+SAID = "Call Bob at 555-0142 and mention the budget"
 real = subprocess.run
 person.subprocess.run = lambda command, **kwargs: real(["false"], **kwargs)
 try:
@@ -490,11 +491,12 @@ def test_nothing_in_this_example_can_be_told_anything_before_it_wakes() -> None:
             assert gone not in text, f"{gone} in {path.name}"
 
 
-def test_the_example_has_no_dial_plan_left_to_resolve_a_number_through() -> None:
-    """A LiveKit destination identity is the number; a directory would be a layer inventing one.
+def test_the_example_gives_the_exchange_a_dial_plan_and_the_bot_only_digits() -> None:
+    """The exchange holds number → participant identity; the bot holds a number and nothing else.
 
-    The mapping had no counterpart in a real handset, so it is gone rather than deprecated: no
-    env key, no config field, no provider directory object reaching ``PhoneService``.
+    Not the deleted directory, which aliased a *name* to an address — that is a contact list, and
+    it belongs on a handset rather than in a room. This is the mapping a telephone network really
+    does have, so it lives in the provider and no identity ever reaches the bot.
     """
 
     source = _example_source()
@@ -504,13 +506,23 @@ def test_the_example_has_no_dial_plan_left_to_resolve_a_number_through() -> None
         encoding="utf-8"
     )
 
+    assert "signaling.MappingDialPlan(app_config.livekit.dial_plan)" in source
     for text in (source, env_example, readme, harness):
+        assert "BOT_LIVEKIT_DIAL_PLAN" in text
+        # The name→address alias table is gone for good, not renamed.
         assert "BOT_LIVEKIT_DIRECTORY" not in text
         assert "LIVEKIT_DIRECTORY" not in text
         assert "MappingDirectory" not in text
     assert "directory=" not in source
     assert "_directory_entries" not in source
     assert "from bot.providers.livekit import PhoneService" in source
+    # Fictional 555-01xx only: a harness default that could ring a real subscriber is a defect
+    # whether or not anybody notices it dialling. Compared as digits, because the defaults are
+    # written the way somebody would say them out loud and the punctuation is not the number.
+    for number in re.findall(r'--call(?:er|ee)-number", default="([^"]+)"', harness):
+        assert re.fullmatch(r"55501\d\d", re.sub(r"\D", "", number)), number
+        # Said aloud, not spelled out as a digit run: the sentence has to survive being spoken.
+        assert "-" in number, number
 
 
 def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
@@ -568,6 +580,7 @@ def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_pa
         "room": "bot-phone-bot",
         "identity": "bot-phone-bot",
         "track_name": "test-track",
+        "dial_plan_entries": 0,
     }
     assert summary["speech"] == {
         "voice_name": "Puck",

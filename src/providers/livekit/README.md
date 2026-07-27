@@ -60,12 +60,45 @@ the callee's decision. Ring time therefore belongs to phone firmware
 (`answer_timeout`); the provider's `setup_timeout` bounds only the message
 crossing the room.
 
-The number dialled **is** the participant identity setup is addressed to. There
-is no dial plan and nothing to resolve: a LiveKit identity is the name an
-endpoint answers to, so a handset that knows the number can place the call. A
-number nobody in the room answers to comes back `RECIPIENT_NOT_FOUND` from the
-SFU, which `dial` reports as `remote_unavailable` — the far end being absent, on
-the room's authority rather than a local table's.
+## The dial plan
+
+A phone number is digits. A LiveKit participant identity is where packets go.
+The **dial plan** is what turns one into the other, and it lives here because
+that translation is the exchange's job — core never handles an identity, and a
+handset never holds one.
+
+```python
+from bot.providers.livekit import signaling
+
+service = PhoneService(
+    url="wss://livekit.example.com",
+    token="livekit-jwt",
+    dial_plan=signaling.MappingDialPlan({"5550142": "phone-bot-bob"}),
+)
+```
+
+Numbers are provisioned per phone by whoever mints the tokens, since "this
+identity is on the room" and "this number rings it" are the same registration.
+Entries go through the same validation a dialled number does, so a plan cannot
+promise to route something no keypad could produce — and both sides are reduced
+to digits, so `555-0142`, `555 0142` and `(555) 0142` are one key and one lookup.
+Write plan entries however you would write the number down.
+
+Two ways a dial reaches nobody, both `remote_unavailable`, because from the
+caller's end they are the same fact:
+
+- the number is in no plan — a wrong number, answered by the exchange, with
+  nothing put on the wire;
+- the number resolves to an endpoint that is not in the room — `RECIPIENT_NOT_FOUND`
+  back from the SFU.
+
+No dial plan at all is a third thing: the phone is registered with no exchange,
+so it can be called and no number leads anywhere from it. `dial` reports that as
+`provider_unavailable`.
+
+A caller ID, however, is still the LiveKit identity the SFU authenticated:
+`IncomingCallData.caller` is not yet a number, so a bot cannot dial back what
+called it.
 
 Presence carries one thing: a participant that leaves the room. That is
 transduced as a typed event, and topology decides what it means — a callee that

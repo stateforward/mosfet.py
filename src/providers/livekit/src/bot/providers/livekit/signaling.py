@@ -16,16 +16,25 @@ Method                  SIP         Meaning
 The caller's identity is never in a payload: LiveKit hands every handler the authenticated
 ``caller_identity`` of the participant that invoked it, and a self-declared caller id on the wire
 would be a claim rather than a fact.
+
+Addressing one endpoint means knowing which one, and that is the other half of this module: a
+:class:`DialPlan` turns the number a handset dialled into the participant identity setup is sent
+to. A phone dials digits; only the exchange holds the map from those digits to a place in the
+room.
 """
 
 from __future__ import annotations
 
+import collections.abc
 import typing
 
 import pydantic
 from livekit import rtc
 
 from bot.devices import phone
+
+_NUMBER = pydantic.TypeAdapter(phone.PhoneNumber)
+"""The one rule for what a number is, so a plan cannot register something no handset could dial."""
 
 
 SetupMethod = "bot.provider.livekit.phone.setup"
@@ -69,6 +78,42 @@ class MessageData(pydantic.BaseModel):
         ),
         examples=["livekit:01J8Z2K7Q9"],
     )
+
+
+class DialPlan(typing.Protocol):
+    """The exchange's numbering plan: which endpoint in the room answers a dialled number.
+
+    A number is what somebody can say out loud, write down and press; a LiveKit participant
+    identity is where the packets go. Holding the two apart is what an exchange is for, and it is
+    why nothing outside this provider ever handles an identity — a phone dials digits, and the
+    network is what knows where they lead.
+    """
+
+    def endpoint(self, number: str) -> str | None:
+        """LiveKit participant identity registered against ``number``, or None for a wrong number."""
+        ...
+
+
+class MappingDialPlan:
+    """Dial plan from an explicit ``number -> participant identity`` mapping.
+
+    Small-exchange provisioning: whoever mints the room tokens also declares which number rings
+    which endpoint, because those are the same registration fact written down once. Numbers are
+    checked against the same rule a dialled number is, so a plan cannot promise to route
+    something no keypad can produce.
+    """
+
+    _endpoints: dict[str, str]
+
+    def __init__(self, entries: collections.abc.Mapping[str, str]) -> None:
+        self._endpoints = {}
+        for number, identity in entries.items():
+            if not identity:
+                raise ValueError("A dial plan entry must name the participant identity that answers the number.")
+            self._endpoints[_NUMBER.validate_python(number)] = identity
+
+    def endpoint(self, number: str) -> str | None:
+        return self._endpoints.get(number)
 
 
 def failure_kind(error: rtc.RpcError) -> phone.FailureKind:
@@ -119,6 +164,8 @@ __all__ = [
     "AcceptMethod",
     "ByeMethod",
     "DeclineMethod",
+    "DialPlan",
+    "MappingDialPlan",
     "MessageData",
     "Methods",
     "SetupMethod",
