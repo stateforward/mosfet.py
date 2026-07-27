@@ -27,6 +27,7 @@ from . import (
     encoding,
     generative,
     hearing,
+    identity,
     language,
     learning,
     listening,
@@ -76,6 +77,7 @@ if typing.TYPE_CHECKING:
     from .decoding import Decoder, Decoding
     from .encoding import Encoder, Encoding
     from .generative import Generative, Generator
+    from .identity import Identity, NameRecognizer, SpeechNameRecognizer
     from .listening import Listening, ListeningStage
     from .speaking import Speaking
     from .participating import (
@@ -124,6 +126,9 @@ _LAZY_EXPORT_MODULES = {
     "Encoder": ".encoding",
     "Generative": ".generative",
     "Generator": ".generative",
+    "Identity": ".identity",
+    "NameRecognizer": ".identity",
+    "SpeechNameRecognizer": ".identity",
     "Listening": ".listening",
     "ListeningStage": ".listening",
     "Speaking": ".speaking",
@@ -168,12 +173,14 @@ __all__ = [
     "EncodeData",
     "Generative",
     "Generator",
+    "Identity",
     "ImageStimulus",
     "Learning",
     "Listening",
     "ListeningStage",
     "Speaking",
     "Message",
+    "NameRecognizer",
     "ParticipantChannelSnapshot",
     "ParticipantContribution",
     "ParticipantSnapshot",
@@ -186,6 +193,7 @@ __all__ = [
     "ReadingOutputKind",
     "ReadingStage",
     "Response",
+    "SpeechNameRecognizer",
     "Stage",
     "TInput",
     "TOutput",
@@ -209,6 +217,7 @@ __all__ = [
     "encoding",
     "generative",
     "hearing",
+    "identity",
     "language",
     "learning",
     "listening",
