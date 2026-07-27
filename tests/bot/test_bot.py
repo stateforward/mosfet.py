@@ -2,9 +2,11 @@ from bot import abilities
 import bot.lifecycle
 import bot
 from bot.abilities import cognition
+from bot.abilities import encoding
 from bot.abilities import listening
 from bot.abilities import memory
 from bot.abilities import processing
+from bot.abilities import speaking
 from bot.abilities.cognition import Cognition
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
@@ -41,6 +43,7 @@ from tests.hsm_instance_state import (
     device_bots,
     phone_microphone,
     phone_speaker,
+    start_ability_tree,
 )
 from tests.hsm_model import transition_map
 from tests.type_helpers import object_dict
@@ -3800,6 +3803,114 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
 
     assert after_far == 0
     assert after_near == 1
+
+
+class UtteranceEncoder(encoding.Encoder[bytes, bytes]):
+    """Stands in for a vocal tract: text in, acoustic bytes out, on this machine.
+
+    A real synthesizer (macOS ``say``, Moonshine) is the same contract and is what the phone-bot
+    example uses. Here the audio only has to be traceable back to the words, so the pipeline can
+    be checked without a model download.
+    """
+
+    @typing.override
+    async def encode(self, input: bytes) -> bytes:
+        return b"spoken:" + input
+
+
+async def somebody_speaks(
+    environment: Environment,
+    text: str,
+    *,
+    position: space.Position,
+    amplitude_db: float = 60.0,
+) -> audio.Speaker:
+    """Put a mouth in the room at ``position`` and say ``text`` out loud through it.
+
+    A mouth is a ``Speaker``: exactly the device a bot uses for its own voice, because a person's
+    mouth and a robot's mouth are the same object acoustically. Everything downstream goes through
+    ``Environment.broadcast`` — no dispatch at the body, no forged ``environment.sound``.
+    """
+
+    mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
+    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    voice = speaking.Speaking(
+        encoder=UtteranceEncoder(),
+        speaker=mouth,
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/wav",
+    )
+    await start_ability_tree(environment, voice)
+    _ = await voice.apply(speaking.InputData(text=text), ctx=environment)
+    return mouth
+
+
+def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
+    """Somebody stands a metre away and says something; the bot's turn arrives as words.
+
+    The whole path is real: a mouth in the environment, ``Environment.broadcast`` with a level
+    and an origin, the bot's own placement deciding it is loud enough where it stands, body
+    fan-out to Listening, voice detection, speech decoding, and the decoded product handed to
+    judgment. The decoded bytes carry the utterance forward through every stage, so this cannot
+    pass on a pipeline that dropped the audio and substituted something else.
+
+    What it refuses to assert is anything the bot does about it. No device is dialed, nothing is
+    answered, and no output is expected — the turn is the whole claim. A bot that hears this
+    sentence and does nothing for the rest of its life passes.
+    """
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        ability = IgnoreAbility()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(RecordingListening(),))
+        environment = await start_bot_with_devices(
+            active_bot,
+            placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
+        )
+        ability.calls.clear()
+
+        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=1.0))
+
+        await wait_until(lambda: bool(ability.calls), timeout=10.0)
+        return [call.input for call in ability.calls if isinstance(call.input, hsm.Event)]
+
+    stimuli = asyncio.run(run())
+
+    assert [stimulus.name for stimulus in stimuli] == [speech.SpeechDecoding.output_event.name]
+    assert stimuli[0].data == b"decoded:spoken:Call Bob at phone-bot-bob."
+
+
+def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
+    """The same sentence, said 500 metres away, is a sentence the bot did not hear.
+
+    This is what proves the utterance went *through* the environment rather than around it: the
+    only difference between this and the test above is where the mouth is standing, and a
+    dispatch aimed at the body would ignore that entirely.
+    """
+
+    async def run() -> tuple[int, int]:
+        ability = IgnoreAbility()
+        listening_ability = RecordingListening()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
+        environment = await start_bot_with_devices(
+            active_bot,
+            placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
+        )
+        ability.calls.clear()
+
+        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=500.0))
+        # Long enough for the near case to have finished decoding twice over.
+        await asyncio.sleep(0.5)
+        shouted_from_far = len(ability.calls)
+
+        _ = await somebody_speaks(environment, "Call Bob at phone-bot-bob.", position=space.Position(x=0.0, y=1.0))
+        await wait_until(lambda: bool(ability.calls), timeout=10.0)
+        return shouted_from_far, len(ability.calls)
+
+    from_far, from_near = asyncio.run(run())
+
+    assert from_far == 0
+    assert from_near == 1
 
 
 def test_a_bot_that_was_told_nothing_still_gets_a_turn() -> None:

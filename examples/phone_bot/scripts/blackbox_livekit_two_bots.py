@@ -5,11 +5,15 @@ Both sides are real ``phone-bot`` processes with their own cognition, speech and
 Nothing is scripted: there is no TTS peer playing canned lines, so every utterance on the wire
 came from a bot deciding to speak.
 
-The two bots are not symmetric, because a call is not symmetric. One is the **caller**: it is
-*told* the other bot's number (``--tell "Call phone-bot-bob."``), so it has something to call
-about and a number to call. The other is told nothing. Both have the same phone and both can
-dial; being told a number is a thing the caller knows, not a thing it must do — whether to dial,
-and whether to answer, are the bots' decisions and this harness makes neither.
+The two bots are not symmetric, because a call is not symmetric. Somebody walks up to one of them
+and **says something out loud** — "Call Bob at phone-bot-bob." — which reaches it as sound in its
+environment, through its ears, its voice detector and its speech decoder, the same way anything
+else it hears does. Nobody says anything to the other one. Both have the same phone and both can
+dial; having heard a sentence is a thing that happened to the caller, not a thing it must act on
+— whether to dial, and whether to answer, are the bots' decisions and this harness makes neither.
+
+The words go in on the caller's stdin and are spoken by a mouth standing a metre in front of it.
+They are never parsed here, and the bot is never handed them as anything but audio.
 
 The room is what makes the call itself possible. A LiveKit room is an exchange: joining it makes a
 phone reachable, and dialing is call setup addressed to one participant. So the callee rings
@@ -93,7 +97,7 @@ def _bot_env_file(
     Identity has to differ or the two processes collide on the SFU; track name differs so each
     bot's audio is attributable to it in the observer's capture. Nothing here distinguishes
     caller from callee: the two configurations are identical, and the only difference between
-    the roles is what one of them was told.
+    the roles is that somebody spoke to one of them.
     """
 
     values: dict[str, str] = {}
@@ -106,8 +110,6 @@ def _bot_env_file(
     values["BOT_LIVEKIT_ROOM"] = room
     values["BOT_LIVEKIT_IDENTITY"] = identity
     values["BOT_LIVEKIT_TRACK_NAME"] = identity
-    # A shared .env telling both bots the same thing would make both of them callers.
-    _ = values.pop("BOT_TELL", None)
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
@@ -183,13 +185,13 @@ async def _main() -> int:
     _ = parser.add_argument("--api-key", default=os.environ.get("LIVEKIT_API_KEY", "devkey"))
     _ = parser.add_argument("--api-secret", default=os.environ.get("LIVEKIT_API_SECRET", "secret"))
     _ = parser.add_argument("--room", default="bot-two-bots")
-    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot told the callee's number.")
-    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot told nothing.")
+    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot somebody speaks to.")
+    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot nobody speaks to.")
     _ = parser.add_argument(
-        "--tell",
+        "--say",
         default=None,
         metavar="TEXT",
-        help="What the caller is told before it starts (default: 'Call <callee>.').",
+        help="What somebody says out loud to the caller (default: 'Call Bob at <callee>.').",
     )
     _ = parser.add_argument("--observer", default="conversation-observer")
     _ = parser.add_argument("--converse-seconds", type=float, default=60.0)
@@ -219,9 +221,10 @@ async def _main() -> int:
 
     caller, callee = str(args.caller), str(args.callee)
     identities = [caller, callee]
-    # The callee's number, in words, to the one bot that is told anything at all. On LiveKit the
-    # destination identity is the number, so this is the number and nothing resolves it.
-    told = {caller: str(args.tell) if args.tell is not None else f"Call {callee}.", callee: None}
+    # A sentence with the callee's number in it, said out loud to the one bot somebody talks to.
+    # On LiveKit the destination identity is the number, so this is the number and nothing
+    # resolves it — and nothing on this side reads the sentence either.
+    said = {caller: str(args.say) if args.say is not None else f"Call Bob at {callee}.", callee: None}
     processes: dict[str, subprocess.Popen[str]] = {}
     logs: dict[str, pathlib.Path] = {}
     try:
@@ -232,28 +235,24 @@ async def _main() -> int:
                 identity=identity,
                 room=str(args.room),
             )
-            instruction = told[identity]
+            utterance = said[identity]
             log_path = record_dir / f"{identity}.log"
             logs[identity] = log_path
             handle = log_path.open("w", encoding="utf-8")
             processes[identity] = subprocess.Popen(
-                [
-                    "uv",
-                    "run",
-                    "phone-bot",
-                    "-v",
-                    "--env",
-                    str(env_file),
-                    *(() if instruction is None else ("--tell", instruction)),
-                ],
+                ["uv", "run", "phone-bot", "-v", "--env", str(env_file)],
                 cwd=str(example_root),
+                # A pipe only for the bot somebody speaks to. Nobody is standing in front of the
+                # other one, so there is nothing to say into it and no stdin to say it on.
+                stdin=subprocess.PIPE if utterance is not None else subprocess.DEVNULL,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 text=True,
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
             print(
-                f"[two-bots] started {identity} pid={processes[identity].pid} log={log_path} told={instruction!r}",
+                f"[two-bots] started {identity} pid={processes[identity].pid} log={log_path} "
+                f"spoken_to={utterance is not None}",
                 flush=True,
             )
 
@@ -262,6 +261,15 @@ async def _main() -> int:
                 print(f"[two-bots] FAIL {identity} not ready in time", flush=True)
                 return 3
             print(f"[two-bots] {identity} ready", flush=True)
+
+        # Speak only once the bot is awake enough to hear: a sentence said into a room where
+        # nothing is listening yet is a sentence nobody heard, which is not what this is testing.
+        utterance = said[caller]
+        stdin = processes[caller].stdin
+        if utterance is not None and stdin is not None:
+            _ = stdin.write(utterance + "\n")
+            stdin.flush()
+            print(f"[two-bots] somebody said something to {caller} ({len(utterance)} characters)", flush=True)
 
         captured = await _observe(
             url=str(args.url),
@@ -303,7 +311,9 @@ async def _main() -> int:
         "caller": caller,
         "callee": callee,
         "identities": identities,
-        "told": told,
+        # How much was said to each bot, not what. The console line says it this way too; a
+        # recording that quotes the sentence back is the first step toward reading it.
+        "said_characters": {identity: None if text is None else len(text) for identity, text in said.items()},
         "audible_floor": int(args.audible_floor),
         "speech": speech,
         "stages": stages,

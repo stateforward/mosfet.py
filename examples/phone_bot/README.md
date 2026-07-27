@@ -69,25 +69,34 @@ handset. The other ways to end up with no call — nothing was ringing, the bot 
 nobody answered — make **no sound**, because no telephone makes one for them; they stay on the
 service plane as `phone.no_call`. What the bot does about a busy tone is its own call.
 
-## Telling the bot something
+## Saying something to the bot
 
 ```bash
-uv run phone-bot --tell "Call phone-bot-bob."
+uv run phone-bot
+# ...
+Call Bob at phone-bot-bob.          # type it, press enter
 ```
 
-`--tell` is repeatable, and `BOT_TELL=` in the env file says one thing. Each becomes a standing
-directive in the bot's memory before its first turn, recalled alongside prior turns the way any
-instruction it was given is.
+Every line you type is **said out loud** in the robot's room. A mouth — the same
+`bot.devices.audio.Speaker` the robot uses for its own voice — stands a metre in front of it,
+renders your words locally with macOS `say`, and broadcasts them through `Environment.broadcast`
+at 60 dB from where it is standing. The robot hears them the way it hears anything: environment
+sound → its ears (its placement's `threshold_db`) → Listening → voice detection → speech
+decoding → cognition. Step far enough away, or raise its hearing floor, and it genuinely does not
+hear you. Nothing is dispatched at the body.
 
 There is no directory: a LiveKit destination identity *is* the number, so "call phone-bot-bob"
-names the thing you would dial, and nothing resolves it to something else. Every bot can dial —
-this one now has a number and a reason.
+names the thing you would dial, and nothing resolves it to something else. Every bot can dial.
 
-Being told is not being made to. The example never reads the text: it does not look for a number
-in it, does not match on "call", and has no transition anywhere of the form "directive present →
-dial". A bot that recalls `Call phone-bot-bob.` and decides this is not the moment has decided,
-and that is a legitimate outcome. Answering, declining, dialing, and hanging up all stay the
-bot's decisions — nothing in the wiring makes them.
+Being spoken to is not being made to. The example never reads the words: it does not look for a
+number in them, does not match on "call", and has no transition anywhere of the form "heard X →
+do Y". A bot that hears `Call Bob at phone-bot-bob.` and decides this is not the moment has
+decided, and that is a legitimate outcome. Answering, declining, dialing, and hanging up all stay
+the bot's decisions — nothing in the wiring makes them.
+
+Requires macOS (`say` and `afconvert`); the readiness summary warns by name if they are missing.
+Any other `Encoder[bytes, bytes]` drops in — the Moonshine `SpeechEncoder` in
+`src/providers/moonshine` is the same contract.
 
 ## What “connected” means
 
@@ -151,11 +160,13 @@ uv run python scripts/blackbox_livekit_two_bots.py \
   --caller phone-bot-alice --callee phone-bot-bob
 ```
 
-The caller is started with `--tell "Call <callee>."`; the callee is told nothing. Their env files
-are identical and both bots can dial — the whole difference between the roles is that one of them
-knows a number and has been asked. Whether the caller dials, and whether the callee answers, stay
-judgment. The verdict prints `dialed=` for the caller and `rang=` for the callee, and both sides
-must be audible to pass.
+Somebody walks up to the caller and says `Call Bob at <callee>.` out loud; nobody says anything to
+the callee. The harness writes the sentence to the caller's stdin once it is awake, and the bot
+hears it as sound. Their env files are identical and both bots can dial — the whole difference
+between the roles is that one of them was spoken to. Whether the caller dials, and whether the
+callee answers, stay judgment. The verdict prints `dialed=` for the caller, `rang=` for the
+callee and `decoded=` for whoever turned audio into words, and both sides must be audible to
+pass. A run where the caller never dials is reported, not failed.
 
 ## Unit tests (no LiveKit)
 

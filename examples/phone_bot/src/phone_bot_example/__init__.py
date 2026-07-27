@@ -10,8 +10,6 @@ from bot.abilities import memory
 from bot.abilities import participating
 from bot.abilities import speaking
 
-# ``start_bot`` binds ``cognition`` as a parameter, so directives are imported by module name.
-from bot.abilities.cognition import directives
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -24,11 +22,14 @@ import datetime
 import json
 import logging
 import pathlib
+import sys
 import typing
 
 import hsm
 
 from bot.bot import Bot
+
+from . import person
 
 from bot.devices import audio
 from bot.devices import phone as phone_device
@@ -304,9 +305,6 @@ class AppConfig:
     cognition: CognitionConfig = dataclasses.field(default_factory=CognitionConfig)
     livekit: LiveKitConfig = dataclasses.field(default_factory=LiveKitConfig)
     speech: SpeechConfig = dataclasses.field(default_factory=SpeechConfig)
-    # Things this bot was told, in the words they were told in. They become standing directives
-    # in its memory before the first turn; the example never reads them.
-    told: tuple[str, ...] = ()
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
@@ -316,9 +314,6 @@ class AppConfig:
             env.update(load_env(_REPO_ENV_PATH))
         if path is not None and path.exists():
             env.update(load_env(path))
-        # One thing the env file can say to the bot. `--tell` is the repeatable form; a KEY=VALUE
-        # line holds one instruction and cannot hold two without splitting somebody's prose.
-        told = _env_first(env, "BOT_TELL")
         openai_api_key = _env_first(env, "BOT_OPENAI_API_KEY", "OPENAI_API_KEY")
         openai_base_url = _env_first(env, "BOT_OPENAI_BASE_URL", "OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL
         return cls(
@@ -360,7 +355,6 @@ class AppConfig:
             ),
             livekit=LiveKitConfig.from_env(env),
             speech=SpeechConfig.from_env(env),
-            told=() if told is None else (told,),
         )
 
     def with_cognition_overrides(self, *, model: str | None) -> typing.Self:
@@ -605,6 +599,28 @@ _EARS_THRESHOLD_DB = 20.0
 
 _MOUTHPIECE_THRESHOLD_DB = 70.0
 """Close-talk handset mouthpiece: it hears the mouth it is held next to, and little else."""
+
+_ROOM_POSITION = space.Position(x=0.0, y=1.0)
+"""Where somebody stands to talk to the robot: a metre away, facing it.
+
+Close enough that a conversational 60 dB arrives 40 dB over the robot's hearing floor, and far
+enough that it arrives 10 dB *under* the close-talk mouthpiece's threshold — so talking to the
+robot in the room does not put your voice down its telephone line.
+"""
+
+
+def _someone_in_the_room() -> person.Person:
+    """A person standing in front of the robot, able to say something out loud.
+
+    Local synthesis only: the words are rendered on this machine and become acoustic energy in
+    the environment. Nothing about them is read here.
+    """
+
+    return person.Person(
+        encoder=person.SayEncoder(),
+        position=_ROOM_POSITION,
+        amplitude_db=_VOICE_DB,
+    )
 
 
 def _earpiece() -> audio.Speaker:
@@ -915,6 +931,7 @@ async def start_bot(
     label: str,
     *,
     config: AppConfig | None = None,
+    environment: Environment | None = None,
     connect_livekit: bool = False,
     phone: phone_device.Phone | None = None,
     voice: audio.Speaker | None = None,
@@ -938,16 +955,8 @@ async def start_bot(
         conversation=conversation,
         memory=memory,
     )
-    # What this bot was told, written where a bot keeps what it was told, before it is awake to
-    # have a turn about any of it. The text is opaque here: nothing reads it, nothing routes on
-    # it, and a bot that recalls "Call Bob" is as free to ignore that as a person would be.
-    for instruction in app_config.told:
-        _ = body.memory().execute(
-            directives.directive_insert_input(directives.Directive(text=instruction), context_ref=None)
-        )
-
-    environment = Environment()
-    _ = await body.attach(environment, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
+    scope = environment if environment is not None else Environment()
+    _ = await body.attach(scope, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
     await _wait_for_active_bot(body)
     if connect_livekit and app_config.livekit.can_connect_room():
         if phone_service is None:
@@ -1007,6 +1016,10 @@ def _warnings(config: AppConfig, *, connect_livekit: bool) -> list[str]:
         )
     if config.livekit.can_connect_room() and not connect_livekit:
         warnings.append("LiveKit room config is loaded but connection is opt-in; pass --connect-livekit to attempt it.")
+    try:
+        person.require_local_speech_tools()
+    except RuntimeError as error:
+        warnings.append(str(error))
     return warnings
 
 
@@ -1040,9 +1053,16 @@ def _summary_for(
             "base_url": app_config.cognition.intuition_base_url,
             "api_key_loaded": bool(app_config.cognition.intuition_api_key),
         },
-        # How many things this bot was told, not what they were: the operator gets confirmation
-        # that the words were heard without the readiness summary quoting them back.
-        "told": len(app_config.told),
+        # Where somebody has to stand to talk to this robot, and how loud. Not which synthesizer
+        # renders them — that is a constructor argument, and a field here naming one would go
+        # stale the moment somebody injects another. Never what was said, either: the words go
+        # into the room, not into the operator's readiness report.
+        "room_voice": {
+            "position_m": [_ROOM_POSITION.x, _ROOM_POSITION.y, _ROOM_POSITION.z],
+            "amplitude_db": _VOICE_DB,
+            "sample_rate_hz": person.VOICE_SAMPLE_RATE_HZ,
+            "media_type": person.VOICE_MEDIA_TYPE,
+        },
         "livekit_room_audio_attempted": room_attempted,
         "livekit_room_audio_configured": app_config.livekit.can_connect_room(),
         "livekit_room_audio_connected": room_connected,
@@ -1124,9 +1144,11 @@ async def run(
         app_config.speech.vad_model_id,
         bool(app_config.speech.api_key),
     )
+    environment = Environment()
     body = await start_bot(
         "alice",
         config=app_config,
+        environment=environment,
         connect_livekit=False,
         phone=phone,
         voice=voice,
@@ -1137,32 +1159,92 @@ async def run(
         conversation=conversation,
         memory=store,
     )
-    if connect_livekit and app_config.livekit.can_connect_room():
-        await _wait_for_livekit_room_audio_result(phone_service)
-    summary = _summary_for(
-        app_config=app_config,
-        body=body,
-        phone_service=phone_service,
-        connect_livekit=connect_livekit,
-    )
-    if on_ready is not None:
-        on_ready(summary)
-    if hold:
-        # Stay on the line until cancelled so a human can join the room.
-        # Call setup addressed to this identity rings the phone; the bot decides whether to answer.
-        # Periodically surface LiveKit media counters so deafness is obvious.
+    # Somebody is in the room with the robot from the moment it is awake. They say nothing until
+    # a line is typed; a person standing there quietly is not a person who is absent.
+    someone = _someone_in_the_room()
+    _ = await someone.enter(environment)
+    try:
+        if connect_livekit and app_config.livekit.can_connect_room():
+            await _wait_for_livekit_room_audio_result(phone_service)
+        summary = _summary_for(
+            app_config=app_config,
+            body=body,
+            phone_service=phone_service,
+            connect_livekit=connect_livekit,
+        )
+        if on_ready is not None:
+            on_ready(summary)
+        if hold:
+            # Stay on the line until cancelled so a human can join the room.
+            # Call setup addressed to this identity rings the phone; the bot decides whether to answer.
+            async with asyncio.TaskGroup() as holding:
+                _ = holding.create_task(
+                    _report_media(phone_service, body=body, phone=phone),
+                    name="phone-bot-media",
+                )
+                _ = holding.create_task(
+                    _say_what_is_typed(environment, someone),
+                    name="phone-bot-room-voice",
+                )
+        return summary
+    finally:
+        # Whoever was standing there walks out again, taking their mouth out of the environment
+        # with them. A summary that returns with a stranger still in the room is a leak.
+        try:
+            _ = await someone.leave(environment)
+        except Exception as error:
+            _LOG.warning("somebody could not leave the robot's room reason=%s", error)
+
+
+async def _report_media(service: PhoneService, *, body: PhoneBot, phone: phone_device.Phone) -> None:
+    """Periodically surface LiveKit media counters so deafness on the wire is obvious."""
+
+    while True:
+        await asyncio.sleep(5.0)
+        snap = service.media_snapshot()
+        _LOG.info(
+            "livekit media local_track_sid=%s delivered_chunks=%s dropped_chunks=%s bot_state=%s phone_state=%s",
+            snap.local_track_sid,
+            snap.remote_audio_chunks,
+            snap.remote_audio_dropped_chunks,
+            body.state(),
+            phone.state(),
+        )
+
+
+async def _say_what_is_typed(environment: Environment, someone: person.Person) -> None:
+    """Every line typed at the terminal is said out loud in the robot's room.
+
+    The terminal is the person: they choose the words, the mouth in the environment carries them,
+    and the robot hears them or does not depending on where everyone is standing. Nothing here
+    reads the line — its length is logged, never its content — and nothing here decides anything
+    on the robot's behalf. End of input means whoever was standing there walked away.
+    """
+
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    try:
+        transport, _protocol = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    except (OSError, ValueError) as error:
+        # No terminal to read is an empty room, not a failure: the bot is still on the phone and
+        # still awake, there is simply nobody standing in front of it. Never take the bot down.
+        _LOG.info("nobody can walk into the robot's room here reason=%s", error)
+        return
+    try:
         while True:
-            await asyncio.sleep(5.0)
-            snap = phone_service.media_snapshot()
-            _LOG.info(
-                "livekit media local_track_sid=%s delivered_chunks=%s dropped_chunks=%s bot_state=%s phone_state=%s",
-                snap.local_track_sid,
-                snap.remote_audio_chunks,
-                snap.remote_audio_dropped_chunks,
-                body.state(),
-                phone.state(),
-            )
-    return summary
+            line = await reader.readline()
+            if not line:
+                _LOG.info("nobody left in the room to talk to the robot")
+                return
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            _LOG.info("someone in the room says something characters=%d", len(text))
+            _ = await someone.say(text, ctx=environment)
+    finally:
+        # connect_read_pipe puts stdin in non-blocking mode for the whole process. Hand it back,
+        # or whatever reads the terminal after this gets a BlockingIOError instead of a line.
+        transport.close()
 
 
 def _render_text(summary: dict[str, object]) -> str:
@@ -1187,23 +1269,12 @@ def main() -> None:
         help="Override the OpenAI Terra reasoning model (default gpt-5.6-terra).",
     )
     _ = parser.add_argument("--connect-livekit", action="store_true", help="Attempt the configured LiveKit room join.")
-    _ = parser.add_argument(
-        "--tell",
-        action="append",
-        default=[],
-        metavar="TEXT",
-        help="Tell the bot something before it starts, in plain words. Repeatable.",
-    )
     args = parser.parse_args()
     env_arg = typing.cast(str | None, getattr(args, "env", None))
     env_path = pathlib.Path(env_arg).expanduser() if env_arg is not None else None
     config = AppConfig.from_env_file(env_path)
     config = config.with_cognition_overrides(
         model=typing.cast(str | None, getattr(args, "reasoning_model", None)),
-    )
-    config = dataclasses.replace(
-        config,
-        told=(*config.told, *typing.cast(list[str], getattr(args, "tell", []))),
     )
     summary = asyncio.run(
         run(
@@ -1225,6 +1296,7 @@ __all__ = [
     "LiveKitConfig",
     "SpeechConfig",
     "PhoneBot",
+    "person",
     "load_env",
     "main",
     "mint_livekit_access_token",

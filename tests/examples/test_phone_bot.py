@@ -1,8 +1,11 @@
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import typing
+
+import pytest
 
 
 def _repo_root() -> pathlib.Path:
@@ -123,105 +126,295 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "openai_terra_reasoning" in source
 
 
-def test_a_bot_can_be_told_something_before_it_starts_and_still_recall_it() -> None:
-    """Telling a bot something is a memory it has, not a branch the example takes.
+def test_somebody_in_the_bots_room_is_heard_or_not_by_where_they_are_standing() -> None:
+    """Saying something out loud is a sound in a place, subject to the room it is said in.
 
-    The instruction is written as a standing directive before the body is awake, and it is
-    still there — recalled by the same query Reasoning recalls with, out of the same in-process
-    ``ShortTermMemory`` the reasoning ability holds — once the bot is running.
+    The example's own ``Person`` speaks, through the mouth it stands behind, through
+    ``Environment.broadcast``. One ear is where the robot's ears are — a metre away with the
+    robot's own hearing floor — and one is across a field with the same floor. The near ear hears
+    a real utterance at a real level; the far ear hears nothing at all, which is only possible if
+    the sound went through the environment rather than at somebody.
 
-    What this refuses to assert is anything about what the bot then does. It does not dial, it
-    is not asked to dial, and this test would pass unchanged if it never dialed in its life.
+    Nothing here asserts that anything acts on what it heard. The ears are ears.
     """
 
-    code = "\n".join(
-        [
-            "import asyncio, phone_bot_example",
-            "from bot.abilities.cognition import directives",
-            "async def main():",
-            "    config = phone_bot_example.AppConfig(",
-            "        told=('Call phone-bot-bob.', 'Keep it brief.'),",
-            "    )",
-            "    body = await phone_bot_example.start_bot('probe', config=config)",
-            "    recalled = directives.directives_from_output(",
-            "        body.memory().execute(directives.directive_select_input(context_ref='phone'))",
-            "    )",
-            "    print([item.text for item in recalled])",
-            "    print(body.state())",
-            "asyncio.run(main())",
-        ]
+    code = '''
+import asyncio
+import typing
+
+import hsm
+from bot import abilities
+from bot.environment import Environment, SoundData, SoundEvent, space
+from phone_bot_example import person
+
+
+class Ear(hsm.Instance):
+    """Something in the room with a hearing threshold and no opinions."""
+
+    def __init__(self, heard: list) -> None:
+        super().__init__()
+        self._heard = heard
+
+    @staticmethod
+    def _record(ctx, instance, event) -> None:
+        if isinstance(event.data, SoundData):
+            instance._heard.append(event.data)
+
+    model = hsm.define(
+        "Ear",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
     )
+
+
+class WordsAsAudio(abilities.Encoder):
+    """A vocal tract with no macOS in it, so this runs anywhere the example imports.
+
+    The real one is ``person.SayEncoder``; this is the same contract with the synthesizer taken
+    out, so the audio stays traceable back to the words through every stage.
+    """
+
+    async def encode(self, input: bytes) -> bytes:
+        return b"spoken:" + input
+
+
+async def main() -> None:
+    environment = Environment()
+    near, far = [], []
+    # Strong references: environment presence is a WeakValueDictionary, so an ear nobody is
+    # holding leaves the room before anybody speaks and both counts come back zero.
+    ears = {}
+    for name, heard, position in (
+        ("near", near, space.Position(x=0.0, y=0.0)),
+        ("far", far, space.Position(x=0.0, y=500.0)),
+    ):
+        ear = Ear(heard)
+        ears[name] = ear
+        _ = await hsm.started(environment, ear, ear.model, hsm.Config(id=name))
+        environment.join(ear, placement=space.Placement(position=position, threshold_db=20.0))
+
+    someone = person.Person(
+        encoder=WordsAsAudio(),
+        position=space.Position(x=0.0, y=1.0),
+        amplitude_db=60.0,
+    )
+    _ = await someone.enter(environment)
+    _ = await someone.say("Call Bob at phone-bot-bob.", ctx=environment)
+    for _ in range(500):
+        await asyncio.sleep(0.01)
+        if near:
+            break
+    print(len(near), len(far))
+    print(near[0].audio.decode(), near[0].amplitude_db, near[0].media_type, near[0].sample_rate_hz)
+    _ = await someone.leave(environment)
+
+
+asyncio.run(main())
+'''
 
     assert _run_phone_bot_python(code) == "\n".join(
         [
-            "['Call phone-bot-bob.', 'Keep it brief.']",
-            "/PhoneBot/active/unfocused",
+            "1 0",
+            "spoken:Call Bob at phone-bot-bob. 60.0 audio/wav 16000",
         ]
     )
 
 
-def test_the_command_line_is_how_you_tell_a_running_bot_something(tmp_path: pathlib.Path) -> None:
-    """``--tell`` repeats, and the env file says one thing; both reach the same bot.
+@pytest.mark.skipif(
+    shutil.which("say") is None or shutil.which("afconvert") is None,
+    reason="the local synthesizer for talking to a bot is macOS say/afconvert",
+)
+def test_the_words_somebody_types_are_synthesized_on_this_machine() -> None:
+    """The operator's line becomes real audio locally: no key, no network, no provider.
 
-    Only the count is asserted here, because the count is all the readiness summary reports —
-    the words go to the bot, not to the operator's console.
+    Only that it is audio is asserted. What it sounds like is the synthesizer's business, and
+    what it means is nobody's business on this side of the microphone.
     """
 
-    env_path = tmp_path / ".env"
-    _ = env_path.write_text("BOT_TELL=Call phone-bot-bob.\n", encoding="utf-8")
-
-    from_env = _run_phone_bot_example("--env", str(env_path))
-    from_flags = _run_phone_bot_example(
-        "--env",
-        str(env_path),
-        "--tell",
-        "Ask them how the demo went.",
-        "--tell",
-        "Keep it brief.",
+    code = "\n".join(
+        [
+            "import asyncio",
+            "from phone_bot_example import person",
+            "audio = asyncio.run(person.SayEncoder().encode(b'Call Bob at phone bot bob.'))",
+            "print(audio[:4].decode(), audio[8:12].decode(), len(audio) > 1000)",
+        ]
     )
-    told_nothing = _run_phone_bot_example("--env", str(tmp_path / "absent.env"))
 
-    assert from_env["told"] == 1
-    assert from_flags["told"] == 3
-    assert told_nothing["told"] == 0
+    assert _run_phone_bot_python(code) == "RIFF WAVE True"
 
 
-def test_the_turnkey_command_carries_every_tell_through_to_the_bot(tmp_path: pathlib.Path) -> None:
-    """``phone-bot --tell`` is the same words in the same order, plus whatever the env file said.
+def test_the_turnkey_command_hands_the_bot_a_config_and_nothing_else(tmp_path: pathlib.Path) -> None:
+    """``phone-bot`` resolves LiveKit and starts the bot. It carries no words to it.
 
     The turnkey command rewrites its env file on the way through (minted token, resolved room),
-    so this pins that what the operator says survives that rewrite. LiveKit and the bot itself
-    are stubbed out: this is about the words reaching the config, not about a call.
+    which is the only reason it touches config at all. LiveKit and the bot itself are stubbed
+    out; what is pinned is that the operator has no way, on this command line, to put anything
+    in a bot's head before it is awake.
     """
 
     env_path = tmp_path / ".env"
-    _ = env_path.write_text("BOT_TELL=Call phone-bot-bob.\n", encoding="utf-8")
+    _ = env_path.write_text("BOT_LIVEKIT_ROOM=a-room\n", encoding="utf-8")
     code = "\n".join(
         [
             "import phone_bot_example.cli as cli",
-            "told = []",
+            "seen = []",
             "async def fake_run(config, **kwargs):",
-            "    told.extend(config.told)",
+            "    seen.append(config.livekit.room)",
+            "    seen.append([field for field in vars(config) if 'told' in field or 'tell' in field])",
             "    return {'livekit_room_audio_connected': True}",
             "cli.run = fake_run",
-            "cli.main([",
-            f"    '--json', '--skip-livekit-start', '--env', {str(env_path)!r},",
-            "    '--tell', 'Ask how the demo went.', '--tell', 'Keep it brief.',",
-            "])",
-            "print(told)",
+            f"cli.main(['--json', '--skip-livekit-start', '--env', {str(env_path)!r}])",
+            "print(seen)",
         ]
     )
 
-    assert _run_phone_bot_python(code) == "['Call phone-bot-bob.', 'Ask how the demo went.', 'Keep it brief.']"
+    assert _run_phone_bot_python(code) == "['a-room', []]"
 
 
-def test_a_bot_that_was_told_a_number_is_offered_its_phone_and_nothing_more() -> None:
-    """The bot is given the instruction and a phone; the choice between them is its own.
+def test_a_failed_utterance_never_repeats_what_somebody_said() -> None:
+    """When the synthesizer fails, the words do not come back out in the failure.
+
+    ``Speaking`` turns any exception from the encoder into ``FailureData(message=str(error))``,
+    which the owner logs, so anything the encoder puts in an exception is something that ends up
+    in a log file. ``say``'s argv *is* the sentence, so this pins that neither the message nor
+    the exception chain behind it carries the utterance anywhere.
+    """
+
+    code = '''
+import asyncio
+import subprocess
+
+from phone_bot_example import person
+
+SAID = "Call Bob at phone-bot-bob and mention the budget"
+real = subprocess.run
+person.subprocess.run = lambda command, **kwargs: real(["false"], **kwargs)
+try:
+    asyncio.run(person.SayEncoder().encode(SAID.encode()))
+except Exception as error:
+    chain = [str(error), repr(error.__cause__), repr(error.__context__)]
+    print(str(error))
+    print(any(SAID in link for link in chain))
+finally:
+    person.subprocess.run = real
+'''
+
+    assert _run_phone_bot_python(code) == "\n".join(["say failed with exit status 1", "False"])
+
+
+def test_arriving_ends_only_on_a_correlated_attachment_outcome() -> None:
+    """Standing in the doorway ends when the attachment protocol answers, and only then.
+
+    The protocol answers an attach request exactly once — complete or failed — and stamps the
+    request id on both, so a person guarding on their arrival id hears whichever one comes. A
+    timer of this person's own would be a second deadline racing that answer, able to declare
+    somebody voiceless while the reply that settles them is already in flight. There is nothing
+    left for it to catch, so ``arriving`` carries no trigger but the two outcomes.
+    """
+
+    from bot.protocols import attachment
+
+    code = "\n".join(
+        [
+            "from phone_bot_example import person",
+            "from tests.hsm_model import transition_map",
+            "print(sorted(transition_map(person.Person.model)['/Person/arriving']))",
+        ]
+    )
+
+    assert _run_phone_bot_python(code) == str(
+        sorted([attachment.AttachCompleteEvent.name, attachment.AttachFailedEvent.name])
+    )
+
+
+def test_a_person_whose_voice_is_already_taken_stops_waiting() -> None:
+    """Being refused a voice is an answer, and ``enter`` has to raise on it rather than hang.
+
+    An ability belongs to one owner, so a voice somebody else holds refuses the next actor who
+    asks for it. That refusal is correlated to this arrival, which is the whole reason it can be
+    heard at all: the transition that fields it is guarded on the arrival's id. A person who
+    cannot speak finds out here, in the call that put them in the room.
+    """
+
+    code = '''
+import asyncio
+
+import hsm
+from bot.environment import Environment, space
+from bot.protocols import attachment
+from phone_bot_example import person
+
+
+class Bystander(hsm.Instance):
+    """Holds the voice first, and says so once it is really theirs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.holding = asyncio.Event()
+
+    @staticmethod
+    def _hold(ctx, instance, event) -> None:
+        instance.holding.set()
+
+    model = hsm.define(
+        "Bystander",
+        hsm.initial(hsm.target("waiting")),
+        hsm.state(
+            "waiting",
+            hsm.transition(
+                hsm.on(attachment.AttachCompleteEvent),
+                hsm.effect(_hold),
+                hsm.target("../holding"),
+            ),
+        ),
+        hsm.state("holding"),
+    )
+
+
+class Refused(person.Person):
+    """Walks in after somebody else has already taken this voice."""
+
+    async def enter(self, environment):
+        bystander = Bystander()
+        _ = await hsm.started(environment, bystander, bystander.model)
+        _ = await self._voice.attach(
+            environment,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=bystander)),
+        )
+        # Wait on the holder's own completion, so the voice is provably taken before this
+        # person asks for it — not merely likely to be by the time they do.
+        await asyncio.wait_for(bystander.holding.wait(), timeout=10.0)
+        return await super().enter(environment)
+
+
+async def main() -> None:
+    refused = Refused(
+        encoder=person.SayEncoder(),
+        position=space.Position(x=0.0, y=1.0),
+        amplitude_db=60.0,
+    )
+    try:
+        _ = await asyncio.wait_for(refused.enter(Environment()), timeout=10.0)
+    except asyncio.TimeoutError:
+        print("still waiting")
+    except RuntimeError:
+        print("stopped waiting")
+    print(refused.state())
+
+
+asyncio.run(main())
+'''
+
+    assert _run_phone_bot_python(code) == "\n".join(["stopped waiting", "/Person/voiceless"])
+
+
+def test_a_bot_somebody_spoke_to_is_offered_its_phone_and_nothing_more() -> None:
+    """The bot is in a room where it can be spoken to, and it has a phone. The choice is its own.
 
     ``phone.dial`` is offered because the handset is resting on the hook, which is true of every
-    bot in this example whether it was told anything or not. Nothing about being told a number
-    enables it, and nothing about being told a number dials it — the assertion here is that both
-    the words and the capability reached the bot, never that one caused the other.
+    bot in this example whether anybody has said anything to it or not. Nothing about being
+    spoken to enables it, and nothing about being spoken to dials it — the assertion here is that
+    the capability reached the bot, never that anything caused it to be used.
     """
 
     code = "\n".join(
@@ -229,44 +422,72 @@ def test_a_bot_that_was_told_a_number_is_offered_its_phone_and_nothing_more() ->
             "import asyncio, phone_bot_example",
             "from bot.abilities import processing",
             "from bot.devices import phone",
+            "from bot.environment import Environment",
             "async def main():",
-            "    told = await phone_bot_example.start_bot(",
-            "        'told', config=phone_bot_example.AppConfig(told=('Call phone-bot-bob.',))",
-            "    )",
-            "    silent = await phone_bot_example.start_bot('silent', config=phone_bot_example.AppConfig())",
-            "    for body in (told, silent):",
+            "    for label in ('spoken-to', 'alone'):",
+            "        environment = Environment()",
+            "        body = await phone_bot_example.start_bot(label, environment=environment)",
             "        offered = tuple(event.name for event in processing.enabled_call_events(body.phone()))",
             "        print(body.label(), phone.DialEvent.name in offered)",
             "asyncio.run(main())",
         ]
     )
 
-    assert _run_phone_bot_python(code) == "\n".join(["told True", "silent True"])
+    assert _run_phone_bot_python(code) == "\n".join(["spoken-to True", "alone True"])
 
 
-def test_the_example_never_reads_what_the_bot_was_told() -> None:
-    """The text is opaque: no parse, no number extraction, no "directive present → dial".
+def test_the_example_never_reads_what_is_said_to_it() -> None:
+    """The utterance is opaque: no parse, no number extraction, no "heard X → dial".
 
-    A telling interface that inspected the instruction would be this example choosing for the
-    bot. The only thing the example does with the words is write them down.
+    An example that inspected what somebody said would be this example choosing for the bot. All
+    it does with the words is turn them into sound and let go of them.
     """
 
     source = _example_source()
-    cli = (_repo_root() / "examples" / "phone_bot" / "src" / "phone_bot_example" / "cli.py").read_text(encoding="utf-8")
+    example_root = _repo_root() / "examples" / "phone_bot" / "src" / "phone_bot_example"
+    cli = (example_root / "cli.py").read_text(encoding="utf-8")
+    speaker = (example_root / "person.py").read_text(encoding="utf-8")
+    harness = (_repo_root() / "examples" / "phone_bot" / "scripts" / "blackbox_livekit_two_bots.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert "directives.Directive(text=instruction)" in source
     for reading_the_words in (
-        "told.startswith",
-        "told.lower",
-        "instruction.lower",
-        "instruction.split",
+        "text.startswith",
+        "text.lower",
+        "text.split",
+        "utterance.lower",
+        "utterance.split",
         '"call" in',
         "DialEvent",
         "DialData",
         "phone.dial",
     ):
-        assert reading_the_words not in source, reading_the_words
-        assert reading_the_words not in cli, reading_the_words
+        for reader in (source, cli, speaker, harness):
+            assert reading_the_words not in reader, reading_the_words
+
+
+def test_nothing_in_this_example_can_be_told_anything_before_it_wakes() -> None:
+    """Configuration is not conversation, so the flag that pretended it was is gone outright.
+
+    No ``--tell``, no ``BOT_TELL``, no config field, no directive written behind the bot's back —
+    and no compatibility path that would let one come back. Talking to a bot happens while it is
+    running, out loud, or it does not happen.
+    """
+
+    example = _repo_root() / "examples" / "phone_bot"
+    files = (
+        example / "src" / "phone_bot_example" / "__init__.py",
+        example / "src" / "phone_bot_example" / "cli.py",
+        example / "src" / "phone_bot_example" / "person.py",
+        example / "scripts" / "blackbox_livekit_two_bots.py",
+        example / "README.md",
+        example / ".env.example",
+    )
+
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for gone in ("--tell", "BOT_TELL", "config.told", "told=", "directive_insert_input"):
+            assert gone not in text, f"{gone} in {path.name}"
 
 
 def test_the_example_has_no_dial_plan_left_to_resolve_a_number_through() -> None:

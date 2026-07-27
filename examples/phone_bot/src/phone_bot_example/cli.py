@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections.abc
-import dataclasses
 import json
 import logging
 import os
@@ -51,7 +50,10 @@ def _human_join_instructions(*, url: str, room: str, api_key: str, api_secret: s
         {"liveKitUrl": url, "token": token},
     )
     return (
-        "\nYou are the other end of the phone.\n"
+        "\nYou are standing in the robot's room.\n"
+        "Type a line and press enter to say it out loud where it can hear you.\n"
+        "It may answer, or it may not — that is its call, not yours.\n"
+        "\nYou are also the other end of the phone.\n"
         f"Open this link (local LiveKit only works from this machine):\n"
         f"  {meet_url}\n"
         "Allow the microphone, then talk.\n"
@@ -230,17 +232,6 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Do not docker-compose up LiveKit (still joins if URL is reachable).",
     )
-    _ = parser.add_argument(
-        "--tell",
-        action="append",
-        default=[],
-        metavar="TEXT",
-        help=(
-            "Tell the bot something before it starts, in plain words "
-            '(e.g. --tell "Call phone-bot-bob."). Repeatable; BOT_TELL in the env file '
-            "says one thing. It is an instruction the bot recalls, not one it obeys."
-        ),
-    )
     args = parser.parse_args(argv)
 
     # Default: hold the line so a human can join. --json / --once are smoke-only.
@@ -280,11 +271,6 @@ def main(argv: list[str] | None = None) -> None:
         config = AppConfig.from_env_file(merged_env)
         config = config.with_cognition_overrides(
             model=typing.cast(str | None, args.reasoning_model),
-        )
-        # Whatever the env file said, then whatever the operator said on the command line.
-        config = dataclasses.replace(
-            config,
-            told=(*config.told, *typing.cast(list[str], args.tell)),
         )
         if not config.livekit.can_connect_room():
             raise RuntimeError("LiveKit URL/token still missing after phone-bot setup.")

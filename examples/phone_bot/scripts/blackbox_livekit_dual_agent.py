@@ -142,6 +142,9 @@ async def _main() -> int:
         phone_proc = subprocess.Popen(
             ["uv", "run", "phone-bot", "-v"],
             cwd=str(example_root),
+            # Nobody is standing in the room with this bot — agent B reaches it by telephone. An
+            # empty room, not this harness's terminal, which the bot would otherwise read from.
+            stdin=subprocess.DEVNULL,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             text=True,
