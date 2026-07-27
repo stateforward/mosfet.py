@@ -116,15 +116,19 @@ class OutputData(pydantic.BaseModel):
                     "result": [],
                     "reason": "The active runtime already owns the input.",
                 },
+                # No worked example of an utterance here, and none anywhere a model reads: an
+                # example the bot can say is a crib rather than documentation, and an unsure bot
+                # says it. Selections shown here are structural for that reason.
                 {
                     "result": [
                         {
-                            "event": "bot.ability.speaking.input",
-                            "data": {"text": "One moment."},
-                            "reason": "Acknowledge while deliberating.",
+                            "target": "bot",
+                            "event": "bot.focus_device",
+                            "data": {"device": "device-a"},
+                            "reason": "That device is where this turn is happening.",
                         }
                     ],
-                    "reason": "Can speak now but not sure enough to stop.",
+                    "reason": "Recognized the stimulus without needing to deliberate.",
                 },
                 {
                     "reason": "The intuition processor did not select an output.",

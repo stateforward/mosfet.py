@@ -129,19 +129,22 @@ class OutputData(pydantic.BaseModel):
                     "confidence": 0.77,
                     "reason": "Deliberation settled which device this turn is about.",
                 },
+                # This branch exists to show result and create together. It deliberately selects
+                # nothing utterable: an example the bot can say aloud is a crib rather than
+                # documentation, and a bot unsure what to say says the example.
                 {
                     "result": [
                         {
-                            "event": "bot.ability.speaking.input",
-                            "data": {"text": "One moment."},
-                            "reason": "Prior episodes bridged with speech while deliberating.",
+                            "target": "bot",
+                            "event": "bot.clear_focus",
+                            "reason": "Nothing is live on that device any more.",
                         }
                     ],
                     "create": {
                         "event": "bot.behavior.create",
-                        "name": "AcknowledgeBeforeDeliberating",
+                        "name": "ReleaseFocusWhenDeviceGoesQuiet",
                         "triggers": ["environment.sound"],
-                        "reason": "Same acknowledge-then-deliberate pattern across recalled episodes.",
+                        "reason": "Same release-focus pattern across recalled episodes.",
                     },
                 },
             ],

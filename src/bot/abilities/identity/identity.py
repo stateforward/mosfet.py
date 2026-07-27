@@ -36,25 +36,25 @@ from bot.telemetry import observer
 
 
 class AdoptData(pydantic.BaseModel):
-    """Take a name as your own."""
+    """Take a name as your own.
+
+    No example name, deliberately — the same reason a phone number has none. A name here is a
+    complete valid answer in the one field that decides it, so a bot unsure what it just heard
+    adopts the schema's name and then answers to it for the rest of its life.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Adopt a name as your own. Select this when you have been given a name and you choose "
-                "to answer to it — for example someone in the environment said your name is Bob. You "
-                "are not required to: hearing a name offered is not the same as taking it, and "
-                "declining leaves you nameless, which is a normal state. Adopting replaces any name "
-                "you already answer to. Once adopted, you can tell when you are being addressed by "
-                "that name; until then you only hear words. This does not speak, answer, or act on "
+                "Adopt a name as your own. Select this when a name has been offered to you and you choose "
+                "to answer to it. You are not required to: hearing a name offered is not the same as "
+                "taking it, and declining leaves you nameless, which is a normal state. Adopting replaces "
+                "any name you already answer to. Once adopted, you can tell when you are being addressed "
+                "by that name; until then you only hear words. This does not speak, answer, or act on "
                 "anything else."
             ),
-            "examples": [
-                {"name": "Bob", "reason": "The caller said my name is Bob and I am willing to answer to it."},
-                {"name": "Ada", "reason": "The operator renamed me at handover."},
-            ],
         },
     )
 
@@ -62,10 +62,11 @@ class AdoptData(pydantic.BaseModel):
         min_length=1,
         max_length=64,
         description=(
-            "The name to answer to, exactly as it was given — just the name itself ('Bob'), not the "
-            "sentence it arrived in ('your name is Bob') and not a description of it."
+            "The name to answer to, exactly as it was given: the name itself and nothing around it — not "
+            "the sentence it arrived in, not a greeting or title attached to it, and not a description of "
+            "it. It can only come from what was actually said to you, because a name you were not given "
+            "names nobody and answering to it makes you answer to the wrong thing."
         ),
-        examples=["Bob", "Ada"],
     )
     reason: str | None = pydantic.Field(
         default=None,
@@ -94,14 +95,14 @@ class AddressedData(pydantic.BaseModel):
                 "audio — what was said arrives separately from listening, and what being addressed "
                 "means is the bot's to decide."
             ),
-            "examples": [{"name": "Bob", "confidence": 0.82}],
         },
     )
 
+    # Carries no example name either. This product is read rather than filled in, but it is read on
+    # the same turns AdoptData is offered, and a name shown here is a name available to adopt.
     name: str = pydantic.Field(
         min_length=1,
         description="The adopted name that was recognized in the heard sound.",
-        examples=["Bob"],
     )
     confidence: float | None = pydantic.Field(
         default=None,

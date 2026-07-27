@@ -44,6 +44,38 @@ def test_speaking_input_is_call_event_for_cognition_selection() -> None:
     assert speaking.InputEvent.kind == processing.EventKind
 
 
+def _examples_in(schema: object, path: str = "") -> list[str]:
+    """Every place the generated schema carries an example, named by where it sits."""
+
+    found: list[str] = []
+    if isinstance(schema, dict):
+        for key, value in typing.cast(dict[str, object], schema).items():
+            here = f"{path}.{key}" if path else key
+            if key in ("examples", "example", "default"):
+                found.append(f"{here} = {value!r}")
+            else:
+                found.extend(_examples_in(value, here))
+    elif isinstance(schema, list):
+        for index, item in enumerate(typing.cast(list[object], schema)):
+            found.extend(_examples_in(item, f"{path}[{index}]"))
+    return found
+
+
+def test_speak_input_schema_offers_no_example_utterance() -> None:
+    """The schema a model reads in order to speak must not hand it something to say.
+
+    Speaking's payload is free text, so an example there is never documentation of a format —
+    it is a complete, valid answer sitting in the one field the model fills in, and a model
+    that is unsure what to say emits it verbatim and the bot says it out loud. Asserted on the
+    projected JSON schema rather than the Python model because that projection is what the
+    model actually reads.
+    """
+
+    schema = processing.model_facing_event_json_schema(speaking.InputEvent)
+
+    assert _examples_in(schema) == []
+
+
 class SoundListener(hsm.Instance):
     """Environment participant that records the ``environment.sound`` a speaker transduces."""
 

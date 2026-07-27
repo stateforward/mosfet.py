@@ -95,7 +95,12 @@ _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 
 
 class InputData(pydantic.BaseModel):
-    """External material to learn from (decoded before behavior generation)."""
+    """External material to learn from (decoded before behavior generation).
+
+    No example lesson, deliberately. content is free text a model fills in, and a worked rule
+    there is a complete valid answer: a bot unsure what it was just taught teaches itself the
+    schema's rule instead, and unlike a bad utterance a learned behavior persists and repeats.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -107,15 +112,15 @@ class InputData(pydantic.BaseModel):
                 "Learning input payload. A decoder turns content into DecodedData; generate synthesizes "
                 "a runtime input and inventory intent for Revision."
             ),
-            "examples": [
-                {"content": "When you hear a knock, say hello.", "media_type": "text/plain"},
-            ],
         },
     )
 
     content: str | bytes = pydantic.Field(
-        description="Raw learning material (text string or binary bytes).",
-        examples=["When you hear a knock, say hello."],
+        description=(
+            "The instruction to learn from, exactly as it arrived: the words that were actually said or "
+            "written to the bot, as text, or the undecoded bytes they came in. This is the only material "
+            "the lesson is read out of, so a rule that was never given is not learned by writing it here."
+        ),
     )
     media_type: str | None = pydantic.Field(
         default=None,
@@ -131,11 +136,10 @@ _INPUT_EVENT = ability.ability_input_event(
     description=(
         "Teach the bot a standing rule from something it was just told, so the behavior runs "
         "automatically next time instead of being reasoned about again. Select this when a turn is "
-        "instruction about what to do in future situations ('when you hear a knock, say hello') rather "
-        "than a request to act now. content is the instruction as heard; the bot grounds it against "
-        "what it already remembers and authors the behavior itself."
+        "instruction about what to do in future situations rather than a request to act now. content "
+        "is the instruction as heard; the bot grounds it against what it already remembers and authors "
+        "the behavior itself."
     ),
-    examples=[{"content": "When you hear a knock, say hello.", "media_type": "text/plain"}],
 )
 # Model-callable so cognition can select learning from a live turn, the same way Speaking is
 # selected. Programmatic callers still dispatch this event directly.
@@ -323,8 +327,10 @@ class GenerateData(pydantic.BaseModel):
                         "stimulus_name": "environment.sound",
                         "payload": {"kind": "knock"},
                         "focus_candidates": ["device-a"],
+                        # expected_data is omitted on purpose where the expected selection speaks:
+                        # a worked utterance here is authored straight into a standing behavior and
+                        # said aloud on every later match. The words come from the lesson and memory.
                         "expected_event": "bot.ability.speaking.input",
-                        "expected_data": {"text": "Hello."},
                     },
                 }
             ],

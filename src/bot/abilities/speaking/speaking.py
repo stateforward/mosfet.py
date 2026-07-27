@@ -30,31 +30,38 @@ _DEFAULT_CHANNELS = 1
 
 
 class InputData(pydantic.BaseModel):
-    """Model-facing speak request: utter this text."""
+    """Model-facing speak request: utter this text.
+
+    No example utterance anywhere on this model, deliberately. Free text has no format to
+    illustrate, so an example here is not documentation — it is a complete, valid answer sitting
+    in the only field there is, and a bot that is unsure what to say says the example out loud.
+    The description carries the whole contract instead.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Utterance for the bot to speak aloud now. text is required and must be non-empty. "
-                "Use for greetings, answers, and short bridge lines while other events (for example "
-                "reasoning.input) run in the same turn. The speaking ability owns TTS and playout."
+                "A request to speak. text is the entire payload: it is required, must be non-empty, and is "
+                "synthesized and played immediately, so this request is never silent and never partial. "
+                "The ability owns speech synthesis and playout, so nothing downstream supplies, completes, "
+                "or edits the words. Speaking does not end a turn — it can accompany other events that keep "
+                "running alongside it."
             ),
-            "examples": [
-                {"text": "Let me think about that."},
-                {"text": "One moment."},
-                {"text": "Hi Gabe, I'm doing well — how can I help?"},
-            ],
         },
     )
 
     text: str = pydantic.Field(
         min_length=1,
         description=(
-            "Required non-empty text to speak aloud. Never omit this field and never use an empty string."
+            "The words to say, verbatim: exactly this string is spoken aloud in the bot's own voice to "
+            "whoever is present, as soon as this is selected, and cannot be taken back once heard. It is "
+            "plain spoken language — what a listener would hear, not markup, not a stage direction, not a "
+            "label for an utterance and not a description of one, because every one of those is read out "
+            "loud just as literally. Required and non-empty: there is no way to send this and stay silent, "
+            "so the choice not to speak is made by not selecting speech at all."
         ),
-        examples=["Let me think about that.", "Hello.", "One moment while I work on that."],
     )
 
 
@@ -68,14 +75,6 @@ class OutputData(pydantic.BaseModel):
         val_json_bytes="base64",
         json_schema_extra={
             "description": "Speak completed: original text plus audio format metadata used for playout.",
-            "examples": [
-                {
-                    "text": "Hello.",
-                    "media_type": "audio/pcm",
-                    "sample_rate_hz": 24000,
-                    "channels": 1,
-                }
-            ],
         },
     )
 
@@ -115,10 +114,11 @@ _INPUT_EVENT = ability.ability_input_event(
     "bot.ability.speaking.input",
     InputData,
     description=(
-        "Speak text through the bot's voice. Use for utterances, including short "
-        "bridge lines while deliberation continues (when combined with escalate)."
+        "Say something aloud, in the bot's own voice, now. This is the ability that turns chosen words "
+        "into sound and it does nothing else: what to say, and whether to say anything at all, is the "
+        "bot's own to decide, and this event only carries the words it settled on. Selecting it does not "
+        "end the turn — it can accompany events that go on deliberating."
     ),
-    examples=[{"text": "Let me think about that."}, {"text": "Hello."}],
 )
 # Selectable by Processing / cognition: mark the ability's one front door offerable.
 InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
@@ -127,7 +127,6 @@ OutputEvent = ability.ability_output_event(
     "bot.ability.speaking.output",
     OutputData,
     description="Speak completed with text and audio format metadata.",
-    examples=[{"text": "Hello.", "media_type": "audio/pcm", "sample_rate_hz": 24000, "channels": 1}],
 )
 
 
