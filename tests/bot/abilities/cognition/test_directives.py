@@ -51,7 +51,7 @@ def test_directive_recall_is_scoped_to_directives_and_survives_undecodable_rows(
 
     _ = store.execute(
         episodes.episode_insert_input(
-            episodes.CognitiveEpisode(focus="phone", stimulus_name="bot.idle", output=()),
+            episodes.CognitiveEpisode(focus="phone", stimulus_name="bot.input", output=()),
             context_ref="phone",
         )
     )

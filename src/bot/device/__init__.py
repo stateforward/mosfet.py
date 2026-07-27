@@ -7,14 +7,6 @@ from bot.device.events import (
     FirmwareInitializingFailedEvent,
     FirmwareInitializingFailedEventData,
 )
-from bot.device.notification import (
-    Notification,
-    DeviceNotificationData,
-    NotificationMarkUnreadEventData,
-    NotificationReadEventData,
-    NotificationMarkUnreadEvent,
-    NotificationReadEvent,
-)
 from bot.device.sandbox import Sandbox
 
 __all__ = [
@@ -23,11 +15,5 @@ __all__ = [
     "FirmwareInitializingDoneEventData",
     "FirmwareInitializingFailedEvent",
     "FirmwareInitializingFailedEventData",
-    "Notification",
-    "DeviceNotificationData",
-    "NotificationMarkUnreadEventData",
-    "NotificationReadEventData",
-    "NotificationMarkUnreadEvent",
-    "NotificationReadEvent",
     "Sandbox",
 ]

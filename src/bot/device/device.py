@@ -172,6 +172,55 @@ class Device(hsm.Instance, attachment.Attachment):
         Environment.from_context(self.context()).join(self, placement=self._placement)
         return instance
 
+    def _report(self, ctx: hsm.Context, event: hsm.Event[typing.Any], *, priority: int = 5) -> None:
+        """Tell the bots this device is attached to that its own state changed.
+
+        This is the device's nerve, not the room. It reaches the bots holding this device and
+        nobody else, so a private device fact — a call connecting, a line going dead — never
+        becomes a public broadcast that every citizen in the environment overhears. Sound and
+        vision are what the environment carries, because those are what a room actually
+        carries; everything else about a device is felt only by whoever is holding it.
+
+        The report says *what happened* and never what to do about it. It carries the source
+        event name and its payload, and there is deliberately no hint, suggestion, or requested
+        action: the bot is the one that decides whether a change is worth acting on, and doing
+        nothing is a legitimate answer.
+
+        Reserved for state changes. Never call this per media frame, per audio chunk, or per
+        sample: streams already have their own path, and a per-frame report would defer without
+        bound behind a body that is busy thinking.
+        """
+
+        import bot
+
+        payload: dict[str, object] | None = None
+        data = event.data
+        if isinstance(data, pydantic.BaseModel):
+            try:
+                payload = data.model_dump(mode="json")
+            except (pydantic.ValidationError, ValueError, TypeError):
+                # A payload that will not serialize is not worth bricking the device over; the
+                # bot still gets the occasion and the source event name that produced it.
+                payload = None
+        for owner in self._attachments:
+            _ = hsm.dispatch(
+                ctx,
+                owner,
+                dataclasses.replace(
+                    bot.InputEvent.with_data(
+                        bot.InputEventData(
+                            priority=priority,
+                            source_event=event.name,
+                            payload=payload,
+                        )
+                    ),
+                    id=event.id or uuid.uuid4().hex,
+                    source=hsm.id(self),
+                    target=hsm.id(owner),
+                    metadata=dict(event.metadata),
+                ),
+            )
+
     @typing.override
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
         environment = Environment.from_context(ctx)

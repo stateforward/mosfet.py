@@ -17,7 +17,7 @@ class SoundData(pydantic.BaseModel):
     """Acoustic energy available to a bot's input (hearing) abilities.
 
     Domain-specific elevation may use a :class:`SoundData` subclass with extra
-    typed fields (for example phone ring elevation carries ``call_id``) so models
+    typed fields (for example phone ring elevation carries ``caller``) so models
     copy from ``event.data`` instead of inferring from ``event.id``.
     """
 

@@ -7,7 +7,6 @@ example-only dependencies out of the root project and provider packages.
 Run an example from the repository root:
 
 ```bash
-uv run --script examples/notification_schema.py
 uv run --project examples/listen_speak_bot listen-speak-bot
 uv run --project examples/phone_bot phone-bot-example
 ```

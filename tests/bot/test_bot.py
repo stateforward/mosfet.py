@@ -21,7 +21,6 @@ import dataclasses
 import datetime
 import inspect
 import typing
-import uuid
 
 import hsm
 import pydantic
@@ -193,6 +192,9 @@ class SequenceProcessor(processing.Processor):
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(input)
+        if not self.outputs:
+            # Out of scripted answers is not an error; see BlockingSequenceProcessor.
+            return ()
         return processing.coerce_event_selections(self.outputs.pop(0)) or ()
 
 
@@ -228,6 +230,11 @@ class BlockingSequenceProcessor(processing.Processor):
         self.calls.append(input)
         if len(self.calls) == self.block_on_call:
             _ = await self.release.wait()
+        if not self.outputs:
+            # Out of scripted answers is not an error. These tests pin what the bot is given
+            # and what it can do, never how many turns it gets — a turn it has nothing to say
+            # about is a turn it says nothing about.
+            return ()
         return processing.coerce_event_selections(self.outputs.pop(0)) or ()
 
 
@@ -560,14 +567,38 @@ class AbilityAgent(Bot):
         return super().dispatch(ctx, event)
 
 
-class IdleAgent(AbilityAgent):
-    """Bot whose moments come often enough to observe inside a test.
+class HappeningData(pydantic.BaseModel):
+    """Something that happened to a device, stated plainly and asking for nothing.
 
-    Only the interval is shortened. The occasion is otherwise the production one: no guard,
-    no directive, nothing about this bot that makes it want anything.
+    Deliberately has no hint, suggestion, priority override, or requested action: a device
+    says what it became, and what that is worth is the bot's to decide.
     """
 
-    _idle_interval: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=5)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    situation: str = pydantic.Field(min_length=1)
+
+
+HappeningEvent = hsm.Event[HappeningData](
+    name="test.device.happening",
+    schema=HappeningData,
+)
+
+
+class ReportingDevice(Device):
+    """A device a test can make something happen to.
+
+    Stands in for any device at all — the mechanism under test is on ``Device``, so nothing
+    here is phone-shaped and no phone is needed to exercise it.
+    """
+
+    def happen(self, situation: str = "changed") -> None:
+        self._report(self.context(), HappeningEvent.with_data(HappeningData(situation=situation)))
+
+
+class OccasionAgent(AbilityAgent):
+    """Bot that records every occasion it is handed, so a test can count its turns."""
+
     occasions: list[hsm.Event[typing.Any]]
 
     def __init__(
@@ -581,20 +612,9 @@ class IdleAgent(AbilityAgent):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.IdleEvent.name:
+        if event.name == bot.InputEvent.name:
             self.occasions.append(event)
         return super().dispatch(ctx, event)
-
-
-def idle_occasion(active_bot: Bot) -> hsm.Event[bot.IdleEventData]:
-    """The occasion exactly as the body mints it: empty payload, self-addressed envelope."""
-
-    return dataclasses.replace(
-        bot.IdleEvent.with_data(bot.IdleEventData()),
-        id=uuid.uuid4().hex,
-        source=hsm.id(active_bot),
-        target=hsm.id(active_bot),
-    )
 
 
 class TimeoutAbilityAgent(AbilityAgent):
@@ -1340,7 +1360,6 @@ def test_bot_events_use_pydantic_schemas() -> None:
     deactivate_schema = object_dict(bot.DeactivateEvent.schema)
     reboot_schema = object_dict(bot.RebootEvent.schema)
     input_schema = object_dict(bot.InputEvent.schema)
-    idle_schema = object_dict(bot.IdleEvent.schema)
     completed_schema = object_dict(bot.ProcessingCompletedEvent.schema)
     failed_schema = object_dict(bot.ProcessingFailedEvent.schema)
     focus_device_schema = object_dict(bot.FocusDeviceEvent.schema)
@@ -1363,17 +1382,15 @@ def test_bot_events_use_pydantic_schemas() -> None:
     assert reboot_schema["required"] == ["reason"]
     assert bot.InputEvent.name == "bot.input"
     assert input_schema == bot.InputEventData.model_json_schema()
-    assert input_schema["required"] == ["target_device", "priority"]
+    # A device does not know its bot-local name and need not rank itself, so an occasion can be
+    # reported with neither; the body resolves the device from the envelope source.
+    assert "required" not in input_schema
     input_properties = typing.cast(collections.abc.Mapping[str, object], input_schema["properties"])
     assert "source_event" in input_properties
     assert "payload" in input_properties
-    assert bot.IdleEvent.name == "bot.idle"
-    assert idle_schema == bot.IdleEventData.model_json_schema()
-    assert idle_schema["description"]
-    assert idle_schema["examples"] == [{}]
-    # Body ingress, never a model tool: plain event kind, not the tool-offerable kind.
-    assert bot.IdleEvent.kind == hsm.EventKind
-    assert bot.IdleEvent.kind != event_schema.EventKind
+    # An occasion is ingress, never a model tool: a bot cannot select having a moment.
+    assert bot.InputEvent.kind == hsm.EventKind
+    assert bot.InputEvent.kind != event_schema.EventKind
     assert bot.FocusDeviceEvent.name == "bot.focus_device"
     assert focus_device_schema == bot.FocusDeviceEventData.model_json_schema()
     assert bot.ClearFocusEvent.name == "bot.clear_focus"
@@ -1472,18 +1489,26 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.input" in transitions["/Bot/active/focused"]
     assert "bot.ability.cognition.input" in transitions["/Bot/active/focused"]
     assert "*" not in transitions["/Bot/active/focused"]
-    # Being awake is the occasion: a recurring moment on both idle attention states, and the
-    # occasion event itself enters processing. Judgment decides what (if anything) it is for.
-    for idle_state in ("/Bot/active/unfocused", "/Bot/active/focused"):
-        assert any("_bot_idle_interval" in event for event in transitions[idle_state])
-        assert "bot.idle" in transitions[idle_state]
-        idle_transition = transitions[idle_state]["bot.idle"][0]
-        assert idle_transition.target == "/Bot/active/processing"
-        # An idle turn is not an attention change: no focus effect rides the occasion.
-        assert not any("_focus_event_target" in effect for effect in idle_transition.effect)
-    # A moment missed while busy is simply gone; stale occasions must not queue up.
-    assert "bot.idle" not in deferred_map.get("/Bot/active/processing", {})
-    assert "bot.idle" not in deferred_map.get("/Bot/active/cancelling_processing", {})
+    # Something happening to the bot is the occasion, and it enters processing from either
+    # attention state. Judgment decides what (if anything) it is for. Nothing wakes the body
+    # on a clock: no timer transition survives on either attention state.
+    for attention_state in ("/Bot/active/unfocused", "/Bot/active/focused"):
+        occasion = transitions[attention_state]["bot.input"][0]
+        assert occasion.target == "/Bot/active/processing"
+        assert not any("interval" in event for event in transitions[attention_state])
+    # An unoccupied body turns to look; a committed one does not get yanked. Both still get
+    # the turn — an interrupt requests attention and only the body grants it.
+    assert any(
+        "_focus_event_target" in effect for effect in transitions["/Bot/active/unfocused"]["bot.input"][0].effect
+    )
+    assert not any(
+        "_focus_event_target" in effect for effect in transitions["/Bot/active/focused"]["bot.input"][0].effect
+    )
+    # A happening survives a busy turn. Unlike a tick, which only ever asserted "it is now
+    # later", a fact about the world is still true when the body finishes thinking, and
+    # nothing re-announces a call that connected while the bot was blocked.
+    assert "bot.input" in deferred_map["/Bot/active/processing"]
+    assert "bot.input" in deferred_map["/Bot/active/cancelling_processing"]
     assert "bot.ability.cognition.input" in deferred_map["/Bot/active/processing"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
@@ -2185,7 +2210,12 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
     """
 
     async def run() -> tuple[
-        str, str, str | None, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]
+        str,
+        str,
+        str | None,
+        list[cognition.types.OutputData],
+        list[bot.ProcessingFailedEventData],
+        list[processing.InputData],
     ]:
         release = asyncio.Event()
         answer_selection = cognition.types.EventData(
@@ -2209,7 +2239,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
         )
         await wait_until(lambda: firmware.state() == "/Phone/hung_up")
         release.set()
-        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
 
         return (
             active_bot.state(),
@@ -2217,22 +2247,29 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
             bot_has_focus(active_bot),
             active_bot.actions,
             active_bot.failures,
+            list(ability.calls),
         )
 
-    state, phone_state, focused_device, actions, failures = asyncio.run(run())
+    state, phone_state, focused_device, actions, failures, calls = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
     assert phone_state == "/Phone/hung_up"
     assert focused_device
-    assert actions == [
-        (
-            cognition.types.EventData(
-                target="phone",
-                event=phone_device.AnswerCallEvent.name,
-                data={"call_id": "call-123"},
-                reason="answer incoming call",
-            ),
-        )
+    # The one thing it chose to do, dispatched even though the call had already gone.
+    assert actions[0] == (
+        cognition.types.EventData(
+            target="phone",
+            event=phone_device.AnswerCallEvent.name,
+            data={"call_id": "call-123"},
+            reason="answer incoming call",
+        ),
+    )
+    # Then it finds out. The far end hanging up and its own answer landing on nothing are both
+    # facts about the world that now come back to it — neither used to reach it at all, which
+    # is how a bot could go on believing it had answered a call that had already ended.
+    assert [turn.input.source_event for turn in calls[1:] if isinstance(turn.input, bot.InputEventData)] == [
+        phone_device.HungUpEvent.name,
+        phone_device.NoCallEvent.name,
     ]
     assert failures == []
 
@@ -2397,20 +2434,20 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
 
     assert state == "/Bot/active/focused"
     assert failures == []
-    assert actions == [
-        (
-            cognition.types.EventData(
-                target="phone",
-                event=phone_device.TransferCallEvent.name,
-                data={
-                    "call_id": "call-123",
-                    "transfer_id": "transfer-123",
-                    "target": {"kind": "address", "value": "operator@example.com"},
-                },
-                reason="transfer call",
-            ),
-        )
-    ]
+    # The selection it made. Later turns are the phone telling it how the transfer went, which
+    # it is free to say nothing about — so this pins the action, never the number of turns.
+    assert actions[0] == (
+        cognition.types.EventData(
+            target="phone",
+            event=phone_device.TransferCallEvent.name,
+            data={
+                "call_id": "call-123",
+                "transfer_id": "transfer-123",
+                "target": {"kind": "address", "value": "operator@example.com"},
+            },
+            reason="transfer call",
+        ),
+    )
 
 
 def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema() -> None:
@@ -3913,26 +3950,32 @@ def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
     assert from_near == 1
 
 
-def test_a_bot_that_was_told_nothing_still_gets_a_turn() -> None:
+def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what() -> None:
     """Topology grants the occasion; it never grants the action.
 
-    Nothing is dispatched at this bot: no input, no sound, no device, no directive, and no
-    memory to have recalled one from. Being awake is the whole condition, so the turn happens
-    anyway — and judgment is the one that gets to decide the turn is a turn to do nothing.
+    Nothing is dispatched at this bot: no input is minted by the test, no sound, no directive,
+    and no memory to have recalled one from. A device it owns simply becomes something, and
+    that is the whole condition for the turn — judgment is the one that gets to decide the
+    turn is a turn to do nothing.
 
-    This is the test that would fail if the idle transition ever grew a guard that read a
-    directive, a goal, or any other content.
+    The guard reads which device the interrupt arrived from and nothing else. This is the test
+    that would fail if it ever grew a condition on what happened: the two happenings here carry
+    different content and both are worth exactly one turn.
     """
 
     async def run() -> tuple[list[processing.InputData], list[bot.ProcessingFailedEventData], str]:
         ability = IgnoreAbility()
-        active_bot = IdleAgent(devices={}, cognition=ability)
+        device = ReportingDevice()
+        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
-        await wait_until(lambda: bool(ability.calls))
+        device.happen("became one thing")
+        await wait_until(lambda: len(ability.calls) == 1)
+        device.happen("became a different thing")
+        await wait_until(lambda: len(ability.calls) == 2)
+
         turns = list(ability.calls)
         failures = list(active_bot.failures)
-
         _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
         return turns, failures, active_bot.state()
@@ -3940,81 +3983,82 @@ def test_a_bot_that_was_told_nothing_still_gets_a_turn() -> None:
     turns, failures, state = asyncio.run(run())
 
     stimulus = turns[0].input
-    assert isinstance(stimulus, hsm.Event)
-    assert stimulus.name == bot.IdleEvent.name
-    # The occasion is content-blind: an empty payload is the entire stimulus.
-    assert stimulus.data == bot.IdleEventData()
+    assert isinstance(stimulus, bot.InputEventData)
+    # What happened rode along; what to do about it did not.
+    assert stimulus.source_event == HappeningEvent.name
+    assert stimulus.payload == {"situation": "became one thing"}
+    assert set(bot.InputEventData.model_fields) == {"target_device", "priority", "source_event", "payload"}
+    # Doing nothing twice is not a failure, and the body is left exactly where it started.
     assert failures == []
     assert state == "/Bot/inactive"
 
 
-def test_the_idle_occasion_enters_processing_carrying_its_own_id() -> None:
-    """Time events arrive with no id and no data, so the body mints the occasion itself.
+def test_an_occasion_carries_the_envelope_of_the_happening_that_caused_it() -> None:
+    """Each occasion is correlatable, and correlates to the thing that actually happened.
 
-    The minted envelope is what processing correlates the turn against, and it is what makes
-    ``bot.idle`` the recorded stimulus of the turn.
+    The old clock-driven occasion had to mint an id out of nothing, because a time event
+    arrives with neither id nor data. A happening already has an envelope worth keeping.
     """
 
-    async def run() -> tuple[str, list[hsm.Event[typing.Any]], list[int]]:
-        release = asyncio.Event()
-        ability = BlockingAbility(release=release)
-        active_bot = IdleAgent(devices={}, cognition=ability)
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData]]:
+        ability = IgnoreAbility()
+        device = ReportingDevice()
+        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
-        await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
-        processing_state = active_bot.state()
+        device.happen("first")
+        device.happen("second")
+        await wait_until(lambda: len(ability.calls) == 2)
+
         occasions = list(active_bot.occasions)
-
-        _ = release.set()
-        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        turns = list(ability.calls)
         _ = await active_bot.detach(environment)
-        return processing_state, occasions, list(ability.calls)
+        return occasions, turns
 
-    processing_state, occasions, calls = asyncio.run(run())
+    occasions, turns = asyncio.run(run())
 
-    assert processing_state == "/Bot/active/processing"
-    assert occasions
+    assert len(occasions) == 2
     assert all(occasion.id for occasion in occasions)
-    assert len({occasion.id for occasion in occasions}) == len(occasions)
-    assert calls
+    assert len({occasion.id for occasion in occasions}) == 2
+    # Sourced from the device that changed, addressed to the bot holding it — not broadcast.
+    assert all(occasion.source and occasion.target for occasion in occasions)
+    assert len(turns) == 2
 
 
-def test_a_moment_missed_while_busy_does_not_queue_up_for_later() -> None:
-    """A person busy through a moment simply does not have that moment.
+def test_a_happening_during_a_busy_turn_is_still_waiting_afterwards() -> None:
+    """A fact about the world outlives the turn the bot was busy with.
 
-    ``bot.input`` is deferred through processing because an interrupt is still owed an answer.
-    The occasion deliberately is not: queueing stale occasions builds a backlog of turns about
-    a world that has already moved on.
-
-    The bot here keeps the production interval, so its timer cannot fire inside this test —
-    every occasion observed is one the test minted.
+    This is where a happening and a clock tick part company. A tick only ever asserted "it is
+    now later", which is stale the instant it is queued, so dropping it lost nothing. A call
+    that connects while the bot is mid-thought is still connected when the thought ends, and
+    nothing will announce it a second time — so the body owes it a turn, late rather than
+    never.
     """
 
     async def run() -> tuple[int, list[bot.ProcessingFailedEventData], str]:
         release = asyncio.Event()
         ability = BlockingAbility(release=release)
-        active_bot = AbilityAgent(devices={}, cognition=ability)
+        device = ReportingDevice()
+        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
-        await active_bot.dispatch(active_bot.context(), idle_occasion(active_bot))
+        device.happen("first")
         await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
 
-        # A second occasion arrives while the body is occupied by the first turn.
-        await active_bot.dispatch(active_bot.context(), idle_occasion(active_bot))
+        # A second thing happens while the body is occupied by the first turn.
+        device.happen("second")
 
         _ = release.set()
-        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        await asyncio.sleep(0)
+        await wait_until(lambda: len(ability.calls) == 2)
         turns = len(ability.calls)
         failures = list(active_bot.failures)
-
         _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
         return turns, failures, active_bot.state()
 
     turns, failures, state = asyncio.run(run())
 
-    assert turns == 1
+    assert turns == 2
     assert failures == []
     assert state == "/Bot/inactive"
 
@@ -4024,19 +4068,24 @@ def test_a_bot_that_is_not_awake_has_no_moments() -> None:
 
     async def run() -> tuple[int, int, int, int]:
         ability = IgnoreAbility()
-        active_bot = IdleAgent(devices={}, cognition=ability)
+        device = ReportingDevice()
+        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
 
-        # Constructed but never attached: no environment, no lifetime, no moments.
+        # Constructed but never attached: no environment, no lifetime, no moments. The device
+        # is not attached to anything either, so there is nothing for it to report to.
+        device.happen("before")
         await asyncio.sleep(0.05)
         before_attach = len(active_bot.occasions)
 
         environment = await start_bot_with_devices(active_bot)
+        device.happen("while awake")
         await wait_until(lambda: bool(active_bot.occasions))
         while_awake = len(active_bot.occasions)
 
         _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
         at_rest = len(active_bot.occasions)
+        device.happen("after")
         await asyncio.sleep(0.05)
         return before_attach, while_awake, at_rest, len(active_bot.occasions)
 

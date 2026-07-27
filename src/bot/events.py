@@ -67,19 +67,13 @@ class RebootEventData(pydantic.BaseModel):
     )
 
 
-class IdleEventData(pydantic.BaseModel):
-    """No-payload occasion: the bot is awake with nothing occupying it right now."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "examples": [{}],
-        },
-    )
-
-
 class InputEventData(pydantic.BaseModel):
-    """Interrupt signal observed by an active bot."""
+    """Interrupt signal observed by an active bot.
+
+    This is how something that happens to a bot becomes an occasion for it. A device reports
+    its own state change here; the body grants the turn on device identity alone and judgment
+    decides what, if anything, the change is worth doing about.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -95,14 +89,24 @@ class InputEventData(pydantic.BaseModel):
         },
     )
 
-    target_device: DeviceReference = pydantic.Field(
-        description="Stable reference for the device that produced or owns the input.",
+    target_device: DeviceReference | None = pydantic.Field(
+        default=None,
+        description=(
+            "Stable reference for the device that produced or owns the input. A device does not "
+            "know what its bot files it under, so it leaves this unset and the body resolves the "
+            "device from the envelope source — the nerve the signal arrived on."
+        ),
         examples=["device-a"],
     )
     priority: int = pydantic.Field(
+        default=5,
         ge=0,
         le=10,
-        description="Priority of the interrupt, where 0 is the highest priority and 10 is the lowest priority.",
+        description=(
+            "How insistent this signal is, where 0 is the highest priority and 10 is the lowest. "
+            "Like loudness, this belongs to the signal rather than to whatever produced it; a "
+            "source that does not distinguish leaves it at the ordinary default."
+        ),
         examples=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     )
     source_event: str | None = pydantic.Field(
@@ -314,16 +318,13 @@ RebootEvent = hsm.Event[RebootEventData](
     name="bot.reboot",
     schema=RebootEventData,
 )
+# Body ingress, never a model tool: an occasion is something that happens to a bot, so it keeps
+# the default event kind rather than the tool-offerable event_schema.EventKind. A bot cannot
+# select having a moment.
 InputEvent = hsm.Event[InputEventData](
     name="bot.input",
     kind=InputEventKind,
     schema=InputEventData,
-)
-# Body ingress, never a model tool: the occasion of being awake is minted by body topology,
-# so this keeps the default event kind rather than the tool-offerable event_schema.EventKind.
-IdleEvent = hsm.Event[IdleEventData](
-    name="bot.idle",
-    schema=IdleEventData,
 )
 FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",

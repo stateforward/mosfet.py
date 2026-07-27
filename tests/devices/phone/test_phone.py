@@ -7,6 +7,7 @@ import datetime
 import typing
 
 import hsm
+import bot
 from bot.abilities import processing
 import bot.devices.phone as phone_contracts
 import bot.devices.phone.phone as phone_module
@@ -2049,3 +2050,251 @@ def test_stopping_a_phone_twice_still_releases_once() -> None:
         return service.target is None
 
     assert asyncio.run(run())
+
+
+class PhoneHolder(hsm.Instance):
+    """Stands in for the bot holding the phone, recording every occasion the handset gives it.
+
+    Attaches the way a bot attaches, so what it receives is exactly what a bot receives.
+    """
+
+    occasions: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.occasions = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name == bot.InputEvent.name:
+            self.occasions.append(event)
+        return super().dispatch(ctx, event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "PhoneHolder",
+        hsm.initial(hsm.target("holding")),
+        hsm.state("holding"),
+    )
+
+
+class RoomOccupant(hsm.Instance):
+    """An environment citizen that records everything the room delivers to it.
+
+    Deliberately unfiltered, unlike the recorders above. Selecting by event name makes a
+    recorder blind to exactly the regression this exists to catch: a device-plane payload put
+    back on the environment bus would simply not be recorded, and the test would pass while the
+    room quietly carried a private fact again.
+    """
+
+    received: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        self.received.append(event)
+        return super().dispatch(ctx, event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "RoomOccupant",
+        hsm.initial(hsm.target("present")),
+        hsm.state("present"),
+    )
+
+
+async def _phone_in_a_hand(
+    environment: Environment,
+) -> tuple[phone_device.Phone, phone_device.PhoneFirmware, PhoneHolder, RoomOccupant]:
+    """A started phone attached to something holding it, plus somebody standing in the room."""
+
+    phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
+    holder = PhoneHolder()
+    bystander = RoomOccupant()
+    _ = await hsm.started(environment, phone, phone.model)
+    _ = await hsm.started(environment, holder, holder.model, hsm.Config(id="holder"))
+    _ = await hsm.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
+    environment.join(bystander)
+    await _wait_until(lambda: phone.state() == "/Device/detached")
+    await phone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=holder)))
+    await _wait_until(lambda: holder in device_bots(phone))
+    return phone, _phone_firmware(phone), holder, bystander
+
+
+def _occasion_sources(holder: PhoneHolder) -> list[str | None]:
+    return [
+        occasion.data.source_event for occasion in holder.occasions if isinstance(occasion.data, bot.InputEventData)
+    ]
+
+
+def test_a_phone_tells_whoever_holds_it_that_the_call_came_up() -> None:
+    """The callee's missing cue: a connected call is silent, so it travels the hand.
+
+    Nothing about this says to greet, to speak, or to do anything at all. It says the call is
+    up. A bot that hears this and stays silent has not malfunctioned — it has decided.
+    """
+
+    async def run() -> tuple[list[str | None], list[hsm.Event[typing.Any]]]:
+        environment = Environment()
+        phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
+        await _emit_service_event(
+            phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await _answer_call(phone, "call-1")
+        await _emit_service_event(
+            phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/answered/media_ready")
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return _occasion_sources(holder), bystander.received
+
+    occasions, overheard = asyncio.run(run())
+
+    # It came to know its call was answered and then connected, without being told what for.
+    assert phone_device.AnsweredEvent.name in occasions
+    assert phone_device.MediaReadyEvent.name in occasions
+    # The ring was a sound in the room; the call coming up was nobody else's business.
+    assert [event.name for event in overheard] == [SoundEvent.name]
+
+
+def test_a_phone_tells_whoever_holds_it_that_nobody_answered() -> None:
+    """The caller's missing cue, and the one a handset cannot make a noise about.
+
+    There is no "they did not answer" tone, so this fact has never had anywhere to go. It is
+    still a fact, and it is the one that decides whether waiting any longer is worth it.
+    """
+
+    async def run() -> tuple[list[str | None], list[hsm.Event[typing.Any]], list[object]]:
+        environment = Environment()
+        phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
+        await phone.dispatch(
+            phone.context(), phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER))
+        )
+        await _wait_until(
+            lambda: phone_device.NoCallEvent.name in _event_names(firmware.event_recorder()), timeout=2.0
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+        reasons = [
+            occasion.data.payload.get("reason")
+            for occasion in holder.occasions
+            if isinstance(occasion.data, bot.InputEventData) and occasion.data.payload is not None
+        ]
+        return _occasion_sources(holder), bystander.received, reasons
+
+    occasions, overheard, reasons = asyncio.run(run())
+
+    assert phone_device.NoCallEvent.name in occasions
+    assert "dial_not_answered" in reasons
+    # Silence in the room is what the object does; the hand is where this one lands.
+    assert overheard == []
+
+
+def test_a_phone_reports_what_it_becomes_and_never_what_flows_through_it() -> None:
+    """A whole call is a handful of occasions, not a stream of them.
+
+    This is the bound on how far a busy body can fall behind. Occasions are deferred through a
+    turn rather than dropped, so what keeps that queue finite is that a device reports state
+    changes and never per-frame traffic — a call carries thousands of audio chunks and produces
+    single-digit occasions. A device that reported media would break this and it is the one
+    thing ``Device._report`` must never be used for.
+    """
+
+    async def run() -> tuple[list[str | None], int]:
+        environment = Environment()
+        phone, firmware, holder, _ = await _phone_in_a_hand(environment)
+        await _emit_service_event(
+            phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await _answer_call(phone, "call-1")
+        await _emit_service_event(
+            phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/answered/media_ready")
+        # Audio flows for the length of the call and is not a thing that happens to the bot.
+        for index in range(50):
+            await _emit_service_event(
+                phone,
+                phone_device.ServiceAudioReceivedEvent.with_data(
+                    phone_device.ServiceAudioData(call_id="call-1", audio=b"\x00\x01" * 8, sample_rate_hz=16_000)
+                ),
+            )
+            del index
+        await _emit_service_event(
+            phone, phone_device.RemoteHangUpEvent.with_data(phone_device.RemoteHangUpData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/hung_up")
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return _occasion_sources(holder), len(holder.occasions)
+
+    occasions, count = asyncio.run(run())
+
+    # Answered, connected, hung up. Fifty audio chunks bought exactly none.
+    assert count == len(occasions)
+    assert count <= 6, f"a single call produced {count} occasions: {occasions}"
+    assert phone_device.HungUpEvent.name in occasions
+
+
+def test_the_room_never_carries_private_call_state() -> None:
+    """Private call state is not something a room can perceive.
+
+    You see somebody talking; you do not perceive their call's lifecycle. A ring is a sound and
+    a call-progress tone is a sound, so those cross the room and anyone standing in it hears
+    them. That a call was answered, connected, transferred, or hung up is not a sound, has no
+    visual body, and is nobody else's business — it reaches whoever is holding the handset and
+    stops there.
+
+    This pins the *absence* of a path, which is the kind of thing that creeps back. The
+    recorder is unfiltered on purpose: a name-filtered one cannot tell a payload that never
+    reached the room from one it merely was not listening for, so it would pass either way.
+    The ring assertion is what keeps this honest — it proves the recorder can hear at all, so
+    the silence about call state is a real silence and not a broken probe.
+    """
+
+    async def run() -> tuple[list[str], list[str]]:
+        environment = Environment()
+        phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
+        await _emit_service_event(
+            phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await _answer_call(phone, "call-1")
+        await _emit_service_event(
+            phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/answered/media_ready")
+        await _emit_service_event(
+            phone, phone_device.RemoteHangUpEvent.with_data(phone_device.RemoteHangUpData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/hung_up")
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return [event.name for event in bystander.received], _occasion_sources(holder)
+
+    in_the_room, in_the_hand = asyncio.run(run())
+
+    # The recorder is not deaf: the ring genuinely crossed the room.
+    assert SoundEvent.name in in_the_room
+    # And nothing else did. Every one of these is a committed call-state payload that used to
+    # ride the environment bus to every citizen, where it was silently dropped for want of a
+    # trigger — perceived by nobody, addressed to everybody.
+    assert set(in_the_room) == {SoundEvent.name}
+    for private in (
+        phone_device.AnsweredEvent.name,
+        phone_device.MediaReadyEvent.name,
+        phone_device.HungUpEvent.name,
+        phone_device.NoCallEvent.name,
+        phone_device.TransferStartedEvent.name,
+        phone_device.CallTransferCompletedEvent.name,
+        phone_device.CallTransferFailedEvent.name,
+    ):
+        assert private not in in_the_room, f"{private} reached the room"
+    # The same facts did reach the hand, so this is a redirection and not a deletion.
+    assert phone_device.AnsweredEvent.name in in_the_hand
+    assert phone_device.MediaReadyEvent.name in in_the_hand
+    assert phone_device.HungUpEvent.name in in_the_hand

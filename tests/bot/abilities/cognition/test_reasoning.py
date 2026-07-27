@@ -180,7 +180,7 @@ def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> Non
         store = memory.Memory()
         _ = store.execute(
             cognition.episodes.episode_insert_input(
-                cognition.episodes.CognitiveEpisode(stimulus_name="bot.idle", output=()),
+                cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
                 context_ref=None,
             )
         )
@@ -202,7 +202,7 @@ def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> Non
     frame = asyncio.run(run())
 
     assert [directive.text for directive in frame.standing_directives] == ["Call Bob when you get a chance."]
-    assert [episode.stimulus_name for episode in frame.prior_episodes] == ["bot.idle"]
+    assert [episode.stimulus_name for episode in frame.prior_episodes] == ["bot.input"]
 
 
 def test_reasoning_without_memory_recalls_no_standing_directives() -> None:
@@ -228,7 +228,7 @@ def test_reasoning_recall_decodes_both_statements_from_one_transaction() -> None
     store = memory.Memory()
     _ = store.execute(
         cognition.episodes.episode_insert_input(
-            cognition.episodes.CognitiveEpisode(stimulus_name="bot.idle", output=()),
+            cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
             context_ref=None,
         )
     )
@@ -251,7 +251,7 @@ def test_reasoning_recall_decodes_both_statements_from_one_transaction() -> None
     assert len(recalled.results) == 2
     assert [
         episode.stimulus_name for episode in cognition.episodes.episodes_from_output(recalled, statement_index=0)
-    ] == ["bot.idle"]
+    ] == ["bot.input"]
     assert [
         directive.text for directive in cognition.directives.directives_from_output(recalled, statement_index=1)
     ] == ["Water the plants."]

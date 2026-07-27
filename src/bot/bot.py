@@ -26,9 +26,6 @@ from bot.environment import SoundEvent, VisualEvent, Environment, require_enviro
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
-# How often an unoccupied, awake body has a moment. Being awake is the occasion; what (if
-# anything) to do with it is judgment's call, so this interval never varies with content.
-_DEFAULT_BOT_IDLE_INTERVAL = datetime.timedelta(seconds=30)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
 
@@ -321,7 +318,6 @@ class Bot(hsm.Instance, abc.ABC):
     _innate_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
     _processing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_PROCESSING_TIMEOUT
     _deactivation_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_DEACTIVATION_TIMEOUT
-    _idle_interval: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_IDLE_INTERVAL
     _devices: dict[str, Device]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
     _focused_device: str | None
@@ -349,8 +345,6 @@ class Bot(hsm.Instance, abc.ABC):
             raise ValueError("processing_timeout must be positive.")
         if self._deactivation_timeout <= datetime.timedelta():
             raise ValueError("deactivation_timeout must be positive.")
-        if self._idle_interval <= datetime.timedelta():
-            raise ValueError("idle_interval must be positive.")
         self._devices = dict(devices)
         self._cognition = cognition
         self._focused_device = None
@@ -553,16 +547,31 @@ class Bot(hsm.Instance, abc.ABC):
         return ()
 
     @staticmethod
-    def _target_device_reference(instance: "Bot", input: events.BotInputData) -> str | None:
-        if isinstance(input, events.InputEventData):
+    def _interrupt_reference(instance: "Bot", input: events.InputEventData, source: str) -> str | None:
+        """Which of this bot's devices an interrupt arrived from.
+
+        A device has no idea what its bot files it under — a handset does not know it is the
+        "work phone" — so a device leaves ``target_device`` unset and the body resolves the
+        device from the envelope source, the nerve the signal came in on. Identity only: this
+        never reads what happened to decide whose interrupt it is.
+        """
+
+        if input.target_device is not None:
             return input.target_device
+        return Bot._device_reference_for_source(instance, source) if source else None
+
+    @staticmethod
+    def _target_device_reference(instance: "Bot", input: events.BotInputData, source: str = "") -> str | None:
+        if isinstance(input, events.InputEventData):
+            return Bot._interrupt_reference(instance, input, source)
         references = Bot._device_references_for_event(instance, input)
         return references[0] if len(references) == 1 else None
 
     @staticmethod
-    def _input_device_references(instance: "Bot", input: events.BotInputData) -> tuple[str, ...]:
+    def _input_device_references(instance: "Bot", input: events.BotInputData, source: str = "") -> tuple[str, ...]:
         if isinstance(input, events.InputEventData):
-            return (input.target_device,) if input.target_device in instance._devices else ()
+            reference = Bot._interrupt_reference(instance, input, source)
+            return (reference,) if reference in instance._devices else ()
         references = Bot._device_references_for_event(instance, input)
         if not input.source and instance._focused_device in references:
             assert instance._focused_device is not None
@@ -570,12 +579,12 @@ class Bot(hsm.Instance, abc.ABC):
         return references
 
     @staticmethod
-    def _processing_device_references(instance: "Bot", input: events.BotInputData) -> tuple[str, ...]:
+    def _processing_device_references(instance: "Bot", input: events.BotInputData, source: str = "") -> tuple[str, ...]:
         references: list[str] = []
         if instance._focused_device in instance._devices:
             assert instance._focused_device is not None
             references.append(instance._focused_device)
-        for target_device in Bot._input_device_references(instance, input):
+        for target_device in Bot._input_device_references(instance, input, source):
             if target_device not in references:
                 references.append(target_device)
         return tuple(references)
@@ -583,7 +592,9 @@ class Bot(hsm.Instance, abc.ABC):
     @staticmethod
     def _input_targets_configured_device(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        return isinstance(event.data, events.InputEventData) and event.data.target_device in instance._devices
+        if not isinstance(event.data, events.InputEventData):
+            return False
+        return Bot._interrupt_reference(instance, event.data, event.source) in instance._devices
 
     @staticmethod
     def _fan_out_input(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -729,44 +740,6 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> datetime.timedelta:
         del ctx, event
         return instance._deactivation_timeout
-
-    @staticmethod
-    def _bot_idle_interval(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> datetime.timedelta:
-        del ctx, event
-        return instance._idle_interval
-
-    @staticmethod
-    def _dispatch_idle(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        """Mint the occasion of being awake and unoccupied.
-
-        Time events arrive with no id and no data, so the occasion is minted here as a real
-        body event the processing entry can correlate. Nothing here reads a directive, goal,
-        memory, or any other content: an awake body has this moment whether or not it was
-        ever told anything, and what to do with it is judgment's decision, not topology's.
-        """
-
-        _ = instance.dispatch(
-            ctx,
-            dataclasses.replace(
-                events.IdleEvent.with_data(events.IdleEventData()),
-                id=uuid.uuid4().hex,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    def _matches_idle_occasion(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        """Envelope self-correlation for a body-minted occasion (post-delivery, not admission)."""
-
-        del ctx
-        return (
-            isinstance(event.data, events.IdleEventData)
-            and bool(event.id)
-            and event.source == hsm.id(instance)
-            and event.target == hsm.id(instance)
-        )
 
     @staticmethod
     def _dispatch_actors(instance: "Bot") -> dict[str, hsm.Instance]:
@@ -933,9 +906,6 @@ class Bot(hsm.Instance, abc.ABC):
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         if isinstance(event.data, events.InputEventData):
             stimulus = event.data
-        elif isinstance(event.data, events.IdleEventData):
-            # The occasion is the stimulus: nothing happened, the bot is simply awake.
-            stimulus = event
         elif isinstance(event.data, cognition.InputData):
             # Speech→Conversation is handled on dedicated unfocused/focused transitions before processing.
             stimulus = event.data.stimulus
@@ -944,7 +914,7 @@ class Bot(hsm.Instance, abc.ABC):
             stimulus = event
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
-        focus_candidates = Bot._processing_device_references(instance, stimulus)
+        focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
         instance._processing_focus_candidates = focus_candidates
         cognition_input = cognition.InputData(
             stimulus=stimulus,
@@ -1148,7 +1118,7 @@ class Bot(hsm.Instance, abc.ABC):
             processing_data = event.data.stimulus
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
-        instance._focused_device = Bot._target_device_reference(instance, processing_data)
+        instance._focused_device = Bot._target_device_reference(instance, processing_data, event.source)
 
     @staticmethod
     def _dispatch_focus_device_action(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -1526,19 +1496,11 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.state(
                 "unfocused",
                 hsm.entry(_clear_focus),
-                # Being awake is itself the occasion. Topology supplies the moment and nothing
-                # else: no guard reads a directive, goal, or memory, and the interval never
-                # varies with content, so a bot that has been told nothing gets the same turn.
-                # What (if anything) to do with it is judgment's, and ignoring is a real answer.
-                hsm.transition(
-                    hsm.every(_bot_idle_interval),
-                    hsm.effect(_dispatch_idle),
-                ),
-                hsm.transition(
-                    hsm.on(events.IdleEvent),
-                    hsm.guard(_matches_idle_occasion),
-                    hsm.target("../processing"),
-                ),
+                # Something happening to this bot is the occasion. The guard reads device
+                # identity and nothing else — never what happened — so the turn is granted
+                # blind to content. What (if anything) to do with it is judgment's, and
+                # ignoring is a real answer. An unoccupied body also turns to look: an
+                # interrupt requests attention and the body is what grants it.
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
@@ -1568,17 +1530,9 @@ class Bot(hsm.Instance, abc.ABC):
             ),
             hsm.state(
                 "focused",
-                # Same blind occasion as unfocused: attention is already somewhere, but having
-                # a moment does not depend on that, and an idle turn never moves focus.
-                hsm.transition(
-                    hsm.every(_bot_idle_interval),
-                    hsm.effect(_dispatch_idle),
-                ),
-                hsm.transition(
-                    hsm.on(events.IdleEvent),
-                    hsm.guard(_matches_idle_occasion),
-                    hsm.target("../processing"),
-                ),
+                # Same blind occasion as unfocused. Attention is already committed here, so an
+                # interrupt gets its turn without moving focus: a phone buzzing while you are
+                # idle draws your eye, the same buzz mid-conversation does not.
                 hsm.transition(
                     hsm.on(events.ClearFocusEvent),
                     hsm.guard(_ability_selected_clear_focus),

@@ -289,6 +289,12 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     Silence is a real answer here, not a gap: several ways of ending up with no call are ones a
     real handset marks with no sound whatsoever, and manufacturing a tone for them would be
     putting a noise in the earpiece that no telephone has ever made.
+
+    Only sound goes here. A call connecting, ending, or being transferred makes no noise and has
+    no visual body, so it has no representable form in an environment that carries acoustics and
+    optics — and it is nobody else's business either: broadcasting it would tell every citizen in
+    the room about a call they cannot perceive. Those facts reach the bot holding this phone
+    through :meth:`Device._report` instead, which is the handset in its hand rather than the room.
     """
 
     data = event.data
@@ -338,11 +344,7 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
             source=hsm.id(owner),
             metadata=dict(event.metadata),
         )
-    return dataclasses.replace(
-        event,
-        source=hsm.id(owner),
-        metadata=dict(event.metadata),
-    )
+    return None
 
 
 class PhoneFirmware(hsm.Instance):
@@ -1279,7 +1281,7 @@ class Phone(bot.device.Device):
         observation_service = _PhoneObservationService(
             owner=self,
             service=service if service is not None else PhoneEventRecorder(),
-            elevate=self._broadcast_observation,
+            elevate=self._observe,
         )
         self._service = observation_service
         self._firmware_instance = PhoneFirmware(
@@ -1306,17 +1308,27 @@ class Phone(bot.device.Device):
             await self._service.detach(Environment.from_context(self.context()), firmware)
         await super().stop(ctx)
 
-    def _broadcast_observation(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Elevate a committed observation into an environment stimulus, from where this phone stands.
+    def _observe(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        """Surface a committed observation on both of the paths a real handset has.
 
         Committed public payloads only — not service-request payloads (MediaReadyData / DialData
         and friends), which must not re-enter the phone shell as environment sound. Committed
         media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
 
-        NoCallData is here for its acoustics and only its acoustics: the environment gets the tone
-        or nothing, and device-plane ``phone.no_call`` keeps flowing to the service either way,
-        exactly as ``phone.ringing`` does. What a bot does about a tone it hears is its own to
-        decide; this only makes the tone reach it.
+        Two paths, because a handset genuinely has two. What it makes a *noise* about goes into
+        the environment, where anyone standing nearby hears it — a ring, a busy tone, reorder.
+        What it merely *becomes* goes to whoever is holding it: the call is up, the other end
+        hung up, nobody picked up. That second path is the one this phone had no way to take
+        before, which is why a bot could sit through a connected call never having been told a
+        call existed.
+
+        Exactly one path per observation, and which one is decided by whether it made a sound.
+        A ringing phone is not two events. You do not hear a ring *and* separately feel that
+        your phone is ringing — you notice your phone ringing, once, and the ear is how. So a
+        sound goes to the room and is perceived by hearing it, and only what the room cannot
+        carry travels the nerve. Sending both would buy the bot two turns for one happening.
+
+        Both say what happened and neither says what to do about it.
         """
 
         if not isinstance(
@@ -1326,6 +1338,9 @@ class Phone(bot.device.Device):
             return
         stimulus = _environment_observation_event(self, event)
         if stimulus is None:
+            # Nothing audible happened, which does not mean nothing happened. A call coming up,
+            # a line going dead, nobody ever picking up: silent to the room, plain to the hand.
+            self._report(ctx, event)
             return
         placement = self._placement
         _ = Environment.from_context(ctx).broadcast(
