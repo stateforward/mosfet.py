@@ -9,7 +9,6 @@ import typing
 
 import hsm
 import pytest
-from livekit import rtc
 
 import bot.providers.livekit.phone as phone_module
 from bot.devices import audio as audio_device
@@ -17,7 +16,6 @@ from bot.devices import phone as phone_device
 from bot.providers.livekit import signaling
 
 from bot.providers.livekit import (
-    MappingDirectory,
     MediaSnapshot,
     ServiceCallFailedEvent,
     ServiceIncomingCallEvent,
@@ -37,9 +35,11 @@ from bot.providers.livekit.room_audio import (
 from bot.environment import Environment
 from tests.hsm_instance_state import device_firmware
 from tests.livekit_room_fakes import (
+    FakeLocalParticipant,
     FakeRemoteParticipant,
     FakeRemoteTrack,
     FakeRoom,
+    FakeSfu,
     fake_local_track_factory,
     fake_pcm_stream,
     rtc_pcm_frame,
@@ -61,8 +61,11 @@ _FORWARDED_PHONE_EVENT_NAMES = frozenset(
 )
 
 
-DIAL_TARGET = phone_device.TransferTarget(kind="device", value="reception")
-DIAL_PEER_IDENTITY = "agent-b"
+DIAL_NUMBER = "phone-bot-bob"
+"""The number the tests dial. It is also the identity that answers to it — there is only one name."""
+
+CALLER_NUMBER = "human"
+"""The far end that dials this phone, and the number its answer/decline/bye go back to."""
 
 
 async def await_value[T](value: collections.abc.Awaitable[T]) -> T:
@@ -202,89 +205,6 @@ class RecordingPhoneService:
         self.service.publish(ctx, dataclasses.replace(published_event, source=hsm.id(self.forwarding_target)))
 
 
-@dataclasses.dataclass(frozen=True)
-class LinkedLiveKitPhoneEndpoint:
-    name: str
-    phone: phone_device.Phone
-    service: PhoneService
-    recording_service: RecordingPhoneService
-
-
-@dataclasses.dataclass
-class InMemoryLiveKitPhoneLink:
-    services: dict[str, PhoneService] = dataclasses.field(default_factory=dict)
-    peers: dict[str, str] = dataclasses.field(default_factory=dict)
-    answered: dict[str, set[str]] = dataclasses.field(default_factory=dict)
-
-    async def connect(
-        self, call_id: str, first: LinkedLiveKitPhoneEndpoint, second: LinkedLiveKitPhoneEndpoint
-    ) -> None:
-        self.peers[first.name] = second.name
-        self.peers[second.name] = first.name
-        await first.service.incoming_call(
-            first.service.context(),
-            phone_device.IncomingCallData(call_id=call_id, caller=second.name),
-        )
-        await second.service.incoming_call(
-            second.service.context(),
-            phone_device.IncomingCallData(call_id=call_id, caller=first.name),
-        )
-
-    async def answer(self, endpoint: str, request: phone_device.AnswerRequestData) -> None:
-        self.answered.setdefault(request.call_id, set()).add(endpoint)
-
-    async def hang_up(self, endpoint: str, request: phone_device.HangUpRequestData) -> None:
-        peer = self.peers[endpoint]
-        await self.services[peer].remote_hang_up(
-            self.services[peer].context(),
-            phone_device.RemoteHangUpData(call_id=request.call_id),
-        )
-
-    async def media_ready(self, call_id: str) -> None:
-        for service in self.services.values():
-            await service.media_ready(service.context(), phone_device.MediaReadyData(call_id=call_id))
-
-
-class LinkedPhoneService(PhoneService):
-    link: InMemoryLiveKitPhoneLink
-    endpoint: str
-
-    def __init__(
-        self,
-        *,
-        link: InMemoryLiveKitPhoneLink,
-        endpoint: str,
-        operation_timeout: datetime.timedelta | None = None,
-    ) -> None:
-        super().__init__(operation_timeout=operation_timeout or datetime.timedelta(seconds=1))
-        self.link = link
-        self.endpoint = endpoint
-
-    @typing.override
-    async def dial(self, request: phone_device.DialData) -> None:
-        del request
-        raise PhoneServiceError("in-memory link does not originate calls", failure_kind="provider_unavailable")
-
-    @typing.override
-    async def answer_call(self, request: phone_device.AnswerRequestData) -> None:
-        await self.link.answer(self.endpoint, request)
-
-    @typing.override
-    async def decline_call(self, request: phone_device.DeclineRequestData) -> None:
-        await self.link.hang_up(self.endpoint, phone_device.HangUpRequestData(call_id=request.call_id))
-
-    @typing.override
-    async def hang_up_call(self, request: phone_device.HangUpRequestData) -> None:
-        await self.link.hang_up(self.endpoint, request)
-
-    @typing.override
-    async def transfer_call(self, request: phone_device.TransferRequestData) -> None:
-        raise PhoneServiceError(
-            f"In-memory linked phone service cannot transfer call {request.call_id}.",
-            failure_kind="transfer_rejected",
-        )
-
-
 async def _start_livekit_phone_service(
     *,
     service: FakePhoneService | None = None,
@@ -309,19 +229,32 @@ async def _start_livekit_phone_service(
     return phone, resolved, recording_service
 
 
-async def _start_signalling_livekit_phone(
+def _endpoint_in_room(sfu: FakeSfu, identity: str) -> FakeLocalParticipant:
+    """Another phone already in the room: it answers to ``identity`` and acks the four methods.
+
+    Enough of a far end for the caller's half of a call to be exercised on its own. A real one is
+    a second :class:`PhoneService`, which is what the two-phone test wires up.
+    """
+
+    endpoint = FakeLocalParticipant(identity=identity, sfu=sfu)
+    for method in signaling.Methods:
+        _ = endpoint.register_rpc_method(method, lambda data: str(getattr(data, "payload", "")))
+    return endpoint
+
+
+async def _start_phone_on_room(
+    identity: str,
+    sfu: FakeSfu,
     *,
-    directory: MappingDirectory | None = None,
     setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
     forwarded_events: list[hsm.Event[typing.Any]] | None = None,
 ) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
-    """A real PhoneService on a fake room, connected, with the call-setup wire live."""
+    """A real PhoneService answering to ``identity`` on ``sfu``, connected, call-setup wire live."""
 
-    room = FakeRoom()
+    room = FakeRoom(local_participant=FakeLocalParticipant(identity=identity, sfu=sfu))
     service = PhoneService(
         operation_timeout=datetime.timedelta(seconds=1),
         setup_timeout=setup_timeout,
-        directory=directory,
         room=room,
         stream_factory=fake_pcm_stream(rtc_pcm_frame(b"\x01\x00")),
         local_track_factory=fake_local_track_factory,
@@ -335,23 +268,35 @@ async def _start_signalling_livekit_phone(
     return phone, service, room, recording_service
 
 
+async def _start_signalling_livekit_phone(
+    *,
+    setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
+    forwarded_events: list[hsm.Event[typing.Any]] | None = None,
+) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
+    """One phone under test, in a room that already holds the endpoints these tests talk to.
+
+    Both are there because a message only reaches an endpoint that is: the number the tests dial,
+    and the caller that dials them and their answer, decline, and bye go back to.
+    """
+
+    sfu = FakeSfu()
+    started = await _start_phone_on_room(
+        "phone-bot-alice",
+        sfu,
+        setup_timeout=setup_timeout,
+        forwarded_events=forwarded_events,
+    )
+    _ = _endpoint_in_room(sfu, DIAL_NUMBER)
+    _ = _endpoint_in_room(sfu, CALLER_NUMBER)
+    return started
+
+
 def _dialed_call_id(room: FakeRoom) -> str:
     """The call id the caller minted, read off the setup message it actually sent."""
 
     setup = room.local_participant.rpc_calls[0]
     assert setup.method == signaling.SetupMethod
     return signaling.MessageData.model_validate_json(setup.payload).call_id
-
-
-async def _start_linked_phone_endpoint(name: str, link: InMemoryLiveKitPhoneLink) -> LinkedLiveKitPhoneEndpoint:
-    service = LinkedPhoneService(link=link, endpoint=name)
-    recording_service = RecordingPhoneService(service)
-    phone = phone_device.Phone(service=recording_service)
-    _ = await hsm.started(None, phone, phone.model)
-    await _wait_until(lambda: service.state() == "/PhoneService/ready")
-    endpoint = LinkedLiveKitPhoneEndpoint(name=name, phone=phone, service=service, recording_service=recording_service)
-    link.services[name] = service
-    return endpoint
 
 
 async def _wait_until(predicate: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -497,7 +442,7 @@ def test_phone_service_default_call_control_is_unavailable() -> None:
         service = PhoneService()
         target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         for coro in (
-            service.dial(phone_device.DialData(target=target)),
+            service.dial(phone_device.DialData(number=DIAL_NUMBER)),
             service.answer_call(phone_device.AnswerRequestData(call_id="call-123")),
             service.decline_call(phone_device.DeclineRequestData(call_id="call-123")),
             service.hang_up_call(phone_device.HangUpRequestData(call_id="call-123")),
@@ -515,35 +460,33 @@ def test_phone_service_default_call_control_is_unavailable() -> None:
     asyncio.run(run())
 
 
-def test_livekit_phone_dials_by_addressing_call_setup_to_the_resolved_endpoint() -> None:
-    """Dialing is call setup addressed to one endpoint, and it connects only when they accept.
+def test_livekit_phone_dials_the_number_it_was_given() -> None:
+    """Dialing is call setup addressed to the number, and it connects only when they accept.
 
-    The two facts this pins are the ones presence-ringing could not express: the message goes to
-    the participant the directory names, and the acked setup leaves the caller *dialing* — the
-    connect arrives later, from the callee, because answering was theirs to decide.
+    The number is the address: setup goes to it as dialled, with nothing in between translating
+    it. And the acked setup leaves the caller *dialing* — the connect arrives later, from the
+    callee, because answering was theirs to decide.
     """
 
     async def run() -> None:
-        phone, service, room, recording_service = await _start_signalling_livekit_phone(
-            directory=MappingDirectory({DIAL_TARGET.value: DIAL_PEER_IDENTITY}),
-        )
+        phone, service, room, recording_service = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
         setup = participant.rpc_calls[0]
-        assert setup.destination_identity == DIAL_PEER_IDENTITY
+        assert setup.destination_identity == DIAL_NUMBER
         assert setup.method == signaling.SetupMethod
         call_id = _dialed_call_id(room)
         assert call_id.startswith("livekit:")
         # Acked setup means ringing, not connected.
         assert _require_firmware(phone).state() == "/Phone/dialing"
 
-        _ = participant.invoke(signaling.AcceptMethod, caller_identity=DIAL_PEER_IDENTITY, call_id=call_id)
+        _ = participant.invoke(signaling.AcceptMethod, caller_identity=DIAL_NUMBER, call_id=call_id)
         await _wait_until(lambda: _is_answered(phone))
 
         answered = _phone_events(recording_service)[-1]
@@ -559,19 +502,16 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
 
     async def run() -> None:
         forwarded: list[hsm.Event[typing.Any]] = []
-        phone, service, room, _recording = await _start_signalling_livekit_phone(
-            directory=MappingDirectory({DIAL_TARGET.value: DIAL_PEER_IDENTITY}),
-            forwarded_events=forwarded,
-        )
+        phone, service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
         _ = room.local_participant.invoke(
             signaling.DeclineMethod,
-            caller_identity=DIAL_PEER_IDENTITY,
+            caller_identity=DIAL_NUMBER,
             call_id=_dialed_call_id(room),
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
@@ -583,57 +523,12 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
     asyncio.run(run())
 
 
-def test_livekit_phone_reports_an_unreachable_address_as_remote_unavailable() -> None:
-    """Nobody answers at that address: the SFU says the recipient is not there."""
+def test_livekit_phone_reports_a_number_nobody_answers_to_as_remote_unavailable() -> None:
+    """A number nobody has still gets dialled. The room is what says nobody is there.
 
-    async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, _service, room, _recording = await _start_signalling_livekit_phone(
-            directory=MappingDirectory({DIAL_TARGET.value: DIAL_PEER_IDENTITY}),
-            forwarded_events=forwarded,
-        )
-        room.local_participant.rpc_error = rtc.RpcError(
-            rtc.RpcError.ErrorCode.RECIPIENT_NOT_FOUND,
-            "Recipient not found",
-        )
-
-        await phone.dispatch(
-            phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
-        )
-        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
-
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
-
-    asyncio.run(run())
-
-
-def test_livekit_phone_with_no_directory_entry_never_reaches_the_wire() -> None:
-    """A name the dial plan does not know is nobody. Nothing is sent, and the attempt fails."""
-
-    async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, _service, room, _recording = await _start_signalling_livekit_phone(
-            directory=MappingDirectory({"switchboard": "agent-c"}),
-            forwarded_events=forwarded,
-        )
-
-        await phone.dispatch(
-            phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
-        )
-        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
-
-        assert room.local_participant.rpc_calls == []
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
-
-    asyncio.run(run())
-
-
-def test_livekit_phone_with_no_directory_is_not_registered_with_an_exchange() -> None:
-    """A phone that knows no exchange cannot place a call. That is correct, not a gap."""
+    Setup goes out and comes back RECIPIENT_NOT_FOUND, which is the far end being absent — a fact
+    the exchange establishes, not one a local table could have predicted.
+    """
 
     async def run() -> None:
         forwarded: list[hsm.Event[typing.Any]] = []
@@ -641,13 +536,13 @@ def test_livekit_phone_with_no_directory_is_not_registered_with_an_exchange() ->
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number="nobody-answers-to-this")),
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert room.local_participant.rpc_calls == []
+        assert room.local_participant.rpc_calls[0].destination_identity == "nobody-answers-to-this"
         failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="provider_unavailable")
+        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
 
     asyncio.run(run())
 
@@ -657,7 +552,7 @@ def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() ->
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -666,7 +561,7 @@ def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() ->
         await _wait_until(lambda: _is_answered(phone))
 
         accepted = participant.rpc_calls[-1]
-        assert accepted.destination_identity == "human"
+        assert accepted.destination_identity == CALLER_NUMBER
         assert accepted.method == signaling.AcceptMethod
         assert signaling.MessageData.model_validate_json(accepted.payload).call_id == "livekit:human-1"
 
@@ -678,7 +573,7 @@ def test_livekit_phone_decline_tells_the_caller_they_were_refused() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -687,7 +582,7 @@ def test_livekit_phone_decline_tells_the_caller_they_were_refused() -> None:
         await _wait_until(lambda: bool(participant.rpc_calls))
 
         declined = participant.rpc_calls[-1]
-        assert declined.destination_identity == "human"
+        assert declined.destination_identity == CALLER_NUMBER
         assert declined.method == signaling.DeclineMethod
 
     asyncio.run(run())
@@ -700,7 +595,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -714,7 +609,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
         await _wait_until(lambda: any(call.method == signaling.ByeMethod for call in participant.rpc_calls))
 
         goodbye = participant.rpc_calls[-1]
-        assert goodbye.destination_identity == "human"
+        assert goodbye.destination_identity == CALLER_NUMBER
         assert signaling.MessageData.model_validate_json(goodbye.payload).call_id == "livekit:human-1"
         assert room.disconnected is False
 
@@ -726,7 +621,7 @@ def test_livekit_phone_bye_from_the_far_end_ends_the_call() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -734,7 +629,7 @@ def test_livekit_phone_bye_from_the_far_end_ends_the_call() -> None:
         )
         await _wait_until(lambda: _is_answered(phone))
 
-        _ = participant.invoke(signaling.ByeMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.ByeMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
     asyncio.run(run())
@@ -747,7 +642,7 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
         phone, _service, room, recording_service = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -755,7 +650,7 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
         )
         await _wait_until(lambda: _is_answered(phone))
 
-        room.emit("participant_disconnected", FakeRemoteParticipant(identity="human"))
+        room.emit("participant_disconnected", FakeRemoteParticipant(identity=CALLER_NUMBER))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert any(
@@ -775,7 +670,7 @@ def test_a_stranger_leaving_the_room_is_not_a_hang_up() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
-        _ = participant.invoke(signaling.SetupMethod, caller_identity="human", call_id="livekit:human-1")
+        _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_NUMBER, call_id="livekit:human-1")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
         await phone.dispatch(
             phone.context(),
@@ -794,18 +689,15 @@ def test_a_stranger_leaving_the_room_is_not_a_hang_up() -> None:
 def test_a_callee_that_leaves_while_ringing_cannot_answer() -> None:
     async def run() -> None:
         forwarded: list[hsm.Event[typing.Any]] = []
-        phone, service, room, _recording = await _start_signalling_livekit_phone(
-            directory=MappingDirectory({DIAL_TARGET.value: DIAL_PEER_IDENTITY}),
-            forwarded_events=forwarded,
-        )
+        phone, service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=DIAL_TARGET)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
-        room.emit("participant_disconnected", FakeRemoteParticipant(identity=DIAL_PEER_IDENTITY))
+        room.emit("participant_disconnected", FakeRemoteParticipant(identity=DIAL_NUMBER))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
@@ -851,13 +743,12 @@ def test_livekit_phone_service_default_gateway_fails_outbound_dial() -> None:
         service = PhoneService(operation_timeout=datetime.timedelta(seconds=1))
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
-        target = phone_device.TransferTarget(kind="address", value="sip:support@example.com")
         _ = await hsm.started(None, phone, phone.model)
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _wait_until(
             lambda: any(
@@ -1087,8 +978,7 @@ def test_livekit_phone_service_keeps_first_phone_attachment_when_second_phone_at
         await second.dispatch(
             second.context(),
             phone_device.DialEvent.with_data(
-                phone_device.DialData(target=phone_device.TransferTarget(kind="address", value="sip:second@example.com"),
-                )
+                phone_device.DialData(number=DIAL_NUMBER)
             ),
         )
         await asyncio.sleep(0)
@@ -1252,42 +1142,61 @@ def test_livekit_phone_service_hangs_up_current_phone_call_through_gateway() -> 
     asyncio.run(run())
 
 
-def test_livekit_phone_service_connects_two_real_phone_devices() -> None:
+def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
+    """Two real phones in one room, and one call carried between them over the wire.
+
+    Nothing here rings Bob's phone but Alice dialling his number: the setup Alice sends is what
+    Bob's service receives, and the accept Bob sends is what connects Alice. Both halves run as
+    one loop, so a break anywhere in dial → ring → answer → connect → bye shows up here.
+
+    Bob rings and stays ringing until Bob's phone is told to answer. Whether to answer is Bob's,
+    and no part of this test may make that decision on the topology's behalf.
+    """
+
     async def run() -> None:
-        link = InMemoryLiveKitPhoneLink()
-        first = await _start_linked_phone_endpoint("front-desk", link)
-        second = await _start_linked_phone_endpoint("operator", link)
+        sfu = FakeSfu()
+        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room("phone-bot-alice", sfu)
+        bob_phone, _bob_service, _bob_room, bob_recording = await _start_phone_on_room(DIAL_NUMBER, sfu)
 
-        await link.connect("call-123", first, second)
-        await _wait_until(lambda: _require_firmware(first.phone).state() == "/Phone/ringing")
-        await _wait_until(lambda: _require_firmware(second.phone).state() == "/Phone/ringing")
+        await alice_phone.dispatch(
+            alice_phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
 
-        await first.phone.dispatch(
-            first.phone.context(),
+        # Bob's phone shows the caller the SFU authenticated, not a name the message claimed.
+        ringing = [event for event in _phone_events(bob_recording) if event.name == phone_device.RingingEvent.name]
+        assert ringing[-1].data == phone_device.RingingData(caller="phone-bot-alice")
+        # Alice is dialling, not connected: acked setup only means the far end is ringing.
+        assert _require_firmware(alice_phone).state() == "/Phone/dialing"
+
+        call_id = _dialed_call_id(alice_room)
+        await bob_phone.dispatch(
+            bob_phone.context(),
             phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
         )
-        await second.phone.dispatch(
-            second.phone.context(),
-            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
-        )
-        await _wait_until(lambda: _is_answered(first.phone))
-        await _wait_until(lambda: _is_answered(second.phone))
+        await _wait_until(lambda: _is_answered(alice_phone))
+        await _wait_until(lambda: _is_answered(bob_phone))
 
-        assert link.answered == {"call-123": {"front-desk", "operator"}}
+        # One call, one name for it, minted by the caller and adopted by the callee.
+        for recording in (alice_recording, bob_recording):
+            answered = [event for event in _phone_events(recording) if event.name == phone_device.AnsweredEvent.name]
+            assert answered[-1].data == phone_device.PhoneCallData(call_id=call_id)
 
-        await link.media_ready("call-123")
-        await _wait_until(lambda: _phone_events(first.recording_service)[-1].name == phone_device.MediaReadyEvent.name)
-        await _wait_until(lambda: _phone_events(second.recording_service)[-1].name == phone_device.MediaReadyEvent.name)
-
-        await first.phone.dispatch(
-            first.phone.context(),
+        await bob_phone.dispatch(
+            bob_phone.context(),
             phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()),
         )
-        await _wait_until(lambda: _require_firmware(first.phone).state() == "/Phone/hung_up")
-        await _wait_until(lambda: _require_firmware(second.phone).state() == "/Phone/hung_up")
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/hung_up")
+        # Bob stays in the room after hanging up, so only the bye can tell Alice the call ended.
+        await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/hung_up")
 
-        assert _phone_events(first.recording_service)[-1].name == phone_device.HungUpEvent.name
-        assert _phone_events(second.recording_service)[-1].name == phone_device.HungUpEvent.name
+        assert any(
+            event.name == phone_device.HungUpEvent.name
+            and isinstance(event.data, phone_device.PhoneHungUpData)
+            and event.data.outcome == "remote_hang_up"
+            for event in _phone_events(alice_recording)
+        )
 
     asyncio.run(run())
 
@@ -1606,10 +1515,9 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
         )
         setup_delivered = typing.cast(hsm.Event[None], getattr(phone_module, "_SetupDeliveredEvent"))
         dial_failed = typing.cast(hsm.Event[phone_device.CallFailedData], getattr(phone_module, "_DialFailedEvent"))
-        target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
 
         await phone.dispatch(
-            phone.context(), phone_device.DialEvent.with_data(phone_device.DialData(target=target))
+            phone.context(), phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER))
         )
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/setup")
         await service.dispatch(
@@ -2036,9 +1944,8 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
         metadata = {"traceparent": f"00-{operation}"}
 
         if operation == "dial":
-            target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
             command = dataclasses.replace(
-                phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+                phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
                 metadata=metadata,
             )
             await phone.dispatch(phone.context(), command)
@@ -2140,15 +2047,13 @@ def test_livekit_phone_service_times_out_blocked_dial_operation() -> None:
         phone, service, recording_service = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
-        target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
-
         await phone.dispatch(
-            phone.context(), phone_device.DialEvent.with_data(phone_device.DialData(target=target))
+            phone.context(), phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER))
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert service.state() == "/PhoneService/ready"
-        assert gateway.dial_requests == [phone_device.DialData(target=target)]
+        assert gateway.dial_requests == [phone_device.DialData(number=DIAL_NUMBER)]
         assert _phone_events(recording_service)[-1].name == phone_device.NoCallEvent.name
         # The provider's verdict survives the trip: firmware reports which way the dial failed,
         # not just that it did.
@@ -2446,13 +2351,13 @@ def test_livekit_phone_service_call_setup_rings_phone_without_auto_answer() -> N
 
         _ = room.local_participant.invoke(
             signaling.SetupMethod,
-            caller_identity="human",
+            caller_identity=CALLER_NUMBER,
             call_id="livekit:human-1",
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
 
         assert resolved._media_call_id == "livekit:human-1"
-        assert resolved._call_peer_identity == "human"
+        assert resolved._call_peer_identity == CALLER_NUMBER
         assert room.connected == [("wss://livekit.example.com", "token")]
         # Do not answer here — answering is bot/operator policy.
         assert _require_firmware(phone).state() == "/Phone/ringing"
@@ -2466,7 +2371,7 @@ def test_livekit_phone_service_does_not_ring_for_a_participant_that_merely_joins
     async def run() -> None:
         phone, _service, room, _recording = await _start_signalling_livekit_phone()
 
-        room.emit("participant_connected", FakeRemoteParticipant(identity="human"))
+        room.emit("participant_connected", FakeRemoteParticipant(identity=CALLER_NUMBER))
         await asyncio.sleep(0.01)
 
         assert _require_firmware(phone).state() == "/Phone/hung_up"

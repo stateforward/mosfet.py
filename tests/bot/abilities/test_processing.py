@@ -723,11 +723,11 @@ def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
     dial_data = by_name["phone.dial"]
     assert json_schema_is_embeddable(dial_data)
     assert "$defs" not in dial_data
-    target = dial_data["properties"]["target"]
-    assert isinstance(target, dict)
-    assert "$ref" not in target
-    assert target.get("type") == "object"
-    assert set(target["properties"]) >= {"kind", "value"}
+    # A number is a string all the way down: there is nothing nested to leave a ref behind.
+    number = dial_data["properties"]["number"]
+    assert isinstance(number, dict)
+    assert "$ref" not in number
+    assert number.get("type") == "string"
 
     transfer_data = by_name["phone.transfer_call"]
     assert json_schema_is_embeddable(transfer_data)

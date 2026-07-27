@@ -907,7 +907,6 @@ class PhoneService(hsm.Instance):
     _call_peer_identity: str | None
     _delivering_remote_audio: bool
     _attached_phone_target_ref: weakref.ReferenceType[hsm.Instance] | None
-    _directory: signaling.Directory | None
     _setup_timeout: datetime.timedelta
     _presence_bound: bool
     _presence_left_callback: collections.abc.Callable[..., object] | None
@@ -922,7 +921,6 @@ class PhoneService(hsm.Instance):
         uplink_sample_rate_hz: int = 48_000,
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
         setup_timeout: datetime.timedelta = _DEFAULT_SETUP_TIMEOUT,
-        directory: signaling.Directory | None = None,
         room: RoomHandle | None = None,
         stream_factory: AudioStreamFactory | None = None,
         local_track_factory: LocalAudioTrackFactory | None = None,
@@ -937,7 +935,6 @@ class PhoneService(hsm.Instance):
             raise ValueError("track_name must be a non-empty string.")
         self._operation_timeout = operation_timeout
         self._setup_timeout = setup_timeout
-        self._directory = directory
         self._uplink_sample_rate_hz = uplink_sample_rate_hz
         self._loop = loop
         self._room = room
@@ -1119,23 +1116,6 @@ class PhoneService(hsm.Instance):
         except rtc.RpcError as error:
             raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
 
-    def _emit_media_ready_if_track_live(self, call_id: str) -> None:
-        """If the room local track is already published, advance firmware to media_ready."""
-
-        if self._local_track_sid is None:
-            return
-        phone_event_target = PhoneService._phone_event_target(self)
-        if phone_event_target is None:
-            return
-        _ = phone_event_target.dispatch(
-            phone_event_target.context(),
-            dataclasses.replace(
-                phone.ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=call_id)),
-                source=hsm.id(self),
-                target=hsm.id(phone_event_target),
-            ),
-        )
-
     def _ensure_media(self) -> tuple[AudioBridge[typing.Any], RoomAudioTrackPath]:
         if self._bridge is not None and self._track_path is not None:
             return self._bridge, self._track_path
@@ -1201,19 +1181,18 @@ class PhoneService(hsm.Instance):
         return bridge, track_path
 
     async def dial(self, request: phone.DialData) -> None:
-        """Send call setup to the endpoint the directory resolves, and return once it is ringing.
+        """Send call setup to the number dialled, and return once it is ringing.
+
+        The number *is* the address: a LiveKit participant identity is the name an endpoint
+        answers to, so setup goes to it as given. Whether anybody answers to that name is the
+        room's answer to give, and it gives it on the wire — a number nobody has comes back
+        ``RECIPIENT_NOT_FOUND``, which is the far end being absent, not a lookup that failed here.
 
         Returning does **not** mean connected. The ack on setup means the far end is ringing; the
         connect arrives later, as an accept, because whether to answer is the callee's decision
         and nothing here may make it for them.
         """
 
-        directory = self._directory
-        if directory is None:
-            raise PhoneServiceError(
-                "This LiveKit phone has no directory, so it is registered with no exchange and cannot place calls.",
-                failure_kind="provider_unavailable",
-            )
         call_id = _dial_call_id(self)
         participant = self._signaling_participant
         if call_id is None or participant is None:
@@ -1221,17 +1200,11 @@ class PhoneService(hsm.Instance):
                 "This LiveKit phone is not on a connected room, so there is no line to dial out on.",
                 failure_kind="provider_unavailable",
             )
-        peer_identity = directory.resolve(request.target)
-        if peer_identity is None:
-            raise PhoneServiceError(
-                f"No LiveKit endpoint answers {request.target.kind} {request.target.value!r}.",
-                failure_kind="remote_unavailable",
-            )
         # A phone that has dialled knows who it dialled, before it knows whether they will answer.
-        self._call_peer_identity = peer_identity
+        self._call_peer_identity = request.number
         try:
             _ = await participant.perform_rpc(
-                destination_identity=peer_identity,
+                destination_identity=request.number,
                 method=signaling.SetupMethod,
                 payload=signaling.MessageData(call_id=call_id).model_dump_json(),
                 response_timeout=self._setup_timeout.total_seconds(),

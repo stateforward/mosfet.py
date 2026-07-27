@@ -31,6 +31,9 @@ from tests.hsm_instance_state import (
 from tests.hsm_model import transition_map
 from tests.type_helpers import invalid_value
 
+DIAL_NUMBER = "phone-bot-bob"
+"""A number to dial. Nothing translates it: it is the address the far phone answers to."""
+
 def _phone_firmware(phone: phone_device.Phone) -> phone_device.PhoneFirmware:
     firmware = phone_firmware(phone)
     assert isinstance(firmware, phone_device.PhoneFirmware)
@@ -401,7 +404,6 @@ def test_phone_device_start_initializes_firmware_and_routes_service_events() -> 
 def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
@@ -410,7 +412,7 @@ def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
 
         assert device_firmware(phone).state() == "/Phone/dialing"
@@ -488,7 +490,7 @@ async def _dialing_phone_in_environment(
     await phone.dispatch(
         phone.context(),
         phone_device.DialEvent.with_data(
-            phone_device.DialData(target=phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com"))
+            phone_device.DialData(number=DIAL_NUMBER)
         ),
     )
     return phone, firmware, listener
@@ -551,11 +553,7 @@ def test_phone_no_call_carries_the_service_verdict_that_chose_the_tone() -> None
         firmware = _phone_firmware(phone)
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(
-                phone_device.DialData(
-                    target=phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
-                )
-            ),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _emit_service_event(
             phone,
@@ -1179,7 +1177,6 @@ def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect(
 def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> None:
     async def run() -> None:
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
-        target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         _ = await hsm.started(None, phone, phone.model)
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
@@ -1188,7 +1185,7 @@ def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> N
 
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
 
         assert device_firmware(phone).state() == "/Phone/dialing"
@@ -1219,7 +1216,7 @@ def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> N
         # Redial is always legal: a handset does not refuse a number it just called.
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
 
         assert device_firmware(phone).state() == "/Phone/dialing"
@@ -1237,10 +1234,9 @@ def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
 
     async def run() -> None:
         phone, firmware = await started_phone()
-        target = phone_device.TransferTarget(kind="address", value="sip:helpdesk@example.com")
         await phone.dispatch(
             phone.context(),
-            phone_device.DialEvent.with_data(phone_device.DialData(target=target)),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await _emit_service_event(
             phone,
@@ -1557,7 +1553,7 @@ def test_phone_dispatch_coerces_dict_command_payload_to_firmware() -> None:
         _ = await hsm.started(None, phone, phone.model)
         raw = dataclasses.replace(
             phone_device.DialEvent,
-            data={"target": {"kind": "address", "value": "sip:desk@example.com"}},
+            data={"number": DIAL_NUMBER},
         )
         await phone.dispatch(phone.context(), raw)
         await _wait_until(lambda: (device_firmware(phone) or phone).state() == "/Phone/dialing")

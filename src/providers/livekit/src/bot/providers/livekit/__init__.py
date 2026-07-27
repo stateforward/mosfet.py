@@ -10,7 +10,6 @@ from .phone import (
     PhoneService,
     PhoneServiceError,
 )
-from .signaling import Directory, MappingDirectory
 
 __version__ = "0.1.0"
 
@@ -21,8 +20,6 @@ __all__ = [
     "ServiceRemoteHangUpEvent",
     "ServiceTransferCompletedEvent",
     "ServiceTransferFailedEvent",
-    "Directory",
-    "MappingDirectory",
     "MediaSnapshot",
     "Phone",
     "PhoneService",

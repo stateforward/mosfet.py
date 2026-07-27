@@ -104,8 +104,8 @@ def test_embeddable_json_schema_closes_local_defs_refs_for_nesting() -> None:
     assert "value" in child_props
 
 
-def test_embeddable_json_schema_closes_phone_dial_transfer_target_ref() -> None:
-    document = event_json_schema(phone.DialEvent)
+def test_embeddable_json_schema_closes_phone_transfer_target_ref() -> None:
+    document = event_json_schema(phone.TransferCallEvent)
     assert "$defs" in document
     target = typing.cast(dict[str, object], document["properties"])["target"]
     assert isinstance(target, dict)

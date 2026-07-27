@@ -19,6 +19,21 @@ CallId = typing.Annotated[
         examples=["livekit:caller", "sip:session-9f3a"],
     ),
 ]
+PhoneNumber = typing.Annotated[
+    str,
+    pydantic.Field(
+        min_length=1,
+        description=(
+            "The number to dial. This is the callee's address on the network — the same string that reaches them, "
+            "used exactly as given. Nothing translates it and there is no dial plan behind it, so it must be the "
+            "address the far phone actually answers to; an approximation of one reaches nobody. Unlike call_id it "
+            "belongs to the phone rather than to a call: it is the same before, during, and after every call, and "
+            "dialling it twice reaches the same phone twice. Dialling a number nothing answers is a real outcome, "
+            "not an error to avoid — the attempt comes back unreachable, the way it does for a person."
+        ),
+        examples=["phone-bot-bob"],
+    ),
+]
 Caller = typing.Annotated[
     str,
     pydantic.Field(
@@ -107,26 +122,20 @@ class IncomingCallData(CallIdData):
     caller: Caller | None = None
 
 class DialData(pydantic.BaseModel):
-    """Command from an operator or owner asking firmware to dial an outbound call.
+    """Command from an operator or owner asking firmware to dial a number.
 
-    Carries no call id. You dial a destination and the exchange assigns the call, so the session
+    Carries no call id. You dial a number and the exchange assigns the call, so the session
     handle arrives from the provider on connect and there is nothing for a caller to supply.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"target": {"kind": "address", "value": "sip:helpdesk@example.com"}}],
+            "examples": [{"number": "phone-bot-bob"}],
         },
     )
 
-    target: TransferTarget = pydantic.Field(
-        description=(
-            "Provider-neutral outbound destination. The provider owns address resolution and transport call setup; "
-            "phone firmware owns the call lifecycle."
-        ),
-        examples=[{"kind": "address", "value": "sip:helpdesk@example.com"}],
-    )
+    number: PhoneNumber
 
 class AnswerCallData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to answer the call that is ringing.

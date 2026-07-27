@@ -2887,10 +2887,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
 
         await active_bot.dispatch(
             active_bot.context(),
-            phone_device.DialEvent.with_data(
-                phone_device.DialData(target=phone_device.TransferTarget(kind="address", value="sip:bob@example.com")
-                )
-            ),
+            phone_device.DialEvent.with_data(phone_device.DialData(number="phone-bot-bob")),
         )
         assert len(ability.calls) == 1
         _ = release.set()

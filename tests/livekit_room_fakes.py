@@ -61,19 +61,61 @@ class FakeRpcCall:
 
 
 @dataclasses.dataclass
+class FakeSfu:
+    """The exchange addressed RPC crosses: it delivers a message to the endpoint it names.
+
+    A real ``perform_rpc`` reaches the far participant's registered handler and returns what that
+    handler returned. Echoing the payload back to the sender instead would make every call-setup
+    test a monologue — two phones could never be wired into one loop, which is the only way to
+    find out whether dialling one of them makes the other ring.
+    """
+
+    endpoints: dict[str, "FakeLocalParticipant"] = dataclasses.field(default_factory=dict)
+    delivered: int = 0
+
+    def deliver(self, *, caller_identity: str, destination_identity: str, method: str, payload: str) -> str:
+        endpoint = self.endpoints.get(destination_identity)
+        if endpoint is None:
+            raise rtc.RpcError(
+                rtc.RpcError.ErrorCode.RECIPIENT_NOT_FOUND,
+                f"No participant named {destination_identity!r} is in the room.",
+            )
+        handler = endpoint.rpc_handlers.get(method)
+        if handler is None:
+            raise rtc.RpcError(
+                rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD,
+                f"{destination_identity!r} does not answer {method!r}.",
+            )
+        self.delivered += 1
+        return handler(
+            rtc.RpcInvocationData(
+                request_id=f"RQ_{self.delivered}",
+                caller_identity=caller_identity,
+                payload=payload,
+                response_timeout=5.0,
+            )
+        )
+
+
+@dataclasses.dataclass
 class FakeLocalParticipant:
     """Local participant with a publish path and a call-setup RPC channel.
 
-    ``rpc_error`` injects the failure the SFU would have raised, so tests can exercise a callee
-    that is not in the room, one that does not answer calls, and a message lost in transit.
+    Participants that share an ``sfu`` can reach each other by identity, the way they do in one
+    real room. A participant given no ``sfu`` gets a private one holding only itself, so its
+    outbound calls reach nobody — which is what being alone in a room means.
     """
 
+    identity: str = "local"
+    sfu: FakeSfu = dataclasses.field(default_factory=FakeSfu)
     publications: list[object] = dataclasses.field(default_factory=list)
     unpublished: list[str] = dataclasses.field(default_factory=list)
     unpublish_error: BaseException | None = None
     rpc_calls: list[FakeRpcCall] = dataclasses.field(default_factory=list)
     rpc_handlers: dict[str, collections.abc.Callable[[object], str]] = dataclasses.field(default_factory=dict)
-    rpc_error: BaseException | None = None
+
+    def __post_init__(self) -> None:
+        self.sfu.endpoints[self.identity] = self
 
     async def publish_track(self, track: object, options: object | None = None) -> FakeTrackPublication:
         del options
@@ -95,9 +137,12 @@ class FakeLocalParticipant:
     ) -> str:
         del response_timeout
         self.rpc_calls.append(FakeRpcCall(destination_identity=destination_identity, method=method, payload=payload))
-        if self.rpc_error is not None:
-            raise self.rpc_error
-        return payload
+        return self.sfu.deliver(
+            caller_identity=self.identity,
+            destination_identity=destination_identity,
+            method=method,
+            payload=payload,
+        )
 
     def register_rpc_method(
         self,
@@ -111,16 +156,13 @@ class FakeLocalParticipant:
         _ = self.rpc_handlers.pop(method, None)
 
     def invoke(self, method: str, *, caller_identity: str, call_id: str) -> str:
-        """Deliver one call-setup message from ``caller_identity``, the way the SFU would."""
+        """Deliver one call-setup message to this participant, from an endpoint tests do not model."""
 
-        handler = self.rpc_handlers[method]
-        return handler(
-            rtc.RpcInvocationData(
-                request_id="RQ_fake",
-                caller_identity=caller_identity,
-                payload=json.dumps({"call_id": call_id}),
-                response_timeout=5.0,
-            )
+        return self.sfu.deliver(
+            caller_identity=caller_identity,
+            destination_identity=self.identity,
+            method=method,
+            payload=json.dumps({"call_id": call_id}),
         )
 
 

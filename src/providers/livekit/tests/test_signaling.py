@@ -5,8 +5,6 @@ import json
 import pytest
 from livekit import rtc
 
-from bot.devices import phone as phone_device
-from bot.providers.livekit import MappingDirectory
 from bot.providers.livekit import signaling
 
 
@@ -20,13 +18,6 @@ def test_the_four_methods_are_the_whole_vocabulary() -> None:
         signaling.ByeMethod,
     )
     assert len(set(signaling.Methods)) == 4
-
-
-def test_a_directory_resolves_a_dial_target_to_the_identity_that_answers_it() -> None:
-    directory = MappingDirectory({"reception": "agent-b"})
-
-    assert directory.resolve(phone_device.TransferTarget(kind="device", value="reception")) == "agent-b"
-    assert directory.resolve(phone_device.TransferTarget(kind="device", value="nobody")) is None
 
 
 @pytest.mark.parametrize(

@@ -94,12 +94,10 @@ def test_phone_service_audio_data_describes_speaker_output_for_current_call() ->
 def test_phone_command_events_carry_no_call_identity() -> None:
     """Operator commands name no call: firmware already holds the one they act on."""
 
-    target = phone.TransferTarget(kind="address", value="sip:helpdesk@example.com")
-
-    assert phone.DialData(target=target).target == target
+    assert phone.DialData(number="phone-bot-bob").number == "phone-bot-bob"
     assert phone.DialEvent.name == "phone.dial"
     assert object_dict(phone.DialEvent.schema) == phone.DialData.model_json_schema()
-    assert object_dict(phone.DialEvent.schema)["required"] == ["target"]
+    assert object_dict(phone.DialEvent.schema)["required"] == ["number"]
     assert phone.AnswerCallEvent.name == "phone.answer_call"
     assert object_dict(phone.AnswerCallEvent.schema) == phone.AnswerCallData.model_json_schema()
     assert phone.DeclineCallEvent.name == "phone.decline_call"

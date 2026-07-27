@@ -20,7 +20,6 @@ would be a claim rather than a fact.
 
 from __future__ import annotations
 
-import collections.abc
 import typing
 
 import pydantic
@@ -72,34 +71,6 @@ class MessageData(pydantic.BaseModel):
     )
 
 
-class Directory(typing.Protocol):
-    """Resolves a provider-neutral dial target to the LiveKit identity that answers it.
-
-    A phone cannot place a call without being registered with an exchange that knows where names
-    live. Injecting the directory is that registration: the provider invents no numbering scheme
-    of its own, and a bot never dials a raw SDK token.
-    """
-
-    def resolve(self, target: phone.TransferTarget) -> str | None:
-        """Return the LiveKit participant identity for ``target``, or ``None`` if nobody answers it."""
-        ...
-
-
-class MappingDirectory:
-    """Directory backed by an explicit ``target value -> participant identity`` mapping.
-
-    The whole of a small exchange's dial plan, declared once by whoever also mints the tokens.
-    """
-
-    _entries: dict[str, str]
-
-    def __init__(self, entries: collections.abc.Mapping[str, str]) -> None:
-        self._entries = dict(entries)
-
-    def resolve(self, target: phone.TransferTarget) -> str | None:
-        return self._entries.get(target.value)
-
-
 def failure_kind(error: rtc.RpcError) -> phone.FailureKind:
     """Normalize one LiveKit RPC failure into the phone contract's failure vocabulary.
 
@@ -148,8 +119,6 @@ __all__ = [
     "AcceptMethod",
     "ByeMethod",
     "DeclineMethod",
-    "Directory",
-    "MappingDirectory",
     "MessageData",
     "Methods",
     "SetupMethod",

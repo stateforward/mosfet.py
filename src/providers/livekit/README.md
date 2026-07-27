@@ -31,13 +31,9 @@ _ = await hsm.started(None, phone, phone.model)
 
 ```python
 from bot.devices import phone as phone_device
-from bot.providers.livekit import MappingDirectory, PhoneService
+from bot.providers.livekit import PhoneService
 
-service = PhoneService(
-    url="wss://livekit.example.com",
-    token="livekit-jwt",
-    directory=MappingDirectory({"reception": "agent-b"}),
-)
+service = PhoneService(url="wss://livekit.example.com", token="livekit-jwt")
 phone = phone_device.Phone(service=service)
 ```
 
@@ -64,10 +60,12 @@ the callee's decision. Ring time therefore belongs to phone firmware
 (`answer_timeout`); the provider's `setup_timeout` bounds only the message
 crossing the room.
 
-A `Directory` resolves a provider-neutral dial target to a participant identity.
-Without one, the phone is registered with no exchange and `dial` reports
-`provider_unavailable` — it can still be called. `MappingDirectory` is the whole
-of a small dial plan; inject your own `Directory` for anything larger.
+The number dialled **is** the participant identity setup is addressed to. There
+is no dial plan and nothing to resolve: a LiveKit identity is the name an
+endpoint answers to, so a handset that knows the number can place the call. A
+number nobody in the room answers to comes back `RECIPIENT_NOT_FOUND` from the
+SFU, which `dial` reports as `remote_unavailable` — the far end being absent, on
+the room's authority rather than a local table's.
 
 Presence carries one thing: a participant that leaves the room. That is
 transduced as a typed event, and topology decides what it means — a callee that
