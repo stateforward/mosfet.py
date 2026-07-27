@@ -92,6 +92,7 @@ class Device(hsm.Instance, attachment.Attachment):
 
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
 
     def __init__(
         self,
@@ -106,6 +107,7 @@ class Device(hsm.Instance, attachment.Attachment):
         self._placement = placement
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._attachment_request_id = ""
         self._peripherals = tuple(peripherals)
         self._firmware = None
         self._firmware_init_operation_id = None
@@ -539,7 +541,7 @@ class Device(hsm.Instance, attachment.Attachment):
                 hsm.guard(attachment.Attachment._can_attach),
                 hsm.effect(
                     attachment.Attachment._attach,
-                    attachment.Attachment._remember_attachment_timeout,
+                    attachment.Attachment._remember_attachment_request,
                     attachment.Attachment._queue_attach_complete,
                 ),
                 hsm.target("../attaching"),

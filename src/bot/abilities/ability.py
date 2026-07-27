@@ -309,6 +309,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     _attachments: list[hsm.Instance]
     _attachment_group: attachment.Group
     _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
     _composite_attachment_terminal_event: typing.ClassVar[hsm.Event[_CompositeAttachmentTerminalData]] = (
         _CompositeAttachmentTerminalEvent
@@ -779,7 +780,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 hsm.guard(attachment.Attachment._can_attach),
                 hsm.effect(
                     attachment.Attachment._attach,
-                    attachment.Attachment._remember_attachment_timeout,
+                    attachment.Attachment._remember_attachment_request,
                     attachment.Attachment._queue_attach_complete,
                 ),
                 hsm.target("/Ability/attaching"),
@@ -862,7 +863,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         if composite_attachment_lifecycle:
             attach_effect = hsm.effect(
                 attachment.Attachment._attach,
-                attachment.Attachment._remember_attachment_timeout,
+                attachment.Attachment._remember_attachment_request,
             )
             attaching: tuple[hsm.Element, ...] = ()
             detach_elements = (hsm.target(f"{attached}/behavior/detaching"),)
@@ -877,7 +878,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         else:
             attach_effect = hsm.effect(
                 attachment.Attachment._attach,
-                attachment.Attachment._remember_attachment_timeout,
+                attachment.Attachment._remember_attachment_request,
                 attachment.Attachment._queue_attach_complete,
             )
             attaching = (
@@ -989,6 +990,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         super().__init__()
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._attachment_request_id = ""
         self._terminal_waiters = {}
 
     @typing.override

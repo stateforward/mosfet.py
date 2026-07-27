@@ -23,6 +23,7 @@ class Attachment(typing.Protocol):
     _attachment_limit: typing.ClassVar[int | None] = None
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
 
     def attach(
         self,
@@ -127,16 +128,24 @@ class Attachment(typing.Protocol):
         instance._attachments.append(data.actor)
 
     @staticmethod
-    def _remember_attachment_timeout(
+    def _remember_attachment_request(
         ctx: hsm.Context,
         instance: hsm.Instance,
         event: hsm.Event[typing.Any],
     ) -> None:
+        """Hold the deadline and the request id the attaching state has to answer.
+
+        The deadline arrives as a time event, which carries no id, so anything the timeout
+        builds has nothing of the request left to stamp unless it was kept here. Success reads
+        its id straight off the request event; failure has to read it off the machine.
+        """
+
         del ctx
         assert isinstance(instance, Attachment)
         data = event.data
         assert isinstance(data, events.AttachData)
         instance._attachment_timeout = data.timeout
+        instance._attachment_request_id = event.id
 
     @staticmethod
     def _attachment_timeout_delay(
@@ -166,6 +175,7 @@ class Attachment(typing.Protocol):
                         ),
                     )
                 ),
+                id=instance._attachment_request_id,
                 source=hsm.id(instance),
                 target=Attachment._actor_id(actor),
                 metadata=dict(event.metadata),

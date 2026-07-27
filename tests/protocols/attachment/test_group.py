@@ -19,11 +19,13 @@ class BroadcastRecorder(hsm.Instance, attachment.Attachment):
     count: int
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
 
     def __init__(self) -> None:
         super().__init__()
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._attachment_request_id = ""
         self.count = 0
 
     @typing.override
@@ -89,6 +91,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
     __test__: typing.ClassVar[bool] = False
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
     attach_calls: list[hsm.Event[attachment.AttachData]]
     detach_calls: list[hsm.Event[attachment.DetachData]]
     attach_contexts: list[hsm.Context]
@@ -133,6 +136,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
         super().__init__()
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._attachment_request_id = ""
         self.attach_calls = []
         self.detach_calls = []
         self.attach_contexts = []
@@ -1730,11 +1734,13 @@ def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination(
         received: list[hsm.Event[typing.Any]]
         _attachments: list[hsm.Instance]
         _attachment_timeout: datetime.timedelta
+        _attachment_request_id: str
 
         def __init__(self) -> None:
             super().__init__()
             self._attachments = []
             self._attachment_timeout = datetime.timedelta(seconds=30)
+            self._attachment_request_id = ""
             self.received = []
 
         @typing.override

@@ -338,6 +338,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             visit(member, {id(self)})
         self._attachments: list[hsm.Instance] = list(attachments)
         self._attachment_timeout: datetime.timedelta = datetime.timedelta(seconds=30)
+        self._attachment_request_id: str = ""
         # Machine-owned attach hold (HSM-CONTEXT-001): not instance.state() for fallback routing.
         self._held_attached: bool = False
 
