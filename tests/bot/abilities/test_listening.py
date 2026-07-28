@@ -1,6 +1,7 @@
 from bot import abilities
 from bot.abilities import cognition
 from bot.abilities import listening
+from bot.abilities import speaking
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -130,12 +131,15 @@ class RecordingListening(listening.Listening):
         sound_classifier: sound_hearing.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+        product_threshold_db: float | None = None,
     ) -> None:
+        thresholds = {} if product_threshold_db is None else {"product_threshold_db": product_threshold_db}
         super().__init__(
             voice_detector=voice_detector,
             sound_classifier=sound_classifier,
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
+            **thresholds,
         )
         self.handoffs = []
         self.failures = []
@@ -200,6 +204,7 @@ def _listening(
     diarizer: FixedVoiceDiarizer | None = None,
     decoder: RecordingSpeechDecoder | None | typing.Literal[False] = None,
     sound_classifier: sound_hearing.classification.SoundClassifier | None = None,
+    product_threshold_db: float | None = None,
 ) -> tuple[RecordingListening, RecordingSpeechDecoder | None]:
     speech_decoder: RecordingSpeechDecoder | None
     if decoder is False:
@@ -208,11 +213,13 @@ def _listening(
         speech_decoder = RecordingSpeechDecoder()
     else:
         speech_decoder = decoder
+    thresholds = {} if product_threshold_db is None else {"product_threshold_db": product_threshold_db}
     listening_ability = RecordingListening(
         voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=is_voice, confidence=0.91)),
         sound_classifier=sound_classifier,
         speech_decoder=speech_decoder,
         voice_diarizer=diarizer,
+        **thresholds,
     )
     return listening_ability, speech_decoder
 
@@ -294,13 +301,17 @@ def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_f
     groups, request_count, state = asyncio.run(run())
 
     assert len(groups) == 2
-    assert len(groups[0]) == 1
-    assert isinstance(groups[0][0], voice.detection.VoiceDetection)
-    assert len(groups[1]) == 4
-    assert isinstance(groups[1][0], voice.detection.VoiceDetection)
-    assert isinstance(groups[1][1], sound_hearing.classification.SoundClassification)
-    assert isinstance(groups[1][2], voice.diarization.VoiceDiarization)
-    assert isinstance(groups[1][3], speech.SpeechDecoding)
+    # Sensitivity is always present: a body always knows what it is doing, whatever else it can
+    # hear with. The optional stages are what the configuration adds on top of that.
+    assert len(groups[0]) == 2
+    assert isinstance(groups[0][0], listening.sensitivity.Sensitivity)
+    assert isinstance(groups[0][1], voice.detection.VoiceDetection)
+    assert len(groups[1]) == 5
+    assert isinstance(groups[1][0], listening.sensitivity.Sensitivity)
+    assert isinstance(groups[1][1], voice.detection.VoiceDetection)
+    assert isinstance(groups[1][2], sound_hearing.classification.SoundClassification)
+    assert isinstance(groups[1][3], voice.diarization.VoiceDiarization)
+    assert isinstance(groups[1][4], speech.SpeechDecoding)
     assert request_count == 1
     assert state == "/ListeningLifecycle/attached/behavior/initializing"
 
@@ -439,7 +450,7 @@ def test_listening_detaches_once_through_group_and_can_reattach(
         attachment.AttachCompleteEvent.name,
     ]
     assert [event.id for event in lifecycle] == ["listening-detach", "listening-second-attach"]
-    assert state == "/ListeningLifecycle/attached/behavior/Listening"
+    assert state == "/ListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_apply_runs_voice_diarization_and_speech_decoding_pipeline() -> None:
@@ -471,31 +482,34 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     assert "/ListeningLifecycle/attaching" not in model.members
     assert "/ListeningLifecycle/attached" in model.members
     assert "/ListeningLifecycle/attached/behavior/initializing" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Listening" in model.members
-    assert "/ListeningLifecycle/attached/behavior/DetectingVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/ClassifyingSound" in model.members
-    assert "/ListeningLifecycle/attached/behavior/RoutingDetectedVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/DiarizingVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/DecodingSpeech" in model.members
-    assert "/ListeningLifecycle/attached/behavior/DecodingSpeech/Detected" in model.members
-    assert "/ListeningLifecycle/attached/behavior/DecodingSpeech/Diarized" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/Listening" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/Sensing" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/HandingOff" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/DetectingVoice" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/ClassifyingSound" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/RoutingDetectedVoice" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/DiarizingVoice" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech/Detected" in model.members
+    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech/Diarized" in model.members
     assert "/ListeningLifecycle/attached/behavior/detaching" in model.members
     assert "/ListeningLifecycle/attached/behavior/degraded" in model.members
     initializing_events = model.transition_map["/ListeningLifecycle/attached/behavior/initializing"]
     assert "bot.ability.attachment.terminal" in initializing_events
     assert "bot.ability.listening.children.attached" not in initializing_events
-    assert "environment.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Listening"]
+    assert "environment.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/Listening"]
     assert (
         "bot.ability.listening.voice_detection.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/DetectingVoice"]
+        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"]
     )
     assert (
         "bot.ability.listening.voice_diarization.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/DiarizingVoice"]
+        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DiarizingVoice"]
     )
     assert (
         "bot.ability.listening.speech_decoding.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/DecodingSpeech"]
+        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech"]
     )
 
 
@@ -514,7 +528,7 @@ def test_listening_skips_cognition_input_when_no_voice() -> None:
 
     assert handoffs == []
     assert decoder_calls == []
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_publishes_sound_cognition_input_when_sound_classifier_labels_nonvoice() -> None:
@@ -537,7 +551,7 @@ def test_listening_publishes_sound_cognition_input_when_sound_classifier_labels_
     assert len(classifier_calls) == 1
     assert classifier_calls[0].audio == b"alarm-tone"
     assert decoder_calls == []
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_skips_cognition_input_when_sound_classifier_finds_no_labels() -> None:
@@ -556,7 +570,7 @@ def test_listening_skips_cognition_input_when_sound_classifier_finds_no_labels()
     assert handoffs == []
     assert len(classifier_calls) == 1
     assert classifier_calls[0].audio == b"ambient"
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_kind_sound_classifier_labels_present_kind() -> None:
@@ -593,7 +607,146 @@ def test_listening_publishes_kind_labeled_nonvoice_sound() -> None:
     assert isinstance(stimulus.data, SoundData)
     assert stimulus.data.kind == "phone.ringing"
     assert stimulus.data.audio == b"ring-clip"
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
+
+
+MOUTH = "the-mouth-that-is-producing"
+
+
+async def start_producing(listening_ability: listening.Listening, *, duration: float = 1.0) -> None:
+    """Tell this perception that the body has just commanded its mouth, as the body would."""
+
+    await hsm.dispatch(
+        hsm.Context(),
+        listening_ability,
+        speaking.EfferenceEvent.with_data(
+            speaking.EfferenceData(mouth=MOUTH, duration=duration, media_type="audio/pcm", sample_rate_hz=16_000)
+        ),
+    )
+
+
+async def arrives_from(listening_ability: listening.Listening, sound_data: SoundData, *, source: str) -> None:
+    """Deliver a sound with the transducer that made it on the envelope, as the environment does."""
+
+    await hsm.dispatch(
+        hsm.Context(),
+        listening_ability,
+        dataclasses.replace(SoundEvent.with_data(sound_data), source=source),
+    )
+
+
+def own_production(audio: bytes, *, kind: str | None = None) -> SoundData:
+    """A sound with the levels a mouth 15 cm from its own ears produces: +16.5 dB of path gain."""
+
+    return SoundData(
+        audio=audio,
+        media_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+        kind=kind,
+        amplitude_db=60.0,
+        received_level_db=76.5,
+    )
+
+
+def test_listening_attenuates_a_labeled_nonvoice_sound_the_body_is_producing() -> None:
+    """The sound is classified and labeled in full; it just does not become a turn.
+
+    Attenuation lands at the handoff, not before it: the classifier still ran on the bot's own
+    noise, which is what makes this attenuation rather than deafness.
+    """
+
+    async def run() -> tuple[list[cognition.InputData], list[SoundData], str]:
+        classifier = FixedSoundClassifier(labels=("hum",))
+        listening_ability, _ = _listening(is_voice=False, decoder=False, sound_classifier=classifier)
+        await start_ability_tree(None, listening_ability)
+        calls = classifier.calls
+
+        await start_producing(listening_ability)
+        await arrives_from(listening_ability, own_production(b"own-hum"), source=MOUTH)
+        await wait_until(lambda: bool(calls))
+        await asyncio.sleep(0.05)
+        return listening_ability.handoffs, calls, listening_ability.state()
+
+    handoffs, calls, active_state = asyncio.run(run())
+
+    assert handoffs == []
+    assert [call.audio for call in calls] == [b"own-hum"]
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
+
+
+def test_listening_publishes_the_same_sound_once_the_body_has_stopped_producing() -> None:
+    """Same sound, same levels, same mouth — arriving after the command it belonged to."""
+
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening(
+            is_voice=False,
+            decoder=False,
+            sound_classifier=FixedSoundClassifier(labels=("hum",)),
+        )
+        await start_ability_tree(None, listening_ability)
+
+        await start_producing(listening_ability, duration=0.05)
+        await asyncio.sleep(0.2)
+        await arrives_from(listening_ability, own_production(b"own-hum"), source=MOUTH)
+        await wait_until(lambda: bool(listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    stimulus = _stimulus(handoffs[0])
+    assert isinstance(stimulus.data, SoundData)
+    assert stimulus.data.audio == b"own-hum"
+
+
+def test_the_product_threshold_is_the_one_place_a_level_becomes_a_yes_or_a_no() -> None:
+    """Every route through perception is compared once, here, against one injected number.
+
+    Nothing about this sound is predicted — nothing is being produced — so its full 76.5 dB
+    survives scoring, and it is the threshold alone that decides. That is the seam a second
+    contributor plugs into: reduce the perceived level and this comparison does the rest, with
+    no second threshold and no second opinion about what quiet means.
+    """
+
+    async def run() -> tuple[list[cognition.InputData], list[cognition.InputData]]:
+        deaf, _ = _listening(
+            is_voice=False,
+            decoder=False,
+            sound_classifier=FixedSoundClassifier(labels=("hum",)),
+            product_threshold_db=120.0,
+        )
+        await start_ability_tree(None, deaf)
+        await arrives_from(deaf, own_production(b"hum"), source=MOUTH)
+        await asyncio.sleep(0.05)
+        nothing = list(deaf.handoffs)
+
+        ordinary, _ = _listening(
+            is_voice=False,
+            decoder=False,
+            sound_classifier=FixedSoundClassifier(labels=("hum",)),
+        )
+        await start_ability_tree(None, ordinary)
+        await arrives_from(ordinary, own_production(b"hum"), source=MOUTH)
+        await wait_until(lambda: bool(ordinary.handoffs))
+        return nothing, list(ordinary.handoffs)
+
+    nothing, something = asyncio.run(run())
+
+    assert nothing == []
+    assert len(something) == 1
+
+
+def test_a_negative_product_threshold_is_refused() -> None:
+    try:
+        _ = listening.Listening(voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=True)))
+        _ = listening.Listening(
+            voice_detector=FixedVoiceDetector(voice.detection.OutputData(is_voice=True)),
+            product_threshold_db=-1.0,
+        )
+    except ValueError as error:
+        assert "product_threshold_db" in str(error)
+    else:
+        raise AssertionError("a negative product threshold must be refused.")
 
 
 def test_listening_publishes_sound_cognition_input_when_speech_decoding_is_absent() -> None:
@@ -612,7 +765,7 @@ def test_listening_publishes_sound_cognition_input_when_speech_decoding_is_absen
     assert stimulus.name == SoundEvent.name
     assert isinstance(stimulus.data, SoundData)
     assert stimulus.data.audio == b"voice"
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_publishes_sound_after_diarization_when_speech_decoding_is_absent() -> None:
@@ -633,7 +786,7 @@ def test_listening_publishes_sound_after_diarization_when_speech_decoding_is_abs
     assert isinstance(stimulus.data, SoundData)
     assert stimulus.data.audio == b"voice"
     assert diarizer_calls == [b"voice"]
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> None:
@@ -653,7 +806,7 @@ def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> 
     assert stimulus.name == speech.SpeechDecoding.output_event.name
     assert stimulus.data == b"decoded:voice"
     assert decoder_calls == [b"voice"]
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
@@ -688,9 +841,10 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
         await start_ability_tree(ctx, listening_ability)
         _ = await listening_ability.apply(sound(b"voice"), ctx=ctx)
         await wait_until(
-            lambda: listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
+            lambda: listening_ability.state()
+            == "/RecordingListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"
         )
-        assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/DetectingVoice"
+        assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"
 
         owner = ability_terminal_owner(listening_ability)
         assert owner is not None
@@ -730,7 +884,7 @@ def test_listening_dispatches_failure_when_detection_fails() -> None:
         listening.FailedEventData(stage="voice_detection", message="voice detector offline"),
     ]
     assert handoffs == []
-    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Listening"
+    assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
 
 def test_listening_failure_payload_reuses_ability_failure_message_shape() -> None:

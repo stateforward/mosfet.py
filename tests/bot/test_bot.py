@@ -3950,6 +3950,241 @@ def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
     assert from_near == 1
 
 
+MOUTH_OFFSET_M = 0.15
+"""How far a robot's mouth is from its own ears. Close enough that it is the loudest thing there."""
+
+
+class TimedUtteranceEncoder(encoding.Encoder[bytes, bytes]):
+    """A vocal tract that takes a realistic amount of time to say something.
+
+    Byte count is what a linear-PCM duration is measured from, so an utterance that is only its
+    own text would be a couple of milliseconds long — shorter than anything can be observed
+    happening during. The marker stays at the front so the audio is still traceable to the words.
+    """
+
+    def __init__(self, *, seconds: float, sample_rate_hz: int, channels: int = 1) -> None:
+        self._seconds = seconds
+        self._frame_bytes = sample_rate_hz * channels * 2
+
+    @typing.override
+    async def encode(self, input: bytes) -> bytes:
+        return (b"spoken:" + input).ljust(int(self._frame_bytes * self._seconds), b"\x00")
+
+
+async def a_bot_with_a_voice(
+    *,
+    utterance_seconds: float,
+) -> tuple[AbilityAgent, IgnoreAbility, RecordingListening, speaking.Speaking, Environment, audio.Speaker]:
+    """A robot standing at the origin with its own mouth 15 cm away, able to hear the room.
+
+    The whole loop is real: the mouth is a ``Speaker`` in the same environment the bot is placed
+    in, so the bot's own voice reaches its ears through ``Environment.broadcast`` exactly as
+    anybody else's would — which is the defect this wiring exists to expose.
+    """
+
+    sample_rate_hz = 16_000
+    mouth = audio.Speaker(
+        placement=space.Placement(position=space.Position(x=MOUTH_OFFSET_M, y=0.0)),
+        amplitude_db=60.0,
+    )
+    voice = speaking.Speaking(
+        encoder=TimedUtteranceEncoder(seconds=utterance_seconds, sample_rate_hz=sample_rate_hz),
+        speaker=mouth,
+        sample_rate_hz=sample_rate_hz,
+        channels=1,
+        media_type="audio/pcm",
+    )
+    ability = IgnoreAbility()
+    listening_ability = RecordingListening()
+    active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
+    environment = await start_bot_with_devices(
+        active_bot,
+        placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
+    )
+    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    ability.calls.clear()
+    return active_bot, ability, listening_ability, voice, environment, mouth
+
+
+async def own_voice_from_the_mouth(environment: Environment, mouth: audio.Speaker, audio_bytes: bytes) -> None:
+    """The bot's own voice reaching its ears again, later — an echo, a line, feedback.
+
+    Emitted from the mouth's position with the mouth's level, so the environment computes the
+    same arrival level it computed the first time. Only the timing is different.
+    """
+
+    await environment.broadcast(
+        dataclasses.replace(
+            SoundEvent.with_data(
+                SoundData(
+                    audio=audio_bytes,
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    amplitude_db=60.0,
+                )
+            ),
+            source=hsm.id(mouth),
+        ),
+        origin=space.Position(x=MOUTH_OFFSET_M, y=0.0),
+    )
+
+
+def test_perception_sees_the_copy_of_a_command_before_the_sound_it_predicts() -> None:
+    """The ordering the whole mechanism rests on, over the real chain rather than a stub.
+
+    The copy leaves ``Speaking``'s entry into playout and travels body → input abilities; the
+    sound leaves the playout activity and travels mouth → environment → body → input abilities.
+    The copy is dispatched strictly earlier in program order and the environment adds a hop, but
+    that is an argument about queue semantics, not a proof, and if the copy ever lost the race
+    the mechanism would fail silently for that utterance.
+
+    Two claims, because either alone is weak. Arrival order at perception is the invariant
+    itself. The attenuated outcome is its consequence, and it is the part that cannot be faked:
+    a sound scored before its copy arrived would carry its full 76.5 dB and become a turn.
+    Repeated, because a race that holds once proves less than a race that holds every time.
+    """
+
+    utterances = 20
+
+    async def run() -> tuple[list[list[str]], list[processing.InputData]]:
+        _, ability, listening_ability, voice, environment, mouth = await a_bot_with_a_voice(utterance_seconds=0.05)
+        mouth_id = hsm.id(mouth)
+        orders: list[list[str]] = []
+
+        for index in range(utterances):
+            listening_ability.received.clear()
+
+            def arrivals() -> list[str]:
+                seen: list[str] = []
+                for event in list(listening_ability.received):
+                    if isinstance(event.data, speaking.EfferenceData):
+                        seen.append("copy")
+                    elif isinstance(event.data, SoundData) and event.source == mouth_id:
+                        seen.append("sound")
+                return seen
+
+            _ = await voice.apply(speaking.InputData(text=f"Utterance {index}."), ctx=environment)
+            await wait_until(lambda: {"copy", "sound"} <= set(arrivals()), timeout=5.0)
+            orders.append(arrivals())
+            # Let the window close so each utterance is scored against its own copy.
+            await asyncio.sleep(0.15)
+
+        return orders, list(ability.calls)
+
+    orders, turns = asyncio.run(run())
+
+    assert len(orders) == utterances
+    assert all(order[:2] == ["copy", "sound"] for order in orders), orders
+    assert turns == []
+
+
+def test_a_bot_does_not_deliberate_its_own_utterance() -> None:
+    """The robot says something and its own voice comes straight back at 76.5 dB. No turn.
+
+    Nothing is filtered on the way in. The sound is broadcast, the bot is placed close enough to
+    hear it, it clears the 20 dB floor by a mile, and the whole pipeline runs on it — voice
+    detection and speech decoding both execute. What stops it becoming something the bot has to
+    answer is that the body told its own senses it was producing, and the arrival matched.
+    """
+
+    async def run() -> tuple[list[processing.InputData], list[bytes]]:
+        _, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.4)
+
+        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        # Well past playout, and past anything the pipeline could still be chewing on.
+        await asyncio.sleep(1.0)
+        assert listening_ability.speech_decoder is not None
+        return list(ability.calls), list(listening_ability.speech_decoder.calls)
+
+    turns, decoded = asyncio.run(run())
+
+    assert turns == []
+    # The bot did hear itself, all the way through speech decoding. It simply had nothing to
+    # deliberate about it, which is a very different thing from having been deafened.
+    assert len(decoded) == 1
+    assert decoded[0].startswith(b"spoken:Hello, this is Alice.")
+
+
+def test_a_bot_hears_its_own_voice_coming_back_late() -> None:
+    """The same audio, arriving after the utterance is over, is a turn.
+
+    This is the residual and it is the whole reason the window is bounded rather than the audio
+    being dropped. Own voice that took longer to come back than the command lasted is a delayed
+    line, an echo, or feedback — real information about the call, and a design that suppressed
+    own audio outright would throw it away.
+    """
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
+        _, ability, listening_ability, voice, environment, mouth = await a_bot_with_a_voice(utterance_seconds=0.2)
+
+        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        await asyncio.sleep(1.0)
+        during = list(ability.calls)
+
+        await own_voice_from_the_mouth(environment, mouth, b"spoken:Hello, this is Alice.")
+        await wait_until(lambda: bool(ability.calls), timeout=5.0)
+        return during, list(ability.calls)
+
+    during, after = asyncio.run(run())
+
+    assert during == []
+    assert len(after) == 1
+    stimulus = after[0].input
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == speech.SpeechDecoding.output_event.name
+    assert stimulus.data == b"decoded:spoken:Hello, this is Alice."
+
+
+def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
+    """The window is not a mute button, and a caller who interrupts still gets a turn.
+
+    Their voice arrives from a different mouth, at a level nothing about the bot's own
+    production predicts. Suppressing everything for the duration of an utterance would be a
+    scheduled deafness, which is exactly what this is not.
+    """
+
+    async def run() -> list[processing.InputData]:
+        _, ability, _, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.6)
+
+        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        # Mid-utterance: the mouth is still committed and the window is still open.
+        await asyncio.sleep(0.15)
+        _ = await somebody_speaks(environment, "Actually, wait.", position=space.Position(x=0.0, y=1.0))
+
+        await wait_until(lambda: bool(ability.calls), timeout=5.0)
+        await asyncio.sleep(0.6)
+        return list(ability.calls)
+
+    turns = asyncio.run(run())
+
+    stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
+    assert [stimulus.data for stimulus in stimuli] == [b"decoded:spoken:Actually, wait."]
+
+
+def test_the_body_fans_the_copy_of_its_own_command_to_its_senses() -> None:
+    """A nerve from mouth to ears, over the same fan-out the environment's own stimuli use.
+
+    Pins the route rather than the consequence: the copy reaches the input abilities, and the
+    body neither reads it nor decides anything with it.
+    """
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        _, _, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.2)
+
+        _ = await voice.apply(speaking.InputData(text="Hello."), ctx=environment)
+        await wait_until(
+            lambda: any(isinstance(event.data, speaking.EfferenceData) for event in listening_ability.received),
+            timeout=5.0,
+        )
+        return [event for event in listening_ability.received if isinstance(event.data, speaking.EfferenceData)]
+
+    copies = asyncio.run(run())
+
+    assert len(copies) == 1
+    assert copies[0].name == speaking.EfferenceEvent.name
+
+
 def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what() -> None:
     """Topology grants the occasion; it never grants the action.
 

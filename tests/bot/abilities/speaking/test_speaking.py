@@ -254,6 +254,161 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
     assert "bot.ability.speaking.input" in {event.name for event in inputs[0].schemas}
 
 
+class OwnerEar(hsm.Instance):
+    """Stands where the body stands: attaches to Speaking and records what it is told.
+
+    The efference copy goes to whatever owns this ability, which in a real bot is the body. Here
+    it is the only thing this test needs, so the recorded order is exactly the order the body
+    would see.
+    """
+
+    def __init__(self, seen: list[str]) -> None:
+        super().__init__()
+        self._seen = seen
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "OwnerEar", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        if isinstance(event.data, speaking.EfferenceData):
+            instance._seen.append("efference")
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "OwnerEar",
+        hsm.initial(hsm.target("owning")),
+        hsm.state("owning", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+    )
+
+
+class OrderingSoundListener(hsm.Instance):
+    """Environment participant that notes when the sound actually shows up in the room."""
+
+    def __init__(self, seen: list[str]) -> None:
+        super().__init__()
+        self._seen = seen
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "OrderingSoundListener", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        if isinstance(event.data, SoundData):
+            instance._seen.append("sound")
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "OrderingSoundListener",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
+    )
+
+
+async def _speak_with_owner(
+    *,
+    media_type: str = "audio/pcm",
+    audio_bytes: bytes = b"\x00" * 32_000,
+    speaker: audio.Speaker | None = None,
+) -> tuple[list[str], list[speaking.EfferenceData]]:
+    """Say one thing with a real mouth in a real environment; return what the owner saw."""
+
+    from bot.protocols import attachment
+
+    mouth = audio.Speaker() if speaker is None else speaker
+    speaking_ability = speaking.Speaking(
+        encoder=RecordingEncoder(audio=audio_bytes),
+        speaker=mouth,
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type=media_type,
+    )
+    environment = Environment()
+    order: list[str] = []
+    copies: list[speaking.EfferenceData] = []
+
+    owner = OwnerEar(order)
+    _ = await hsm.started(environment, owner, owner.model)
+    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    listener = OrderingSoundListener(order)
+    _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+    environment.join(listener)
+
+    _ = await hsm.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
+    _ = await speaking_ability.attach(
+        environment,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
+
+    original = owner.dispatch
+
+    def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> typing.Awaitable[None]:
+        if isinstance(event.data, speaking.EfferenceData):
+            copies.append(event.data)
+        return original(ctx, event)
+
+    owner.dispatch = capture  # type: ignore[method-assign]
+    try:
+        await speaking_ability.dispatch(
+            environment, speaking.InputEvent.with_data(speaking.InputData(text="Hello there."))
+        )
+        await _wait_until(lambda: "sound" in order)
+        await asyncio.sleep(0.02)
+    finally:
+        owner.dispatch = original  # type: ignore[method-assign]
+    return order, copies
+
+
+def test_the_copy_of_a_command_leaves_before_the_sound_does() -> None:
+    """An efference copy that arrived after the sound would be a report, not a prediction.
+
+    Issued on entry to playout: after the audio exists, strictly before it reaches the mouth.
+    Not at the request — synthesis takes seconds during which nothing is being produced — and
+    not at completion, which means the act was committed, not that the sound stopped.
+    """
+
+    order, copies = asyncio.run(_speak_with_owner())
+
+    assert order[:2] == ["efference", "sound"]
+    assert len(copies) == 1
+
+
+def test_the_copy_says_which_mouth_how_long_and_in_what_form_and_never_the_words() -> None:
+    """Words on the copy would make this self-recognition, which is the thing being avoided.
+
+    Duration is measured, not guessed: 32000 bytes of 16-bit mono at 16 kHz is one second of
+    sound, and that is how long the consequences of this command are expected to last.
+    """
+
+    async def run() -> tuple[audio.Speaker, list[speaking.EfferenceData]]:
+        mouth = audio.Speaker()
+        _, copies = await _speak_with_owner(speaker=mouth)
+        return mouth, copies
+
+    mouth, copies = asyncio.run(run())
+
+    assert len(copies) == 1
+    copy = copies[0]
+    assert copy.mouth == hsm.id(mouth)
+    assert copy.duration == 1.0
+    assert copy.media_type == "audio/pcm"
+    assert copy.sample_rate_hz == 16_000
+    assert copy.channels == 1
+    assert "Hello" not in copy.model_dump_json()
+
+
+def test_no_copy_is_issued_for_a_form_whose_byte_count_is_not_a_duration() -> None:
+    """A compressed buffer says nothing about time, and a made-up window is worse than none."""
+
+    order, copies = asyncio.run(_speak_with_owner(media_type="audio/opus"))
+
+    assert copies == []
+    assert "sound" in order
+
+
+def test_the_efference_event_is_never_offerable_to_a_model() -> None:
+    """A nerve, not a tool. Nothing decides to send one, so nothing may select one."""
+
+    assert speaking.EfferenceEvent.kind != processing.EventKind
+    # Contrast: the ability's one front door is offerable, which is what makes the difference
+    # between them a decision rather than an oversight.
+    assert speaking.InputEvent.kind == processing.EventKind
+
+
 def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
     """Acquire once, release on stop.
 

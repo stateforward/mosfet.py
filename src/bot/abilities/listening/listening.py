@@ -1,8 +1,11 @@
+from . import sensitivity
 from .. import ability
+from .. import speaking
 from ..hearing import sound
 from ..hearing import speech
 from ..hearing import voice
 
+import asyncio
 import dataclasses
 import typing
 import uuid
@@ -15,6 +18,14 @@ import pydantic
 from bot.abilities import cognition
 from bot.telemetry import observer
 from bot.environment import SoundData, SoundEvent
+
+_DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
+"""How loud what is left of an arrival must be, in dB, to be worth handing on.
+
+Three decibels is a doubling of acoustic intensity — the smallest level difference conventionally
+treated as a real one rather than as measurement slop. This is the single place a level becomes a
+yes or a no, and every contributor that reduces a perceived level is compared against it here.
+"""
 
 ListeningStage: typing.TypeAlias = typing.Literal[
     "voice_detection",
@@ -60,7 +71,7 @@ class _VoiceDetectionCompletedEventData(pydantic.BaseModel):
         val_json_bytes="base64",
     )
 
-    sound: SoundData
+    sensed: sensitivity.OutputData
     voice_detection: voice.detection.OutputData
 
 
@@ -73,7 +84,7 @@ class _VoiceDiarizationCompletedEventData(pydantic.BaseModel):
         val_json_bytes="base64",
     )
 
-    sound: SoundData
+    sensed: sensitivity.OutputData
     voice_detection: voice.detection.OutputData
     diarization: voice.diarization.OutputData
 
@@ -87,7 +98,7 @@ class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
         val_json_bytes="base64",
     )
 
-    sound: SoundData
+    sensed: sensitivity.OutputData
     voice_detection: voice.detection.OutputData
     speech: bytes
     diarization: voice.diarization.OutputData | None = None
@@ -102,7 +113,7 @@ class _SoundClassificationCompletedEventData(pydantic.BaseModel):
         val_json_bytes="base64",
     )
 
-    sound: SoundData
+    sensed: sensitivity.OutputData
     voice_detection: voice.detection.OutputData
     classification: "sound.classification.OutputData"
 
@@ -110,6 +121,11 @@ class _SoundClassificationCompletedEventData(pydantic.BaseModel):
 ListeningFailedEvent = hsm.Event[FailedEventData](
     name="bot.ability.listening.failed",
     schema=FailedEventData,
+)
+_SensitivityCompletedEvent = hsm.Event[sensitivity.OutputData](
+    name="bot.ability.listening.sensitivity.completed",
+    kind=hsm.CompletionEventKind,
+    schema=sensitivity.OutputData,
 )
 _VoiceDetectionCompletedEvent = hsm.Event[_VoiceDetectionCompletedEventData](
     name="bot.ability.listening.voice_detection.completed",
@@ -138,9 +154,11 @@ _ListeningStageFailedEvent = hsm.Event[FailedEventData](
 )
 
 
-def _listening_sound(event: hsm.Event[typing.Any]) -> SoundData | None:
+def _listening_sensed(event: hsm.Event[typing.Any]) -> sensitivity.OutputData | None:
+    """The scored sound carried anywhere along the private completion chain."""
+
     data = event.data
-    if isinstance(data, SoundData):
+    if isinstance(data, sensitivity.OutputData):
         return data
     if isinstance(
         data,
@@ -149,7 +167,7 @@ def _listening_sound(event: hsm.Event[typing.Any]) -> SoundData | None:
         | _VoiceDiarizationCompletedEventData
         | _SpeechDecodingCompletedEventData,
     ):
-        return data.sound
+        return data.sensed
     return None
 
 
@@ -221,39 +239,32 @@ def _dispatch_stage_failure(
     )
 
 
-def _dispatch_sound_cognition_input(
+def _dispatch_product_cognition_input(
     ctx: hsm.Context,
     instance: "Listening",
     event: hsm.Event[typing.Any],
 ) -> None:
-    """Hand off the original sound when speech decoding did not produce a transcript."""
+    """Hand off whatever product this pipeline arrived at, whichever route it came by.
 
-    sound = _listening_sound(event)
-    if sound is None:
-        raise AssertionError("listening sound cognition handoff requires sound on the event chain.")
-    _dispatch_listening_cognition_input(ctx, instance, event, SoundEvent.with_data(sound))
-
-
-def _dispatch_speech_cognition_input(
-    ctx: hsm.Context,
-    instance: "Listening",
-    event: hsm.Event[typing.Any],
-) -> None:
-    """Hand off speech-decoding product bytes (typically UTF-8 transcript after STT).
-
-    Speech decoding must succeed before this terminal fires. When Conversation is
-    Bot-acquired, Bot bridges this product into a Conversation Message (``text_turn`` for
-    TextConversation, ``voice_turn`` for VoiceConversation with acoustic payload).
+    Speech-decoding product bytes (typically a UTF-8 transcript after STT) when there is a
+    transcript, the original sound otherwise. When Conversation is Bot-acquired, Bot bridges a
+    speech product into a Conversation Message (``text_turn`` for TextConversation,
+    ``voice_turn`` for VoiceConversation with acoustic payload).
     """
 
     completion = event.data
-    assert isinstance(completion, _SpeechDecodingCompletedEventData)
-    _dispatch_listening_cognition_input(
-        ctx,
-        instance,
-        event,
-        speech.SpeechDecoding.output_event.with_data(completion.speech),
-    )
+    if isinstance(completion, _SpeechDecodingCompletedEventData):
+        _dispatch_listening_cognition_input(
+            ctx,
+            instance,
+            event,
+            speech.SpeechDecoding.output_event.with_data(completion.speech),
+        )
+        return
+    sensed = _listening_sensed(event)
+    if sensed is None:
+        raise AssertionError("listening cognition handoff requires sound on the event chain.")
+    _dispatch_listening_cognition_input(ctx, instance, event, SoundEvent.with_data(sensed.sound))
 
 
 def _dispatch_listening_failure(
@@ -268,7 +279,17 @@ def _dispatch_listening_failure(
 
 def _has_listening_input(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return _listening_sound(event) is not None
+    return isinstance(event.data, SoundData)
+
+
+def _has_sensed_sound(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+    del ctx, instance
+    return isinstance(event.data, sensitivity.OutputData)
+
+
+def _has_efference_copy(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+    del ctx, instance
+    return isinstance(event.data, speaking.EfferenceData)
 
 
 def _has_detected_voice(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
@@ -324,6 +345,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     output_event: typing.ClassVar[hsm.Event[cognition.InputData]] = cognition.InputEvent
     failed_event: typing.ClassVar[hsm.Event[FailedEventData]] = ListeningFailedEvent
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
+    _product_threshold_db: float
+    _sensitivity: sensitivity.Sensitivity
     _voice_detection: voice.detection.VoiceDetection
     _sound_classification: sound.classification.SoundClassification | None
     _speech_decoding: speech.SpeechDecoding | None
@@ -337,8 +360,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+        product_threshold_db: float = _DEFAULT_PRODUCT_THRESHOLD_DB,
     ) -> None:
         super().__init__()
+        if product_threshold_db < 0.0:
+            raise ValueError("product_threshold_db must not be negative.")
+        self._product_threshold_db = product_threshold_db
+        self._sensitivity = sensitivity.Sensitivity()
         self._voice_detection = voice.detection.VoiceDetection(classifier=voice_detector)
         self._sound_classification = (
             sound.classification.SoundClassification(classifier=sound_classifier)
@@ -349,7 +377,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         self._voice_diarization = (
             voice.diarization.VoiceDiarization(classifier=voice_diarizer) if voice_diarizer is not None else None
         )
-        children: list[hsm.Instance] = [self._voice_detection]
+        children: list[hsm.Instance] = [self._sensitivity, self._voice_detection]
         if self._sound_classification is not None:
             children.append(self._sound_classification)
         if self._voice_diarization is not None:
@@ -359,13 +387,81 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         self._attachment_group = attachment.Group(*children)
 
     @staticmethod
+    def _forward_efference_copy(
+        ctx: hsm.Context,
+        instance: "Listening",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Carry the mouth's report to the stage that holds the body's prediction.
+
+        Wiring an effector's copy to the sensors is a nerve, not a judgment: nothing here reads
+        the payload, ranks it, or decides anything about it.
+        """
+
+        target = instance._sensitivity
+        _ = hsm.dispatch(
+            ctx,
+            target,
+            dataclasses.replace(event, target=hsm.id(target), metadata=dict(event.metadata)),
+        )
+
+    @staticmethod
+    async def _run_sensitivity(
+        ctx: hsm.Context,
+        instance: "Listening",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Score an arriving sound against whatever the body predicts about it right now."""
+
+        sound = event.data
+        assert isinstance(sound, SoundData)
+        operation_id = event.id if event.id else uuid.uuid4().hex
+        stage = instance._sensitivity
+        waiter: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+        stage.register_terminal_waiter(operation_id, waiter)
+        try:
+            # Dispatched by hand rather than through the shared child-terminal helper for one
+            # reason: that helper stamps the envelope source with whoever asked, and here the
+            # source is which transducer made the sound. That is the field the body's own
+            # command is correlated against, and overwriting it with "Listening asked" would
+            # leave nothing to correlate.
+            await hsm.dispatch(
+                ctx,
+                stage,
+                dataclasses.replace(
+                    stage.input_event.with_data_and_id(sound, operation_id),
+                    source=event.source,
+                    target=hsm.id(stage),
+                    metadata=dict(event.metadata),
+                ),
+            )
+            terminal = await waiter
+        except asyncio.CancelledError:
+            if not waiter.done():
+                _ = waiter.cancel()
+            raise
+        finally:
+            stage.clear_terminal_waiter(operation_id)
+        sensed = terminal.data
+        if not isinstance(sensed, sensitivity.OutputData):
+            raise AssertionError("listening sensitivity must always return a scored sound.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _listening_event_with_context(
+                _SensitivityCompletedEvent.with_data(sensed),
+                dataclasses.replace(event, id=operation_id),
+            ),
+        )
+
+    @staticmethod
     async def _run_voice_detection(
         ctx: hsm.Context,
         instance: "Listening",
         event: hsm.Event[typing.Any],
     ) -> None:
-        sound = _listening_sound(event)
-        if sound is None:
+        sensed = _listening_sensed(event)
+        if sensed is None:
             _dispatch_stage_failure(
                 ctx,
                 instance,
@@ -375,7 +471,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         try:
-            voice_detection = await instance._voice_detection.classifier.classify(sound.audio)
+            voice_detection = await instance._voice_detection.classifier.classify(sensed.sound.audio)
         except Exception as error:
             _dispatch_stage_failure(
                 ctx,
@@ -385,7 +481,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 message=str(error),
             )
             return
-        completion = _VoiceDetectionCompletedEventData(sound=sound, voice_detection=voice_detection)
+        completion = _VoiceDetectionCompletedEventData(sensed=sensed, voice_detection=voice_detection)
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -421,7 +517,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         try:
             # Pass full SoundData so kind/media provenance is available to classifiers
             # (e.g. KindSoundClassifier labels from sound.kind without probing codecs).
-            classification = await sound_classification.classifier.classify(detection.sound)
+            classification = await sound_classification.classifier.classify(detection.sensed.sound)
         except Exception as error:
             _dispatch_stage_failure(
                 ctx,
@@ -432,7 +528,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         completion = _SoundClassificationCompletedEventData(
-            sound=detection.sound,
+            sensed=detection.sensed,
             voice_detection=detection.voice_detection,
             classification=classification,
         )
@@ -469,7 +565,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         try:
-            diarization = await voice_diarization.classifier.classify(detection.sound.audio)
+            diarization = await voice_diarization.classifier.classify(detection.sensed.sound.audio)
         except Exception as error:
             _dispatch_stage_failure(
                 ctx,
@@ -480,7 +576,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         completion = _VoiceDiarizationCompletedEventData(
-            sound=detection.sound,
+            sensed=detection.sensed,
             voice_detection=detection.voice_detection,
             diarization=diarization,
         )
@@ -510,7 +606,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             ctx,
             instance,
             event,
-            sound=detection.sound,
+            sensed=detection.sensed,
             voice_detection=detection.voice_detection,
             diarization=None,
         )
@@ -535,7 +631,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             ctx,
             instance,
             event,
-            sound=diarization.sound,
+            sensed=diarization.sensed,
             voice_detection=diarization.voice_detection,
             diarization=diarization.diarization,
         )
@@ -546,7 +642,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         instance: "Listening",
         event: hsm.Event[typing.Any],
         *,
-        sound: SoundData,
+        sensed: sensitivity.OutputData,
         voice_detection: voice.detection.OutputData,
         diarization: voice.diarization.OutputData | None,
     ) -> None:
@@ -561,7 +657,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         try:
-            speech = await speech_decoding.decoder.decode(sound.audio)
+            speech = await speech_decoding.decoder.decode(sensed.sound.audio)
         except Exception as error:
             _dispatch_stage_failure(
                 ctx,
@@ -572,7 +668,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
             return
         completion = _SpeechDecodingCompletedEventData(
-            sound=sound,
+            sensed=sensed,
             voice_detection=voice_detection,
             speech=speech,
             diarization=diarization,
@@ -602,6 +698,25 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         """No voice with a sound classifier: try non-speech acoustic labeling."""
 
         return _has_detected_no_voice(ctx, instance, event) and instance._sound_classification is not None
+
+    @staticmethod
+    def _is_audible_product(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+        """The one comparison: is enough of this left, after everything predicting it, for a turn?
+
+        Made once, here, at the end of the pipeline and nowhere earlier — voice detection,
+        diarization, and speech decoding all run on the bot's own voice and the transcript is
+        produced. The only thing that changes is whether any of it becomes something for the bot
+        to judge, which is what it means for a sound to be quiet rather than absent.
+
+        A perceived level of ``None`` means nothing could be measured, and an arrival that cannot
+        be shown to be quiet is heard.
+        """
+
+        del ctx
+        sensed = _listening_sensed(event)
+        if sensed is None or sensed.perceived_level_db is None:
+            return True
+        return sensed.perceived_level_db >= instance._product_threshold_db
 
     @staticmethod
     def _has_voice_diarization_ability(
@@ -648,126 +763,164 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_attach_complete),
                 hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
-                hsm.target("/Listening/Listening"),
+                hsm.target("/Listening/Perceiving"),
             ),
         ),
+        # Everything perception does lives under one roof so that the body's report of what it is
+        # producing reaches the prediction from wherever the pipeline happens to be — a mouth
+        # does not wait for the ears to be free. This is an internal transition: the report
+        # modulates perception, it does not interrupt it.
         hsm.state(
-            "Listening",
+            "Perceiving",
+            hsm.initial(hsm.target("/Listening/Perceiving/Listening")),
             hsm.transition(
-                hsm.on(input_event),
-                hsm.guard(_has_listening_input),
-                hsm.target("/Listening/DetectingVoice"),
-            ),
-        ),
-        hsm.state(
-            "DetectingVoice",
-            hsm.defer(input_event),
-            hsm.activity(_run_voice_detection),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_no_voice_without_sound_classification),
-                hsm.target("/Listening/Listening"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_no_voice_with_sound_classification),
-                hsm.target("/Listening/ClassifyingSound"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_voice),
-                hsm.target("/Listening/RoutingDetectedVoice"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Listening/Listening"),
-            ),
-        ),
-        hsm.state(
-            "ClassifyingSound",
-            hsm.defer(input_event),
-            hsm.activity(_run_sound_classification),
-            hsm.transition(
-                hsm.on(_SoundClassificationCompletedEvent),
-                hsm.guard(_has_labeled_sound),
-                hsm.effect(_dispatch_sound_cognition_input),
-                hsm.target("/Listening/Listening"),
-            ),
-            hsm.transition(
-                hsm.on(_SoundClassificationCompletedEvent),
-                hsm.guard(_has_unlabeled_sound),
-                hsm.target("/Listening/Listening"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Listening/Listening"),
-            ),
-        ),
-        hsm.choice(
-            "RoutingDetectedVoice",
-            hsm.transition(
-                hsm.guard(_has_voice_diarization_ability),
-                hsm.target("/Listening/DiarizingVoice"),
-            ),
-            hsm.transition(
-                hsm.guard(_has_speech_decoding_ability),
-                hsm.target("/Listening/DecodingSpeech/Detected"),
-            ),
-            hsm.transition(
-                hsm.effect(_dispatch_sound_cognition_input),
-                hsm.target("/Listening/Listening"),
-            ),
-        ),
-        hsm.state(
-            "DiarizingVoice",
-            hsm.defer(input_event),
-            hsm.activity(_run_voice_diarization),
-            hsm.transition(
-                hsm.on(_VoiceDiarizationCompletedEvent),
-                hsm.guard(_has_voice_diarization_completion_and_speech_decoding),
-                hsm.target("/Listening/DecodingSpeech/Diarized"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDiarizationCompletedEvent),
-                hsm.guard(_has_voice_diarization_completion_without_speech_decoding),
-                hsm.effect(_dispatch_sound_cognition_input),
-                hsm.target("/Listening/Listening"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Listening/Listening"),
-            ),
-        ),
-        hsm.state(
-            "DecodingSpeech",
-            hsm.initial(hsm.target("/Listening/DecodingSpeech/Detected")),
-            hsm.transition(
-                hsm.on(_SpeechDecodingCompletedEvent),
-                hsm.guard(_has_speech_decoding_completion),
-                hsm.effect(_dispatch_speech_cognition_input),
-                hsm.target("/Listening/Listening"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Listening/Listening"),
+                hsm.on(speaking.EfferenceEvent),
+                hsm.guard(_has_efference_copy),
+                hsm.effect(_forward_efference_copy),
             ),
             hsm.state(
-                "Detected",
+                "Listening",
+                hsm.transition(
+                    hsm.on(input_event),
+                    hsm.guard(_has_listening_input),
+                    hsm.target("/Listening/Perceiving/Sensing"),
+                ),
+            ),
+            # First stage, before anything is interpreted: what does the body already know
+            # about this arrival? It goes first because interpretation takes time and the
+            # prediction is about a moment — scoring after a decoder had run would be scoring
+            # against a window that had moved on.
+            hsm.state(
+                "Sensing",
                 hsm.defer(input_event),
-                hsm.activity(_run_detected_speech_decoding),
+                hsm.activity(_run_sensitivity),
+                hsm.transition(
+                    hsm.on(_SensitivityCompletedEvent),
+                    hsm.guard(_has_sensed_sound),
+                    hsm.target("/Listening/Perceiving/DetectingVoice"),
+                ),
             ),
             hsm.state(
-                "Diarized",
+                "DetectingVoice",
                 hsm.defer(input_event),
-                hsm.activity(_run_diarized_speech_decoding),
+                hsm.activity(_run_voice_detection),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice_without_sound_classification),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice_with_sound_classification),
+                    hsm.target("/Listening/Perceiving/ClassifyingSound"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_voice),
+                    hsm.target("/Listening/Perceiving/RoutingDetectedVoice"),
+                ),
+                hsm.transition(
+                    hsm.on(_ListeningStageFailedEvent),
+                    hsm.guard(_has_listening_stage_failure),
+                    hsm.effect(_dispatch_listening_failure),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+            ),
+            hsm.state(
+                "ClassifyingSound",
+                hsm.defer(input_event),
+                hsm.activity(_run_sound_classification),
+                hsm.transition(
+                    hsm.on(_SoundClassificationCompletedEvent),
+                    hsm.guard(_has_labeled_sound),
+                    hsm.target("/Listening/Perceiving/HandingOff"),
+                ),
+                hsm.transition(
+                    hsm.on(_SoundClassificationCompletedEvent),
+                    hsm.guard(_has_unlabeled_sound),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+                hsm.transition(
+                    hsm.on(_ListeningStageFailedEvent),
+                    hsm.guard(_has_listening_stage_failure),
+                    hsm.effect(_dispatch_listening_failure),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+            ),
+            hsm.choice(
+                "RoutingDetectedVoice",
+                hsm.transition(
+                    hsm.guard(_has_voice_diarization_ability),
+                    hsm.target("/Listening/Perceiving/DiarizingVoice"),
+                ),
+                hsm.transition(
+                    hsm.guard(_has_speech_decoding_ability),
+                    hsm.target("/Listening/Perceiving/DecodingSpeech/Detected"),
+                ),
+                hsm.transition(
+                    hsm.target("/Listening/Perceiving/HandingOff"),
+                ),
+            ),
+            # Every route through perception ends here, and this is the only place a level
+            # becomes a yes or a no. One comparison, whatever produced the product and whatever
+            # reduced its level on the way — which is what keeps a second contributor from
+            # needing a second threshold, or a second opinion about what quiet means.
+            hsm.choice(
+                "HandingOff",
+                hsm.transition(
+                    hsm.guard(_is_audible_product),
+                    hsm.effect(_dispatch_product_cognition_input),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+                hsm.transition(
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+            ),
+            hsm.state(
+                "DiarizingVoice",
+                hsm.defer(input_event),
+                hsm.activity(_run_voice_diarization),
+                hsm.transition(
+                    hsm.on(_VoiceDiarizationCompletedEvent),
+                    hsm.guard(_has_voice_diarization_completion_and_speech_decoding),
+                    hsm.target("/Listening/Perceiving/DecodingSpeech/Diarized"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDiarizationCompletedEvent),
+                    hsm.guard(_has_voice_diarization_completion_without_speech_decoding),
+                    hsm.target("/Listening/Perceiving/HandingOff"),
+                ),
+                hsm.transition(
+                    hsm.on(_ListeningStageFailedEvent),
+                    hsm.guard(_has_listening_stage_failure),
+                    hsm.effect(_dispatch_listening_failure),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+            ),
+            hsm.state(
+                "DecodingSpeech",
+                hsm.initial(hsm.target("/Listening/Perceiving/DecodingSpeech/Detected")),
+                hsm.transition(
+                    hsm.on(_SpeechDecodingCompletedEvent),
+                    hsm.guard(_has_speech_decoding_completion),
+                    hsm.target("/Listening/Perceiving/HandingOff"),
+                ),
+                hsm.transition(
+                    hsm.on(_ListeningStageFailedEvent),
+                    hsm.guard(_has_listening_stage_failure),
+                    hsm.effect(_dispatch_listening_failure),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+                hsm.state(
+                    "Detected",
+                    hsm.defer(input_event),
+                    hsm.activity(_run_detected_speech_decoding),
+                ),
+                hsm.state(
+                    "Diarized",
+                    hsm.defer(input_event),
+                    hsm.activity(_run_diarized_speech_decoding),
+                ),
             ),
         ),
         hsm.state(
@@ -784,7 +937,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_detach_failed),
                 hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
-                hsm.target("/Listening/Listening"),
+                hsm.target("/Listening/Perceiving"),
             ),
         ),
         hsm.state("degraded"),

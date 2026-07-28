@@ -1,6 +1,7 @@
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import processing
+from bot.abilities import speaking
 from bot.abilities.hearing import speech
 
 import abc
@@ -1476,6 +1477,14 @@ class Bot(hsm.Instance, abc.ABC):
             # Explicit environment input events fan out in parallel to input abilities (never cognition).
             hsm.transition(
                 hsm.on(SoundEvent, VisualEvent),
+                hsm.effect(_fan_out_input),
+            ),
+            # A copy of what an effector was told to do, going to the senses. Guardless like its
+            # neighbour and over the same fan-out, because that is all it is: a nerve running
+            # from mouth to ears. The body does not read it, rank it, or decide anything with
+            # it — what it means for perception is perception's, and nothing here can tell.
+            hsm.transition(
+                hsm.on(speaking.EfferenceEvent),
                 hsm.effect(_fan_out_input),
             ),
             hsm.transition(

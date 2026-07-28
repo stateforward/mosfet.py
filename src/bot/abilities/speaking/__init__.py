@@ -1,6 +1,8 @@
 """Bot output ability: speak text through TTS encoding and a speaker device."""
 
 from .speaking import (
+    EfferenceData,
+    EfferenceEvent,
     InputData,
     InputEvent,
     OutputData,
@@ -9,6 +11,8 @@ from .speaking import (
 )
 
 __all__ = [
+    "EfferenceData",
+    "EfferenceEvent",
     "InputData",
     "InputEvent",
     "OutputData",
