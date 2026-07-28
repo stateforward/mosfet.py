@@ -88,6 +88,18 @@ class SoundData(pydantic.BaseModel):
         ),
         examples=[60.0, 25.0],
     )
+    received_level_db: float | None = pydantic.Field(
+        default=None,
+        description=(
+            "Optional loudness of this sound in dB SPL where the recipient of this event is, "
+            "which is a different quantity from amplitude_db: the same shout is one level at the "
+            "mouth and another at the far side of the room. The environment fills this in per "
+            "recipient, so an emitter never sets it. None means the environment had nothing to "
+            "measure — the sound carried no amplitude, or nobody said where it or the listener "
+            "was — not that the sound was silent."
+        ),
+        examples=[54.0, 6.0],
+    )
 
 
 class VisualData(pydantic.BaseModel):

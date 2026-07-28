@@ -245,10 +245,14 @@ class SoundRecorder(hsm.Instance):
     """Environment citizen that records the ``environment.sound`` stimuli that actually reach it."""
 
     heard: list[tuple[bytes, str | None]]
+    levels: list[float | None]
+    received: list[SoundData]
 
     def __init__(self) -> None:
         super().__init__()
         self.heard = []
+        self.levels = []
+        self.received = []
 
     @staticmethod
     def _record(ctx: hsm.Context, instance: "SoundRecorder", event: hsm.Event[typing.Any]) -> None:
@@ -256,6 +260,8 @@ class SoundRecorder(hsm.Instance):
         data = event.data
         if isinstance(data, SoundData):
             instance.heard.append((bytes(data.audio), event.target))
+            instance.levels.append(data.received_level_db)
+            instance.received.append(data)
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "SoundRecorder",
@@ -372,6 +378,132 @@ def test_environment_broadcast_short_circuits_when_attenuation_silences_everyone
     assert far_heard == []
     # Never joined, so it must not hear anything either way.
     assert bystander_heard == []
+
+
+def test_environment_broadcast_stamps_the_level_each_participant_receives() -> None:
+    """The same sound arrives at two listeners at two different levels, and each is told which.
+
+    ``amplitude_db`` is a property of the sound at its source and is the same for both;
+    ``received_level_db`` is a property of the sound *here* and is what a listener can act on.
+    """
+
+    async def run() -> tuple[list[float | None], list[float | None]]:
+        environment = Environment()
+        near = SoundRecorder()
+        far = SoundRecorder()
+
+        _ = await hsm.started(environment, near, near.model, hsm.Config(id="near"))
+        _ = await hsm.started(environment, far, far.model, hsm.Config(id="far"))
+        environment.join(near, placement=space.Placement(position=space.Position(x=1.0, y=0.0), threshold_db=0.0))
+        environment.join(far, placement=space.Placement(position=space.Position(x=10.0, y=0.0), threshold_db=0.0))
+
+        await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
+
+        return near.levels, far.levels
+
+    near_levels, far_levels = asyncio.run(run())
+
+    assert near_levels == [pytest.approx(60.0)]
+    assert far_levels == [pytest.approx(space.received_level_db(60.0, 10.0))]
+    assert far_levels[0] != near_levels[0]
+
+
+def test_environment_broadcast_leaves_the_source_amplitude_alone() -> None:
+    """Received level is a second quantity, never a rewrite of the first."""
+
+    async def run() -> list[float | None]:
+        environment = Environment()
+        listener = SoundRecorder()
+        amplitudes: list[float | None] = []
+
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        environment.join(listener, placement=space.Placement(position=space.Position(x=10.0, y=0.0), threshold_db=0.0))
+
+        original = _sound(60.0)
+        await environment.broadcast(original, origin=space.Position(x=0.0, y=0.0))
+
+        data = original.data
+        assert isinstance(data, SoundData)
+        amplitudes.append(data.amplitude_db)
+        return amplitudes
+
+    assert asyncio.run(run()) == [60.0]
+
+
+def test_environment_broadcast_leaves_the_level_unstamped_without_geometry() -> None:
+    """Geometry is opt-in, so an unplaced listener is told nothing about level rather than zero."""
+
+    async def run() -> tuple[list[float | None], list[float | None]]:
+        environment = Environment()
+        unplaced = SoundRecorder()
+        placed = SoundRecorder()
+
+        _ = await hsm.started(environment, unplaced, unplaced.model, hsm.Config(id="unplaced"))
+        _ = await hsm.started(environment, placed, placed.model, hsm.Config(id="placed"))
+        environment.join(unplaced)
+        environment.join(placed, placement=space.Placement(position=space.Position(x=1.0, y=0.0)))
+
+        # Placed, but the emitter never said how loud it was.
+        await environment.broadcast(_sound(None), origin=space.Position(x=0.0, y=0.0))
+        # Loud, but the emitter never said where it was.
+        await environment.broadcast(_sound(60.0))
+
+        return unplaced.levels, placed.levels
+
+    unplaced_levels, placed_levels = asyncio.run(run())
+
+    assert unplaced_levels == [None, None]
+    assert placed_levels == [None, None]
+
+
+def test_environment_broadcast_stamps_a_participant_without_a_threshold() -> None:
+    """Hearing everything is not the same as knowing nothing: level is still measured."""
+
+    async def run() -> list[float | None]:
+        environment = Environment()
+        listener = SoundRecorder()
+
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        environment.join(listener, placement=space.Placement(position=space.Position(x=10.0, y=0.0)))
+
+        await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
+
+        return listener.levels
+
+    assert asyncio.run(run()) == [pytest.approx(space.received_level_db(60.0, 10.0))]
+
+
+class ElevatedSoundData(SoundData):
+    """A domain elevation of a sound, standing in for the phone's ring stimulus."""
+
+    caller: str
+
+
+def test_environment_broadcast_stamps_a_domain_elevation_without_flattening_it() -> None:
+    """Stamping the level must not cost a listener the domain fields it was going to read."""
+
+    async def run() -> tuple[list[float | None], list[str]]:
+        environment = Environment()
+        listener = SoundRecorder()
+        callers: list[str] = []
+
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        environment.join(listener, placement=space.Placement(position=space.Position(x=2.0, y=0.0)))
+
+        elevated = SoundEvent.with_data(
+            ElevatedSoundData(audio=b"ring", kind="phone.ringing", amplitude_db=70.0, caller="+15551234567")
+        )
+        await environment.broadcast(elevated, origin=space.Position(x=0.0, y=0.0))
+
+        for data in listener.received:
+            assert isinstance(data, ElevatedSoundData)
+            callers.append(data.caller)
+        return listener.levels, callers
+
+    levels, callers = asyncio.run(run())
+
+    assert levels == [pytest.approx(space.received_level_db(70.0, 2.0))]
+    assert callers == ["+15551234567"]
 
 
 def test_environment_join_rejects_a_conflicting_placement() -> None:

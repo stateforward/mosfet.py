@@ -1,5 +1,6 @@
 import asyncio
 import collections.abc
+import dataclasses
 import typing
 import weakref
 
@@ -116,29 +117,29 @@ class Environment(hsm.Context):
             if participant is instance:
                 del self._participants[identifier]
 
-    def _audible(
+    def _reception(
         self,
         participant: hsm.Instance,
-        event: hsm.Event[typing.Any],
+        amplitude_db: float | None,
         origin: space.Position | None,
-    ) -> bool:
-        """Whether this stimulus still clears ``participant``'s threshold where it stands.
+    ) -> tuple[bool, float | None]:
+        """Whether this stimulus still clears ``participant``'s threshold, and how loud it arrives.
 
-        True whenever any of the three inputs is missing — the emitter did not say where it was,
-        or how loud, or the citizen never said where it is or how quiet it can hear. Geometry is
-        opt-in on all three counts.
+        The level is the quantity this whole model is for, so it is returned rather than reduced
+        to the boolean and thrown away: a citizen is told how loud the sound was where it stands.
+
+        A level of ``None`` means there was nothing to measure — the emitter did not say how loud
+        it was, or where it was, or the citizen never said where it is. Geometry is opt-in on all
+        three counts, and a citizen with nothing to measure hears the stimulus.
         """
 
-        if origin is None:
-            return True
-        data = event.data
-        amplitude_db = data.amplitude_db if isinstance(data, events.SoundData) else None
-        if amplitude_db is None:
-            return True
         placement = self._placements.get(participant)
-        if placement is None or placement.threshold_db is None:
-            return True
-        return space.received_level_db(amplitude_db, origin.distance_to(placement.position)) >= placement.threshold_db
+        if amplitude_db is None or origin is None or placement is None:
+            return True, None
+        level_db = space.received_level_db(amplitude_db, origin.distance_to(placement.position))
+        if placement.threshold_db is None:
+            return True, level_db
+        return level_db >= placement.threshold_db, level_db
 
     def broadcast(
         self,
@@ -152,25 +153,50 @@ class Environment(hsm.Context):
         because how far a sound carries is a property of the space, not of the emitter — which is
         also why the emitter is a parameter here rather than something read off ``event.source``.
 
+        Delivery is per recipient because the stimulus is not the same event for each of them: two
+        citizens standing at two distances hear one sound at two levels, and each is handed the
+        level it hears. ``amplitude_db`` is left exactly as the emitter set it.
+
         ``hsm.dispatch_to`` with no ids means "every instance in scope", so an empty recipient
         list short-circuits instead of degrading into an addressing-plane broadcast.
         """
 
+        data = event.data
+        sound = data if isinstance(data, events.SoundData) else None
+        amplitude_db = None if sound is None else sound.amplitude_db
         # Narrowing runs BEFORE the guard, and the guard runs on the narrowed list. The POSITION
         # of this guard is load-bearing, not just its presence: a filter that removes everyone
         # would otherwise hand dispatch_to an empty id list, which means "deliver to every
         # instance in scope" — the defect the guard exists to prevent, in the case that hits most
         # often, a quiet sound in a large environment. Any future narrowing goes above this line.
-        audible = [
-            identifier
-            for identifier, participant in self._participants.items()
-            if self._audible(participant, event, origin)
-        ]
+        # Per-recipient dispatch below never reaches it with no ids, but that is a property of
+        # this loop and not a reason to relax the guard.
+        audible: list[tuple[str, float | None]] = []
+        for identifier, participant in self._participants.items():
+            heard, level_db = self._reception(participant, amplitude_db, origin)
+            if heard:
+                audible.append((identifier, level_db))
         if not audible:
             delivered = asyncio.get_running_loop().create_future()
             delivered.set_result(None)
             return delivered
-        return hsm.dispatch_to(self, event, *audible)
+        deliveries = [
+            hsm.dispatch_to(
+                self,
+                event
+                if sound is None or level_db is None
+                else dataclasses.replace(event, data=sound.model_copy(update={"received_level_db": level_db})),
+                identifier,
+            )
+            for identifier, level_db in audible
+        ]
+
+        async def delivered_to_all() -> None:
+            _ = await asyncio.gather(*deliveries)
+
+        # Eager, matching hsm.dispatch_to: the fire-and-forget callers that never await a
+        # broadcast must still see it leave.
+        return asyncio.Task(delivered_to_all(), loop=asyncio.get_running_loop(), eager_start=True)
 
 
 def require_environment_scope(environment: Environment, instance: hsm.Instance, *, participant: str) -> None:
