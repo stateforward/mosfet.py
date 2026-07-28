@@ -47,13 +47,16 @@ class FailingVoiceDetector(voice.detection.VoiceDetector):
 
 class HangingVoiceDetector(voice.detection.VoiceDetector):
     cancelled: bool
+    entered: asyncio.Event
 
     def __init__(self) -> None:
         self.cancelled = False
+        self.entered = asyncio.Event()
 
     @override
     async def classify(self, input: bytes) -> voice.detection.OutputData:
         del input
+        self.entered.set()
         try:
             _ = await asyncio.Event().wait()
         finally:
@@ -141,20 +144,11 @@ class RecordingListening(listening.Listening):
             voice_diarizer=voice_diarizer,
             **thresholds,
         )
+        # Filled by the terminal mirror from what this ability emits. Not from dispatch: the
+        # interpretation half's products travel through this ability on their way out, so a
+        # dispatch hook would count every product twice — once arriving, once leaving.
         self.handoffs = []
         self.failures = []
-
-    @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == cognition.InputEvent.name:
-            handoff = event.data
-            assert isinstance(handoff, cognition.InputData)
-            self.handoffs.append(handoff)
-        if event.name == self.failed_event.name:
-            failure = event.data
-            assert isinstance(failure, listening.FailedEventData)
-            self.failures.append(failure)
-        return super().dispatch(ctx, event)
 
 
 class ListeningAttachmentOwner(hsm.Instance):
@@ -300,18 +294,27 @@ def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_f
 
     groups, request_count, state = asyncio.run(run())
 
-    assert len(groups) == 2
-    # Sensitivity is always present: a body always knows what it is doing, whatever else it can
-    # hear with. The optional stages are what the configuration adds on top of that.
-    assert len(groups[0]) == 2
-    assert isinstance(groups[0][0], listening.sensitivity.Sensitivity)
-    assert isinstance(groups[0][1], voice.detection.VoiceDetection)
-    assert len(groups[1]) == 5
-    assert isinstance(groups[1][0], listening.sensitivity.Sensitivity)
-    assert isinstance(groups[1][1], voice.detection.VoiceDetection)
-    assert isinstance(groups[1][2], sound_hearing.classification.SoundClassification)
-    assert isinstance(groups[1][3], voice.diarization.VoiceDiarization)
-    assert isinstance(groups[1][4], speech.SpeechDecoding)
+    # Two abilities, each building its own group: interpretation's first, because Listening
+    # constructs it before grouping it. The ear's group never varies — a body always knows what
+    # it is doing and always has something to interpret with. Configuration varies what
+    # interpretation is made of, and that is the only thing it varies.
+    minimum_stages, minimum_ear, maximum_stages, maximum_ear = groups
+    assert len(groups) == 4
+    assert [type(member) for member in minimum_ear] == [
+        listening.sensitivity.Sensitivity,
+        listening.interpretation.Interpretation,
+    ]
+    assert [type(member) for member in maximum_ear] == [
+        listening.sensitivity.Sensitivity,
+        listening.interpretation.Interpretation,
+    ]
+    assert len(minimum_stages) == 1
+    assert isinstance(minimum_stages[0], voice.detection.VoiceDetection)
+    assert len(maximum_stages) == 4
+    assert isinstance(maximum_stages[0], voice.detection.VoiceDetection)
+    assert isinstance(maximum_stages[1], sound_hearing.classification.SoundClassification)
+    assert isinstance(maximum_stages[2], voice.diarization.VoiceDiarization)
+    assert isinstance(maximum_stages[3], speech.SpeechDecoding)
     assert request_count == 1
     assert state == "/ListeningLifecycle/attached/behavior/initializing"
 
@@ -389,9 +392,11 @@ def test_listening_reports_aggregate_attachment_failure_and_accepts_retry(
     assert state == "/ListeningLifecycle/attached/behavior/initializing"
 
 
-def test_listening_detaches_once_through_group_and_can_reattach(
+def test_listening_detaches_each_group_once_through_group_and_can_reattach(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One detach from the owner, one detach per group, and the ability comes back afterwards."""
+
     async def run() -> tuple[list[hsm.Event[attachment.DetachData]], list[hsm.Event[typing.Any]], str]:
         requests: list[hsm.Event[attachment.DetachData]] = []
         group_detach = attachment.Group.detach
@@ -443,8 +448,12 @@ def test_listening_detaches_once_through_group_and_can_reattach(
 
     requests, lifecycle, state = asyncio.run(run())
 
-    assert len(requests) == 1
+    # Two groups now — the ear's and interpretation's — and the caller's one detach reaches each
+    # exactly once. The ear's carries the caller's id; interpretation's is a detach of its own,
+    # correlated by its own id, because it is releasing its own members and not the caller's.
+    assert len(requests) == 2
     assert requests[0].id == "listening-detach"
+    assert requests[1].id and requests[1].id != "listening-detach"
     assert [event.name for event in lifecycle] == [
         attachment.DetachedEvent.name,
         attachment.AttachCompleteEvent.name,
@@ -485,31 +494,67 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     assert "/ListeningLifecycle/attached/behavior/Perceiving" in model.members
     assert "/ListeningLifecycle/attached/behavior/Perceiving/Listening" in model.members
     assert "/ListeningLifecycle/attached/behavior/Perceiving/Sensing" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/HandingOff" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/DetectingVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/ClassifyingSound" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/RoutingDetectedVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/DiarizingVoice" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech/Detected" in model.members
-    assert "/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech/Diarized" in model.members
     assert "/ListeningLifecycle/attached/behavior/detaching" in model.members
     assert "/ListeningLifecycle/attached/behavior/degraded" in model.members
+    # Nothing slow is in here. Every interpretation stage lives in its own machine, which is what
+    # keeps a decoder from standing between a sound and the prediction it has to be scored
+    # against; a stage reappearing here would put the queue back in front of the ear.
+    assert not [
+        member
+        for member in model.members
+        if member.startswith("/ListeningLifecycle/attached/behavior/Perceiving/")
+        and member.rsplit("/", 1)[-1]
+        in {
+            "DetectingVoice",
+            "ClassifyingSound",
+            "RoutingDetectedVoice",
+            "DiarizingVoice",
+            "DecodingSpeech",
+            "HandingOff",
+        }
+    ]
     initializing_events = model.transition_map["/ListeningLifecycle/attached/behavior/initializing"]
     assert "bot.ability.attachment.terminal" in initializing_events
     assert "bot.ability.listening.children.attached" not in initializing_events
     assert "environment.sound" in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/Listening"]
     assert (
+        "bot.ability.listening.sensitivity.completed"
+        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/Sensing"]
+    )
+
+
+def test_interpretation_model_tracks_detection_diarization_and_decoding_lifecycle() -> None:
+    model = model_view(require_model(listening.interpretation.Interpretation.model))
+
+    assert model.qualified_name == "/InterpretationLifecycle"
+    assert "/InterpretationLifecycle/attached/behavior/initializing" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/Idle" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/HandingOff" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/DetectingVoice" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/ClassifyingSound" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/RoutingDetectedVoice" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/DiarizingVoice" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/DecodingSpeech" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/DecodingSpeech/Detected" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/DecodingSpeech/Diarized" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/detaching" in model.members
+    assert "/InterpretationLifecycle/attached/behavior/degraded" in model.members
+    # A scored sound is what comes in, so nothing here can be reached with an unscored one.
+    assert (
+        "bot.ability.listening.sensitivity.output"
+        in model.transition_map["/InterpretationLifecycle/attached/behavior/Idle"]
+    )
+    assert (
         "bot.ability.listening.voice_detection.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"]
+        in model.transition_map["/InterpretationLifecycle/attached/behavior/DetectingVoice"]
     )
     assert (
         "bot.ability.listening.voice_diarization.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DiarizingVoice"]
+        in model.transition_map["/InterpretationLifecycle/attached/behavior/DiarizingVoice"]
     )
     assert (
         "bot.ability.listening.speech_decoding.completed"
-        in model.transition_map["/ListeningLifecycle/attached/behavior/Perceiving/DecodingSpeech"]
+        in model.transition_map["/InterpretationLifecycle/attached/behavior/DecodingSpeech"]
     )
 
 
@@ -840,11 +885,10 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
         )
         await start_ability_tree(ctx, listening_ability)
         _ = await listening_ability.apply(sound(b"voice"), ctx=ctx)
-        await wait_until(
-            lambda: listening_ability.state()
-            == "/RecordingListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"
-        )
-        assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/Perceiving/DetectingVoice"
+        # Waited on through the detector rather than through a state name: the ear hands the sound
+        # on and goes straight back to listening, so it is never the thing sitting in detection.
+        await wait_until(lambda: detector.entered.is_set())
+        assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
         owner = ability_terminal_owner(listening_ability)
         assert owner is not None

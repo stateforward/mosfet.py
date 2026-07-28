@@ -206,6 +206,15 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         shape of the body, and bodies do not change shape between utterances — so a departure is
         always evidence about the world rather than about the body, and must never be allowed to
         teach the model that caught it. A body that really is rebuilt gets a new one of these.
+
+        Do not simplify this to a tag. Carrying the command's operation id out through the mouth
+        and matching it on the way back in would identify own audio in one comparison and look
+        like an obvious cleanup. It would also destroy the residual: a voice off a wall or up a
+        wire is the same audio and would arrive carrying the same tag, so every echo, delayed
+        line, and feedback loop would be suppressed silently and there would be no way left to
+        notice any of them. A tag says "this is mine". The window says "this is mine, arriving
+        when mine should arrive" — and only the second can be violated. The violation is the
+        information, which is the entire reason this is bounded in time rather than by identity.
         """
 
         sound = event.data

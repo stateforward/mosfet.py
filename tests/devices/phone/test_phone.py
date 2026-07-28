@@ -8,7 +8,9 @@ import typing
 
 import hsm
 import bot
+from bot.abilities import encoding
 from bot.abilities import processing
+from bot.abilities import speaking
 import bot.devices.phone as phone_contracts
 import bot.devices.phone.phone as phone_module
 
@@ -28,6 +30,7 @@ from tests.hsm_instance_state import (
     phone_firmware,
     phone_microphone,
     phone_speaker,
+    start_ability_tree,
 )
 from tests.hsm_model import transition_map
 from tests.type_helpers import invalid_value
@@ -1958,6 +1961,54 @@ def test_the_robots_own_voice_goes_up_the_wire() -> None:
         return len(_uplinks(service))
 
     assert asyncio.run(run()) == 1
+
+
+class _Utterance(encoding.Encoder[bytes, bytes]):
+    """A vocal tract: words in, sound out. Local, so the chain can be checked without a network."""
+
+    @typing.override
+    async def encode(self, input: bytes) -> bytes:
+        return b"spoken:" + input
+
+
+def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire() -> None:
+    """The product claim, end to end: a bot decides to say something and the far end can hear it.
+
+    Everything between the decision and the wire is the real thing — ``Speaking`` synthesizes and
+    hands the signal to the mouth it was built with, the mouth transduces into the environment,
+    the environment works out that a 60 dB voice 0 cm from a close-talk mouthpiece clears its
+    70 dB threshold, and the mouthpiece carries the capture to the firmware holding it. Sibling
+    tests drive the mouth by dispatching playout at it directly, which is one hop short of the
+    only thing that matters: that choosing to speak is enough.
+    """
+
+    async def run() -> tuple[int, bytes]:
+        environment = Environment()
+        service = AttachablePhoneService()
+        phone, mouth, _ = await _handset_on_a_call(environment, service)
+        assert phone_microphone(phone) is not None
+        service.events.clear()
+
+        voice = speaking.Speaking(
+            encoder=_Utterance(),
+            speaker=mouth,
+            sample_rate_hz=16_000,
+            channels=1,
+            media_type="audio/pcm",
+        )
+        await start_ability_tree(environment, voice)
+        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+
+        await _wait_until(lambda: bool(_uplinks(service)), timeout=2.0)
+        uplinks = _uplinks(service)
+        carried = uplinks[0].data
+        assert isinstance(carried, audio_device.AudioOutputData)
+        return len(uplinks), carried.audio
+
+    count, carried = asyncio.run(run())
+
+    assert count == 1
+    assert carried == b"spoken:Hello, this is Alice."
 
 
 def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:

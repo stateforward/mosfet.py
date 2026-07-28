@@ -3971,9 +3971,31 @@ class TimedUtteranceEncoder(encoding.Encoder[bytes, bytes]):
         return (b"spoken:" + input).ljust(int(self._frame_bytes * self._seconds), b"\x00")
 
 
+class SlowSpeechDecoder(RecordingSpeechDecoder):
+    """A speech decoder that takes as long over a sentence as an off-device one does.
+
+    Interpretation is the slow part of hearing, and it is slower than the utterances it runs on.
+    A decoder that returns instantly hides every question about what perception was doing when a
+    sound arrived, because there is never a moment when it was doing anything.
+    """
+
+    _seconds: float
+
+    def __init__(self, *, seconds: float) -> None:
+        super().__init__()
+        self._seconds = seconds
+
+    @typing.override
+    async def decode(self, input: bytes) -> bytes:
+        self.calls.append(input)
+        await asyncio.sleep(self._seconds)
+        return b"decoded:" + input
+
+
 async def a_bot_with_a_voice(
     *,
     utterance_seconds: float,
+    listening_ability: RecordingListening | None = None,
 ) -> tuple[AbilityAgent, IgnoreAbility, RecordingListening, speaking.Speaking, Environment, audio.Speaker]:
     """A robot standing at the origin with its own mouth 15 cm away, able to hear the room.
 
@@ -3995,7 +4017,7 @@ async def a_bot_with_a_voice(
         media_type="audio/pcm",
     )
     ability = IgnoreAbility()
-    listening_ability = RecordingListening()
+    listening_ability = listening_ability if listening_ability is not None else RecordingListening()
     active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
     environment = await start_bot_with_devices(
         active_bot,
@@ -4160,6 +4182,43 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
     assert [stimulus.data for stimulus in stimuli] == [b"decoded:spoken:Actually, wait."]
+
+
+def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy() -> None:
+    """The bot answers somebody, and its own answer comes back while the ear is still working.
+
+    This is the ordinary case, not an edge one. Interpreting a sentence takes longer than saying
+    one, so a bot that replies is replying while its ears are still busy with what it is
+    replying to — and its own voice arrives into a pipeline that is occupied and queues it.
+
+    What the copy commits to is a duration of *sound*, and the sound arrived on time. Whether
+    perception had got round to it is a fact about perception's backlog, not about the mouth. A
+    body that scores an arrival against whatever it happens to be doing when it reaches the front
+    of the queue is not correlating the arrival with the command at all: it is correlating the
+    command with the clock.
+    """
+
+    async def run() -> list[processing.InputData]:
+        decoder = SlowSpeechDecoder(seconds=0.5)
+        _, ability, _, voice, environment, _ = await a_bot_with_a_voice(
+            utterance_seconds=0.2,
+            listening_ability=RecordingListening(speech_decoder=decoder),
+        )
+
+        _ = await somebody_speaks(environment, "Are you there?", position=space.Position(x=0.0, y=1.0))
+        # Perception is now committed to a sentence for longer than the reply will last.
+        await wait_until(lambda: bool(decoder.calls), timeout=5.0)
+
+        _ = await voice.apply(speaking.InputData(text="Yes, I am here."), ctx=environment)
+
+        # Long enough for the backlog to drain and for anything it produced to become a turn.
+        await asyncio.sleep(2.0)
+        return list(ability.calls)
+
+    turns = asyncio.run(run())
+
+    stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
+    assert [stimulus.data for stimulus in stimuli] == [b"decoded:spoken:Are you there?"]
 
 
 def test_the_body_fans_the_copy_of_its_own_command_to_its_senses() -> None:
