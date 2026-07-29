@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot import abilities
+import bot.abilities
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import participating
@@ -24,7 +24,7 @@ class FixedSpeechDecoder(speech.SpeechDecoder):
 
 
 @dataclasses.dataclass
-class RecordingSpeechEncoder(abilities.Encoder[bytes, bytes]):
+class RecordingSpeechEncoder(bot.abilities.Encoder[bytes, bytes]):
     calls: list[bytes] = dataclasses.field(default_factory=list)
 
     @typing.override
@@ -74,6 +74,7 @@ def test_voice_decoder_uses_mlx_speech_decoder() -> None:
 
     assert output == "hello caller"
 
+
 def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
     speech_encoder = RecordingSpeechEncoder()
     encoder = VoiceEncoder(speech_encoder=speech_encoder)
@@ -96,6 +97,7 @@ def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
 
     assert output == b"encoded voice response"
     assert speech_encoder.calls == [b"I can help with that."]
+
 
 def test_voice_encoder_falls_back_to_decoded_text() -> None:
     speech_encoder = RecordingSpeechEncoder()

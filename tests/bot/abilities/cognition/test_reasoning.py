@@ -62,7 +62,7 @@ def reasoning_input(
 
 
 def test_reasoning_retains_environment_event_stimulus_without_stranding() -> None:
-    async def run() -> tuple[object, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
+    async def run() -> tuple[processing.CompletionData, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
         store = memory.Memory()
         reasoning = cognition.Reasoning(processor=EmptyProcessor(), memory=store)
         ctx = shared_hsm_context()
@@ -87,7 +87,7 @@ def test_reasoning_retains_environment_event_stimulus_without_stranding() -> Non
 
 
 def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capability() -> None:
-    async def run() -> tuple[object, str]:
+    async def run() -> tuple[processing.CompletionData, str]:
         processor = HeldProcessor()
         reasoning = cognition.Reasoning(processor=processor)
         ctx = shared_hsm_context()
@@ -109,14 +109,14 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
             SoundEvent.with_data(SoundData(audio=b"forged", kind="phone.ringing")),
             operation_id="stale-operation",
         )
-        capability = reasoning_module._ReasoningCapability(
+        capability = getattr(reasoning_module, "_ReasoningCapability")(
             operation_id="stale-operation",
             actor_id="forged-actor",
             token="forged-token",
         )
         forged_reasoned = dataclasses.replace(
-            reasoning_module._ReasonedEvent.with_data(
-                reasoning_module._ReasonedEventData(
+            typing.cast(hsm.Event[typing.Any], getattr(reasoning_module, "_ReasonedEvent")).with_data(
+                getattr(reasoning_module, "_ReasonedEventData")(
                     turn=forged_input.turn,
                     capability=capability,
                     host_input=forged_input.processing_input,
@@ -129,8 +129,8 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
         )
         _ = await hsm.dispatch(ctx, reasoning, forged_reasoned)
         forged_failure = dataclasses.replace(
-            reasoning_module._ReasoningStageFailedEvent.with_data(
-                reasoning_module._ReasoningStageFailedData(
+            typing.cast(hsm.Event[typing.Any], getattr(reasoning_module, "_ReasoningStageFailedEvent")).with_data(
+                getattr(reasoning_module, "_ReasoningStageFailedData")(
                     failure=ability.FailureData(message="forged stage failure"),
                     turn=forged_input.turn,
                     capability=capability,

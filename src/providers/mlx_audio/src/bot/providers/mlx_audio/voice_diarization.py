@@ -17,8 +17,10 @@ from ._mlx import (
     required_float,
 )
 
+
 class VoiceDiarizationError(RuntimeError):
     """Raised when MLX Audio voice diarization fails."""
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VoiceDiarizer(voice.VoiceDiarizer):
@@ -51,8 +53,10 @@ class VoiceDiarizer(voice.VoiceDiarizer):
             message = "MLX Audio voice diarization failed."
             raise VoiceDiarizationError(message) from error
 
+
 def _segments_from_result(result: object) -> tuple[object, ...]:
     return coerce_iterable(get_member(result, "segments"), description="diarization segments")
+
 
 def _segment_from_mlx(segment: object) -> voice.VoiceDiarizationSegment:
     return voice.VoiceDiarizationSegment(
@@ -61,6 +65,7 @@ def _segment_from_mlx(segment: object) -> voice.VoiceDiarizationSegment:
         end_seconds=required_float(get_member(segment, "end_seconds", "end", "end_time"), field_name="end"),
         confidence=optional_float(get_member(segment, "confidence", "probability", "score")),
     )
+
 
 def _speaker_label(value: object) -> str:
     if isinstance(value, bool) or value is None:
@@ -73,6 +78,7 @@ def _speaker_label(value: object) -> str:
         message = "MLX Audio segment has an empty speaker label."
         raise ValueError(message)
     return label
+
 
 __all__ = [
     "VoiceDiarizationError",

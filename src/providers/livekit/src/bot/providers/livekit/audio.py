@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot import abilities
+import bot.abilities
 from bot.abilities import conversation
 from bot.abilities.hearing import speech
 from bot.devices import audio as audio_device
@@ -21,8 +21,10 @@ TFrame = typing.TypeVar("TFrame")
 TFrame_co = typing.TypeVar("TFrame_co", covariant=True)
 TFrame_contra = typing.TypeVar("TFrame_contra", contravariant=True)
 
+
 class AudioFrameError(RuntimeError):
     """Raised when stateforward.bot audio cannot be adapted to or from a LiveKit audio frame."""
+
 
 class AudioFrame(typing.Protocol):
     """LiveKit audio frame shape consumed by stateforward.bot adapters."""
@@ -47,6 +49,7 @@ class AudioFrame(typing.Protocol):
         """Number of PCM samples per channel in the frame."""
         ...
 
+
 class AudioFrameFactory(typing.Protocol[TFrame_co]):
     """Factory compatible with `livekit.rtc.AudioFrame` construction."""
 
@@ -61,12 +64,14 @@ class AudioFrameFactory(typing.Protocol[TFrame_co]):
         """Build a LiveKit-compatible audio frame from signed 16-bit PCM bytes."""
         ...
 
+
 class AudioSource(typing.Protocol[TFrame_contra]):
     """LiveKit audio source shape used to publish frames."""
 
     def capture_frame(self, frame: TFrame_contra) -> collections.abc.Awaitable[None]:
         """Queue a LiveKit-compatible audio frame for playout."""
         ...
+
 
 def _livekit_audio_frame(
     *,
@@ -82,6 +87,7 @@ def _livekit_audio_frame(
         samples_per_channel=samples_per_channel,
     )
 
+
 def _positive_int(value: int | None, fallback: int, *, label: str) -> int:
     resolved = fallback if value is None else value
     if isinstance(resolved, bool) or resolved < 1:
@@ -89,10 +95,12 @@ def _positive_int(value: int | None, fallback: int, *, label: str) -> int:
         raise AudioFrameError(message)
     return resolved
 
+
 def _is_pcm_media_type(media_type: str | None) -> bool:
     if media_type is None:
         return True
     return media_type.split(";", 1)[0].strip().casefold() in {_PCM_MEDIA_TYPE, "audio/l16", "audio/raw"}
+
 
 def _samples_per_channel(audio: bytes, *, channels: int) -> int:
     frame_width = channels * _SAMPLE_WIDTH_BYTES
@@ -100,6 +108,7 @@ def _samples_per_channel(audio: bytes, *, channels: int) -> int:
         message = "LiveKit audio frames require signed 16-bit PCM bytes aligned to the channel count."
         raise AudioFrameError(message)
     return len(audio) // frame_width
+
 
 def _frame_audio_bytes(frame: AudioFrame) -> bytes:
     data = frame.data
@@ -113,6 +122,7 @@ def _frame_audio_bytes(frame: AudioFrame) -> bytes:
         message = "LiveKit audio frame data must not be empty."
         raise AudioFrameError(message)
     return audio
+
 
 def pcm_to_wav_bytes(
     audio: bytes,
@@ -144,8 +154,9 @@ def pcm_to_wav_bytes(
             wav.writeframes(audio)
         return buffer.getvalue()
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class AudioFrameEncoder(abilities.Encoder[audio_device.AudioOutputData, TFrame], typing.Generic[TFrame]):
+class AudioFrameEncoder(bot.abilities.Encoder[audio_device.AudioOutputData, TFrame], typing.Generic[TFrame]):
     """Encoder that converts stateforward.bot audio output chunks into LiveKit PCM audio frames."""
 
     default_sample_rate_hz: int = 48_000
@@ -172,8 +183,9 @@ class AudioFrameEncoder(abilities.Encoder[audio_device.AudioOutputData, TFrame],
             samples_per_channel=samples_per_channel,
         )
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class AudioFrameDecoder(abilities.Decoder[AudioFrame, audio_device.AudioInputData]):
+class AudioFrameDecoder(bot.abilities.Decoder[AudioFrame, audio_device.AudioInputData]):
     """Decoder that converts LiveKit PCM audio frames into stateforward.bot audio input chunks."""
 
     media_type: str = _PCM_MEDIA_TYPE
@@ -194,18 +206,20 @@ class AudioFrameDecoder(abilities.Decoder[AudioFrame, audio_device.AudioInputDat
             channels=channels,
         )
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class AudioSourceWriter(typing.Generic[TFrame]):
     """Writer that publishes stateforward.bot audio output chunks to an injected LiveKit audio source."""
 
     source: AudioSource[TFrame]
-    encoder: abilities.Encoder[audio_device.AudioOutputData, TFrame]
+    encoder: bot.abilities.Encoder[audio_device.AudioOutputData, TFrame]
 
     async def write(self, output: audio_device.AudioOutputData) -> None:
         """EncodeData and capture one stateforward.bot audio output chunk."""
 
         frame = await self.encoder.encode(output)
         await self.source.capture_frame(frame)
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class AudioBridge(typing.Generic[TFrame]):
@@ -217,7 +231,7 @@ class AudioBridge(typing.Generic[TFrame]):
     """
 
     source_writer: AudioSourceWriter[TFrame]
-    frame_decoder: abilities.Decoder[AudioFrame, audio_device.AudioInputData] = dataclasses.field(
+    frame_decoder: bot.abilities.Decoder[AudioFrame, audio_device.AudioInputData] = dataclasses.field(
         default_factory=AudioFrameDecoder,
     )
 
@@ -226,8 +240,8 @@ class AudioBridge(typing.Generic[TFrame]):
         cls: type[AudioBridge[TFrame]],
         *,
         source: AudioSource[TFrame],
-        encoder: abilities.Encoder[audio_device.AudioOutputData, TFrame],
-        frame_decoder: abilities.Decoder[AudioFrame, audio_device.AudioInputData] | None = None,
+        encoder: bot.abilities.Encoder[audio_device.AudioOutputData, TFrame],
+        frame_decoder: bot.abilities.Decoder[AudioFrame, audio_device.AudioInputData] | None = None,
     ) -> AudioBridge[TFrame]:
         """Build a bridge from an injected LiveKit audio source and stateforward.bot encoder."""
 
@@ -245,6 +259,7 @@ class AudioBridge(typing.Generic[TFrame]):
         """Publish one stateforward.bot audio output chunk into the injected LiveKit source."""
 
         await self.source_writer.write(output)
+
 
 def create_audio_bridge(
     *,
@@ -272,7 +287,7 @@ def create_audio_bridge(
             loop=loop,
         ),
     )
-    encoder: abilities.Encoder[audio_device.AudioOutputData, rtc.AudioFrame] = AudioFrameEncoder(
+    encoder: bot.abilities.Encoder[audio_device.AudioOutputData, rtc.AudioFrame] = AudioFrameEncoder(
         default_sample_rate_hz=sample_rate_hz,
         default_channels=channels,
     )
@@ -281,6 +296,7 @@ def create_audio_bridge(
         encoder=encoder,
     )
     return AudioBridge[rtc.AudioFrame](source_writer=source_writer)
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PcmWavDecoder(speech.SpeechDecoder):
@@ -299,6 +315,7 @@ class PcmWavDecoder(speech.SpeechDecoder):
             sample_width_bytes=self.sample_width_bytes,
         )
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VoiceDecoder(conversation.voice.VoiceDecoder):
     """Voice conversation decoder for LiveKit PCM audio with an injected speech decoder."""
@@ -307,10 +324,11 @@ class VoiceDecoder(conversation.voice.VoiceDecoder):
     pcm_decoder: PcmWavDecoder = dataclasses.field(default_factory=PcmWavDecoder)
 
     @typing.override
-    async def decode(self, input: abilities.AudioStimulus) -> str:
+    async def decode(self, input: bot.abilities.AudioStimulus) -> str:
         wav = await self.pcm_decoder.decode(input.content)
         transcript = await self.speech_decoder.decode(wav)
         return transcript.decode("utf-8")
+
 
 __all__ = [
     "AudioBridge",

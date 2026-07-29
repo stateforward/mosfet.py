@@ -17,9 +17,11 @@ from bot.providers.mlx_audio import SpeechDecoder, SpeechDecodingError
 from bot.providers.mlx_audio._mlx import SpeechDecodingModel
 from tests.hsm_instance_state import start_ability_tree
 
+
 @dataclasses.dataclass(frozen=True)
 class FakeTranscription:
     text: str
+
 
 @dataclasses.dataclass
 class FakeSpeechDecodingModel:
@@ -33,10 +35,12 @@ class FakeSpeechDecodingModel:
         self.calls.append({"audio": audio_path, **kwargs})
         return self.result
 
+
 class FailingSpeechDecodingModel:
     def generate(self, audio: str, **kwargs: object) -> object:
         del audio, kwargs
         raise RuntimeError("mlx unavailable")
+
 
 @dataclasses.dataclass
 class StrictSpeechDecodingModel:
@@ -48,12 +52,15 @@ class StrictSpeechDecodingModel:
         self.calls.append({"audio": audio_path, "verbose": verbose})
         return {"text": "strict transcript"}
 
+
 async def await_speech_decoding(output: collections.abc.Awaitable[bytes]) -> bytes:
     return await output
+
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 async def await_speech_decoding_ability(
     ability: speech.SpeechDecoding,
@@ -67,6 +74,7 @@ async def await_speech_decoding_ability(
             return
         await asyncio.sleep(0)
     raise AssertionError("speech decoding ability did not run decoder")
+
 
 def test_speech_decoder_uses_injected_model() -> None:
     model = FakeSpeechDecodingModel(result=FakeTranscription(text="hello there"))
@@ -93,6 +101,7 @@ def test_speech_decoder_uses_injected_model() -> None:
     }
     assert isinstance(decoder, speech.SpeechDecoder)
 
+
 def test_speech_decoder_uses_injected_loader() -> None:
     models: list[FakeSpeechDecodingModel] = []
 
@@ -108,6 +117,7 @@ def test_speech_decoder_uses_injected_loader() -> None:
 
     assert output == b"loaded transcript"
     assert len(models) == 1
+
 
 def test_speech_decoder_default_constructor_uses_mlx_audio_loader(
     monkeypatch: pytest.MonkeyPatch,
@@ -134,6 +144,7 @@ def test_speech_decoder_default_constructor_uses_mlx_audio_loader(
     assert loaded_model_ids == ["mlx-community/whisper-large-v3-turbo"]
     assert len(model.calls) == 1
 
+
 def test_speech_decoder_filters_unsupported_generate_kwargs() -> None:
     model = StrictSpeechDecodingModel()
     strict_model = typing.cast(SpeechDecodingModel, typing.cast(object, model))
@@ -153,6 +164,7 @@ def test_speech_decoder_filters_unsupported_generate_kwargs() -> None:
     assert not audio_path.exists()
     assert model.calls[0] == {"audio": model.calls[0]["audio"], "verbose": True}
 
+
 def test_speech_decoder_can_drive_speech_decoding_ability() -> None:
     model = FakeSpeechDecodingModel(result=FakeTranscription(text="ability transcript"))
     decoder = SpeechDecoder(model=model)
@@ -162,6 +174,7 @@ def test_speech_decoder_can_drive_speech_decoding_ability() -> None:
 
     assert len(model.calls) == 1
 
+
 def test_speech_decoder_is_awaitable() -> None:
     decoder = SpeechDecoder(model=FakeSpeechDecodingModel(result="plain transcript"))
 
@@ -170,6 +183,7 @@ def test_speech_decoder_is_awaitable() -> None:
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output) == b"plain transcript"
 
+
 def test_speech_decoder_wraps_provider_errors() -> None:
     decoder = SpeechDecoder(model=FailingSpeechDecodingModel())
 
@@ -177,6 +191,7 @@ def test_speech_decoder_wraps_provider_errors() -> None:
         _ = asyncio.run(await_speech_decoding(decoder.decode(b"audio")))
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
 
 def test_speech_decoder_wraps_loader_errors() -> None:
     def load_model(model_id: str) -> FakeSpeechDecodingModel:
@@ -189,6 +204,7 @@ def test_speech_decoder_wraps_loader_errors() -> None:
         _ = asyncio.run(await_speech_decoding(decoder.decode(b"audio")))
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
 
 def test_speech_decoder_rejects_missing_transcription_text() -> None:
     decoder = SpeechDecoder(model=FakeSpeechDecodingModel(result={"segments": []}))

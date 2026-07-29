@@ -34,7 +34,9 @@ class ManualLoop:
     """
 
     real_loop: asyncio.AbstractEventLoop
-    pending: list[tuple[collections.abc.Callable[[], None], ManualTimerHandle]] = dataclasses.field(default_factory=list)
+    pending: list[tuple[collections.abc.Callable[[], None], ManualTimerHandle]] = dataclasses.field(
+        default_factory=list
+    )
     last_task: asyncio.Task[None] | None = dataclasses.field(default=None, init=False)
 
     def call_later(self, _delay: float, callback: collections.abc.Callable[[], None]) -> ManualTimerHandle:

@@ -437,6 +437,11 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
             ),
         )
 
+    class StubbornLearning(Learning):
+        def replace_processing(self, stubborn: processing.Processing) -> None:
+            self._select_processing = stubborn
+            self._attachment_group = attachment.Group(stubborn, self._revision, self._memory)
+
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         monkeypatch.setattr(learning_impl, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(milliseconds=10))
         connection = sqlite3.connect(":memory:", check_same_thread=False)
@@ -446,10 +451,9 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
             selection=_generate_selection(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
-        ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        ability = StubbornLearning(decoder=TextDecoder(), processor=processor, memory=store)
         stubborn = StubbornProcessing(processor=processor)
-        ability._select_processing = stubborn
-        ability._attachment_group = attachment.Group(stubborn, ability._revision, ability._memory)
+        ability.replace_processing(stubborn)
         ctx = hsm.Context()
         owner = AttachmentOwner()
         _ = await hsm.started(ctx, owner, owner.model)

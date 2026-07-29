@@ -5,6 +5,7 @@ from bot.abilities import vision
 import dataclasses
 import typing
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VisualClassifier(vision.VisualClassifier):
     """Classifier that routes reading input before MLX VLM image decoding."""
@@ -20,5 +21,6 @@ class VisualClassifier(vision.VisualClassifier):
         if input.kind == "image" and isinstance(input.content, bytes) and input.content:
             return vision.OutputData(kind="image", confidence=self.image_confidence)
         return vision.OutputData(kind="unreadable", confidence=self.unreadable_confidence)
+
 
 __all__ = ["VisualClassifier"]

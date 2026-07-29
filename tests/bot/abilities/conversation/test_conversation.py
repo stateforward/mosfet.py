@@ -35,14 +35,17 @@ def model_examples(model: type[pydantic.BaseModel]) -> list[dict[str, typing.Any
     return typing.cast(list[dict[str, typing.Any]], examples)
 
 
+class _ProcessHost(typing.Protocol):
+    async def process(self, input: processing.InputData) -> object: ...
+
+
 class _HostAsProcessor(processing.Processor):
-    def __init__(self, host: object) -> None:
+    def __init__(self, host: _ProcessHost) -> None:
         self._host = host
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
-        method = type(self._host).process  # type: ignore[attr-defined]
-        result = await method(self._host, input)
+        result = await self._host.process(input)
         coerced = processing.coerce_event_selections(result)
         if coerced is None:
             raise TypeError(f"host process returned non-events: {type(result)!r}")
@@ -292,6 +295,15 @@ class RecordingConversation(conversation.TextConversation):
             self.snapshots.append(snapshot)
         return super().dispatch(ctx, event)
 
+    def active_turn_id(self) -> str | None:
+        return self._active_turn_id
+
+    def set_active_turn_id(self, turn_id: str | None) -> None:
+        self._active_turn_id = turn_id
+
+    def matches_active_turn(self, event: hsm.Event[typing.Any]) -> bool:
+        return self._matches_active_turn(self, event)
+
 
 class RecordingVoiceConversation(conversation.VoiceConversation):
     outputs: list[conversation.Response]
@@ -472,7 +484,7 @@ def test_host_contribution_does_not_replace_machine_dispatch(monkeypatch: pytest
         await start_conversation(conversation_ability)
         original_setattr = RecordingConversation.__setattr__
 
-        def reject_dispatch_assignment(instance: object, name: str, value: object) -> None:
+        def reject_dispatch_assignment(instance: RecordingConversation, name: str, value: object) -> None:
             if name == "dispatch":
                 raise AssertionError("host composition must not replace machine dispatch")
             original_setattr(instance, name, value)
@@ -533,7 +545,7 @@ def test_host_correlation_metadata_is_not_owner_visible(monkeypatch: pytest.Monk
         owner = ability_terminal_owner(conversation_ability)
         assert owner is not None
         metadata: list[dict[str, object]] = []
-        original_record = owner.record
+        original_record = getattr(owner, "record")
 
         def record(event: hsm.Event[typing.Any]) -> None:
             metadata.append(dict(event.metadata))
@@ -783,7 +795,7 @@ def test_conversation_phase_context_is_not_instance_stashed() -> None:
     conversation_ability = RecordingConversation()
     assert "_active_message" not in conversation_ability.__dict__
     assert "_active_decoded" not in conversation_ability.__dict__
-    assert conversation_ability._active_turn_id is None
+    assert conversation_ability.active_turn_id() is None
 
 
 def test_conversation_activity_holds_turn_without_stage_fields() -> None:
@@ -799,7 +811,7 @@ def test_conversation_activity_holds_turn_without_stage_fields() -> None:
             conversation_ability.input_event.with_data_and_id(text_message(content="hello"), turn_id),
         )
         await wait_until(lambda: conversation_ability.state().endswith("/active/decoding"))
-        mid_id = conversation_ability._active_turn_id
+        mid_id = conversation_ability.active_turn_id()
         has_message = "_active_message" in conversation_ability.__dict__
         has_decoded = "_active_decoded" in conversation_ability.__dict__
         decoder.gate.set()
@@ -815,8 +827,8 @@ def test_conversation_activity_holds_turn_without_stage_fields() -> None:
 
 def test_conversation_active_turn_match_is_id_equality() -> None:
     conversation_ability = RecordingConversation()
-    conversation_ability._active_turn_id = "turn-a"
+    conversation_ability.set_active_turn_id("turn-a")
     wrong = conversation_ability.input_event.with_data_and_id(text_message(), "turn-b")
     right = conversation_ability.input_event.with_data_and_id(text_message(), "turn-a")
-    assert conversation_impl.Conversation._matches_active_turn(conversation_ability, wrong) is False
-    assert conversation_impl.Conversation._matches_active_turn(conversation_ability, right) is True
+    assert conversation_ability.matches_active_turn(wrong) is False
+    assert conversation_ability.matches_active_turn(right) is True

@@ -21,6 +21,7 @@ _VOICE_DETECTION_MODEL_CACHE: dict[str, VoiceDetectionModel] = {}
 class VoiceDetectionError(RuntimeError):
     """Raised when MLX Audio voice detection fails."""
 
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VoiceDetector(voice.VoiceDetector):
     """Voice detector backed by MLX Audio Silero VAD.
@@ -66,6 +67,7 @@ class VoiceDetector(voice.VoiceDetector):
         loaded = self.load_model(self.model_id)
         _VOICE_DETECTION_MODEL_CACHE[self.model_id] = loaded
         return loaded
+
 
 __all__ = [
     "VoiceDetectionError",

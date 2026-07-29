@@ -9,16 +9,18 @@ import dataclasses
 import hsm
 import pytest
 
-from bot import abilities
+import bot.abilities
 
 from bot.providers.mlx_audio import SpeechEncoder, SpeechEncodingError
 from bot.providers.mlx_audio._mlx import SpeechGenerationResult
 from tests.hsm_instance_state import start_ability_tree
 
+
 @dataclasses.dataclass
 class FakeSpeechGenerationResult:
     audio: object
     sample_rate: int
+
 
 @dataclasses.dataclass
 class FakeSpeechEncodingModel:
@@ -29,17 +31,21 @@ class FakeSpeechEncodingModel:
         self.calls.append({"text": text, **kwargs})
         return self.results
 
+
 class FailingSpeechEncodingModel:
     def generate(self, text: str, **kwargs: object) -> collections.abc.Iterable[SpeechGenerationResult]:
         del text, kwargs
         raise RuntimeError("mlx unavailable")
 
+
 async def await_speech_encoding(output: collections.abc.Awaitable[bytes]) -> bytes:
     return await output
+
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
+
 
 async def await_speech_encoding_ability(
     ability: speech.SpeechEncoding,
@@ -53,6 +59,7 @@ async def await_speech_encoding_ability(
             return
         await asyncio.sleep(0)
     raise AssertionError("speech encoding ability did not run encoder")
+
 
 def test_speech_encoder_uses_injected_model() -> None:
     writer_calls: list[tuple[object, int, str]] = []
@@ -85,7 +92,8 @@ def test_speech_encoder_uses_injected_model() -> None:
         }
     ]
     assert writer_calls == [(("samples",), 24000, "wav")]
-    assert isinstance(encoder, abilities.Encoder)
+    assert isinstance(encoder, bot.abilities.Encoder)
+
 
 def test_speech_encoder_uses_injected_loader() -> None:
     models: list[FakeSpeechEncodingModel] = []
@@ -106,6 +114,7 @@ def test_speech_encoder_uses_injected_loader() -> None:
 
     assert output == b"(0.1, 0.2):24000:wav"
     assert len(models) == 1
+
 
 def test_speech_encoder_can_drive_speech_encoding_ability() -> None:
     writer_calls: list[tuple[object, int, str]] = []
@@ -134,6 +143,7 @@ def test_speech_encoder_can_drive_speech_encoding_ability() -> None:
     ]
     assert writer_calls == [((0.1, 0.2), 24000, "wav")]
 
+
 def test_speech_encoder_is_awaitable() -> None:
     encoder = SpeechEncoder(
         model=FakeSpeechEncodingModel(results=(FakeSpeechGenerationResult(audio=(0.1,), sample_rate=24000),)),
@@ -144,6 +154,7 @@ def test_speech_encoder_is_awaitable() -> None:
 
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output) == b"encoded speech"
+
 
 def test_speech_encoder_wraps_provider_errors() -> None:
     encoder = SpeechEncoder(model=FailingSpeechEncodingModel())

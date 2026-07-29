@@ -2,6 +2,7 @@ from bot.devices import phone
 
 import json
 import re
+import typing
 
 import hsm
 import pydantic
@@ -39,6 +40,9 @@ PHONE_EVENTS = (
     phone.CallTransferFailedEvent,
 )
 
+def _schema_properties(schema: object) -> dict[str, object]:
+    return typing.cast(dict[str, object], object_dict(schema).get("properties", {}))
+
 def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     assert phone.IncomingCallEvent.name == "phone.service.incoming_call"
     assert object_dict(phone.IncomingCallEvent.schema) == phone.IncomingCallData.model_json_schema()
@@ -58,7 +62,7 @@ def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     assert incoming.caller == "Front desk"
     # A withheld caller still rings.
     assert phone.IncomingCallData(call_id="livekit:caller").caller is None
-    assert "display_hint" not in object_dict(phone.IncomingCallEvent.schema)["properties"]
+    assert "display_hint" not in _schema_properties(phone.IncomingCallEvent.schema)
 
 def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
     transfer_target = phone.TransferTarget(kind="address", value="helpdesk@example.com")
@@ -113,9 +117,9 @@ def test_phone_command_events_carry_no_call_identity() -> None:
     assert object_dict(phone.TransferCallEvent.schema) == phone.TransferCallData.model_json_schema()
     for command in (phone.AnswerCallData, phone.DeclineCallData, phone.HangUpCallData):
         assert command.model_fields == {}
-        assert "call_id" not in object_dict(command.model_json_schema()).get("properties", {})
-    assert "call_id" not in object_dict(phone.DialEvent.schema)["properties"]
-    assert "call_id" not in object_dict(phone.TransferCallEvent.schema)["properties"]
+        assert "call_id" not in _schema_properties(command.model_json_schema())
+    assert "call_id" not in _schema_properties(phone.DialEvent.schema)
+    assert "call_id" not in _schema_properties(phone.TransferCallEvent.schema)
 
 
 def test_a_phone_number_is_digits() -> None:
@@ -227,7 +231,7 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
     assert ringing.caller == "Front desk"
     # A ringing handset shows who is calling, not which session is ringing.
     assert not isinstance(ringing, phone.PhoneCallData)
-    assert "call_id" not in object_dict(phone.RingingEvent.schema)["properties"]
+    assert "call_id" not in _schema_properties(phone.RingingEvent.schema)
     assert phone.RingingData().caller is None
     assert hung_up.outcome == "remote_hang_up"
     assert transfer.target.kind == "address"
@@ -255,7 +259,7 @@ def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:
     assert object_dict(phone.NoCallEvent.schema) == phone.NoCallData.model_json_schema()
     assert phone.NoCallData(reason="nothing_to_answer").reason == "nothing_to_answer"
     # No call happened, so there is no call id to report it against.
-    assert "call_id" not in object_dict(phone.NoCallEvent.schema)["properties"]
+    assert "call_id" not in _schema_properties(phone.NoCallEvent.schema)
     # A service verdict when a service gave one, and nothing invented when none did.
     assert phone.NoCallData(reason="nothing_to_answer").failure_kind is None
     assert phone.NoCallData(reason="dial_failed", failure_kind="call_declined").failure_kind == "call_declined"

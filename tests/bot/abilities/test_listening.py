@@ -231,7 +231,8 @@ def test_listening_events_use_concrete_pydantic_schemas() -> None:
     assert listening.Listening.input_event is SoundEvent
     assert listening.Listening.input_event.name == "environment.sound"
     assert input_schema == SoundData.model_json_schema()
-    assert input_schema["properties"]["audio"]["format"] in {"binary", "base64", "base64url"}
+    audio_schema = object_dict(object_dict(input_schema["properties"])["audio"])
+    assert audio_schema["format"] in {"binary", "base64", "base64url"}
 
     assert listening.Listening.output_event is cognition.InputEvent
     assert listening.Listening.output_event.name == "bot.ability.cognition.input"
@@ -349,7 +350,9 @@ def test_listening_reports_aggregate_attachment_failure_and_accepts_retry(
         )
         await wait_until(lambda: len(requests) == 1)
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -499,9 +502,11 @@ def test_listening_model_tracks_detection_diarization_and_decoding_lifecycle() -
     # Nothing slow is in here. Every interpretation stage lives in its own machine, which is what
     # keeps a decoder from standing between a sound and the prediction it has to be scored
     # against; a stage reappearing here would put the queue back in front of the ear.
+    members = model.members
+    assert isinstance(members, collections.abc.Iterable)
     assert not [
         member
-        for member in model.members
+        for member in members
         if member.startswith("/ListeningLifecycle/attached/behavior/Perceiving/")
         and member.rsplit("/", 1)[-1]
         in {

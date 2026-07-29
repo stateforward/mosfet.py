@@ -8,12 +8,14 @@ import dataclasses
 
 from bot.providers.openai_compat import TextGenerationError, TextGenerator
 
+
 @dataclasses.dataclass
 class ChatCompletionCall:
     messages: list[dict[str, object]]
     tools: list[object]
     response_format: object | None
     extra_body: dict[str, object]
+
 
 @dataclasses.dataclass
 class FakeChatClient:
@@ -37,6 +39,7 @@ class FakeChatClient:
             )
         )
         return self.response
+
 
 def test_text_generator_maps_bot_text_generation_contract() -> None:
     client = FakeChatClient(
@@ -119,14 +122,18 @@ def test_text_generator_maps_bot_text_generation_contract() -> None:
         )
     ]
 
+
 def test_text_generator_is_awaitable() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "hello"}}]})
     generator = TextGenerator(client=client)
 
-    generated = generator.generate(text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hello"),)))
+    generated = generator.generate(
+        text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hello"),))
+    )
 
     assert isinstance(generated, collections.abc.Coroutine)
     assert asyncio.run(generated) == text.OutputData(content="hello", provider="openai_compat")
+
 
 def test_text_generator_maps_string_tools_to_openai_function_tools() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})
@@ -150,6 +157,7 @@ def test_text_generator_maps_string_tools_to_openai_function_tools() -> None:
             extra_body={"tool_choice": "auto", "reasoning_effort": "none"},
         )
     ]
+
 
 def test_text_generator_maps_tool_selection_policy_to_openai_tool_choice() -> None:
     client = FakeChatClient(
@@ -185,6 +193,7 @@ def test_text_generator_maps_tool_selection_policy_to_openai_tool_choice() -> No
 
     assert client.calls[0].extra_body == {"tool_choice": "required", "reasoning_effort": "none"}
 
+
 def test_text_generator_omits_tool_choice_without_tools() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})
     generator = TextGenerator(client=client)
@@ -199,6 +208,7 @@ def test_text_generator_omits_tool_choice_without_tools() -> None:
     )
 
     assert client.calls[0].extra_body == {}
+
 
 def test_text_generator_rejects_missing_required_tool_call() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})
@@ -218,6 +228,7 @@ def test_text_generator_rejects_missing_required_tool_call() -> None:
         assert str(error) == "OpenAI-compatible chat completion did not include a required tool call."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_tool_calls_when_selection_is_none() -> None:
     client = FakeChatClient(
@@ -257,6 +268,7 @@ def test_text_generator_rejects_tool_calls_when_selection_is_none() -> None:
         raise AssertionError("Expected TextGenerationError.")
     assert client.calls[0].extra_body == {"tool_choice": "none", "reasoning_effort": "none"}
 
+
 def test_text_generator_rejects_malformed_tools() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": "available"}}]})
     generator = TextGenerator(client=client)
@@ -274,6 +286,7 @@ def test_text_generator_rejects_malformed_tools() -> None:
         assert str(error) == "OpenAI-compatible tools must be function tool objects or non-blank tool names."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_malformed_tool_arguments() -> None:
     client = FakeChatClient(
@@ -309,6 +322,7 @@ def test_text_generator_rejects_malformed_tool_arguments() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_mapping_tool_arguments() -> None:
     client = FakeChatClient(
         response={
@@ -343,6 +357,7 @@ def test_text_generator_rejects_mapping_tool_arguments() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_tool_calls_without_function_type() -> None:
     client = FakeChatClient(
         response={
@@ -375,6 +390,7 @@ def test_text_generator_rejects_tool_calls_without_function_type() -> None:
         assert str(error) == "OpenAI-compatible tool calls must use function tools."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_blank_tool_call_identity() -> None:
     client = FakeChatClient(
@@ -410,6 +426,7 @@ def test_text_generator_rejects_blank_tool_call_identity() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_blank_tool_call_id() -> None:
     client = FakeChatClient(
         response={
@@ -444,6 +461,7 @@ def test_text_generator_rejects_blank_tool_call_id() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_legacy_function_call() -> None:
     client = FakeChatClient(
         response={
@@ -472,6 +490,7 @@ def test_text_generator_rejects_legacy_function_call() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_refusals() -> None:
     client = FakeChatClient(
         response={"choices": [{"finish_reason": "stop", "message": {"content": None, "refusal": "policy refusal"}}]}
@@ -487,6 +506,7 @@ def test_text_generator_rejects_refusals() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_missing_content_without_tool_calls() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "stop", "message": {"content": None}}]})
     generator = TextGenerator(client=client)
@@ -499,6 +519,7 @@ def test_text_generator_rejects_missing_content_without_tool_calls() -> None:
         assert str(error) == "OpenAI-compatible chat completion message did not include string content."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_missing_finish_reason() -> None:
     client = FakeChatClient(response={"choices": [{"message": {"content": "hello"}}]})
@@ -513,6 +534,7 @@ def test_text_generator_rejects_missing_finish_reason() -> None:
     else:
         raise AssertionError("Expected TextGenerationError.")
 
+
 def test_text_generator_rejects_tool_finish_without_tool_calls() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "tool_calls", "message": {"content": ""}}]})
     generator = TextGenerator(client=client)
@@ -525,6 +547,7 @@ def test_text_generator_rejects_tool_finish_without_tool_calls() -> None:
         assert str(error) == "OpenAI-compatible chat completion finished with no tool calls."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_tool_calls_without_tool_finish_reason() -> None:
     client = FakeChatClient(
@@ -559,6 +582,7 @@ def test_text_generator_rejects_tool_calls_without_tool_finish_reason() -> None:
         assert str(error) == "OpenAI-compatible chat completion included tool calls without a tool_calls finish reason."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
 
 def test_text_generator_rejects_unsuccessful_finish_reason() -> None:
     client = FakeChatClient(response={"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]})

@@ -28,6 +28,8 @@ def test_attachment_protocol_defines_correlated_lifecycle_outcomes() -> None:
     assert attachment.DetachFailedEvent.name == "attachment.detach.failed"
     assert attach.id == "attach-operation"
     assert detach.id == "detach-operation"
+    assert attach.data is not None
+    assert detach.data is not None
     assert attach.data.reply_to is reply_to
     assert detach.data.reply_to is reply_to
     assert detach.data.timeout == datetime.timedelta(seconds=30)

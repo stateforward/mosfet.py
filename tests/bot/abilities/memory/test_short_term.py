@@ -2,7 +2,7 @@ from bot.abilities import memory
 
 import asyncio
 
-from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
 
@@ -54,7 +54,7 @@ def test_short_term_memory_event_names_and_scope() -> None:
 def test_short_term_memory_sql_apply() -> None:
     async def run() -> memory.OutputData:
         short_term = memory.ShortTermMemory()
-        await start_abilities_for_test(None, short_term)
+        await start_abilities_for_test(shared_hsm_context(), short_term)
         return await dispatch_ability_for_test(
             short_term,
             None,

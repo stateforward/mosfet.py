@@ -13,9 +13,11 @@ import pytest
 
 from bot.providers.mlx_audio import VoiceIdentificationError, VoiceIdentifier
 
+
 @dataclasses.dataclass(frozen=True)
 class DecodedAudio:
     samples: tuple[float, ...]
+
 
 @dataclasses.dataclass(frozen=True)
 class FakeEmbedding:
@@ -23,6 +25,7 @@ class FakeEmbedding:
 
     def tolist(self) -> list[list[float]]:
         return [list(row) for row in self.values]
+
 
 @dataclasses.dataclass
 class FakeVoiceIdentificationModel:
@@ -33,15 +36,18 @@ class FakeVoiceIdentificationModel:
         self.calls.append((audio, sr))
         return self.embeddings.pop(0)
 
+
 class FailingVoiceIdentificationModel:
     def extract_speaker_embedding(self, audio: object, *, sr: int) -> FakeEmbedding:
         del audio, sr
         raise RuntimeError("mlx unavailable")
 
+
 async def await_voice_identification(
     output: collections.abc.Awaitable[voice.identification.OutputData],
 ) -> voice.identification.OutputData:
     return await output
+
 
 def test_voice_identifier_uses_injected_model() -> None:
     decoded_audio = DecodedAudio(samples=(0.1, 0.2, 0.3))
@@ -68,6 +74,7 @@ def test_voice_identifier_uses_injected_model() -> None:
     assert model.calls == [(decoded_audio, 24000)]
     assert isinstance(identifier, voice.VoiceIdentifier)
 
+
 def test_voice_identifier_uses_injected_loader() -> None:
     models: list[FakeVoiceIdentificationModel] = []
 
@@ -87,6 +94,7 @@ def test_voice_identifier_uses_injected_loader() -> None:
 
     assert _signature_payload(output.signatures[0].signature)["embeddings"] == [[[0.3, 0.4]]]
     assert len(models) == 1
+
 
 def test_voice_identifier_aggregates_repeated_speaker_segments() -> None:
     model = FakeVoiceIdentificationModel(
@@ -110,6 +118,7 @@ def test_voice_identifier_aggregates_repeated_speaker_segments() -> None:
         [[0.3, 0.4]],
     ]
 
+
 def test_voice_identifier_is_awaitable() -> None:
     identifier = VoiceIdentifier(
         model=FakeVoiceIdentificationModel(embeddings=[FakeEmbedding(values=((0.1,),))]),
@@ -121,6 +130,7 @@ def test_voice_identifier_is_awaitable() -> None:
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output).signatures[0].speaker_label == "speaker_1"
 
+
 def test_voice_identifier_wraps_provider_errors() -> None:
     identifier = VoiceIdentifier(
         model=FailingVoiceIdentificationModel(),
@@ -131,6 +141,7 @@ def test_voice_identifier_wraps_provider_errors() -> None:
         _ = asyncio.run(await_voice_identification(identifier.classify(_input())))
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
 
 def _input(*, segment_count: int = 1) -> voice.identification.InputData:
     return voice.identification.InputData(
@@ -147,6 +158,7 @@ def _input(*, segment_count: int = 1) -> voice.identification.InputData:
             for index in range(segment_count)
         )
     )
+
 
 def _signature_payload(signature: str) -> dict[str, object]:
     prefix = "mlx-audio:speaker-embedding:"

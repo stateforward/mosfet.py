@@ -29,6 +29,7 @@ from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
+from sqlalchemy.sql import ClauseElement
 
 from bot.abilities.memory.schema import metadata
 
@@ -156,7 +157,7 @@ def _parse_status(raw: object) -> Status:
     return STATUS_ACTIVE
 
 
-def select_all_behaviors_clauses() -> tuple[object, object]:
+def select_all_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
     """Core clauses: all behavior rows (any status), then all triggers."""
 
     behaviors = select(behavior_table).order_by(behavior_table.c.name)
@@ -167,7 +168,7 @@ def select_all_behaviors_clauses() -> tuple[object, object]:
     return behaviors, triggers
 
 
-def select_active_behaviors_clauses() -> tuple[object, object]:
+def select_active_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
     """Core clauses: ACTIVE behaviors only (Autonomy runtime load)."""
 
     behaviors = (
@@ -182,7 +183,7 @@ def select_active_behaviors_clauses() -> tuple[object, object]:
     return behaviors, triggers
 
 
-def select_behavior_by_name_clauses(name: str) -> tuple[object, object]:
+def select_behavior_by_name_clauses(name: str) -> tuple[ClauseElement, ClauseElement]:
     """Core clauses to load one behavior and its triggers (any status)."""
 
     behaviors = select(behavior_table).where(behavior_table.c.name == name)
@@ -190,7 +191,7 @@ def select_behavior_by_name_clauses(name: str) -> tuple[object, object]:
     return behaviors, triggers
 
 
-def delete_behavior_clauses(name: str) -> tuple[object, object]:
+def delete_behavior_clauses(name: str) -> tuple[ClauseElement, ClauseElement]:
     """Core clauses to remove a behavior (triggers first for non-CASCADE dialects)."""
 
     delete_triggers = delete(behavior_trigger_table).where(behavior_trigger_table.c.behavior_name == name)
@@ -198,10 +199,10 @@ def delete_behavior_clauses(name: str) -> tuple[object, object]:
     return delete_triggers, delete_behavior
 
 
-def insert_behavior_clauses(instance: Instance) -> tuple[object, ...]:
+def insert_behavior_clauses(instance: Instance) -> tuple[ClauseElement, ...]:
     """Core clauses to insert one behavior row plus its trigger rows."""
 
-    clauses: list[object] = [
+    clauses: list[ClauseElement] = [
         insert(behavior_table).values(
             name=instance.name,
             source=instance.source,
@@ -226,7 +227,7 @@ def insert_behavior_clauses(instance: Instance) -> tuple[object, ...]:
     return tuple(clauses)
 
 
-def replace_behavior_clauses(instance: Instance) -> tuple[object, ...]:
+def replace_behavior_clauses(instance: Instance) -> tuple[ClauseElement, ...]:
     """Core clauses for create/change/break/usage upsert: delete existing, then insert replacement."""
 
     return (*delete_behavior_clauses(instance.name), *insert_behavior_clauses(instance))

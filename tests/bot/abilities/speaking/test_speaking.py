@@ -8,23 +8,27 @@ import typing
 import hsm
 from bot.abilities import processing
 
+from bot.abilities import encoding
 from bot.abilities import speaking
 from bot.devices import audio
 from bot.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, start_ability_tree
+from tests.bot.abilities.support import require_model
 
 
-class RecordingEncoder:
+class RecordingEncoder(encoding.Encoder[bytes, bytes]):
     def __init__(self, audio: bytes = b"pcm-audio") -> None:
         self.calls: list[bytes] = []
         self._audio = audio
 
+    @typing.override
     async def encode(self, input: bytes) -> bytes:
         self.calls.append(input)
         return self._audio
 
 
-class FailingEncoder:
+class FailingEncoder(encoding.Encoder[bytes, bytes]):
+    @typing.override
     async def encode(self, input: bytes) -> bytes:
         del input
         raise RuntimeError("tts failed")
@@ -115,7 +119,7 @@ def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
         listener = SoundListener(sounds)
 
         await start_ability_tree(environment, speaking_ability)
-        _ = await hsm.started(environment, speaker, speaker.model)
+        _ = await hsm.started(environment, speaker, require_model(speaker.model))
         _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
@@ -163,8 +167,8 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
 
             if event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
                 data = event.data.data
-                if hasattr(data, "message"):
-                    failures.append(str(data.message))
+                if isinstance(data, ability.FailureData):
+                    failures.append(data.message)
             return original(ctx, event)
 
         speaking_ability.dispatch = capture  # type: ignore[method-assign]
@@ -421,7 +425,7 @@ def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
         environment = Environment()
         await start_ability_tree(environment, speaking_ability)
-        _ = await hsm.started(environment, speaker, speaker.model)
+        _ = await hsm.started(environment, speaker, require_model(speaker.model))
 
         # Sequential utterances: let each finish so this pins "wired once", not a race with a
         # deferred queue.

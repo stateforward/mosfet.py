@@ -301,7 +301,9 @@ def test_reading_waits_for_aggregate_attachment_completion(monkeypatch: pytest.M
         assert owner.lifecycle == []
         assert reading_ability.state() == "/ReadingLifecycle/attached/behavior/initializing"
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         terminal = dataclasses.replace(
             attachment.AttachCompleteEvent.with_data(
@@ -484,7 +486,9 @@ def test_reading_rejects_replayed_group_terminal_when_operation_id_is_reused(
         )
         await wait_until(lambda: len(requests) == 1)
         group, first_request = requests[0]
-        first_reply = first_request.data.reply_to
+        first_request_data = first_request.data
+        assert first_request_data is not None
+        first_reply = first_request_data.reply_to
         assert first_reply is not None
         first_terminal = dataclasses.replace(
             attachment.AttachCompleteEvent.with_data(
@@ -512,7 +516,9 @@ def test_reading_rejects_replayed_group_terminal_when_operation_id_is_reused(
         await asyncio.sleep(0)
         assert reading_ability.state().endswith("/attached/behavior/initializing")
         _, second_request = requests[1]
-        second_reply = second_request.data.reply_to
+        second_request_data = second_request.data
+        assert second_request_data is not None
+        second_reply = second_request_data.reply_to
         assert second_reply is not None
         await hsm.dispatch(
             ctx,
@@ -561,7 +567,9 @@ def test_reading_rolls_back_owner_after_aggregate_attachment_failure(monkeypatch
         )
         await wait_until(lambda: bool(requests))
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,

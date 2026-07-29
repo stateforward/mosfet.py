@@ -9,7 +9,7 @@ import types
 
 import pytest
 
-from bot import abilities
+import bot.abilities
 from bot.providers.mlx_vlm import ImageDecoder, ImageDecodingError
 
 
@@ -143,7 +143,7 @@ def test_image_decoder_uses_injected_runtime() -> None:
         "verbose": True,
         "generate_kwargs": {"max_tokens": 64},
     }
-    assert isinstance(decoder, abilities.Decoder)
+    assert isinstance(decoder, bot.abilities.Decoder)
 
 
 def test_image_decoder_default_constructor_uses_mlx_vlm_runtime(

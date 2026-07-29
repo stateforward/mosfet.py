@@ -6,7 +6,7 @@ import dataclasses
 import importlib
 import typing
 
-from bot import abilities
+import bot.abilities
 
 from ._mlx import (
     SpeechEncodingModel,
@@ -33,8 +33,8 @@ def _empty_generate_kwargs() -> collections.abc.Mapping[str, object]:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class SpeechEncoder(abilities.Encoder[bytes, bytes]):
-    """abilities.Encoder that converts UTF-8 text bytes into MLX Audio speech audio bytes."""
+class SpeechEncoder(bot.abilities.Encoder[bytes, bytes]):
+    """bot.abilities.Encoder that converts UTF-8 text bytes into MLX Audio speech audio bytes."""
 
     model_id: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
     voice: str | None = None

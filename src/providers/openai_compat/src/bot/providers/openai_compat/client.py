@@ -86,15 +86,14 @@ def jsonable(value: object) -> object:
     except ImportError:  # pragma: no cover - provider always runs with hsm installed
         hsm = None  # type: ignore[assignment]
     if hsm is not None and isinstance(value, hsm.Event):
-        event = typing.cast(hsm.Event[object], value)
         return {
-            "name": event.name,
-            "data": jsonable(event.data),
-            "kind": event.kind,
-            "id": event.id or "",
-            "source": event.source or "",
-            "target": event.target or "",
-            "metadata": jsonable(dict(event.metadata)) if event.metadata else {},
+            "name": value.name,
+            "data": jsonable(value.data),
+            "kind": value.kind,
+            "id": value.id or "",
+            "source": value.source or "",
+            "target": value.target or "",
+            "metadata": jsonable(dict(value.metadata)) if value.metadata else {},
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return jsonable(dataclasses.asdict(value))

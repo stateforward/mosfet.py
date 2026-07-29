@@ -14,7 +14,7 @@ from tests.bot.abilities.memory.memory_fixtures import (
     require_model,
     start_ability_tree,
 )
-from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.type_helpers import object_dict
 
 
@@ -70,7 +70,7 @@ def test_memory_is_sql_transaction_ability_without_encoder() -> None:
 def test_memory_apply_select_and_insert_transaction() -> None:
     async def run() -> memory.OutputData:
         store = memory.Memory()
-        await start_abilities_for_test(None, store)
+        await start_abilities_for_test(shared_hsm_context(), store)
         return await dispatch_ability_for_test(
             store,
             None,

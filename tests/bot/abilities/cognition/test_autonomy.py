@@ -117,7 +117,9 @@ def test_autonomy_waits_for_asynchronous_behavior_terminal() -> None:
             triggers=(SoundEvent.name,),
         )
         _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+            memory.InputData(statements=memory.compile_statements(
+                *behavior_storage.insert_behavior_clauses(installed)
+            ))
         )
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
@@ -131,7 +133,7 @@ def test_autonomy_waits_for_asynchronous_behavior_terminal() -> None:
         )
         instances = autonomy.context().value(hsm.Keys.Instances)
         candidate_count = (
-            sum(isinstance(actor, autonomy_module._CandidateRun) for actor in instances.values())
+            sum(isinstance(actor, getattr(autonomy_module, "_CandidateRun")) for actor in instances.values())
             if isinstance(instances, collections.abc.Mapping)
             else 0
         )
@@ -163,7 +165,9 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
             triggers=(SoundEvent.name,),
         )
         _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+            memory.InputData(statements=memory.compile_statements(
+                *behavior_storage.insert_behavior_clauses(installed)
+            ))
         )
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
@@ -289,7 +293,9 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
             description="Answer an incoming phone ring as practiced automatic behavior.",
         )
         _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+            memory.InputData(statements=memory.compile_statements(
+                *behavior_storage.insert_behavior_clauses(installed)
+            ))
         )
 
         environment = Environment()

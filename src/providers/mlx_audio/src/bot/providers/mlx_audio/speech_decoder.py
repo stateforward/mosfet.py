@@ -18,8 +18,10 @@ _SPEECH_DECODING_MODEL_CACHE: dict[str, SpeechDecodingModel] = {}
 class SpeechDecodingError(RuntimeError):
     """Raised when MLX Audio speech decoding fails."""
 
+
 def _empty_generate_kwargs() -> collections.abc.Mapping[str, object]:
     return {}
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class SpeechDecoder(speech.SpeechDecoder):
@@ -75,6 +77,7 @@ class SpeechDecoder(speech.SpeechDecoder):
         _SPEECH_DECODING_MODEL_CACHE[self.model_id] = loaded
         return loaded
 
+
 def _accepted_generate_kwargs(
     model: SpeechDecodingModel,
     kwargs: collections.abc.Mapping[str, object],
@@ -88,6 +91,7 @@ def _accepted_generate_kwargs(
         return dict(kwargs)
 
     return {name: value for name, value in kwargs.items() if name in signature.parameters}
+
 
 def _transcription_text(result: object) -> str:
     if isinstance(result, str):
@@ -107,6 +111,7 @@ def _transcription_text(result: object) -> str:
 
     message = "MLX Audio speech decoding result is missing transcript text."
     raise TypeError(message)
+
 
 __all__ = [
     "SpeechDecoder",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot import abilities
+import bot.abilities
 from bot.abilities import participating
 from bot.abilities.hearing import speech
 from bot.devices import audio as audio_device
@@ -23,6 +23,7 @@ from bot.providers.livekit.audio import (
     create_audio_bridge,
 )
 
+
 @dataclasses.dataclass(frozen=True)
 class FakeAudioFrame:
     data: bytes
@@ -30,12 +31,14 @@ class FakeAudioFrame:
     num_channels: int
     samples_per_channel: int
 
+
 @dataclasses.dataclass
 class FakeAudioSource:
     captured_frames: list[FakeAudioFrame] = dataclasses.field(default_factory=list)
 
     async def capture_frame(self, frame: FakeAudioFrame) -> None:
         self.captured_frames.append(frame)
+
 
 @dataclasses.dataclass
 class RecordingSpeechDecoder(speech.SpeechDecoder):
@@ -45,8 +48,10 @@ class RecordingSpeechDecoder(speech.SpeechDecoder):
         self.inputs.append(input)
         return b"hello caller"
 
+
 async def await_value[T](value: collections.abc.Awaitable[T]) -> T:
     return await value
+
 
 def fake_audio_frame_factory(
     *,
@@ -62,6 +67,7 @@ def fake_audio_frame_factory(
         samples_per_channel=samples_per_channel,
     )
 
+
 def test_livekit_audio_frame_encoder_converts_bot_audio_output_to_livekit_frame() -> None:
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
     output = audio_device.AudioOutputData(
@@ -76,7 +82,8 @@ def test_livekit_audio_frame_encoder_converts_bot_audio_output_to_livekit_frame(
         num_channels=2,
         samples_per_channel=2,
     )
-    assert isinstance(encoder, abilities.Encoder)
+    assert isinstance(encoder, bot.abilities.Encoder)
+
 
 def test_livekit_audio_frame_encoder_uses_livekit_sdk_audio_frame_by_default() -> None:
     encoder: AudioFrameEncoder[rtc.AudioFrame] = AudioFrameEncoder()
@@ -84,7 +91,9 @@ def test_livekit_audio_frame_encoder_uses_livekit_sdk_audio_frame_by_default() -
     frame = asyncio.run(
         await_value(
             encoder.encode(
-                audio_device.AudioOutputData(audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
+                audio_device.AudioOutputData(
+                    audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
+                )
             )
         )
     )
@@ -94,6 +103,7 @@ def test_livekit_audio_frame_encoder_uses_livekit_sdk_audio_frame_by_default() -
     assert frame.num_channels == 1
     assert frame.samples_per_channel == 2
     assert bytes(frame.data) == b"\x01\x00\x02\x00"
+
 
 def test_livekit_audio_frame_encoder_uses_configured_pcm_defaults() -> None:
     encoder = AudioFrameEncoder[FakeAudioFrame](
@@ -108,6 +118,7 @@ def test_livekit_audio_frame_encoder_uses_configured_pcm_defaults() -> None:
     assert frame.num_channels == 1
     assert frame.samples_per_channel == 2
 
+
 @pytest.mark.parametrize("media_type", ["audio/opus", "audio/mpeg", "audio/wav"])
 def test_livekit_audio_frame_encoder_rejects_non_pcm_audio(media_type: str) -> None:
     """audio/wav is in this list for a reason: TTS that returns a container reaches here.
@@ -119,7 +130,10 @@ def test_livekit_audio_frame_encoder_rejects_non_pcm_audio(media_type: str) -> N
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
 
     with pytest.raises(AudioFrameError, match="PCM"):
-        _ = asyncio.run(await_value(encoder.encode(audio_device.AudioOutputData(audio=b"\x01\x00", media_type=media_type))))
+        _ = asyncio.run(
+            await_value(encoder.encode(audio_device.AudioOutputData(audio=b"\x01\x00", media_type=media_type)))
+        )
+
 
 def test_livekit_audio_frame_encoder_rejects_misaligned_pcm() -> None:
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
@@ -128,10 +142,13 @@ def test_livekit_audio_frame_encoder_rejects_misaligned_pcm() -> None:
         _ = asyncio.run(
             await_value(
                 encoder.encode(
-                    audio_device.AudioOutputData(audio=b"\x01\x00\x02", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
+                    audio_device.AudioOutputData(
+                        audio=b"\x01\x00\x02", media_type="audio/pcm", sample_rate_hz=48000, channels=1
+                    )
                 )
             )
         )
+
 
 def test_livekit_audio_frame_decoder_converts_livekit_frame_to_bot_audio_input() -> None:
     decoder = AudioFrameDecoder()
@@ -150,7 +167,8 @@ def test_livekit_audio_frame_decoder_converts_livekit_frame_to_bot_audio_input()
         sample_rate_hz=24000,
         channels=1,
     )
-    assert isinstance(decoder, abilities.Decoder)
+    assert isinstance(decoder, bot.abilities.Decoder)
+
 
 def test_livekit_audio_source_writer_captures_bot_audio_output() -> None:
     source = FakeAudioSource()
@@ -159,7 +177,9 @@ def test_livekit_audio_source_writer_captures_bot_audio_output() -> None:
 
     asyncio.run(
         writer.write(
-            audio_device.AudioOutputData(audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
+            audio_device.AudioOutputData(
+                audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
+            )
         )
     )
 
@@ -171,6 +191,7 @@ def test_livekit_audio_source_writer_captures_bot_audio_output() -> None:
             samples_per_channel=2,
         )
     ]
+
 
 def test_livekit_audio_bridge_receives_remote_frames_and_publishes_local_audio() -> None:
     source = FakeAudioSource()
@@ -191,7 +212,9 @@ def test_livekit_audio_bridge_receives_remote_frames_and_publishes_local_audio()
     )
     asyncio.run(
         bridge.publish_audio(
-            audio_device.AudioOutputData(audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
+            audio_device.AudioOutputData(
+                audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
+            )
         )
     )
 
@@ -210,6 +233,7 @@ def test_livekit_audio_bridge_receives_remote_frames_and_publishes_local_audio()
         )
     ]
 
+
 def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
     async def exercise_bridge() -> audio_device.AudioInputData:
         bridge = create_audio_bridge(sample_rate_hz=48000, channels=1, queue_size_ms=10)
@@ -223,7 +247,9 @@ def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
         received = await bridge.receive_frame(frame)
         await asyncio.wait_for(
             bridge.publish_audio(
-                audio_device.AudioOutputData(audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
+                audio_device.AudioOutputData(
+                    audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
+                )
             ),
             timeout=1.0,
         )
@@ -238,6 +264,7 @@ def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
         channels=1,
     )
 
+
 def test_livekit_pcm_wav_decoder_wraps_pcm_in_wav_container_for_existing_speech_decoding_contract() -> None:
     decoder = PcmWavDecoder(sample_rate_hz=16000, channels=1)
 
@@ -247,6 +274,7 @@ def test_livekit_pcm_wav_decoder_wraps_pcm_in_wav_container_for_existing_speech_
     assert wav[8:12] == b"WAVE"
     assert wav[12:16] == b"fmt "
     assert wav.endswith(b"\x01\x00\x02\x00")
+
 
 def test_livekit_voice_decoder_wraps_pcm_audio_for_injected_speech_decoder() -> None:
     speech_decoder = RecordingSpeechDecoder()
@@ -267,10 +295,11 @@ def test_livekit_voice_decoder_wraps_pcm_audio_for_injected_speech_decoder() -> 
     )
 
     assert transcript == "hello caller"
-    assert isinstance(decoder, abilities.VoiceDecoder)
+    assert isinstance(decoder, bot.abilities.VoiceDecoder)
     assert len(speech_decoder.inputs) == 1
     assert speech_decoder.inputs[0].startswith(b"RIFF")
     assert speech_decoder.inputs[0].endswith(b"\x01\x00\x02\x00")
+
 
 def test_livekit_voice_decoder_is_not_package_root_constructable_export() -> None:
     import bot.providers.livekit as livekit

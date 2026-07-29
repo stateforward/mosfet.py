@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
 
@@ -52,7 +52,7 @@ def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, li
 def test_memory_store_ability_apply_is_transaction() -> None:
     async def run() -> memory.OutputData:
         store = memory.MemoryStore()
-        await start_abilities_for_test(None, store)
+        await start_abilities_for_test(shared_hsm_context(), store)
         return await dispatch_ability_for_test(
             store,
             None,
@@ -74,7 +74,7 @@ def test_memory_store_ability_apply_is_transaction() -> None:
 def test_memory_store_ability_rolls_back_on_failure() -> None:
     async def run() -> tuple[str, ...]:
         store = memory.Memory()
-        await start_abilities_for_test(None, store)
+        await start_abilities_for_test(shared_hsm_context(), store)
         with pytest.raises(RuntimeError):
             _ = await dispatch_ability_for_test(
                 store,

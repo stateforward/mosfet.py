@@ -16,10 +16,13 @@ from ._mlx import (
     load_voice_identification_model,
 )
 
+
 class VoiceIdentificationError(RuntimeError):
     """Raised when MLX Audio voice identification fails."""
 
+
 VoiceIdentificationAudioDecoder = collections.abc.Callable[[bytes, int], object]
+
 
 def _decode_audio(audio: bytes, sample_rate: int) -> object:
     miniaudio = importlib.import_module("miniaudio")
@@ -32,6 +35,7 @@ def _decode_audio(audio: bytes, sample_rate: int) -> object:
     mlx_core = importlib.import_module("mlx.core")
     array = typing.cast(collections.abc.Callable[[object], object], getattr(mlx_core, "array"))
     return array(samples)
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VoiceIdentifier(voice.VoiceIdentifier):
@@ -87,6 +91,7 @@ class VoiceIdentifier(voice.VoiceIdentifier):
         embedding = model.extract_speaker_embedding(audio, sr=self.sample_rate)
         return segment.diarization.speaker_label, embedding
 
+
 def _serialize_embeddings(embeddings: collections.abc.Sequence[object], *, model_id: str, prefix: str) -> str:
     payload = {
         "format": "mlx-audio-speaker-embedding-v1",
@@ -95,6 +100,7 @@ def _serialize_embeddings(embeddings: collections.abc.Sequence[object], *, model
     }
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     return f"{prefix}{encoded.decode('ascii')}"
+
 
 def _jsonable_embedding(value: object) -> object:
     tolist = getattr(value, "tolist", None)
@@ -112,6 +118,7 @@ def _jsonable_embedding(value: object) -> object:
 
     message = "MLX Audio speaker embedding is not JSON serializable."
     raise TypeError(message)
+
 
 __all__ = [
     "VoiceIdentificationError",

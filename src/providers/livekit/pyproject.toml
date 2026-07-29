@@ -44,3 +44,7 @@ include = ["src", "tests"]
 extraPaths = ["src", "../../../src", "../../.."]
 pythonVersion = "3.13"
 reportPrivateUsage = "error"
+# Package `__init__` re-exports from `.phone`, which imports sibling modules — an intrinsic
+# package-init cycle. The root project disables this check for the same reason.
+reportImportCycles = false
+executionEnvironments = [{ root = "tests/test_phone.py", reportPrivateUsage = "none" }]

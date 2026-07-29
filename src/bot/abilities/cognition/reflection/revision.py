@@ -14,7 +14,7 @@ import uuid
 import hsm
 from pydantic.json_schema import SkipJsonSchema
 import pydantic
-from sqlalchemy.sql import Executable
+from sqlalchemy.sql import ClauseElement
 
 from bot.behavior import ChangeData
 from bot.behavior import ChangeEvent
@@ -304,8 +304,8 @@ _CancelStartedEvent = hsm.Event[_CancelRequestedData](
 )
 
 
-def _compile_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
-    return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
+def _compile_statements(clauses: tuple[ClauseElement, ...]) -> tuple[memory.Statement, ...]:
+    return memory.compile_statements(*clauses)
 
 
 def _load_behavior(store: memory.Memory, name: str) -> Instance | None:

@@ -31,7 +31,7 @@ import uuid
 
 import hsm
 import bot
-from sqlalchemy.sql import Executable
+from sqlalchemy.sql import ClauseElement
 
 from bot.protocols import attachment
 import pydantic
@@ -285,8 +285,8 @@ def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any
     raise TypeError(f"Reflection select returned unsupported event: {item.event}.")
 
 
-def _compile_behavior_statements(clauses: tuple[object, ...]) -> tuple[memory.Statement, ...]:
-    return memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
+def _compile_behavior_statements(clauses: tuple[ClauseElement, ...]) -> tuple[memory.Statement, ...]:
+    return memory.compile_statements(*clauses)
 
 
 def _load_behavior(store: memory.Memory, *, name: str) -> Instance | None:

@@ -94,13 +94,13 @@ def patch_field_names(patch: SchemaPatch | None) -> frozenset[str]:
     return frozenset(patch.model_fields)
 
 
-def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, tuple[object, object]]:
+def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, typing.Any]:
     """Build create_model field kwargs from a patch model (fresh Field, not borrowed FieldInfo)."""
 
-    fields: dict[str, tuple[object, object]] = {}
+    fields: dict[str, typing.Any] = {}
     for name, field_info in patch.model_fields.items():
         annotation: object = field_info.annotation if field_info.annotation is not None else object
-        kwargs: dict[str, object] = {}
+        kwargs: dict[str, typing.Any] = {}
         if field_info.description is not None:
             kwargs["description"] = field_info.description
         if field_info.examples is not None:
@@ -1030,7 +1030,8 @@ def _one_selection(
             # Top-level confidence without an active patch still lifts for convenience.
             top_conf = normalize_confidence(value.get("confidence"))
             if top_conf is not None:
-                meta = {"confidence": top_conf}
+                lifted: dict[str, object] = {"confidence": top_conf}
+                meta = lifted
         confidence = _confidence_from_meta(meta)
         if confidence is None:
             confidence = normalize_confidence(value.get("confidence"))

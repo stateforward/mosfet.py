@@ -11,6 +11,7 @@ import pytest
 
 from bot.providers.mlx_audio import VoiceDiarizationError, VoiceDiarizer
 
+
 @dataclasses.dataclass(frozen=True)
 class FakeDiarizationSegment:
     speaker: int
@@ -18,9 +19,11 @@ class FakeDiarizationSegment:
     end: float
     confidence: float
 
+
 @dataclasses.dataclass(frozen=True)
 class FakeDiarizationResult:
     segments: tuple[object, ...]
+
 
 @dataclasses.dataclass
 class FakeVoiceDiarizationModel:
@@ -34,15 +37,18 @@ class FakeVoiceDiarizationModel:
         self.calls.append((audio_path, threshold, verbose))
         return self.result
 
+
 class FailingVoiceDiarizationModel:
     def generate(self, audio: str, *, threshold: float, verbose: bool) -> FakeDiarizationResult:
         del audio, threshold, verbose
         raise RuntimeError("mlx unavailable")
 
+
 async def await_voice_diarization(
     output: collections.abc.Awaitable[voice.diarization.OutputData],
 ) -> voice.diarization.OutputData:
     return await output
+
 
 def test_voice_diarizer_uses_injected_model() -> None:
     model = FakeVoiceDiarizationModel(
@@ -85,6 +91,7 @@ def test_voice_diarizer_uses_injected_model() -> None:
     assert verbose is True
     assert isinstance(diarizer, voice.VoiceDiarizer)
 
+
 def test_voice_diarizer_uses_injected_loader() -> None:
     models: list[FakeVoiceDiarizationModel] = []
 
@@ -107,6 +114,7 @@ def test_voice_diarizer_uses_injected_loader() -> None:
     )
     assert len(models) == 1
 
+
 def test_voice_diarizer_is_awaitable() -> None:
     diarizer = VoiceDiarizer(
         model=FakeVoiceDiarizationModel(
@@ -120,6 +128,7 @@ def test_voice_diarizer_is_awaitable() -> None:
 
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output).segments[0].speaker_label == "speaker_0"
+
 
 def test_voice_diarizer_wraps_provider_errors() -> None:
     diarizer = VoiceDiarizer(model=FailingVoiceDiarizationModel())

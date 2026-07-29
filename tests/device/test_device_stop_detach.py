@@ -13,6 +13,11 @@ from bot.protocols import attachment
 from bot.environment import Environment
 
 
+def require_model(model: hsm.Model | None) -> hsm.Model:
+    assert model is not None
+    return model
+
+
 class _EmptyFirmware(hsm.Instance):
     model = hsm.define("EmptyFirmware", hsm.initial(hsm.target("ready")), hsm.state("ready"))
 
@@ -38,7 +43,7 @@ def test_device_stop_then_detach_does_not_dispatch() -> None:
     async def run() -> bool:
         environment = Environment()
         device = _TestDevice()
-        _ = await hsm.started(environment, device, device.model)
+        _ = await hsm.started(environment, device, require_model(device.model))
         assert bot.lifecycle.is_started(device) is True
         owner = hsm.Instance()
         _ = await hsm.started(
@@ -67,7 +72,7 @@ def test_device_reattach_after_stop_requires_restart() -> None:
     async def run() -> None:
         environment = Environment()
         device = _TestDevice()
-        _ = await hsm.started(environment, device, device.model)
+        _ = await hsm.started(environment, device, require_model(device.model))
         owner = hsm.Instance()
         _ = await hsm.started(
             environment,

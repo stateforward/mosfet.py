@@ -12,11 +12,13 @@ from bot.devices import audio
 import array
 import asyncio
 import logging
+import typing
 import collections.abc
 import dataclasses
 
 
 _LOG = logging.getLogger(__name__)
+
 
 def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
     if sample_rate_hz <= 0 or channels <= 0 or not pcm:
@@ -53,7 +55,7 @@ class RemotePcmBatcher:
     _buffer: bytearray = dataclasses.field(default_factory=bytearray, init=False, repr=False)
     _sample_rate_hz: int | None = dataclasses.field(default=None, init=False)
     _channels: int | None = dataclasses.field(default=None, init=False)
-    _media_type: str = dataclasses.field(default="audio/pcm", init=False)
+    _media_type: str | None = dataclasses.field(default="audio/pcm", init=False)
     _idle_handle: asyncio.TimerHandle | None = dataclasses.field(default=None, init=False, repr=False)
     _lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = dataclasses.field(default=False, init=False)
@@ -65,13 +67,10 @@ class RemotePcmBatcher:
         async with self._lock:
             if self._closed:
                 return
-            format_changed = (
-                self._sample_rate_hz is not None
-                and (
-                    data.sample_rate_hz != self._sample_rate_hz
-                    or data.channels != self._channels
-                    or data.media_type != self._media_type
-                )
+            format_changed = self._sample_rate_hz is not None and (
+                data.sample_rate_hz != self._sample_rate_hz
+                or data.channels != self._channels
+                or data.media_type != self._media_type
             )
             if format_changed and self._buffer:
                 to_emit.append(self._snapshot_unlocked())
@@ -82,8 +81,10 @@ class RemotePcmBatcher:
             self._buffer.extend(data.audio)
             duration_ms = pcm_duration_ms(
                 bytes(self._buffer),
-                sample_rate_hz=data.sample_rate_hz,
-                channels=data.channels,
+                # Same invariant `_snapshot_unlocked` asserts: pushed frames always carry
+                # a concrete format, so the optional fields are populated here.
+                sample_rate_hz=typing.cast(int, data.sample_rate_hz),
+                channels=typing.cast(int, data.channels),
             )
             if duration_ms >= self.max_utterance_ms:
                 to_emit.append(self._snapshot_unlocked())

@@ -46,8 +46,8 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
     async def run() -> None:
         microphone = audio.Microphone()
         target = RecordingDevice()
-        _ = await hsm.started(None, microphone, microphone.model, hsm.Config(id="livekit-microphone"))
-        _ = await hsm.started(None, target, target.model, hsm.Config(id="phone-audio"))
+        _ = await hsm.started(None, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="livekit-microphone"))
+        _ = await hsm.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="phone-audio"))
         target.events.clear()
         data = audio.AudioInputData(audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1)
 
@@ -83,9 +83,9 @@ def test_microphone_transduces_one_capture_per_environment_sound_to_each_attache
         controller = RecordingDevice()
         bystander = RecordingDevice()
 
-        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(environment, controller, controller.model, hsm.Config(id="controller"))
-        _ = await hsm.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
+        _ = await hsm.started(environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller"))
+        _ = await hsm.started(environment, bystander, typing.cast(hsm.Model, bystander.model), hsm.Config(id="bystander"))
         await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: microphone.state() == "/Device/attached")
         controller.events.clear()
@@ -127,8 +127,8 @@ def test_unattached_microphone_transduces_nothing() -> None:
         microphone = audio.Microphone()
         listener = RecordingDevice()
 
-        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        _ = await hsm.started(environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, listener, typing.cast(hsm.Model, listener.model), hsm.Config(id="listener"))
         listener.events.clear()
 
         await environment.broadcast(
@@ -179,8 +179,8 @@ def test_microphone_mid_attach_transduces_nothing() -> None:
         microphone = HalfAttachedMicrophone()
         controller = RecordingDevice()
 
-        _ = await hsm.started(environment, microphone, microphone.model, hsm.Config(id="microphone"))
-        _ = await hsm.started(environment, controller, controller.model, hsm.Config(id="controller"))
+        _ = await hsm.started(environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone"))
+        _ = await hsm.started(environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller"))
         await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: microphone.state() == "/Device/attaching")
         controller.events.clear()

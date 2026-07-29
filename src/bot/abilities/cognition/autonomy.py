@@ -22,7 +22,6 @@ import hsm
 
 from bot.protocols import attachment
 import pydantic
-from sqlalchemy.sql import Executable
 
 from bot import behavior
 from bot.behavior.instance import Instance
@@ -687,7 +686,7 @@ def _child_operation_id(parent_operation_id: str, index: int) -> str:
 def _behavior_select_input() -> memory.InputData:
     """Memory ability input: SELECT ACTIVE behaviors + triggers (skip DRAFT/BROKEN)."""
 
-    clauses = typing.cast(tuple[Executable, ...], behavior_storage.select_active_behaviors_clauses())
+    clauses = behavior_storage.select_active_behaviors_clauses()
     return memory.InputData(statements=memory.compile_statements(*clauses))
 
 
@@ -857,7 +856,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         store = instance._memory
         if store is not None:
             try:
-                clauses = typing.cast(tuple[Executable, ...], behavior_storage.replace_behavior_clauses(updated))
+                clauses = behavior_storage.replace_behavior_clauses(updated)
                 _ = store.execute(memory.InputData(statements=memory.compile_statements(*clauses)))
             except Exception:
                 # Practice telemetry must not fail the turn; inventory may lag until next attach load.

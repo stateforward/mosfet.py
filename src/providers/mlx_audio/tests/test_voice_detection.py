@@ -15,6 +15,7 @@ from bot.providers.mlx_audio import VoiceDetectionError, VoiceDetector
 SPEECH_WAV = (pathlib.Path(__file__).parent / "assets" / "speech.wav").read_bytes()
 """Real human speech, same encoding as the ring clip (see assets/SOURCES.md)."""
 
+
 @dataclasses.dataclass
 class FakeVoiceDetectionModel:
     timestamps: tuple[object, ...]
@@ -28,13 +29,18 @@ class FakeVoiceDetectionModel:
         self.calls.append(audio_path)
         return self.timestamps
 
+
 class FailingVoiceDetectionModel:
     def get_speech_timestamps(self, audio: str, *, return_seconds: bool) -> tuple[object, ...]:
         del audio, return_seconds
         raise RuntimeError("mlx unavailable")
 
-async def await_voice_detection(output: collections.abc.Awaitable[voice.detection.OutputData]) -> voice.detection.OutputData:
+
+async def await_voice_detection(
+    output: collections.abc.Awaitable[voice.detection.OutputData],
+) -> voice.detection.OutputData:
     return await output
+
 
 def test_voice_detector_uses_injected_model() -> None:
     # Bare start/end is the whole record MLX Audio emits, so a positive carries no confidence.
@@ -47,6 +53,7 @@ def test_voice_detector_uses_injected_model() -> None:
     assert len(model.calls) == 1
     assert not model.calls[0].exists()
     assert isinstance(detector, voice.VoiceDetector)
+
 
 def test_voice_detector_uses_injected_loader() -> None:
     models: list[FakeVoiceDetectionModel] = []
@@ -64,6 +71,7 @@ def test_voice_detector_uses_injected_loader() -> None:
     assert output == voice.detection.OutputData(is_voice=False, confidence=None)
     assert len(models) == 1
 
+
 def test_voice_detector_is_awaitable() -> None:
     detector = VoiceDetector(model=FakeVoiceDetectionModel(timestamps=()))
 
@@ -72,6 +80,7 @@ def test_voice_detector_is_awaitable() -> None:
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output) == voice.detection.OutputData(is_voice=False, confidence=None)
 
+
 def test_voice_detector_wraps_provider_errors() -> None:
     detector = VoiceDetector(model=FailingVoiceDetectionModel())
 
@@ -79,6 +88,7 @@ def test_voice_detector_wraps_provider_errors() -> None:
         _ = asyncio.run(await_voice_detection(detector.classify(b"audio")))
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
 
 @pytest.mark.live
 def test_real_detector_hears_no_voice_in_the_ring_but_hears_speech() -> None:

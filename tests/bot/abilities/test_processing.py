@@ -151,11 +151,9 @@ class OptionalRecordingProcessor(processing.Processor):
         self.output = output
 
     @typing.override
-    async def process(
-        self, input: processing.InputData
-    ) -> processing.Events | processing.Result[processing.Events] | None:
+    async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(str(input.input))
-        return self.output
+        return typing.cast(processing.Events, self.output)
 
 
 def optional_recording(
@@ -271,12 +269,10 @@ class ContextRecordingProcessor(processing.Processor):
         self._ctx = ctx
 
     @typing.override
-    async def process(
-        self, input: processing.InputData
-    ) -> processing.Events | processing.Result[processing.Events] | None:
+    async def process(self, input: processing.InputData) -> processing.Events:
         del input
         self.values.append(None if self._ctx is None else self._ctx.value(CONTEXT_KEY))
-        return self.output
+        return typing.cast(processing.Events, self.output)
 
 
 def context_recording(
@@ -327,7 +323,6 @@ class ModeledChildProcessing(processing.Processing):
         ),
     )
 
-    @typing.override
     async def _apply(self, ctx: hsm.Context, input: processing.InputData) -> processing.Events:
         del ctx, input
         raise AssertionError("direct _apply bypassed modeled child dispatch")
@@ -670,13 +665,20 @@ def test_input_data_serialization_projects_patched_schemas() -> None:
     assert "confidence" not in pure_props
 
 
+def _nested_dict(value: object, *keys: str) -> dict[str, object]:
+    for key in keys:
+        value = object_dict(value)[key]
+    return object_dict(value)
+
+
 def test_dispatch_tool_is_single_function_with_events_array() -> None:
     tool = processing.dispatch_tool((_SPEAK_EVENT,), patch=_ConfidencePatch)
     assert tool["type"] == "function"
-    assert tool["function"]["name"] == processing.DISPATCH_TOOL_NAME
-    parameters = tool["function"]["parameters"]
+    function = _nested_dict(tool, "function")
+    assert function["name"] == processing.DISPATCH_TOOL_NAME
+    parameters = _nested_dict(function, "parameters")
     assert parameters["required"] == ["events"]
-    items = parameters["properties"]["events"]["items"]
+    items = _nested_dict(parameters, "properties", "events", "items")
     # Per-event anyOf branches carry const name + full data schema (required fields).
     assert "anyOf" in items
     branches = items["anyOf"]
@@ -688,11 +690,9 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     assert "text" in data_schema.get("required", [])
     assert "confidence" in data_schema["properties"]
     assert "event" in branch["required"] and "data" in branch["required"]
-    assert "description" in tool["function"]
-    assert (
-        "multi-select" in tool["function"]["description"].lower()
-        or "multiple" in tool["function"]["description"].lower()
-    )
+    description = function["description"]
+    assert isinstance(description, str)
+    assert "multi-select" in description.lower() or "multiple" in description.lower()
 
 
 def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
@@ -709,11 +709,11 @@ def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
             phone.DeclineCallEvent,
         )
     )
-    parameters = tool["function"]["parameters"]
+    parameters = _nested_dict(tool, "function", "parameters")
     assert json_schema_is_embeddable(parameters)
     assert "$defs" not in parameters
 
-    items = parameters["properties"]["events"]["items"]
+    items = _nested_dict(parameters, "properties", "events", "items")
     branches = items["anyOf"]
     assert isinstance(branches, list)
     by_name = {

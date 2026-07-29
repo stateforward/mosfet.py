@@ -12,7 +12,7 @@ import hsm
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
-from tests.hsm_instance_state import start_ability_tree
+from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
 
 class RecordingParticipating(participating.Participating):
@@ -263,7 +263,8 @@ def test_participating_detach_releases_owned_perception_while_reading() -> None:
         )
         assert ability.state() == "/RecordingParticipatingLifecycle/attached/behavior/perceiving/reading_text"
 
-        owner = ability._attachments[0]
+        owner = ability_terminal_owner(ability)
+        assert owner is not None
         _ = await ability.detach(
             ctx,
             attachment.DetachEvent.with_data_and_id(attachment.DetachData(actor=owner), "participating-detach"),

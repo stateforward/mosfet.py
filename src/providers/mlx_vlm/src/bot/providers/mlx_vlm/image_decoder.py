@@ -5,7 +5,7 @@ import collections.abc
 import dataclasses
 import typing
 
-from bot import abilities
+import bot.abilities
 
 from ._image_file import temporary_image_file
 from ._mlx import (
@@ -29,7 +29,7 @@ def _default_generate_kwargs() -> collections.abc.Mapping[str, object]:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class ImageDecoder(abilities.Decoder[bytes, str]):
+class ImageDecoder(bot.abilities.Decoder[bytes, str]):
     """Image decoder backed by an MLX vision-language model.
 
     The decoder accepts encoded image bytes, writes them to a temporary image

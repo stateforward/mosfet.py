@@ -22,8 +22,7 @@ import pydantic
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine
-from sqlalchemy.sql import Executable
-from sqlalchemy.sql.compiler import Compiled
+from sqlalchemy.sql import ClauseElement
 
 from bot.telemetry import observer
 
@@ -217,7 +216,7 @@ def _optional_str(value: ParameterValue) -> str | None:
 
 
 def compile_statement(
-    clause: Executable,
+    clause: ClauseElement,
     *,
     dialect: Dialect | None = None,
 ) -> Statement:
@@ -226,24 +225,22 @@ def compile_statement(
     from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 
     active = dialect if dialect is not None else sqlite_dialect()
-    compiled = typing.cast(
-        Compiled,
-        clause.compile(dialect=active, compile_kwargs={"render_postcompile": True}),
-    )
+    compiled = clause.compile(dialect=active, compile_kwargs={"render_postcompile": True})
     sql = str(compiled)
     positiontup = getattr(compiled, "positiontup", None)
+    params = compiled.params or {}
     if positiontup:
-        params = tuple(compiled.params[name] for name in positiontup)
+        parameters = tuple(params[name] for name in positiontup)
     else:
-        params = tuple(compiled.params.values())
+        parameters = tuple(params.values())
     return Statement(
         sql=sql,
-        parameters=typing.cast(tuple[ParameterValue, ...], params),
+        parameters=typing.cast(tuple[ParameterValue, ...], parameters),
     )
 
 
 def compile_statements(
-    *clauses: Executable,
+    *clauses: ClauseElement,
     dialect: Dialect | None = None,
 ) -> tuple[Statement, ...]:
     """Compile one or more Core clauses into a transaction batch."""

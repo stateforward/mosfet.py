@@ -17,7 +17,7 @@ import pydantic
 import bot.device
 from livekit import rtc
 
-from bot import lifecycle
+import bot.lifecycle
 from bot.telemetry import observer
 from bot.environment import Environment, require_environment_scope
 
@@ -1273,11 +1273,11 @@ class PhoneService(hsm.Instance):
 
         require_environment_scope(environment, target, participant="Phone service target")
         _, track_path = self._ensure_media()
-        if not lifecycle.is_started(track_path):
+        if not bot.lifecycle.is_started(track_path):
             _ = await hsm.started(environment, track_path, track_path.model)
         # Start this service before room connect so its signaling handlers are registered by the
         # time setup can arrive; an unattached phone answers RPC with RECIPIENT_NOT_FOUND.
-        if not lifecycle.is_started(self):
+        if not bot.lifecycle.is_started(self):
             _ = await hsm.started(environment, self, self.model)
         require_environment_scope(environment, self, participant="PhoneService")
         await self.dispatch(environment, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
@@ -1295,7 +1295,7 @@ class PhoneService(hsm.Instance):
         """Detach this service from the phone-owned firmware target."""
 
         # Idempotent when already stopped; no firmware reply channel on this API.
-        if not lifecycle.is_started(self):
+        if not bot.lifecycle.is_started(self):
             return
         require_environment_scope(environment, target, participant="Phone service target")
         require_environment_scope(environment, self, participant="PhoneService")
@@ -1311,9 +1311,9 @@ class PhoneService(hsm.Instance):
         """Connect the privately owned LiveKit room audio path for this service."""
 
         _, track_path = self._ensure_media()
-        if not lifecycle.is_started(track_path):
+        if not bot.lifecycle.is_started(track_path):
             # Parent the track path under this service only while the service is live.
-            parent = self.context() if lifecycle.is_started(self) else None
+            parent = self.context() if bot.lifecycle.is_started(self) else None
             _ = await hsm.started(parent, track_path, track_path.model)
         await track_path.connect_room(
             track_path.context(),
@@ -1340,7 +1340,7 @@ class PhoneService(hsm.Instance):
         if track_path is None:
             return
         # Track path is created by _ensure_media before start; only stop if started.
-        if not lifecycle.is_started(track_path):
+        if not bot.lifecycle.is_started(track_path):
             return
         await hsm.stop(track_path, ctx)
 

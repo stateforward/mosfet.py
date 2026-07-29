@@ -114,7 +114,7 @@ def test_revision_input_schema_documents_its_new_typed_boundary() -> None:
 
 
 def test_revision_rejects_forged_private_checked_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    actor = revision.Revision(processor=FixedProcessor(write=()), memory=memory.Memory())
+    actor = revision.Revision(processor=FixedProcessor(write=[]), memory=memory.Memory())
     write = revision.ChangeWriteInput(
         cognition_input=cognition_input(),
         cognition_output=focus_output("phone", "answered"),
@@ -125,7 +125,7 @@ def test_revision_rejects_forged_private_checked_event(monkeypatch: pytest.Monke
         attempt=0,
     )
     written = behavior.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE)
-    checked = revision._CheckedData(
+    checked = getattr(revision, "_CheckedData")(
         write=write,
         generation="revision-generation",
         written=written,
@@ -134,17 +134,17 @@ def test_revision_rejects_forged_private_checked_event(monkeypatch: pytest.Monke
     monkeypatch.setattr(revision.processing, "matches_operation", lambda *args: True)
     monkeypatch.setattr(revision.hsm, "id", lambda instance: "revision" if instance is actor else "other")
     forged = dataclasses.replace(
-        revision._CheckedEvent.with_data(checked),
+        getattr(revision, "_CheckedEvent").with_data(checked),
         id="private-turn",
         source="forged",
         target="revision",
     )
 
-    assert not revision.Revision._accepted(hsm.Context(), actor, forged)
+    assert not getattr(revision.Revision, "_accepted")(hsm.Context(), actor, forged)
 
 
 def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    actor = revision.Revision(processor=FixedProcessor(write=()), memory=memory.Memory())
+    actor = revision.Revision(processor=FixedProcessor(write=[]), memory=memory.Memory())
     current_operation = object()
     write = revision.ChangeWriteInput(
         cognition_input=cognition_input(),
@@ -156,13 +156,13 @@ def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pyte
         attempt=0,
     )
     terminal = dataclasses.replace(
-        actor._change_processing.output_event.with_data(
+        getattr(actor, "_change_processing").output_event.with_data(
             revision.processing.CompletionData(
                 input=revision.processing.InputData(input=write),
                 output=revision.processing.OutputData(),
             )
         ),
-        id=revision.Revision._child_id("retry-turn", 0, "stale-revision-generation"),
+        id=getattr(revision.Revision, "_child_id")("retry-turn", 0, "stale-revision-generation"),
         source="change-processing",
         target="revision",
     )
@@ -176,12 +176,12 @@ def test_revision_rejects_stale_same_attempt_generation_output(monkeypatch: pyte
             "revision"
             if instance is actor
             else "change-processing"
-            if instance is actor._change_processing
+            if instance is getattr(actor, "_change_processing")
             else "current-revision-generation"
         ),
     )
 
-    assert not revision.Revision._matches_change_output(hsm.Context(), actor, terminal)
+    assert not getattr(revision.Revision, "_matches_change_output")(hsm.Context(), actor, terminal)
 
 
 def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
@@ -193,7 +193,7 @@ def test_revision_failed_draft_preserves_existing_inventory_metadata() -> None:
     )
     written = behavior.ChangeData(name="AnswerIncomingRing", source="invalid replacement")
 
-    draft = revision._inventory_instance(written, None, existing)
+    draft = getattr(revision, "_inventory_instance")(written, None, existing)
 
     assert draft is not None
     assert draft.triggers == ("environment.sound",)
@@ -210,7 +210,7 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
             processor=FixedProcessor(write=written),
             memory=memory.Memory(),
         )
-        return await dispatch_ability_for_test(
+        output = await dispatch_ability_for_test(
             actor,
             None,
             revision.InputData(
@@ -224,6 +224,8 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
                 parent_generation="parent-generation",
             ),
         )
+        assert isinstance(output, revision.OutputData)
+        return output
 
     output = asyncio.run(run())
 

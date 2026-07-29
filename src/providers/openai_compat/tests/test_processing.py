@@ -59,7 +59,7 @@ class _ProcessForTestOwner(hsm.Instance):
             return
         if event.name == instance.failed_event.name:
             failure = event.data
-            message = failure.message if hasattr(failure, "message") else str(failure)
+            message = failure.message if failure is not None and hasattr(failure, "message") else str(failure)
             future.set_exception(RuntimeError(message))
 
     model: typing.ClassVar[hsm.Model | None] = hsm.define(
@@ -121,8 +121,18 @@ def test_processor_user_content_serializes_speech_event_stimulus() -> None:
         data=b"Hey I'm Gabe how are you",
         kind=hsm.CompletionEventKind,
     )
-    input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
-    content = Processor._user_content(input)
+    generator = RecordingGenerator(content="[]")
+    processor = Processor(generator=generator)
+    input = processing.InputData(
+        input=stimulus,
+        schemas=(_PHONE_ANSWER_CALL,),
+        instructions="Select events from schemas.",
+    )
+    output = asyncio.run(process_for_test(processor, input))
+    assert output == ()
+    content = next(
+        message.content for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER
+    )
     assert "Hey I'm Gabe how are you" in content
     assert "bot.ability.hearing.speech.decoding.output" in content
     assert "phone.answer_call" in content

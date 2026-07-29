@@ -1,4 +1,4 @@
-from bot import behavior
+from bot.behavior import verify
 
 
 def _transfer_selection_behavior_source() -> str:
@@ -61,7 +61,7 @@ def test_verify_apply_allows_selection_naming_a_different_call_id_than_the_live_
     leg, etc.) was rejected with a spurious binding-mismatch error.
     """
 
-    checked = behavior.verify_apply(
+    checked = verify.verify_apply(
         _transfer_selection_behavior_source(),
         input_data={"text": "transfer me"},
         event_id="live-call-123",

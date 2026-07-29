@@ -16,7 +16,9 @@ def _behavior_model(machine_cls: type[hsm.Instance]) -> hsm.Model:
     submodel = getattr(machine_cls, "submodel", None)
     if isinstance(submodel, hsm.Model):
         return submodel
-    return machine_cls.model
+    model = getattr(machine_cls, "model", None)
+    assert isinstance(model, hsm.Model)
+    return model
 
 
 def _composite_state(model: hsm.Model, *, name: str) -> tuple[str, object]:
@@ -47,7 +49,7 @@ def test_hsm_init_required_composites_declare_nested_initials() -> None:
     for machine_cls, composite_name, expected_target_suffix in cases:
         model = _behavior_model(machine_cls)
         _path, state = _composite_state(model, name=composite_name)
-        initial_path = state.initial
+        initial_path = getattr(state, "initial", None)
         assert isinstance(initial_path, str) and initial_path.endswith("/.initial")
         transition_paths = [
             path

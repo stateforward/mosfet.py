@@ -3,11 +3,11 @@ from __future__ import annotations
 import dataclasses
 import typing
 
-from bot import abilities
+import bot.abilities
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class TextDecoder(abilities.Decoder[str, str]):
+class TextDecoder(bot.abilities.Decoder[str, str]):
     """Text decoder for reading inputs that are already plain text."""
 
     @typing.override

@@ -48,7 +48,9 @@ class PreferenceAssociationGenerator(generative.Generator[processing.InputData, 
     @typing.override
     async def generate(self, input: processing.InputData) -> memory.associative.LinkedData:
         self.inputs.append(input)
-        assert [source.decoded.content for source in input.input.sources] == [
+        frame = input.input
+        assert isinstance(frame, memory.associative.AssociationData)
+        assert [source.decoded.content for source in frame.sources] == [
             "Gabe prefers terse handoff notes.",
             "Gabe asked for concise final reports.",
         ]
@@ -56,7 +58,7 @@ class PreferenceAssociationGenerator(generative.Generator[processing.InputData, 
             memory=memory.classification.GeneratedMemory(
                 content="The operator prefers concise handoff and final notes.",
                 kind=memory.classification.MemoryClassificationKind.PREFERENCE,
-                subject_ref=input.input.subject_ref,
+                subject_ref=frame.subject_ref,
             ),
             links=(
                 memory.associative.Link(
@@ -277,7 +279,6 @@ def test_associative_memory_decodes_sources_then_processes_graph_associations() 
     async def run() -> tuple[
         list[memory.associative.OutputData],
         list[processing.InputData],
-        list[memory.classification.EncodedMemory],
         list[memory.classification.GeneratedMemory],
     ]:
         decoder = GeneratedMemoryDecoder()
@@ -307,6 +308,7 @@ def test_associative_memory_decodes_sources_then_processes_graph_associations() 
 
     assert len(processor_inputs) == 1
     processor_frame = processor_inputs[0].input
+    assert isinstance(processor_frame, memory.associative.AssociationData)
     assert processor_frame.context == "Build graph associations for a knowledge store."
     assert processor_frame.context_ref == "active-task"
     assert processor_frame.subject_ref == "operator"

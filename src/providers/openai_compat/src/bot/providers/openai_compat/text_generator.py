@@ -10,13 +10,17 @@ import typing
 
 from .client import ChatCompletionClient, jsonable
 
+
 class TextGenerationError(RuntimeError):
     """Raised when an OpenAI-compatible text generation response cannot be mapped to stateforward.bot output."""
 
+
 _SUCCESS_FINISH_REASONS = frozenset({"stop", "tool_calls"})
+
 
 def _empty_body() -> dict[str, object]:
     return {}
+
 
 def _tool_call_to_openai(tool_call: text.TextToolCall) -> dict[str, object]:
     return {
@@ -28,6 +32,7 @@ def _tool_call_to_openai(tool_call: text.TextToolCall) -> dict[str, object]:
         },
     }
 
+
 def _message_to_openai(message: text.TextMessage) -> dict[str, object]:
     output: dict[str, object] = {
         "role": str(message.role),
@@ -38,6 +43,7 @@ def _message_to_openai(message: text.TextMessage) -> dict[str, object]:
     if message.tool_calls:
         output["tool_calls"] = [_tool_call_to_openai(tool_call) for tool_call in message.tool_calls]
     return output
+
 
 def _tool_to_openai(tool: object) -> dict[str, object]:
     if isinstance(tool, str):
@@ -63,13 +69,16 @@ def _tool_to_openai(tool: object) -> dict[str, object]:
         raise TextGenerationError("OpenAI-compatible tools must be function tool objects or non-blank tool names.")
     return tool_mapping
 
+
 def _tools_to_openai(tools: collections.abc.Sequence[object]) -> tuple[dict[str, object], ...]:
     return tuple(_tool_to_openai(tool) for tool in tools)
+
 
 def _mapping(value: object, message: str) -> collections.abc.Mapping[str, object]:
     if not isinstance(value, collections.abc.Mapping):
         raise TextGenerationError(message)
     return typing.cast(collections.abc.Mapping[str, object], value)
+
 
 def _first_choice(response: collections.abc.Mapping[str, object]) -> tuple[collections.abc.Mapping[str, object], str]:
     choices = response.get("choices")
@@ -86,6 +95,7 @@ def _first_choice(response: collections.abc.Mapping[str, object]) -> tuple[colle
         finish_reason,
     )
 
+
 def _content_from_message(message: collections.abc.Mapping[str, object], *, has_tool_calls: bool) -> str:
     if message.get("refusal") is not None:
         raise TextGenerationError("OpenAI-compatible chat completion refused the request.")
@@ -96,6 +106,7 @@ def _content_from_message(message: collections.abc.Mapping[str, object], *, has_
         return content
     raise TextGenerationError("OpenAI-compatible chat completion message did not include string content.")
 
+
 def _reasoning_from_message(message: collections.abc.Mapping[str, object]) -> str:
     reasoning = message.get("reasoning")
     if isinstance(reasoning, str):
@@ -104,6 +115,7 @@ def _reasoning_from_message(message: collections.abc.Mapping[str, object]) -> st
     if isinstance(reasoning_content, str):
         return reasoning_content
     return ""
+
 
 def _tool_args(value: object) -> dict[str, object]:
     if not isinstance(value, str):
@@ -116,6 +128,7 @@ def _tool_args(value: object) -> dict[str, object]:
         parsed_mapping = typing.cast(collections.abc.Mapping[object, object], parsed)
         return {str(key): item for key, item in parsed_mapping.items()}
     raise TextGenerationError("OpenAI-compatible tool call arguments must be a JSON object string.")
+
 
 def _tool_calls_from_message(message: collections.abc.Mapping[str, object]) -> tuple[text.TextToolCall, ...]:
     if message.get("function_call") is not None:
@@ -153,6 +166,7 @@ def _tool_calls_from_message(message: collections.abc.Mapping[str, object]) -> t
         )
     return tuple(tool_calls)
 
+
 def _extra_body_for_input(
     input: text.InputData,
     extra_body: collections.abc.Mapping[str, object],
@@ -165,11 +179,13 @@ def _extra_body_for_input(
         body.setdefault("reasoning_effort", "none")
     return body
 
+
 def _validate_tool_selection(input: text.InputData, tool_calls: tuple[text.TextToolCall, ...]) -> None:
     if input.tools and input.tool_selection == text.ToolSelectionPolicy.REQUIRED and not tool_calls:
         raise TextGenerationError("OpenAI-compatible chat completion did not include a required tool call.")
     if input.tool_selection == text.ToolSelectionPolicy.NONE and tool_calls:
         raise TextGenerationError("OpenAI-compatible chat completion included tool calls when tool selection is none.")
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TextGenerator(text.TextGenerator):
@@ -208,5 +224,6 @@ class TextGenerator(text.TextGenerator):
             model=model if isinstance(model, str) else None,
             tool_calls=tool_calls,
         )
+
 
 __all__ = ["TextGenerationError", "TextGenerator"]

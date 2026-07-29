@@ -55,11 +55,7 @@ def _openai_model() -> str:
 
 
 def _openai_base_url() -> str:
-    return (
-        os.environ.get("BOT_OPENAI_BASE_URL")
-        or os.environ.get("OPENAI_BASE_URL")
-        or _DEFAULT_OPENAI_BASE_URL
-    )
+    return os.environ.get("BOT_OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or _DEFAULT_OPENAI_BASE_URL
 
 
 def _openai_reflection_processor() -> processing.Processor:
@@ -68,8 +64,6 @@ def _openai_reflection_processor() -> processing.Processor:
     model = _openai_model()
     client = OpenAIChatClient(model=model, api_key=api_key, base_url=_openai_base_url())
     return OpenAIProcessor(client=client, provider="openai_terra_reflection_live")
-
-
 
 
 def _insert_content(
@@ -85,6 +79,7 @@ def _insert_content(
 ) -> memory.Statement:
     import uuid
     from sqlalchemy import insert
+
     table = memory.memory_table
     clause = insert(table).values(
         memory_id=memory_id or uuid.uuid4().hex,
@@ -103,12 +98,14 @@ def _insert_content(
 
 def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, limit: int = 50) -> memory.Statement:
     from sqlalchemy import or_, select
+
     table = memory.memory_table
     clause = select(table).where(table.c.query_tags == query_tags)
     if context_ref is not None:
         clause = clause.where(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
     clause = clause.order_by(table.c.created_at).limit(limit)
     return memory.compile_statement(clause)
+
 
 def _load_dotenv_file(path: Path) -> None:
     if not path.is_file():
@@ -205,9 +202,7 @@ async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) ->
 async def _behavior_contents(store: memory.Memory) -> tuple[str, ...]:
     from bot.behavior import storage as behavior_storage
 
-    select = memory.InputData(
-        statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
-    )
+    select = memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
     out = store.execute(select)
     if not out.results:
         return ()
@@ -225,7 +220,7 @@ async def _episodes(store: memory.Memory) -> tuple[cognition.episodes.CognitiveE
     return cognition.episodes.episodes_from_output(out)
 
 
-async def _start_reflection(reflection: cognition.Reflection) -> object:
+async def _start_reflection(reflection: cognition.Reflection) -> hsm.Context:
     ctx = shared_hsm_context()
     await start_abilities_for_test(ctx, reflection)
     return ctx
@@ -398,9 +393,7 @@ def _live_behavior_answers_phone_call(
         call_id = "livekit:caller"
         store = memory.Memory()
         _ = store.execute(
-            memory.InputData(
-                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
-            )
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
         )
 
         environment = Environment()
@@ -414,9 +407,7 @@ def _live_behavior_answers_phone_call(
         assert firmware is not None
         await firmware.event_recorder().receive(
             phone.context(),
-            phone_device.IncomingCallEvent.with_data(
-                phone_device.IncomingCallData(call_id=call_id, caller="caller")
-            ),
+            phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller="caller")),
         )
         deadline = asyncio.get_running_loop().time() + 2.0
         while asyncio.get_running_loop().time() < deadline:
@@ -517,7 +508,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         async def process(self, input: processing.InputData) -> processing.Events:
             del input
             # Unhandled → Cognition cascades to reasoning.
-            return processing.Result[processing.Events].unhandled()
+            return typing.cast(processing.Events, typing.cast(object, processing.Result[processing.Events].unhandled()))
 
     class _AnswerRingReasoning(processing.Processor):
         answered: list[str]
@@ -642,4 +633,3 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
     assert formed_at >= 1
     assert len(behaviors) >= 1
     assert "hsm.define" in behaviors[0] or "behavior" in behaviors[0].lower()
-

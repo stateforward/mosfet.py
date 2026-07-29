@@ -15,6 +15,7 @@ from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities.conversation import voice as conversation_voice
 from bot.abilities import decoding
+from bot.abilities import encoding
 from bot.abilities import listening
 from bot.abilities import participating
 from bot.abilities import processing
@@ -28,11 +29,12 @@ from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.test_bot import as_cognition, device_firmware, emit_phone_service_event, ring_phone
 
 
-class RecordingEncoder:
+class RecordingEncoder(encoding.Encoder[bytes, bytes]):
     def __init__(self, audio: bytes = b"\x11\x22") -> None:
         self.calls: list[bytes] = []
         self._audio = audio
 
+    @typing.override
     async def encode(self, input: bytes) -> bytes:
         self.calls.append(input)
         return self._audio

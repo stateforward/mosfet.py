@@ -199,7 +199,6 @@ def test_memory_consolidation_decodes_sources_then_generates_and_encodes_consoli
     async def run() -> tuple[
         list[memory.consolidation.OutputData],
         list[memory.consolidation.SourceData],
-        list[memory.classification.EncodedMemory],
         list[memory.classification.GeneratedMemory],
     ]:
         decoder = GeneratedMemoryDecoder()

@@ -324,6 +324,7 @@ def _events_from_dispatch_tool_calls(
             merged.append(selection)
     return tuple(merged)
 
+
 _MISSING = object()
 
 
@@ -625,9 +626,7 @@ class Processor(processing.Processor):
     async def process(self, input: processing.InputData) -> processing.Events:
         instructions = (input.instructions or "").strip()
         if not instructions:
-            raise ProcessingError(
-                "OpenAI-compatible processing requires non-blank instructions stamped by Processing."
-            )
+            raise ProcessingError("OpenAI-compatible processing requires non-blank instructions stamped by Processing.")
         operation_tools: tuple[dict[str, object], ...] = ()
         if input.schemas:
             operation_tools = (processing.dispatch_tool(input.schemas, patch=input.patch),)

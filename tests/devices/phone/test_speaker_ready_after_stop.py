@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import typing
 
 import hsm
 
@@ -30,13 +31,12 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
     async def run() -> tuple[bool, bool, bool, bool]:
         environment = Environment()
         speaker = audio.Speaker()
-        owner = hsm.Instance()
         target = hsm.Instance()
         # This test is about attach/liveness gating, not elevation; the phone injects the real
         # elevation, so a no-op stands in here.
         observation = _PhoneObservationService(
-            owner=owner,  # type: ignore[arg-type]
-            service=object(),  # type: ignore[arg-type]
+            owner=phone_device.Phone(),
+            service=phone_device.PhoneEventRecorder(),
             elevate=lambda ctx, event: None,
         )
         firmware = PhoneFirmware(service=observation, speaker=speaker)
@@ -46,7 +46,7 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
         unattached = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         observation.target = target
         attached_unstarted = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        _ = await hsm.started(environment, speaker, speaker.model)
+        _ = await hsm.started(environment, speaker, typing.cast(hsm.Model, audio.Speaker.model))
         ready = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         await hsm.stop(speaker)
         after_stop = PhoneFirmware._matches_current_service_audio(environment, firmware, event)

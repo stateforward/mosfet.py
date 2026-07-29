@@ -47,5 +47,6 @@ def test_start_raises_source_error_with_report() -> None:
 
     with pytest.raises(behavior.SourceError) as error:
         _ = behavior.start("   ")
-    assert error.value.report is not None
-    assert not error.value.report.ok
+    report = error.value.report
+    assert isinstance(report, behavior.Report)
+    assert not report.ok

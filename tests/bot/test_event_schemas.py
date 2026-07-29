@@ -35,7 +35,7 @@ def test_observed_bot_event_serializes_binary_payload_as_type_only() -> None:
 
     # Custom wrap serializer projects stimulus + schemas only (not full Event schema adapters).
     dumped = object_dict(payload.model_dump(mode="python"))
-    event_dump = dumped["input"]
+    event_dump = object_dict(dumped["input"])
     assert event_dump["name"] == audio.OutputEvent.name or event_dump.get("event") == audio.OutputEvent.name
     # Audio bytes must not appear as raw content in JSON projections of the processing input.
     serialized = json.dumps(dumped, default=lambda o: getattr(o, "__name__", type(o).__name__))

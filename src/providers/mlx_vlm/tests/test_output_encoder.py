@@ -5,12 +5,14 @@ from bot.abilities import reading
 import asyncio
 import collections.abc
 
-from bot import abilities
+import bot.abilities
 
 from bot.providers.mlx_vlm import ReadingOutputEncoder
 
+
 async def await_output_encoding(output: collections.abc.Awaitable[reading.OutputData]) -> reading.OutputData:
     return await output
+
 
 def test_reading_output_encoder_returns_reading_output() -> None:
     encoder = ReadingOutputEncoder()
@@ -19,7 +21,8 @@ def test_reading_output_encoder_returns_reading_output() -> None:
     output = asyncio.run(await_output_encoding(encoder.encode(input)))
 
     assert output == input
-    assert isinstance(encoder, abilities.Encoder)
+    assert isinstance(encoder, bot.abilities.Encoder)
+
 
 def test_reading_output_encoder_is_awaitable() -> None:
     encoder = ReadingOutputEncoder()

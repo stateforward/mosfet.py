@@ -44,6 +44,7 @@ _LIVE_TIMEOUT_S = 60.0
 _DEFAULT_MERCURY_MODEL = "mercury-2"
 _DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 _CALL_ID = "livekit:caller-agent-eval"
+_CALLER = "caller-agent-eval"
 
 
 def _mercury_api_key() -> str | None:
@@ -101,7 +102,7 @@ def _minimal_wav() -> bytes:
 
 
 def _ring_stimulus() -> hsm.Event[PhoneSoundData]:
-    """Match phone ring elevation: kind=phone.ringing, PhoneSoundData.call_id, event.id."""
+    """Match phone ring elevation: kind=phone.ringing, PhoneSoundData.caller, event.id."""
 
     return dataclasses.replace(
         SoundEvent.with_data(
@@ -111,7 +112,7 @@ def _ring_stimulus() -> hsm.Event[PhoneSoundData]:
                 sample_rate_hz=16_000,
                 channels=1,
                 kind="phone.ringing",
-                call_id=_CALL_ID,
+                caller=_CALLER,
             )
         ),
         id=_CALL_ID,
@@ -203,6 +204,4 @@ def test_mercury_does_not_answer_unrelated_ambient_kind(mercury_processor: Proce
     answers = _answer_selections(events)
     assert not answers, f"ambient kind should not select phone.answer_call; got {_event_names(events)}"
     ignores = tuple(item for item in events if item.event == cognition_types.IgnoreEvent.name)
-    assert ignores, (
-        f"ambient should select bot.ability.cognition.ignore; got {_event_names(events)}"
-    )
+    assert ignores, f"ambient should select bot.ability.cognition.ignore; got {_event_names(events)}"

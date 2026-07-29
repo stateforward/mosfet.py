@@ -6,6 +6,7 @@ from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.cognition import cognition as cognition_module
 from bot.abilities.cognition import reflection as reflection_module
+from bot.behavior import instance as behavior_instance
 from bot.protocols import attachment
 
 import asyncio
@@ -130,6 +131,55 @@ def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, li
     return memory.compile_statement(clause)
 
 
+# Typed accessors for the protected internals these tests deliberately exercise
+# (same convention as tests/hsm_instance_state.py).
+def cognition_intuition(ability: cognition.Cognition) -> cognition.Intuition:
+    return typing.cast(cognition.Intuition, object.__getattribute__(ability, "_intuition"))
+
+
+def cognition_reasoning(ability: cognition.Cognition) -> cognition.Reasoning:
+    return typing.cast(cognition.Reasoning, object.__getattribute__(ability, "_reasoning"))
+
+
+def cognition_autonomy(ability: cognition.Cognition) -> cognition.Autonomy | None:
+    return typing.cast(cognition.Autonomy | None, object.__getattribute__(ability, "_autonomy"))
+
+
+def cognition_reflection(ability: cognition.Cognition) -> cognition.Reflection:
+    return typing.cast(cognition.Reflection, object.__getattribute__(ability, "_reflection"))
+
+
+def cognition_attachment_group(ability: cognition.Cognition) -> attachment.Group:
+    return typing.cast(attachment.Group, object.__getattribute__(ability, "_attachment_group"))
+
+
+def reflection_select_processing(ability: cognition.Reflection) -> processing.Processing:
+    return typing.cast(processing.Processing, object.__getattribute__(ability, "_select_processing"))
+
+
+_CognitionGuard = collections.abc.Callable[[hsm.Context, cognition.Cognition, hsm.Event[typing.Any]], bool]
+_ReflectionGuard = collections.abc.Callable[[hsm.Context, cognition.Reflection, hsm.Event[typing.Any]], bool]
+
+cognition_matches_intuition_output = typing.cast(
+    _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_intuition_output")
+)
+cognition_matches_autonomy_output = typing.cast(
+    _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_autonomy_output")
+)
+cognition_matches_child_cancelled = typing.cast(
+    _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_child_cancelled")
+)
+reflection_matches_select_output = typing.cast(
+    _ReflectionGuard, object.__getattribute__(reflection_module.Reflection, "_matches_select_output")
+)
+
+
+def _processor_events(output: object) -> processing.Events:
+    """Processing honors Result declines and invalid payloads at runtime; Processor declares Events only."""
+
+    return typing.cast(processing.Events, output)
+
+
 def empty_output() -> cognition.types.OutputData:
     """Empty selection product — intuition treats as unhandled and cascades to reasoning."""
 
@@ -242,7 +292,7 @@ class RecordingIntuitionProcessor(processing.Processor):
     """Return events (with optional patched confidence) or unhandled OutputData."""
 
     calls: list[processing.InputData]
-    output: processing.Events | cognition.intuition.OutputData | processing.Result[processing.Events]
+    output: processing.Events | cognition.intuition.OutputData
 
     def __init__(
         self,
@@ -265,13 +315,11 @@ class RecordingIntuitionProcessor(processing.Processor):
             self.output = _as_events(output, confidence=confidence)
 
     @typing.override
-    async def process(
-        self, input: processing.InputData
-    ) -> processing.Events | processing.Result[processing.Events] | cognition.intuition.OutputData:
+    async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(input)
         if isinstance(self.output, cognition.intuition.OutputData):
             if self.output.result is None:
-                return processing.Result[processing.Events].unhandled()
+                return _processor_events(processing.Result[processing.Events].unhandled())
             return _as_events(self.output.result)
         return self.output
 
@@ -300,7 +348,7 @@ class DelayedIntuitionProcessor(processing.Processor):
             self.output = _as_events(output, confidence=confidence)
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events | processing.Result[processing.Events]:
+    async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(input)
         if len(self.calls) == 1:
             try:
@@ -310,7 +358,7 @@ class DelayedIntuitionProcessor(processing.Processor):
                 raise
         if isinstance(self.output, cognition.intuition.OutputData):
             if self.output.result is None:
-                return processing.Result[processing.Events].unhandled()
+                return _processor_events(processing.Result[processing.Events].unhandled())
             return _as_events(self.output.result)
         return self.output
 
@@ -372,9 +420,9 @@ class FailingReasoningProcessor(processing.Processor):
 
 class InvalidReasoningProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> object:
+    async def process(self, input: processing.InputData) -> processing.Events:
         del input
-        return {"not": "valid-output"}
+        return _processor_events({"not": "valid-output"})
 
 
 class RecordingOutputOperation(processing.Processor):
@@ -382,7 +430,12 @@ class RecordingOutputOperation(processing.Processor):
     output: processing.Events | processing.Result[processing.Events] | None
 
     def __init__(
-        self, output: cognition.types.OutputData | processing.Events | processing.Result[processing.Events] | None
+        self,
+        output: cognition.types.OutputData
+        | cognition.types.EventData
+        | processing.Events
+        | processing.Result[processing.Events]
+        | None,
     ) -> None:
         self.calls = []
         if isinstance(output, processing.Result) or output is None:
@@ -390,14 +443,12 @@ class RecordingOutputOperation(processing.Processor):
         elif isinstance(output, tuple) and (not output or isinstance(output[0], processing.SelectedEvent)):
             self.output = typing.cast(processing.Events, output)
         else:
-            self.output = _as_events(typing.cast(cognition.types.OutputData, output))
+            self.output = _as_events(output)
 
     @typing.override
-    async def process(
-        self, input: processing.InputData
-    ) -> processing.Events | processing.Result[processing.Events] | None:
+    async def process(self, input: processing.InputData) -> processing.Events:
         self.calls.append(input)
-        return self.output
+        return _processor_events(self.output)
 
 
 def _events_from_output(selection: cognition.types.OutputData) -> processing.Events:
@@ -543,16 +594,15 @@ def behavior_create_selection(
 class RecordingReflectionAbility(cognition.Reflection):
     """Reflection with fixed select/write processors for structural tests."""
 
-    processor: FixedProcessor
-
     def __init__(
         self,
         connection: sqlite3.Connection,
         selection: cognition.types.OutputData | None = None,
     ) -> None:
-        processor = FixedProcessor(selection or behavior_create_selection())
-        super().__init__(processor=processor, memory=memory.Memory(connection=connection))
-        self.processor = processor
+        super().__init__(
+            processor=FixedProcessor(selection or behavior_create_selection()),
+            memory=memory.Memory(connection=connection),
+        )
 
 
 class RecordingCognition(cognition.Cognition):
@@ -622,6 +672,7 @@ def cognition_input() -> cognition.InputData:
 async def started_cognition_input(ctx: hsm.Context) -> cognition.InputData:
     data = cognition_input()
     actor = data.actors["bot"]
+    assert isinstance(actor, _BotActor)
     assert actor.model is not None
     _ = await hsm.started(ctx, actor, actor.model)
     return data
@@ -719,7 +770,7 @@ def test_cognition_rejects_child_terminal_from_wrong_source() -> None:
         ability = make_cognition()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, ability)
-        child = ability._intuition
+        child = cognition_intuition(ability)
         turn = cognition_turn(operation_id="forged-turn", generation="forged-operation-token")
         forged = dataclasses.replace(
             child.output_event.with_data(cognition.types.CompletionData(turn=turn, output=None)),
@@ -727,7 +778,7 @@ def test_cognition_rejects_child_terminal_from_wrong_source() -> None:
             source="forged-child",
             target=hsm.id(ability),
         )
-        return cognition.Cognition._matches_intuition_output(ctx, ability, forged)
+        return cognition_matches_intuition_output(ctx, ability, forged)
 
     assert not asyncio.run(run())
 
@@ -739,7 +790,7 @@ def test_reflection_rejects_child_terminal_from_wrong_source() -> None:
         )
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, ability)
-        child = ability._select_processing
+        child = reflection_select_processing(ability)
         forged = dataclasses.replace(
             child.output_event.with_data(None),
             id="forged-reflection:select",
@@ -747,7 +798,7 @@ def test_reflection_rejects_child_terminal_from_wrong_source() -> None:
             target=hsm.id(ability),
             metadata={},
         )
-        return reflection_module.Reflection._matches_select_output(ctx, ability, forged)
+        return reflection_matches_select_output(ctx, ability, forged)
 
     assert not asyncio.run(run())
 
@@ -959,7 +1010,9 @@ def test_cognition_reports_aggregate_attachment_failure_and_accepts_retry(
         )
         await wait_until(lambda: len(requests) == 1)
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -1014,7 +1067,7 @@ def test_cognition_detaches_once_through_group_and_can_reattach(
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
         ) -> None:
-            if group is ability._attachment_group:
+            if group is cognition_attachment_group(ability):
                 requests.append(event)
             await group_detach(group, ctx, event)
 
@@ -1366,7 +1419,7 @@ def test_cognition_forwards_reflection_reboot_to_bot_owner() -> None:
         request = dataclasses.replace(
             bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
             id="reflection-reboot",
-            source=hsm.id(ability._reflection),
+            source=hsm.id(cognition_reflection(ability)),
             target=hsm.id(ability),
         )
 
@@ -1405,7 +1458,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
                 raise
             return ()
 
-    async def run() -> tuple[list[int], str, int]:
+    async def run() -> tuple[list[int], str]:
         monkeypatch.setattr(cognition_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=30))
         processor = TwoTurnHangingProcessor()
         ability = make_cognition(intuition_processor=processor)
@@ -1495,7 +1548,7 @@ def test_cognition_ignores_stale_public_child_terminal() -> None:
 
 def test_cognition_rejects_terminal_from_inactive_sibling(monkeypatch: pytest.MonkeyPatch) -> None:
     ability = make_cognition(autonomy=cognition.Autonomy())
-    autonomy_ability = ability._autonomy
+    autonomy_ability = cognition_autonomy(ability)
     assert autonomy_ability is not None
     monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/intuition")
     monkeypatch.setattr(
@@ -1514,14 +1567,14 @@ def test_cognition_rejects_terminal_from_inactive_sibling(monkeypatch: pytest.Mo
         target="cognition",
     )
 
-    assert not cognition_module.Cognition._matches_autonomy_output(hsm.Context(), ability, stale)
+    assert not cognition_matches_autonomy_output(hsm.Context(), ability, stale)
 
 
 def test_cognition_rejects_valid_terminal_from_prior_turn_in_same_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ability = make_cognition()
-    intuition_ability = ability._intuition
+    intuition_ability = cognition_intuition(ability)
     monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/intuition")
     monkeypatch.setattr(hsm, "id", lambda actor: "cognition" if actor is ability else "intuition")
     turn = cognition_turn(operation_id="prior-turn", generation="prior-operation-token")
@@ -1532,7 +1585,7 @@ def test_cognition_rejects_valid_terminal_from_prior_turn_in_same_leaf(
         target="cognition",
     )
 
-    assert not cognition_module.Cognition._matches_intuition_output(hsm.Context(), ability, stale)
+    assert not cognition_matches_intuition_output(hsm.Context(), ability, stale)
 
 
 def test_cognition_cancel_ack_requires_exact_parent_operation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1552,16 +1605,16 @@ def test_cognition_cancel_ack_requires_exact_parent_operation(monkeypatch: pytes
         target="cognition",
     )
 
-    assert not cognition_module.Cognition._matches_child_cancelled(hsm.Context(), ability, wrong_parent)
+    assert not cognition_matches_child_cancelled(hsm.Context(), ability, wrong_parent)
 
 
 def test_cognition_cancel_ack_requires_exact_token_and_child(monkeypatch: pytest.MonkeyPatch) -> None:
     ability = make_cognition()
     identities = {
         id(ability): "cognition",
-        id(ability._autonomy): "autonomy",
-        id(ability._intuition): "intuition",
-        id(ability._reasoning): "reasoning",
+        id(cognition_autonomy(ability)): "autonomy",
+        id(cognition_intuition(ability)): "intuition",
+        id(cognition_reasoning(ability)): "reasoning",
     }
     monkeypatch.setattr(hsm, "id", lambda actor: identities.get(id(actor), "unknown"))
     parent_id = "cancel-turn"
@@ -1589,13 +1642,13 @@ def test_cognition_cancel_ack_requires_exact_token_and_child(monkeypatch: pytest
             target="cognition",
         )
 
-    assert cognition_module.Cognition._matches_child_cancelled(
+    assert cognition_matches_child_cancelled(
         hsm.Context(), ability, acknowledgement(source="intuition", acknowledged_token=token)
     )
-    assert not cognition_module.Cognition._matches_child_cancelled(
+    assert not cognition_matches_child_cancelled(
         hsm.Context(), ability, acknowledgement(source="intuition", acknowledged_token="wrong-token")
     )
-    assert not cognition_module.Cognition._matches_child_cancelled(
+    assert not cognition_matches_child_cancelled(
         hsm.Context(), ability, acknowledgement(source="reasoning", acknowledged_token=token)
     )
 
@@ -1736,6 +1789,7 @@ def test_cognition_dispatches_reflection_after_processing_completes() -> None:
 
     assert len(calls) == 1
     processor_input = calls[0].input
+    assert isinstance(processor_input, cognition.reflection.ProcessorInput)
     assert processor_input.cognition_input.focus is None
     # Default intuition handles with deliberate ignore; reflection still sees that result.
     assert processor_input.cognition_output == ignore_output("fast")
@@ -1954,7 +2008,9 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
     assert object_dict(cognition.Reasoning.output_event.schema) == cognition.types.CompletionData.model_json_schema()
     reflection_input_schema = object_dict(cognition.Reflection.input_event.schema)
     assert reflection_input_schema["description"]
-    assert "cognition_output" in reflection_input_schema.get("properties", {})
+    reflection_input_properties = reflection_input_schema.get("properties", {})
+    assert isinstance(reflection_input_properties, dict)
+    assert "cognition_output" in reflection_input_properties
     assert "cognition_input" in cognition.reflection.InputData.model_fields
     reflection_output_schema = object_dict(cognition.Reflection.output_event.schema)
     assert reflection_output_schema["description"]
@@ -1972,9 +2028,11 @@ def test_cognitive_output_events_validate_through_typed_schema_contracts() -> No
         "data": {"device": "phone"},
     }
 
-    assert isinstance(
-        validate_event_data(cognition.cognition.OutputEvent, [operation_data])[0], cognition.types.EventData
+    validated = typing.cast(
+        collections.abc.Sequence[object],
+        validate_event_data(cognition.cognition.OutputEvent, [operation_data]),
     )
+    assert isinstance(validated[0], cognition.types.EventData)
     completion = cognition.types.CompletionData(
         turn=cognition_turn(),
         output=(cognition.types.EventData.model_validate(operation_data),),
@@ -2099,6 +2157,7 @@ def test_cognitive_completes_when_trace_metadata_present() -> None:
         result_for = getattr(owner, "result_for", None)
         assert callable(result_for)
         result_future = result_for(operation_id)
+        assert isinstance(result_future, asyncio.Future)
         _ = await hsm.dispatch(
             shared,
             ability,
@@ -2145,7 +2204,9 @@ def test_cognition_intuition_handles_without_reasoning() -> None:
     assert len(intuition_calls) == 1
     assert reasoning_calls == []
     assert len(reflection_calls) == 1
-    assert reflection_calls[0].input.cognition_output == result
+    reflection_input = reflection_calls[0].input
+    assert isinstance(reflection_input, cognition.reflection.ProcessorInput)
+    assert reflection_input.cognition_output == result
 
 
 def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> None:
@@ -2178,7 +2239,9 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
     assert len(reasoning_calls) == 1
     assert bot.FocusDeviceEvent.name in {event.name for event in reasoning_calls[0].schemas}
     assert len(reflection_calls) == 1
-    assert reflection_calls[0].input.cognition_output == result
+    reflection_input = reflection_calls[0].input
+    assert isinstance(reflection_input, cognition.reflection.ProcessorInput)
+    assert reflection_input.cognition_output == result
 
 
 def test_intuition_low_confidence_escalates_to_reasoning_after_environment_actions() -> None:
@@ -2317,9 +2380,7 @@ def test_cognition_keeps_reasoning_off_intuition_actor_map() -> None:
 
     async def run() -> set[str]:
         # Handled ignore (not empty cascade) so we only inspect intuition's offered map.
-        processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=ignore_output("map-only"))
-        )
+        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=ignore_output("map-only")))
         ability = RecordingCognition(
             intuition_processor=processor,
             reasoning_processor=RecordingReasoningProcessor(ignore_output("should not run")),
@@ -2368,7 +2429,7 @@ def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
 
 
 def test_intuition_processor_receives_input() -> None:
-    async def run() -> tuple[cognition.types.OutputData | None, list[processing.InputData]]:
+    async def run() -> tuple[processing.CompletionData, list[processing.InputData]]:
         processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=ignore_output("seen")))
         intuition = cognition.Intuition(processor=processor)
         ctx = await start_cognition_ability_for_test(intuition)
@@ -2383,7 +2444,7 @@ def test_intuition_processor_receives_input() -> None:
 
 
 def test_reasoning_processor_receives_input() -> None:
-    async def run() -> tuple[cognition.types.OutputData, list[processing.InputData]]:
+    async def run() -> tuple[processing.CompletionData, list[processing.InputData]]:
         processor = RecordingReasoningProcessor(no_output("reasoned"))
         reasoning = cognition.Reasoning(processor=processor)
         ctx = await start_cognition_ability_for_test(reasoning)
@@ -2445,7 +2506,6 @@ def test_cognitive_defers_repeated_input_while_processing() -> None:
     async def run() -> tuple[
         list[cognition.types.OutputData],
         list[processing.InputData],
-        list[processing.InputData],
     ]:
         intuition_processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
         ability = RecordingCognition(intuition_processor=intuition_processor)
@@ -2474,7 +2534,7 @@ def test_cognitive_defers_repeated_input_while_processing() -> None:
 
 
 def test_intuition_no_operations_returns_to_idle_and_accepts_next_input() -> None:
-    async def run() -> tuple[str, cognition.types.OutputData | None, cognition.types.OutputData | None]:
+    async def run() -> tuple[str, processing.CompletionData, processing.CompletionData]:
         intuition = cognition.Intuition(
             processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=None, reason="no ops"))
         )
@@ -2494,7 +2554,7 @@ def test_intuition_no_operations_returns_to_idle_and_accepts_next_input() -> Non
 
 
 def test_intuition_defers_repeated_input_while_dispatching() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData | None], list[processing.InputData]]:
+    async def run() -> tuple[str, list[processing.CompletionData], list[processing.InputData]]:
         processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
         intuition = cognition.Intuition(processor=processor)
         ctx = shared_hsm_context()
@@ -2518,7 +2578,7 @@ def test_intuition_defers_repeated_input_while_dispatching() -> None:
 
 
 def test_reasoning_defers_repeated_input_while_applying() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[processing.InputData]]:
+    async def run() -> tuple[str, list[processing.CompletionData], list[processing.InputData]]:
         processor = DelayedReasoningProcessor()
         reasoning = cognition.Reasoning(processor=processor)
         ctx = shared_hsm_context()
@@ -2556,7 +2616,7 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
     )
 
     async def run() -> tuple[
-        cognition.types.OutputData,
+        processing.CompletionData,
         list[processing.InputData],
         tuple[cognition.episodes.CognitiveEpisode, ...],
     ]:
@@ -2587,7 +2647,9 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
 
     assert result.output == focus_output("phone", "deliberate with memory")
     assert len(calls) == 1
-    assert calls[0].input.prior_episodes == (prior,)
+    reasoning_processor_input = calls[0].input
+    assert isinstance(reasoning_processor_input, cognition.reasoning.ProcessorInput)
+    assert reasoning_processor_input.prior_episodes == (prior,)
     assert len(stored) >= 2
     assert prior in stored
     latest = next(
@@ -2625,7 +2687,7 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
     )
 
     async def run() -> tuple[
-        None,
+        processing.CompletionData | None,
         tuple[cognition.episodes.CognitiveEpisode, ...],
         tuple[str, ...],
         list[str],
@@ -2662,10 +2724,12 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         cognition.Reflection.change_instructions,
     ]
     assert len(write_calls) == 1
-    assert write_calls[0].input.existing_behavior.name == "AnswerIncomingRing"
-    assert write_calls[0].input.existing_behavior.source == ""
-    assert write_calls[0].input.existing_behavior.status == "DRAFT"
-    assert write_calls[0].input.intent.name == intent.name
+    write_input = write_calls[0].input
+    assert isinstance(write_input, cognition.reflection.ChangeWriteInput)
+    assert write_input.existing_behavior.name == "AnswerIncomingRing"
+    assert write_input.existing_behavior.source == ""
+    assert write_input.existing_behavior.status == "DRAFT"
+    assert write_input.intent.name == intent.name
     assert len(episodes) == 1
     applied = episodes[0].behavior
     assert isinstance(applied, behavior_events.CreateData)
@@ -2717,7 +2781,7 @@ behavior = hsm.define(
         ),
     )
 
-    async def run() -> tuple[str, list[processing.InputData], bool]:
+    async def run() -> tuple[str, list[processing.InputData], behavior_instance.Status]:
         store = memory.Memory()
         processor = FixedProcessor(selection, write=[bad, bad])
         reflection = cognition.Reflection(processor=processor, memory=store)
@@ -2745,10 +2809,14 @@ behavior = hsm.define(
     message, write_calls, draft_status = asyncio.run(run())
 
     assert len(write_calls) == 2
-    assert write_calls[0].input.diagnostics is None
-    assert write_calls[0].input.existing_behavior.source == ""
-    assert write_calls[0].input.existing_behavior.status == "DRAFT"
-    assert write_calls[1].input.diagnostics is not None
+    first_write = write_calls[0].input
+    second_write = write_calls[1].input
+    assert isinstance(first_write, cognition.reflection.ChangeWriteInput)
+    assert isinstance(second_write, cognition.reflection.ChangeWriteInput)
+    assert first_write.diagnostics is None
+    assert first_write.existing_behavior.source == ""
+    assert first_write.existing_behavior.status == "DRAFT"
+    assert second_write.diagnostics is not None
     assert draft_status == "DRAFT"
     assert "same diagnostic message after fix" in message
 
@@ -2862,7 +2930,9 @@ behavior = hsm.define(
         ),
     )
 
-    async def run() -> tuple[None, list[processing.InputData], tuple[str, ...], bool]:
+    async def run() -> tuple[
+        processing.CompletionData | None, list[processing.InputData], tuple[str, ...], behavior_instance.Status
+    ]:
         store = memory.Memory()
         processor = FixedProcessor(selection, write=[bad, good])
         reflection = cognition.Reflection(processor=processor, memory=store)
@@ -2892,13 +2962,17 @@ behavior = hsm.define(
 
     assert result is None
     assert len(write_calls) == 2
-    assert write_calls[0].input.diagnostics is None
-    assert write_calls[0].input.existing_behavior.source == ""
-    assert write_calls[1].input.diagnostics is not None
-    assert not write_calls[1].input.diagnostics.ok
-    assert write_calls[1].input.failed_source is not None
-    assert "AnswerIncomingRing" in write_calls[1].input.failed_source
-    assert any(item.code == "E0007" for item in write_calls[1].input.diagnostics.errors)
+    first_write = write_calls[0].input
+    second_write = write_calls[1].input
+    assert isinstance(first_write, cognition.reflection.ChangeWriteInput)
+    assert isinstance(second_write, cognition.reflection.ChangeWriteInput)
+    assert first_write.diagnostics is None
+    assert first_write.existing_behavior.source == ""
+    assert second_write.diagnostics is not None
+    assert not second_write.diagnostics.ok
+    assert second_write.failed_source is not None
+    assert "AnswerIncomingRing" in second_write.failed_source
+    assert any(item.code == "E0007" for item in second_write.diagnostics.errors)
     assert len(sources) == 1
     assert "hsm.define" in sources[0]
     assert "Fixed after diagnostics" in sources[0] or "AnswerIncomingRing" in sources[0]
@@ -2980,7 +3054,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
     )
 
     async def run() -> tuple[
-        None,
+        processing.CompletionData | None,
         tuple[str, ...],
         list[processing.InputData],
         behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
@@ -3019,10 +3093,12 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
 
     assert result is None
     assert len(change_calls) == 1
-    assert change_calls[0].input.existing_behavior.name == "AnswerIncomingRing"
-    assert change_calls[0].input.existing_behavior.description == "Original description."
-    assert change_calls[0].input.existing_behavior.source
-    assert change_calls[0].input.intent == change_intent
+    change_input = change_calls[0].input
+    assert isinstance(change_input, cognition.reflection.ChangeWriteInput)
+    assert change_input.existing_behavior.name == "AnswerIncomingRing"
+    assert change_input.existing_behavior.description == "Original description."
+    assert change_input.existing_behavior.source
+    assert change_input.intent == change_intent
     assert isinstance(latest_behavior, behavior_events.ChangeData)
     assert latest_behavior.name == written.name
     assert latest_behavior.triggers == written.triggers
@@ -3047,11 +3123,11 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
     )
 
     async def run() -> tuple[
-        None,
+        processing.CompletionData | None,
         tuple[str, ...],
-        bool,
-        list[tuple[object, str]],
-        object,
+        behavior_instance.Status,
+        list[str],
+        behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
         int,
     ]:
         store = memory.Memory()
@@ -3114,7 +3190,7 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
 
 
 def test_reflection_no_selection_still_stores_episode() -> None:
-    async def run() -> tuple[None, tuple[cognition.episodes.CognitiveEpisode, ...]]:
+    async def run() -> tuple[processing.CompletionData | None, tuple[cognition.episodes.CognitiveEpisode, ...]]:
         store = memory.Memory()
         processor = FixedProcessor(empty_output())
         reflection = cognition.Reflection(processor=processor, memory=store)
@@ -3197,7 +3273,7 @@ def _ring_stimulus() -> hsm.Event[object]:
 def test_autonomy_handles_matching_behavior_without_intuition_processor() -> None:
     """Stimulus → behavior Behavior → EventData selection without deliberative Processing."""
 
-    async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
+    async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData], list[processing.InputData]]:
         store = memory.Memory()
         await _seed_behavior_record(
             store,
@@ -3224,6 +3300,7 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
             focus_candidates=("phone",),
         )
         bot_actor = turn.actors["bot"]
+        assert isinstance(bot_actor, _BotActor)
         assert bot_actor.model is not None
         _ = await hsm.started(ctx, bot_actor, bot_actor.model)
         _ = await dispatch_ability_for_test(ability, ctx, turn)
@@ -3243,7 +3320,9 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
     )
     assert intuition_calls == []
     assert len(reflection_calls) == 1
-    assert reflection_calls[0].input.cognition_output == outputs[0]
+    reflection_input = reflection_calls[0].input
+    assert isinstance(reflection_input, cognition.reflection.ProcessorInput)
+    assert reflection_input.cognition_output == outputs[0]
 
 
 def test_autonomy_unhandled_falls_through_to_intuition() -> None:

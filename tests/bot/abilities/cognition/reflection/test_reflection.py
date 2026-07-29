@@ -14,6 +14,7 @@ import dataclasses
 import datetime
 import sqlite3
 import typing
+import uuid
 
 import hsm
 import pytest
@@ -140,8 +141,8 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         await wait_until(lambda: reflection.state().endswith("/processing"))
         turn = input
         forged = dataclasses.replace(
-            reflection_impl._SelectedEvent.with_data(
-                reflection_impl._SelectedEventData(
+            getattr(reflection_impl, "_SelectedEvent").with_data(
+                getattr(reflection_impl, "_SelectedEventData")(
                     turn=turn,
                     selection=cognition.types.EventData(
                         event=behavior.CreateEvent.name,
@@ -159,7 +160,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         )
         _ = await hsm.dispatch(ctx, reflection, forged)
         await asyncio.sleep(0)
-        stored = reflection_impl._load_behavior(store, name="ForgedBehavior")
+        stored = getattr(reflection_impl, "_load_behavior")(store, name="ForgedBehavior")
         state = reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -268,7 +269,7 @@ def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id
 
 
 def test_reflection_change_cancellation_prevents_late_completion() -> None:
-    async def run() -> tuple[list[hsm.Event[typing.Any]], int, int, str]:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int, str]:
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
@@ -336,7 +337,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
             ),
         )
 
-    async def run() -> tuple[list[hsm.Event[typing.Any]], str, int]:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         monkeypatch.setattr(
             reflection_impl,
             "_CANCEL_TEARDOWN_TIMEOUT",
@@ -344,11 +345,15 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         )
         reflection, connection = reflection_ability()
         stubborn = StubbornProcessing(processor=EmptyProcessor())
-        reflection._select_processing = stubborn
-        reflection._attachment_group = attachment.Group(
-            stubborn,
-            reflection._revision,
-            reflection._memory,
+        setattr(reflection, "_select_processing", stubborn)
+        setattr(
+            reflection,
+            "_attachment_group",
+            attachment.Group(
+                stubborn,
+                typing.cast(revision.Revision, getattr(reflection, "_revision")),
+                typing.cast(memory.Memory, getattr(reflection, "_memory")),
+            ),
         )
         ctx = hsm.Context()
         owner = AttachmentOwner()
@@ -402,13 +407,13 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
         _ = await hsm.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
-        request_id = reflection_module.Reflection._child_id(reflection, reflection_impl._SELECT_ID_SUFFIX)
+        request_id = getattr(reflection_module.Reflection, "_child_id")(reflection, getattr(reflection_impl, "_SELECT_ID_SUFFIX"))
         wrong_operation = dataclasses.replace(
             processing.CancelledEvent.with_data(
                 processing.CancelledData(operation_id="wrong-request", token="guard-token")
             ),
             id="wrong-request",
-            source=hsm.id(reflection._select_processing),
+            source=hsm.id(getattr(reflection, "_select_processing")),
             target=hsm.id(reflection),
         )
         wrong_source = dataclasses.replace(
@@ -417,8 +422,8 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
             source="forged-child",
             target=hsm.id(reflection),
         )
-        operation_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, wrong_operation)
-        source_matches = reflection_module.Reflection._matches_cancelled(ctx, reflection, wrong_source)
+        operation_matches = getattr(reflection_module.Reflection, "_matches_cancelled")(ctx, reflection, wrong_operation)
+        source_matches = getattr(reflection_module.Reflection, "_matches_cancelled")(ctx, reflection, wrong_source)
         await reflection.stop(reflection.context())
         connection.close()
         return operation_matches, source_matches
@@ -437,7 +442,7 @@ def test_reflection_revision_cancel_guard_requires_typed_parent_correlation(
             lambda actor: "reflection"
             if actor is reflection
             else "revision"
-            if actor is reflection._revision
+            if actor is getattr(reflection, "_revision")
             else "select",
         )
         monkeypatch.setattr(processing, "active_operation", lambda owner, operation_id: object())
@@ -474,9 +479,9 @@ def test_reflection_revision_cancel_guard_requires_typed_parent_correlation(
             target="reflection",
         )
 
-        assert not cognition.Reflection._matches_cancelled(hsm.Context(), reflection, missing_parent)
-        assert not cognition.Reflection._matches_cancelled(hsm.Context(), reflection, wrong_parent)
-        assert cognition.Reflection._matches_cancelled(hsm.Context(), reflection, correlated)
+        assert not getattr(cognition.Reflection, "_matches_cancelled")(hsm.Context(), reflection, missing_parent)
+        assert not getattr(cognition.Reflection, "_matches_cancelled")(hsm.Context(), reflection, wrong_parent)
+        assert getattr(cognition.Reflection, "_matches_cancelled")(hsm.Context(), reflection, correlated)
     finally:
         connection.close()
 
@@ -572,7 +577,7 @@ def test_reflection_rejects_valid_select_terminal_from_prior_turn(
             generation="prior-operation-token",
         )
         stale = dataclasses.replace(
-            reflection._select_processing.output_event.with_data(
+            getattr(reflection, "_select_processing").output_event.with_data(
                 processing.CompletionData(
                     input=processing.InputData(input=select_input),
                     output=processing.OutputData(),
@@ -583,7 +588,7 @@ def test_reflection_rejects_valid_select_terminal_from_prior_turn(
             target="reflection",
         )
 
-        assert not cognition.Reflection._matches_select_output(hsm.Context(), reflection, stale)
+        assert not getattr(cognition.Reflection, "_matches_select_output")(hsm.Context(), reflection, stale)
     finally:
         connection.close()
 
@@ -683,7 +688,9 @@ def test_reflection_waits_for_aggregate_attachment_completion(
         group_is_private = group.context().value(hsm.Keys.Instances) is not reflection.context().value(
             hsm.Keys.Instances
         )
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -759,7 +766,9 @@ def test_reflection_defers_detach_during_initialization_then_detaches_once(
         await asyncio.sleep(0)
         assert detach_requests == []
         group, request = attach_requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -839,7 +848,11 @@ def test_reflection_detaches_once_and_cancels_active_processing(
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
-        await reflection.apply(reflection_input(), ctx=ctx)
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            reflection.input_event.with_data_and_id(reflection_input(), uuid.uuid4().hex),
+        )
         await wait_until(lambda: reflection.state().endswith(f"/{expected_state}"))
         await reflection.detach(
             ctx,
@@ -914,7 +927,11 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
             return dispatch(dispatch_ctx, target, event)
 
         monkeypatch.setattr(hsm, "dispatch", hold_activity_terminal)
-        await reflection.apply(reflection_input(), ctx=ctx)
+        _ = await hsm.dispatch(
+            ctx,
+            reflection,
+            reflection.input_event.with_data_and_id(reflection_input(), uuid.uuid4().hex),
+        )
         await wait_until(lambda: reflection.state().endswith(f"/{expected_state}"))
         await reflection.detach(
             ctx,
@@ -968,7 +985,9 @@ def test_reflection_reports_aggregate_attachment_failure_and_accepts_retry(
         )
         await wait_until(lambda: len(requests) == 1)
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -1114,7 +1133,9 @@ def test_reflection_reports_detach_failure_and_accepts_retry(
         )
         await wait_until(lambda: bool(requests))
         group, request = requests[0]
-        reply = request.data.reply_to
+        request_data = request.data
+        assert request_data is not None
+        reply = request_data.reply_to
         assert reply is not None
         await hsm.dispatch(
             ctx,
@@ -1164,12 +1185,14 @@ def test_reflection_reports_detach_failure_and_accepts_retry(
 
 def test_reflection_model_uses_group_lifecycle_states_without_synthetic_readiness() -> None:
     model = model_view(require_model(cognition.Reflection.model))
-    transition_events = {name for names in model.transition_map.values() for name in names}
-
     assert model.qualified_name == "/ReflectionLifecycle"
     assert "/ReflectionLifecycle/attaching" not in model.members
     assert "/ReflectionLifecycle/attached/behavior/initializing" in model.members
     assert "/ReflectionLifecycle/attached/behavior/idle" in model.members
     assert "/ReflectionLifecycle/attached/behavior/detaching" in model.members
     assert "/ReflectionLifecycle/attached/behavior/rebooting" in model.members
-    assert "bot.ability.reflection.initializing.complete" not in transition_events
+    assert "bot.ability.reflection.initializing.complete" not in {
+        name
+        for names in model.transition_map.values()
+        for name in typing.cast(collections.abc.Iterable[str], typing.cast(object, names))
+    }

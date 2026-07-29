@@ -1030,6 +1030,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         async def detach_or_fail() -> None:
             if not lifecycle.is_started(self):
                 data = event.data
+                assert isinstance(data, attachment.DetachData)
                 reply_to = data.reply_to if data.reply_to is not None else data.actor
                 if reply_to is not None:
                     reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""

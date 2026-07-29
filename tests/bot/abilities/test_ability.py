@@ -377,8 +377,10 @@ def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
         attachment.AttachCompleteEvent.name,
         attachment.DetachedEvent.name,
     ]
-    assert lifecycle[0].data.created
-    assert lifecycle[1].data.removed
+    created = lifecycle[0].data
+    removed = lifecycle[1].data
+    assert created is not None and created.created
+    assert removed is not None and removed.removed
 
 
 def test_ordinary_ability_ignores_composite_terminal_events() -> None:
