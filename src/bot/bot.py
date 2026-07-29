@@ -25,7 +25,7 @@ from . import events
 from bot.device import Device
 from bot.devices import phone
 from bot.telemetry import observer
-from bot.environment import SoundData, SoundEvent, VisualEvent, Environment, require_environment_scope, space
+from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
@@ -328,6 +328,10 @@ class _BotProcessingOperation(hsm.Instance):
             raise
 
 
+def _device_tree(*roots: Device) -> tuple[Device, ...]:
+    return Device.device_tree(*roots)
+
+
 def _private_scope(parent: hsm.Context) -> hsm.Context:
     """Child context with a private Instances map, off the environment addressing map.
 
@@ -342,6 +346,12 @@ def _private_scope(parent: hsm.Context) -> hsm.Context:
     return hsm.Context(parent=parent, values=values)
 
 
+def _instance_id(instance: hsm.Instance) -> str:
+    """Return the stable id of an active configured actor."""
+
+    return hsm.id(instance)
+
+
 class Bot(hsm.Instance, abc.ABC):
     """Interrupt-driven bot that observes and processes events while active."""
 
@@ -351,10 +361,6 @@ class Bot(hsm.Instance, abc.ABC):
     _devices: dict[str, Device]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
     _focused_device: str | None
-    # Flat runtime-id → configured-reference index of this body's own devices, rebuilt on every
-    # activation from the body's own configuration records. The only device lookup the body is
-    # allowed: provenance resolves by dict read, never by walking device or attachment trees.
-    _device_reference_by_id: dict[str, str]
     # Live connected phone-line calls by configured device reference. The body's own modeled
     # world state, kept true from the device nerve so conversation frames can tell it.
     _connected_calls: dict[str, _ConnectedCall]
@@ -385,7 +391,6 @@ class Bot(hsm.Instance, abc.ABC):
         self._devices = dict(devices)
         self._cognition = cognition
         self._focused_device = None
-        self._device_reference_by_id = {}
         self._connected_calls = {}
         self._processing_focus_candidates = ()
         self._innate_ability_instances = tuple(ability_type() for ability_type in self._innate_abilities)
@@ -570,49 +575,20 @@ class Bot(hsm.Instance, abc.ABC):
         await Bot._deactivation_cleanup(ctx, instance, event, cleanup="reset")
 
     @staticmethod
-    def _index_configured_devices(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        """Rebuild the body's flat runtime-id → configured-reference index from its own records.
-
-        Runs on every activation (the ``active`` entry), after the attachment group has brought
-        the configured devices up, so every later provenance resolution is a dict read against
-        the body's own configuration. A device that is not running cannot emit anything and
-        simply has no entry until it is.
-        """
-
-        del ctx, event
-        instance._device_reference_by_id = {
-            hsm.id(device): reference for reference, device in instance._devices.items() if lifecycle.is_started(device)
-        }
-
-    @staticmethod
-    def _device_reference_for_id(instance: "Bot", runtime_id: str) -> str | None:
-        """Resolve one stamped or envelope runtime id to a configured device reference.
-
-        A flat read of the body's own index — the whole of what provenance resolution is
-        allowed to be. An id the body has no record of resolves to nothing: an honest
-        unknown, never an invented one.
-        """
-
-        return instance._device_reference_by_id.get(runtime_id)
+    def _device_reference_for_source(instance: "Bot", source: str) -> str | None:
+        for reference, device in instance._devices.items():
+            if any(_instance_id(candidate) == source for candidate in _device_tree(device)):
+                return reference
+        return None
 
     @staticmethod
     def _device_references_for_event(instance: "Bot", event: hsm.Event[typing.Any]) -> tuple[str, ...]:
-        """Map stimulus provenance to configured device refs, from the event itself.
+        """Map stimulus provenance to configured device refs via envelope source id only."""
 
-        The holder chain, read off the stimulus: a sound whose holder is one of this body's
-        devices issued from that device's peripheral (an earpiece), so the sound is that
-        device's. Anything else — a holder that is this body itself, an unknown holder, an
-        unstamped sound — resolves by the modeled envelope source. Every id resolves against
-        the body's flat index; nothing walks a device or attachment tree.
-        """
-
-        data = event.data
-        reference = None
-        if isinstance(data, SoundData) and data.owner is not None:
-            reference = Bot._device_reference_for_id(instance, data.owner)
-        if reference is None and event.source:
-            reference = Bot._device_reference_for_id(instance, event.source)
-        return (reference,) if reference is not None else ()
+        source_reference = Bot._device_reference_for_source(instance, event.source) if event.source else None
+        if source_reference is not None:
+            return (source_reference,)
+        return ()
 
     @staticmethod
     def _interrupt_reference(instance: "Bot", input: events.InputEventData, source: str) -> str | None:
@@ -620,13 +596,13 @@ class Bot(hsm.Instance, abc.ABC):
 
         A device has no idea what its bot files it under — a handset does not know it is the
         "work phone" — so a device leaves ``target_device`` unset and the body resolves the
-        device from the envelope source, the nerve the signal came in on, against its own flat
-        index. Identity only: this never reads what happened to decide whose interrupt it is.
+        device from the envelope source, the nerve the signal came in on. Identity only: this
+        never reads what happened to decide whose interrupt it is.
         """
 
         if input.target_device is not None:
             return input.target_device
-        return Bot._device_reference_for_id(instance, source) if source else None
+        return Bot._device_reference_for_source(instance, source) if source else None
 
     @staticmethod
     def _target_device_reference(instance: "Bot", input: events.BotInputData, source: str = "") -> str | None:
@@ -666,18 +642,6 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _fan_out_input(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        # A sound whose stamp names a holder the body holds is fanned to the senses AS that
-        # device: an earpiece's sounds carry the phone as their holder, the phone is in the
-        # body's own index, and the copy's envelope source carries that device identity, so
-        # everything the senses later produce from it still names the device — with no one
-        # ever walking a device tree for it. Every other sound keeps the source it arrived
-        # with: a holder that is the body itself (its own phone's ring) is already named by
-        # the emitter on the envelope, an unknown holder elevates nothing, and the mouth's
-        # own unstamped productions keep the transducer source the efference copy correlates
-        # against.
-        data = event.data
-        if isinstance(data, SoundData) and data.owner is not None and data.owner in instance._device_reference_by_id:
-            event = dataclasses.replace(event, source=data.owner)
         for ability in instance._input:
             _ = hsm.dispatch(
                 ctx,
@@ -908,18 +872,17 @@ class Bot(hsm.Instance, abc.ABC):
     def _conversation_source_ref(instance: "Bot", stimulus: hsm.Event[typing.Any]) -> str:
         """Who is speaking, for a conversation frame built from a speech product.
 
-        Provenance arrives on the product itself: an earpiece's sounds carry the phone as
-        their holder (``SoundData.owner``), the body elevated that device identity onto the
-        fanned copy's envelope at fan-out (see ``_fan_out_input``), and the listening chain
-        rode it here — so the envelope source already names the device, a runtime id the body
-        resolves against its own flat index. Speech off a phone with a connected call is the
-        party on the line; the earpiece stays the phone's private peripheral and no tree is
-        ever walked for it. Everything else is the room, exactly as before.
+        Correlation by envelope source only: the transducer the sound came off rides the whole
+        listening chain on the envelope by design, and the body maps it against its own device
+        tree. Speech off a phone with a connected call is the party on the line — the earpiece
+        stays the phone's private peripheral, but the source id on a sound that already arrived
+        is the modeled handle the chain preserves for exactly this. Everything else is the room,
+        exactly as before.
         """
 
         source = stimulus.source
         if source:
-            reference = Bot._device_reference_for_id(instance, source)
+            reference = Bot._device_reference_for_source(instance, source)
             if reference is not None:
                 tracked = instance._connected_calls.get(reference)
                 if tracked is not None:
@@ -1213,39 +1176,6 @@ class Bot(hsm.Instance, abc.ABC):
         )
 
     @staticmethod
-    def _legible_owner(instance: "Bot", owner: str) -> str:
-        """Render one holder stamp the way this body's frames name the holder.
-
-        The body's own runtime id becomes its frame self-reference — ``"bot"``, the same ref
-        the participant template names it — because a model reading its frame should see
-        "you", not an opaque instance id. A device the body holds becomes its configured
-        reference. Anything else stays exactly as stamped: a frame never invents a name.
-        """
-
-        if owner == hsm.id(instance):
-            return "bot"
-        return instance._device_reference_by_id.get(owner, owner)
-
-    @staticmethod
-    def _legible_stimulus(instance: "Bot", stimulus: events.BotInputData) -> events.BotInputData:
-        """Translate runtime-id provenance on a cognition-bound stimulus into frame-legible refs.
-
-        Correlation already happened by the time anything is rendered — the index read comes
-        first, the render second. And the render is only for the frame cognition deliberates
-        over: the device-plane nerve and telemetry keep the truthful runtime ids.
-        """
-
-        if not isinstance(stimulus, hsm.Event):
-            return stimulus
-        data = stimulus.data
-        if not isinstance(data, SoundData) or data.owner is None:
-            return stimulus
-        legible = Bot._legible_owner(instance, data.owner)
-        if legible == data.owner:
-            return stimulus
-        return dataclasses.replace(stimulus, data=data.model_copy(update={"owner": legible}))
-
-    @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         if isinstance(event.data, events.InputEventData):
             stimulus = event.data
@@ -1259,7 +1189,6 @@ class Bot(hsm.Instance, abc.ABC):
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
         focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
         instance._processing_focus_candidates = focus_candidates
-        stimulus = Bot._legible_stimulus(instance, stimulus)
         cognition_input = cognition.InputData(
             stimulus=stimulus,
             abilities=Bot._lifecycle_abilities(instance),
@@ -1811,9 +1740,6 @@ class Bot(hsm.Instance, abc.ABC):
         hsm.state(
             "active",
             hsm.initial(hsm.target("unfocused")),
-            # Provenance resolves by flat index from here on; rebuild it from the body's own
-            # configuration records on every activation, devices now being up.
-            hsm.entry(_index_configured_devices),
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),

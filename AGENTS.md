@@ -106,11 +106,6 @@
   payloads; use modeled `id` / `source` / `target` for post-delivery correlation only. See HSM-DELIVERY-001.
 - NEVER store transient event or operation scratch on an HSM instance. Carry results, failures, and behavioral
   provenance through typed completion or failure event data.
-- ALWAYS emit events with everything their consumers need: producers stamp identity, ownership, and provenance
-  on the event at emission time. NEVER reconstruct what an event is, where it came from, or who it belongs to
-  by walking device/attachment trees, instance graphs, or other actors' state — reverse lookup and traversal
-  break pass-by-message. Post-delivery correlation reads modeled `id` / `source` / `target` and stamped data
-  carried on the event itself, never a traversal of the actor graph.
 - ALWAYS reserve `hsm.Event.metadata` for telemetry propagation only. NEVER put domain data, identity, capabilities,
   retries, results, policy, or progression decisions in metadata. Behavioral coordination uses typed event data plus
   modeled `id` / `source` / `target`. Architecture allowlists for pre-existing metadata violations may only shrink.

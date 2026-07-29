@@ -274,9 +274,7 @@ def _require_positive_timeout(name: str, value: datetime.timedelta) -> None:
         raise ValueError(f"{name} must be a positive duration.")
 
 
-def _environment_observation_event(
-    owner: "Phone", event: hsm.Event[typing.Any], owner_reference: str | None
-) -> hsm.Event[typing.Any] | None:
+def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
     """Map phone observations that bots experience as input energy into environment stimuli.
 
     Ringing is heard as ``environment.sound`` with ``source`` = the phone instance id. Device-plane
@@ -311,9 +309,6 @@ def _environment_observation_event(
                     kind="phone.ringing",
                     caller=data.caller,
                     amplitude_db=RINGER_DB,
-                    # The phone is the emitter, so the stamp is the phone's holder: whose hand
-                    # this line is ringing in. The phone's own id stays on the envelope source.
-                    owner=owner_reference,
                 )
             ),
             source=hsm.id(owner),
@@ -344,7 +339,6 @@ def _environment_observation_event(
                     channels=1,
                     kind="phone.busy" if busy else "phone.reorder",
                     amplitude_db=CALL_PROGRESS_DB,
-                    owner=owner_reference,
                 )
             ),
             source=hsm.id(owner),
@@ -1342,7 +1336,7 @@ class Phone(bot.device.Device):
             RingingData | PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData | NoCallData,
         ):
             return
-        stimulus = _environment_observation_event(self, event, self._current_owner_reference())
+        stimulus = _environment_observation_event(self, event)
         if stimulus is None:
             # Nothing audible happened, which does not mean nothing happened. A call coming up,
             # a line going dead, nobody ever picking up: silent to the room, plain to the hand.
@@ -1401,33 +1395,6 @@ class Phone(bot.device.Device):
             return None
         return dataclasses.replace(event, data=validated)
 
-    def _current_owner_reference(self) -> str | None:
-        """Who holds this handset: the actor most recently attached, or nobody.
-
-        Attachment is possession, so the newest attachment is the current holder. An unattached
-        phone names nobody — null is what a handset lying on the table would say, not an error.
-        """
-
-        if not self._attachments:
-            return None
-        # The ancestor's own id reader: hsm.id can fail mid-stop, and it already falls back.
-        return attachment.Attachment._actor_id(self._attachments[-1]) or None
-
-    async def _stamp_sound_provenance(self, ctx: hsm.Context) -> None:
-        """Label the earpiece with its holder — this phone — so the sounds it makes say so.
-
-        Stamped once at wiring time: what holds an earpiece is structural, so the label never
-        changes. The phone coming into or out of someone's hand moves the phone's own stamp,
-        not the earpiece's — an earpiece is the phone's whether or not anyone is holding it.
-        """
-
-        if not lifecycle.is_started(self._speaker):
-            return
-        await self._speaker.dispatch(
-            ctx,
-            audio.SoundProvenanceEvent.with_data(audio.SoundProvenanceData(owner=hsm.id(self))),
-        )
-
     @typing.override
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:
         await super()._after_firmware_started(ctx, event)
@@ -1445,7 +1412,6 @@ class Phone(bot.device.Device):
         wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=self._firmware))
         await self._microphone.attach(environment, wired)
         await self._speaker.attach(environment, wired)
-        await self._stamp_sound_provenance(ctx)
 
     @typing.override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:

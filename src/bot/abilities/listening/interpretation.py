@@ -212,8 +212,7 @@ def _dispatch_listening_cognition_input(
     """Terminal handoff: ``cognition.InputEvent`` for the body owner when listening finishes.
 
     Stimulus is the acoustic product cognition should judge (``environment.sound`` or decoded
-    speech). Provenance comes only from the event chain: the provenance the sound arrived with —
-    the stamped holder's id when the sound declares one, the transducer's id otherwise — rides
+    speech). Provenance comes only from the event chain: the transducer the sound came off rides
     in on the scored product's envelope and rides out on the stimulus, which is how the body
     resolves which of its devices a sensory product belongs to.
     """

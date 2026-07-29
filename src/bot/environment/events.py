@@ -78,22 +78,6 @@ class SoundData(pydantic.BaseModel):
         ),
         examples=["phone.ringing", "phone.call", "ambient", "knock"],
     )
-    owner: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Runtime identifier of the holder of whatever emitted this sound, stamped at "
-            "emission time — one field with one meaning at every level of composition. A phone's "
-            "ring names the phone's holder, because the phone emitted it; the same phone's "
-            "earpiece names the phone, because the earpiece emitted it and the phone is what "
-            "holds an earpiece. The chain is structural, so attribution is hops through holders, "
-            "never a walk of device or attachment trees. The emitter itself is the event's "
-            "envelope source — though the body may elevate a fanned copy's envelope source to "
-            "the stamped holder, so provenance is read from the stamp first. Null when the "
-            "emitter is held by nobody — an honest unknown, never an invented one."
-        ),
-        examples=["bot-7", "phone-1"],
-    )
     amplitude_db: float | None = pydantic.Field(
         default=None,
         description=(

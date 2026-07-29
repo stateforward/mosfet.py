@@ -65,41 +65,9 @@ class AudioFrameData(pydantic.BaseModel):
 class AudioInputData(AudioFrameData):
     """Audio captured by an input peripheral and dispatched to another device."""
 
+
 class AudioOutputData(AudioFrameData):
     """Audio requested for output and dispatched to an audio output implementation."""
-
-class SoundProvenanceData(pydantic.BaseModel):
-    """Configuration from a transducer's owning device: whose holder its sounds must name.
-
-    A speaker has no way to know what holds it, and asking around would mean walking someone
-    else's graph. The device that wires it in says it once — and the holder of a wired-in
-    transducer is structural, so once is forever: an earpiece is the phone's whether or not
-    anyone is holding the phone.
-
-    Invariant: a transducer the body speaks through — a mouth, a voice speaker — must never be
-    stamped. The efference-copy self-voice discount correlates the envelope source against the
-    mouth's runtime id, and a stamp would silently break that correlation, so a mouth's sounds
-    stay unlabeled on purpose.
-    """
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "examples": [{"owner": "phone-1"}, {"owner": None}],
-        },
-    )
-
-    owner: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Runtime identifier of the transducer's holder, stamped as ``owner`` on every "
-            "environment sound it transduces — the device the transducer is wired into, not "
-            "whoever holds that device. Null labels the sound as held by nobody: an honest "
-            "unknown, never an invented one."
-        ),
-        examples=["phone-1"],
-    )
 
 
 InputEvent = hsm.Event[AudioInputData](
@@ -109,10 +77,6 @@ InputEvent = hsm.Event[AudioInputData](
 OutputEvent = hsm.Event[AudioOutputData](
     name="devices.audio.output",
     schema=AudioOutputData,
-)
-SoundProvenanceEvent = hsm.Event[SoundProvenanceData](
-    name="devices.audio.sound_provenance",
-    schema=SoundProvenanceData,
 )
 
 
