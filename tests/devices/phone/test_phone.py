@@ -481,8 +481,45 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert getattr(sound, "audio", b"").startswith(b"RIFF")
     assert getattr(sound, "audio", b"") == phone_device.RING_SOUND_WAV
     assert getattr(sound, "caller", "") == "Front desk"
+    # A phone nobody holds honestly names no holder; the emitter's id stays on the envelope.
+    assert getattr(sound, "owner", "invented") is None
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
+
+def test_a_ring_says_whose_line_is_being_called_and_by_whom() -> None:
+    """The ring's addressing rides the stimulus: this emitter, held by this owner, called by this caller.
+
+    A bot that hears its own phone ring reads "your line is being called by X" off the sound
+    alone — the emitter's id is the envelope source, and the owner stamp names whose hand the
+    phone is in. No walking device trees or attachment graphs. A phone nobody holds stamps no
+    owner: null is an honest unknown, never an invented one.
+    """
+
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        environment = Environment()
+        phone, _firmware, _holder, bystander = await _phone_in_a_hand(environment)
+        phone_id = hsm.id(phone)
+        bystander.received.clear()
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-1", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: bool(bystander.received))
+        return bystander.received[-1], phone_id
+
+    ring, phone_id = asyncio.run(run())
+
+    assert ring.name == SoundEvent.name
+    assert ring.source == phone_id
+    assert isinstance(ring.data, phone_device.PhoneSoundData)
+    assert ring.data.kind == "phone.ringing"
+    assert ring.data.caller == "Front desk"
+    # The addressing: the phone's own line (the emitter), in this bot's hand (its holder).
+    assert ring.data.owner == "holder"
+    assert not hasattr(ring.data, "device")
 
 async def _dialing_phone_in_environment(
     environment: Environment,
@@ -1051,6 +1088,61 @@ def test_phone_service_audio_routes_through_speaker_to_environment_observers() -
     assert event.source == speaker_id
     assert event.target == "observer"
     assert event.metadata == {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
+
+def test_earpiece_sound_says_whose_line_it_plays_for() -> None:
+    """Far-end speech out of the earpiece names the phone as its holder — always.
+
+    The phone owns its earpiece the whole time, attached or not: the chain is structural, so
+    the stamp is the phone's own id and it does not change when the phone itself changes hands.
+    Attribution needs no tree walk: one hop from the stamp to the phone, and the phone's own
+    observations say who holds it.
+    """
+
+    async def run() -> tuple[hsm.Event[typing.Any], hsm.Event[typing.Any], str]:
+        environment = Environment()
+        phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
+        phone_id = hsm.id(phone)
+        chunk = phone_device.ServiceAudioData(
+            call_id="call-1",
+            audio=b"far-end-speech",
+            media_type="audio/pcm",
+            sample_rate_hz=48_000,
+            channels=1,
+        )
+
+        await _emit_service_event(
+            phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        await _emit_service_event(
+            phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1"))
+        )
+        await _emit_service_event(
+            phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1"))
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/answered/media_ready")
+        bystander.received.clear()
+
+        await _emit_service_event(phone, phone_device.ServiceAudioReceivedEvent.with_data(chunk))
+        await _wait_until(lambda: bool(bystander.received))
+        held_sound = bystander.received[-1]
+
+        await phone.detach(environment, attachment.DetachEvent.with_data(attachment.DetachData(actor=holder)))
+        bystander.received.clear()
+        await _emit_service_event(phone, phone_device.ServiceAudioReceivedEvent.with_data(chunk))
+        await _wait_until(lambda: bool(bystander.received))
+        return held_sound, bystander.received[-1], phone_id
+
+    held, released, phone_id = asyncio.run(run())
+
+    for sound in (held, released):
+        assert sound.name == SoundEvent.name
+        assert isinstance(sound.data, SoundData)
+        assert sound.data.audio == b"far-end-speech"
+        # The speaker's holder is the phone, whether or not anyone is holding the phone.
+        assert sound.data.owner == phone_id
+        assert not hasattr(sound.data, "device")
 
 def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audio() -> None:
     async def run() -> tuple[tuple[hsm.Event[typing.Any], ...], list[str]]:

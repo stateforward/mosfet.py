@@ -119,6 +119,53 @@ def test_speaker_transduces_attached_controller_signal_into_environment_sound() 
     assert outside_events == []
 
 
+def test_speaker_stamps_the_provenance_it_was_configured_with_on_every_sound() -> None:
+    """The label on a speaker's sounds comes from whoever wired it in, never from asking around.
+
+    The device that owns the transducer tells it whose holder to stamp; the speaker stamps
+    exactly that on every sound it transduces until told otherwise. An unlabeled speaker stamps
+    null — an honest unknown, never an invented one.
+    """
+
+    async def run() -> tuple[hsm.Event[typing.Any], hsm.Event[typing.Any]]:
+        environment = Environment()
+        speaker = audio.Speaker()
+        controller = RecordingDevice()
+        listener = RecordingDevice()
+        _ = await hsm.started(environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
+        _ = await hsm.started(environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller"))
+        _ = await hsm.started(environment, listener, typing.cast(hsm.Model, listener.model), hsm.Config(id="listener"))
+        await speaker.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
+        await wait_until(lambda: speaker.state() == "/Device/attached")
+        listener.events.clear()
+        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+
+        await speaker.dispatch(
+            environment,
+            audio.SoundProvenanceEvent.with_data(audio.SoundProvenanceData(owner="phone-1")),
+        )
+        await speaker.dispatch(environment, audio.OutputEvent.with_data(data))
+        await wait_until(lambda: bool(listener.events))
+        stamped = listener.events[-1]
+
+        listener.events.clear()
+        await speaker.dispatch(
+            environment,
+            audio.SoundProvenanceEvent.with_data(audio.SoundProvenanceData(owner=None)),
+        )
+        await speaker.dispatch(environment, audio.OutputEvent.with_data(data))
+        await wait_until(lambda: bool(listener.events))
+        return stamped, listener.events[-1]
+
+    stamped, restamped = asyncio.run(run())
+
+    assert isinstance(stamped.data, SoundData)
+    assert stamped.data.owner == "phone-1"
+    assert not hasattr(stamped.data, "device")
+    assert isinstance(restamped.data, SoundData)
+    assert restamped.data.owner is None
+
+
 def test_unattached_speaker_transduces_nothing() -> None:
     """An unwired speaker is silent, exactly as its physical counterpart is."""
 

@@ -1,4 +1,4 @@
-from .events import OutputEvent, AudioOutputData, routed_audio_event
+from .events import OutputEvent, AudioOutputData, SoundProvenanceData, SoundProvenanceEvent, routed_audio_event
 
 import collections.abc
 import dataclasses
@@ -24,6 +24,7 @@ class Speaker(Device):
     output_event: typing.ClassVar[hsm.Event[AudioOutputData]] = OutputEvent
 
     _amplitude_db: float | None
+    _sound_owner: str | None
 
     def __init__(
         self,
@@ -37,6 +38,18 @@ class Speaker(Device):
         # and a room speaker are different hardware; without a value the sound carries everywhere,
         # which is what keeps geometry opt-in.
         self._amplitude_db = amplitude_db
+        # Who holds this transducer, told to it by the device that wired it in
+        # (devices.audio.sound_provenance). Unlabeled means the sounds say so: null, never invented.
+        self._sound_owner = None
+
+    @staticmethod
+    def _note_sound_provenance(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
+        """Label this transducer with the holder its owning device just declared."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, SoundProvenanceData)
+        instance._sound_owner = data.owner
 
     @staticmethod
     def _transduce(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
@@ -59,6 +72,7 @@ class Speaker(Device):
                     sample_rate_hz=data.sample_rate_hz,
                     channels=data.channels,
                     amplitude_db=instance._amplitude_db,
+                    owner=instance._sound_owner,
                 )
             ),
             source=hsm.id(instance),
@@ -70,6 +84,7 @@ class Speaker(Device):
     model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
         typing.cast(hsm.Model, Device.model),
         hsm.transition(hsm.source("attached"), hsm.on(OutputEvent), hsm.effect(_transduce)),
+        hsm.transition(hsm.source("attached"), hsm.on(SoundProvenanceEvent), hsm.effect(_note_sound_provenance)),
     )
 
     def dispatch_audio_output(

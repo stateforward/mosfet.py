@@ -186,7 +186,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     ) -> None:
         """Pass the scored sound on, and go back to listening.
 
-        The transducer the sound came off rides along on the envelope: it is how the body works
+        The provenance the sound arrived with rides along on the envelope: the stamped holder's
+        id when the sound declares one, the transducer's id otherwise. It is how the body works
         out which of its devices a sensory product belongs to, and nothing downstream can
         reconstruct it.
         """
