@@ -1456,9 +1456,7 @@ class PhoneService(hsm.Instance):
         _ = phone_event_target.dispatch(
             ctx,
             dataclasses.replace(
-                phone.ServiceMediaReadyEvent.with_data(
-                    phone.MediaReadyData(call_id=call_id, party=instance._call_peer_identity)
-                ),
+                phone.ServiceMediaReadyEvent.with_data(phone.MediaReadyData(call_id=call_id)),
                 source=hsm.id(instance),
                 target=hsm.id(phone_event_target),
             ),
@@ -1640,16 +1638,7 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.MediaReadyData)
         instance._media_call_id = data.call_id
-        # Stamp who the call is with at the boundary: the peer this phone adopted from setup or
-        # the dial plan. None when the far end was never identified — never invented.
-        PhoneService._emit_phone_event(
-            ctx,
-            instance,
-            event,
-            phone.ServiceMediaReadyEvent.with_data(
-                phone.MediaReadyData(call_id=data.call_id, party=instance._call_peer_identity)
-            ),
-        )
+        PhoneService._emit_phone_event(ctx, instance, event, phone.ServiceMediaReadyEvent.with_data(data))
 
     @staticmethod
     def _emit_remote_hang_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
@@ -1698,16 +1687,7 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.CallConnectedData)
         instance._media_call_id = data.call_id
-        # Stamp who the call is with at the boundary: the peer this phone adopted from setup or
-        # the dial plan. None when the far end was never identified — never invented.
-        PhoneService._emit_phone_event(
-            ctx,
-            instance,
-            event,
-            phone.CallConnectedEvent.with_data(
-                phone.CallConnectedData(call_id=data.call_id, party=instance._call_peer_identity)
-            ),
-        )
+        PhoneService._emit_phone_event(ctx, instance, event, phone.CallConnectedEvent.with_data(data))
 
     @staticmethod
     def _emit_media_ready_for_connected_call(
