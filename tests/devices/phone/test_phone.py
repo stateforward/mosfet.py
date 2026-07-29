@@ -918,6 +918,55 @@ def test_phone_media_ready_publishes_committed_event() -> None:
 
     asyncio.run(run())
 
+def test_phone_connected_call_committed_observations_carry_the_party() -> None:
+    """A connected call says who it is with, not only that it is.
+
+    The service stamps the party when the call comes up; firmware carries it onto the
+    committed observation unchanged. Without it a bot is told a call exists and nothing
+    about who is on it.
+    """
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        firmware = _phone_firmware(phone)
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        await _emit_service_event(
+            phone,
+            phone_device.CallConnectedEvent.with_data(
+                phone_device.CallConnectedData(call_id="call-123", party="Front desk")
+            ),
+        )
+        await _emit_service_event(
+            phone,
+            phone_device.ServiceMediaReadyEvent.with_data(
+                phone_device.MediaReadyData(call_id="call-123", party="Front desk")
+            ),
+        )
+        await _wait_until(lambda: _event_names(firmware.event_recorder())[-1] == phone_device.MediaReadyEvent.name)
+        return list(firmware.event_recorder().events)
+
+    events = asyncio.run(run())
+
+    answered = [event.data for event in events if event.name == phone_device.AnsweredEvent.name]
+    media_ready = [event.data for event in events if event.name == phone_device.MediaReadyEvent.name]
+    assert answered == [phone_device.PhoneCallData(call_id="call-123", party="Front desk")]
+    assert media_ready == [phone_device.PhoneCallData(call_id="call-123", party="Front desk")]
+    assert all(isinstance(data, phone_device.PhoneCallData) for data in answered + media_ready)
+    assert [data.party for data in answered + media_ready if isinstance(data, phone_device.PhoneCallData)] == [
+        "Front desk",
+        "Front desk",
+    ]
+
 def test_phone_service_audio_routes_through_speaker_to_environment_observers() -> None:
     async def run() -> tuple[tuple[hsm.Event[typing.Any], ...], list[str], str]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
@@ -2209,6 +2258,50 @@ def test_a_phone_tells_whoever_holds_it_that_the_call_came_up() -> None:
     assert phone_device.MediaReadyEvent.name in occasions
     # The ring was a sound in the room; the call coming up was nobody else's business.
     assert [event.name for event in overheard] == [SoundEvent.name]
+
+
+def test_a_phone_tells_whoever_holds_it_who_the_call_is_with() -> None:
+    """Who is on the line rides the nerve as plain JSON, the way the hand feels it.
+
+    The committed payload serializes through ``model_dump`` onto ``bot.InputEvent``, so the
+    party cognition later reasons about is exactly the one the service stamped.
+    """
+
+    async def run() -> list[dict[str, object]]:
+        environment = Environment()
+        phone, firmware, holder, _bystander = await _phone_in_a_hand(environment)
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-1", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        await _emit_service_event(
+            phone,
+            phone_device.CallConnectedEvent.with_data(
+                phone_device.CallConnectedData(call_id="call-1", party="Front desk")
+            ),
+        )
+        await _emit_service_event(
+            phone,
+            phone_device.ServiceMediaReadyEvent.with_data(
+                phone_device.MediaReadyData(call_id="call-1", party="Front desk")
+            ),
+        )
+        await _wait_until(lambda: firmware.state() == "/Phone/answered/media_ready")
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return [
+            occasion.data.payload
+            for occasion in holder.occasions
+            if isinstance(occasion.data, bot.InputEventData) and occasion.data.payload is not None
+        ]
+
+    payloads = asyncio.run(run())
+
+    assert {"call_id": "call-1", "party": "Front desk"} in payloads
 
 
 def test_a_phone_tells_whoever_holds_it_that_nobody_answered() -> None:

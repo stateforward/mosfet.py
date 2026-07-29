@@ -528,7 +528,7 @@ def test_livekit_phone_dials_the_number_it_was_given() -> None:
             event for event in _phone_events(recording_service) if event.name == phone_device.AnsweredEvent.name
         ]
         # Both phones name the call the caller minted; nobody invented a second handle.
-        assert [event.data for event in answered] == [phone_device.PhoneCallData(call_id=call_id)]
+        assert [event.data for event in answered] == [phone_device.PhoneCallData(call_id=call_id, party=BOB_IDENTITY)]
 
     asyncio.run(run())
 
@@ -1221,7 +1221,9 @@ def test_livekit_phone_service_answers_current_phone_call_through_gateway() -> N
             phone_device.ServiceAnswerRequestedEvent.name,
             phone_device.AnsweredEvent.name,
         ]
-        assert _phone_events(recording_service)[-1].data == phone_device.PhoneCallData(call_id="call-123")
+        assert _phone_events(recording_service)[-1].data == phone_device.PhoneCallData(
+            call_id="call-123", party="Front desk"
+        )
 
     asyncio.run(run())
 
@@ -1312,10 +1314,11 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
         await _wait_until(lambda: _is_answered(alice_phone))
         await _wait_until(lambda: _is_answered(bob_phone))
 
-        # One call, one name for it, minted by the caller and adopted by the callee.
-        for recording in (alice_recording, bob_recording):
+        # One call, one name for it, minted by the caller and adopted by the callee — and each
+        # phone names the other as the party on the line.
+        for recording, party in ((alice_recording, BOB_IDENTITY), (bob_recording, ALICE_IDENTITY)):
             answered = [event for event in _phone_events(recording) if event.name == phone_device.AnsweredEvent.name]
-            assert answered[-1].data == phone_device.PhoneCallData(call_id=call_id)
+            assert answered[-1].data == phone_device.PhoneCallData(call_id=call_id, party=party)
 
         await bob_phone.dispatch(
             bob_phone.context(),
@@ -1371,7 +1374,81 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
         media_ready = [
             event for event in _phone_events(alice_recording) if event.name == phone_device.MediaReadyEvent.name
         ]
-        assert [event.data for event in media_ready] == [phone_device.PhoneCallData(call_id=call_id)]
+        assert [event.data for event in media_ready] == [
+            phone_device.PhoneCallData(call_id=call_id, party=BOB_IDENTITY)
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_connected_call_says_who_is_on_the_line() -> None:
+    """Both ends of a connected call learn who picked up, each from what it genuinely knows.
+
+    The callee names the caller the SFU authenticated on setup; the caller names whoever the
+    dial plan resolved the number to. Neither is invented: one came in on the wire, the other
+    out of the exchange's numbering plan.
+    """
+
+    async def run() -> None:
+        sfu = FakeSfu()
+        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+
+        await alice_phone.dispatch(
+            alice_phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
+
+        call_id = _dialed_call_id(alice_room)
+        await bob_phone.dispatch(
+            bob_phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+        await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/answered/media_ready")
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/answered/media_ready")
+
+        for recording, party in ((alice_recording, BOB_IDENTITY), (bob_recording, ALICE_IDENTITY)):
+            events = _phone_events(recording)
+            answered = [event.data for event in events if event.name == phone_device.AnsweredEvent.name]
+            media_ready = [event.data for event in events if event.name == phone_device.MediaReadyEvent.name]
+            assert answered == [phone_device.PhoneCallData(call_id=call_id, party=party)]
+            assert media_ready == [phone_device.PhoneCallData(call_id=call_id, party=party)]
+            assert all(isinstance(data, phone_device.PhoneCallData) for data in answered + media_ready)
+            assert [data.party for data in answered + media_ready if isinstance(data, phone_device.PhoneCallData)] == [
+                party,
+                party,
+            ]
+
+    asyncio.run(run())
+
+
+def test_a_call_with_a_withheld_caller_names_nobody() -> None:
+    """party stays None when the provider never learned the far end — it is never invented.
+
+    A withheld caller ID still connects: the call is no less real for being anonymous, and
+    "unknown" is what a handset shows, not a made-up name.
+    """
+
+    async def run() -> None:
+        phone, service, _room, recording_service = await _start_signalling_livekit_phone()
+
+        await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
+        await phone.dispatch(
+            phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
+
+        events = _phone_events(recording_service)
+        answered = [event.data for event in events if event.name == phone_device.AnsweredEvent.name]
+        media_ready = [event.data for event in events if event.name == phone_device.MediaReadyEvent.name]
+        assert answered == [phone_device.PhoneCallData(call_id="call-123")]
+        assert media_ready == [phone_device.PhoneCallData(call_id="call-123")]
+        assert all(
+            isinstance(data, phone_device.PhoneCallData) and data.party is None for data in answered + media_ready
+        )
 
     asyncio.run(run())
 

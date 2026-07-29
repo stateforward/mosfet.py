@@ -1,5 +1,6 @@
 from bot.abilities import cognition
 from bot.abilities import conversation
+from bot.abilities import participating
 from bot.abilities import processing
 from bot.abilities import speaking
 from bot.abilities.hearing import speech
@@ -22,6 +23,7 @@ from bot.protocols import attachment
 from . import events
 
 from bot.device import Device
+from bot.devices import phone
 from bot.telemetry import observer
 from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
 
@@ -164,6 +166,43 @@ _BotProcessingCancelTimedOutEvent = hsm.Event[_BotProcessingOperationData](
     kind=hsm.ErrorEventKind,
     schema=_BotProcessingOperationData,
 )
+
+_LINE_REFERENCE = "line"
+"""Participant and channel reference for a connected phone line in a conversation frame.
+
+The channel a connected call adds to the frame, and — when the phone service never learned who
+is on the far end — the generic participant reference for whoever is physically there. A line
+with nobody to name is still occupied; inventing a name would be a lie about who is speaking.
+"""
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConnectedCall:
+    """One phone-line call the body knows is connected, kept per configured device reference.
+
+    Body-modeled world state, not turn scratch: it is what lets the body tell the truth about
+    who is present when it builds conversation frames, and it lives exactly as long as the call
+    does — added when the device nerve reports the call connected, removed when it reports the
+    call ended.
+    """
+
+    call_id: str
+    party: str | None
+
+
+def _line_participant_ref(party: str | None, taken_refs: collections.abc.Set[str]) -> str:
+    """Effective conversation reference for the party on a connected line.
+
+    The party's own name when the service learned one — unless the frame already has that name
+    (the bot itself, the room participant, or a party on another line). A colliding name is one
+    the frame cannot tell apart, so the party takes the generic line reference instead:
+    dropping them would pretend nobody is on the line, and inventing a distinguisher would be
+    inventing a name.
+    """
+
+    if party is None or party in taken_refs:
+        return _LINE_REFERENCE
+    return party
 
 
 def _bot_cancel_operation_id(request_id: str, token: str, owner: hsm.Instance) -> str:
@@ -322,6 +361,9 @@ class Bot(hsm.Instance, abc.ABC):
     _devices: dict[str, Device]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
     _focused_device: str | None
+    # Live connected phone-line calls by configured device reference. The body's own modeled
+    # world state, kept true from the device nerve so conversation frames can tell it.
+    _connected_calls: dict[str, _ConnectedCall]
     # Turn-scoped attention policy for the active processing operation (body-owned).
     # Set when the processing activity starts; cleared when the turn retires.
     _processing_focus_candidates: tuple[str, ...]
@@ -349,6 +391,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._devices = dict(devices)
         self._cognition = cognition
         self._focused_device = None
+        self._connected_calls = {}
         self._processing_focus_candidates = ()
         self._innate_ability_instances = tuple(ability_type() for ability_type in self._innate_abilities)
         self._input = tuple(input)
@@ -800,8 +843,8 @@ class Bot(hsm.Instance, abc.ABC):
         return None
 
     @staticmethod
-    def _listening_speech_bytes(event: hsm.Event[typing.Any]) -> bytes | None:
-        """Return Listening speech-decoding product bytes when event is a sensory speech handoff."""
+    def _listening_speech_stimulus(event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
+        """Return the Listening speech-decoding product event when event is a sensory speech handoff."""
 
         data = event.data
         if not isinstance(data, cognition.InputData):
@@ -814,11 +857,93 @@ class Bot(hsm.Instance, abc.ABC):
         # SpeechDecoding public output identity (delivery already selected this event type on Listening).
         if stimulus.name != speech.SpeechDecoding.output_event.name:
             return None
-        return stimulus.data
+        return stimulus
+
+    @staticmethod
+    def _listening_speech_bytes(event: hsm.Event[typing.Any]) -> bytes | None:
+        """Return Listening speech-decoding product bytes when event is a sensory speech handoff."""
+
+        stimulus = Bot._listening_speech_stimulus(event)
+        if stimulus is None:
+            return None
+        return typing.cast(bytes, stimulus.data)
+
+    @staticmethod
+    def _conversation_source_ref(instance: "Bot", stimulus: hsm.Event[typing.Any]) -> str:
+        """Who is speaking, for a conversation frame built from a speech product.
+
+        Correlation by envelope source only: the transducer the sound came off rides the whole
+        listening chain on the envelope by design, and the body maps it against its own device
+        tree. Speech off a phone with a connected call is the party on the line — the earpiece
+        stays the phone's private peripheral, but the source id on a sound that already arrived
+        is the modeled handle the chain preserves for exactly this. Everything else is the room,
+        exactly as before.
+        """
+
+        source = stimulus.source
+        if source:
+            reference = Bot._device_reference_for_source(instance, source)
+            if reference is not None:
+                tracked = instance._connected_calls.get(reference)
+                if tracked is not None:
+                    room_refs = {participant.ref for participant in conversation.default_pair_participants()}
+                    return _line_participant_ref(tracked.party, room_refs)
+        return "caller"
+
+    @staticmethod
+    def _conversation_participants(
+        instance: "Bot",
+        *,
+        source_ref: str,
+    ) -> tuple[participating.ParticipantSnapshot, ...]:
+        """The participant set the body can honestly vouch for right now.
+
+        With no connected call this is exactly the static room template. A connected call adds
+        the party on the line — present, reachable over a phone-line audio channel — while the
+        room participant stays, because a call being up says nothing about whether someone is
+        also in the room. Whoever is speaking holds the turn; every other human is listening.
+        """
+
+        participants: list[participating.ParticipantSnapshot] = []
+        for participant in conversation.default_pair_participants():
+            if participant.kind == "human" and participant.ref != source_ref and participant.state.turn != "listening":
+                participant = participant.model_copy(
+                    update={"state": participant.state.model_copy(update={"turn": "listening"})}
+                )
+            participants.append(participant)
+        refs = {participant.ref for participant in participants}
+        for tracked in instance._connected_calls.values():
+            ref = _line_participant_ref(tracked.party, refs)
+            if ref in refs:
+                # A second line that resolves to an already-taken generic reference is one the
+                # frame cannot tell apart from the first: keep refs unique, invent nothing.
+                continue
+            refs.add(ref)
+            participants.append(
+                participating.ParticipantSnapshot(
+                    ref=ref,
+                    kind="human",
+                    state=participating.ParticipantStateSnapshot(
+                        presence="present",
+                        attention="available",
+                        turn="holding" if ref == source_ref else "listening",
+                    ),
+                    channels=(
+                        participating.ParticipantChannelSnapshot(
+                            ref=_LINE_REFERENCE,
+                            modality="audio",
+                            state="available",
+                        ),
+                    ),
+                )
+            )
+        return tuple(participants)
 
     @staticmethod
     def _conversation_message_from_speech(
+        instance: "Bot",
         conversation_ability: conversation.Conversation[typing.Any, typing.Any],
+        stimulus: hsm.Event[typing.Any],
         speech_bytes: bytes,
     ) -> conversation.TextMessage | conversation.VoiceMessage | None:
         """Map Listening speech product into a Conversation Message for the acquired ability.
@@ -827,18 +952,28 @@ class Bot(hsm.Instance, abc.ABC):
         VoiceConversation requires acoustic payload (non-UTF-8 speech product); UTF-8 STT text
         is refused for VoiceMessage so STT text is not mislabeled as audio.
 
+        The frame tells the truth about the room the body knows: who is speaking (the party on
+        the line when the sound came off a connected phone, the room otherwise) and who is
+        present (a connected call adds the line party beside the room participant).
+
         Total fail-closed helper: returns ``None`` for modality mismatch, empty transcript, or any
         Message construction/validation failure. HSM effects must drop without raising so a bad
         product never bricks the Bot actor.
         """
 
+        source_ref = Bot._conversation_source_ref(instance, stimulus)
+        participants = Bot._conversation_participants(instance, source_ref=source_ref)
         input_type = conversation_ability.input_data_type
         try:
             if input_type is conversation.VoiceMessage:
                 try:
                     _ = speech_bytes.decode("utf-8")
                 except UnicodeDecodeError:
-                    return conversation.voice_turn(speech_bytes)
+                    return conversation.voice_turn(
+                        speech_bytes,
+                        source_participant_ref=source_ref,
+                        participants=participants,
+                    )
                 # UTF-8 STT transcript must not be mislabeled as acoustic VoiceMessage payload.
                 return None
             try:
@@ -849,7 +984,11 @@ class Bot(hsm.Instance, abc.ABC):
             if not text:
                 # Empty STT is not a TextStimulus (min_length=1); drop rather than raise in effect.
                 return None
-            return conversation.text_turn(text)
+            return conversation.text_turn(
+                text,
+                source_participant_ref=source_ref,
+                participants=participants,
+            )
         except (pydantic.ValidationError, ValueError, TypeError):
             return None
 
@@ -889,9 +1028,14 @@ class Bot(hsm.Instance, abc.ABC):
         """
 
         conversation_ability = Bot._acquired_conversation(instance)
-        speech_bytes = Bot._listening_speech_bytes(event)
-        assert conversation_ability is not None and speech_bytes is not None
-        message = Bot._conversation_message_from_speech(conversation_ability, speech_bytes)
+        stimulus = Bot._listening_speech_stimulus(event)
+        assert conversation_ability is not None and stimulus is not None
+        message = Bot._conversation_message_from_speech(
+            instance,
+            conversation_ability,
+            stimulus,
+            typing.cast(bytes, stimulus.data),
+        )
         if message is None:
             return
         operation_id = event.id or uuid.uuid4().hex
@@ -902,6 +1046,134 @@ class Bot(hsm.Instance, abc.ABC):
             metadata=dict(event.metadata),
         )
         _ = hsm.dispatch(ctx, conversation_ability, input_event)
+
+    @staticmethod
+    def _track_connected_call(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Keep the body's model of connected phone-line calls true, and say so in the frame.
+
+        The device nerve says what happened; this is the body remembering that a line is open
+        (and who is on it) so every conversation frame it builds while the call is up can tell
+        the truth. Opening or closing a line is also a social fact in its own right, so the
+        moment itself goes to cognition as a conversation turn — additive to the nerve report,
+        which keeps riding the device plane unchanged. ``source_event`` is the device nerve's
+        own typed contract for what happened (the shared-payload residual of HSM-DELIVERY-001);
+        payload shape is revalidated against the phone's committed models, never trusted blind.
+        """
+
+        data = event.data
+        if not isinstance(data, events.InputEventData) or data.source_event is None:
+            return
+        reference = Bot._interrupt_reference(instance, data, event.source or "")
+        if reference not in instance._devices:
+            return
+        if data.source_event in (phone.AnsweredEvent.name, phone.MediaReadyEvent.name):
+            if data.payload is None:
+                return
+            try:
+                call = phone.PhoneCallData.model_validate(data.payload)
+            except pydantic.ValidationError:
+                return
+            tracked = instance._connected_calls.get(reference)
+            if tracked is not None and tracked.call_id == call.call_id:
+                # Already known: media_ready after answered is the same line becoming whole, not
+                # a second connection. A party learned only now is still worth remembering.
+                if tracked.party is None and call.party is not None:
+                    instance._connected_calls[reference] = _ConnectedCall(call_id=call.call_id, party=call.party)
+                return
+            instance._connected_calls[reference] = _ConnectedCall(call_id=call.call_id, party=call.party)
+            Bot._dispatch_line_turn(ctx, instance, event, reference, call.call_id, call.party)
+            return
+        if data.source_event in (phone.HungUpEvent.name, phone.NoCallEvent.name):
+            tracked = instance._connected_calls.get(reference)
+            if tracked is None:
+                return
+            if data.source_event == phone.HungUpEvent.name:
+                if data.payload is None:
+                    return
+                try:
+                    ended = phone.PhoneHungUpData.model_validate(data.payload)
+                except pydantic.ValidationError:
+                    return
+                if ended.call_id != tracked.call_id:
+                    # A hang-up report for some other call says nothing about this line.
+                    return
+            del instance._connected_calls[reference]
+            Bot._dispatch_line_turn(ctx, instance, event, reference, tracked.call_id, tracked.party)
+
+    @staticmethod
+    def _dispatch_line_turn(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+        reference: str,
+        call_id: str,
+        party: str | None,
+    ) -> None:
+        """Hand cognition the social fact that a phone line opened or closed, as a conversation turn.
+
+        The frame is built after the connected-call model changed, so its participant set is the
+        new reality: the party present with their line channel on connect, gone on hang-up. The
+        content is an EventStimulus carrying the phone's own committed event name and the call's
+        identity — the body reports what the phone said happened, and what (if anything) to do
+        about someone arriving on or leaving the line is cognition's to decide.
+
+        Contract: the body hands cognition the Message directly and deliberately does NOT
+        dispatch it to the conversation ability. The concrete conversation abilities accept only
+        text/voice Message content — an EventStimulus is neither decodable audio nor a
+        transcript, and teaching the conversation plane to decode structured events is a
+        separate, larger contract change. The bypass costs participation nothing on speech
+        turns: every speech Message the body bridges still carries the line participant, so
+        participating sees the party on every turn that is actually theirs. The known divergence
+        is snapshot-only: the conversation ability's recorded participant set changes on accepted
+        speech Messages, so a conversation Snapshot taken after a line opens but before anyone
+        speaks does not show a line-only presence change. Teaching the conversation
+        EventStimulus is the named follow-up if snapshots must reflect that.
+
+        The envelope is ``conversation.InputEvent`` — the modality-agnostic conversation-plane
+        turn contract, whose schema (``AnyMessage``) already admits EventStimulus content. The
+        acquired ability's own input event would claim a text or voice modality this content
+        does not have, so the shared envelope is the truthful one.
+
+        The EventStimulus source is the device reference, not a conversation participant: the
+        phone produced this observation — the party on the line said nothing — and EventStimulus
+        explicitly models producers beyond participants ("participant, service, or runtime").
+        And because a line opening or closing is not anyone speaking, the frame holds the floor
+        for no one: every participant is listening on these turns.
+        """
+
+        data = event.data
+        assert isinstance(data, events.InputEventData) and data.source_event is not None
+        conversation_ability = Bot._acquired_conversation(instance)
+        if conversation_ability is None:
+            # No conversation ability means no conversation plane to put the social fact on; the
+            # device-plane nerve report still reaches cognition exactly as before.
+            return
+        message = conversation.Message[participating.EventStimulus](
+            conversation_ref="conversation",
+            self_participant_ref="bot",
+            participants=Bot._conversation_participants(instance, source_ref=reference),
+            content=participating.EventStimulus(
+                source_participant_ref=reference,
+                event=data.source_event,
+                payload={"call_id": call_id, "party": party},
+            ),
+        )
+        stimulus = dataclasses.replace(
+            conversation.InputEvent.with_data(message),
+            source=event.source or "",
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus)),
+                id=uuid.uuid4().hex,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
@@ -1513,6 +1785,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
+                    hsm.effect(_track_connected_call),
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
@@ -1550,6 +1823,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
+                    hsm.effect(_track_connected_call),
                     hsm.target("../processing"),
                 ),
                 hsm.transition(

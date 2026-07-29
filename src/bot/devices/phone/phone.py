@@ -614,23 +614,23 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _publish_answered(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, CallIdData)
+        assert isinstance(data, CallConnectedData)
         PhoneFirmware._queue_committed(
             ctx,
             instance,
             event,
-            _AnsweredCommittedEvent.with_data(PhoneCallData(call_id=data.call_id)),
+            _AnsweredCommittedEvent.with_data(PhoneCallData(call_id=data.call_id, party=data.party)),
         )
 
     @staticmethod
     def _publish_media_ready(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, CallIdData)
+        assert isinstance(data, MediaReadyData)
         PhoneFirmware._queue_committed(
             ctx,
             instance,
             event,
-            _MediaReadyCommittedEvent.with_data(PhoneCallData(call_id=data.call_id)),
+            _MediaReadyCommittedEvent.with_data(PhoneCallData(call_id=data.call_id, party=data.party)),
         )
 
     @staticmethod

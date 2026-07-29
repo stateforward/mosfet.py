@@ -283,8 +283,28 @@ class TransferRequestData(CallIdData):
 class CallConnectedData(CallIdData):
     """Signal from a phone service provider that the current call is connected."""
 
+    party: Caller | None = pydantic.Field(
+        default=None,
+        description=(
+            "Who the connected call is with, as the provider knows them. Null when the provider "
+            "never learned the far end's identity — a withheld caller ID or an unresolvable number "
+            "connects exactly like an identified call, and the provider invents nobody."
+        ),
+        examples=["Front desk", "+15555550123"],
+    )
+
 class MediaReadyData(CallIdData):
     """Signal from a phone service provider that call media is ready for audio routing."""
+
+    party: Caller | None = pydantic.Field(
+        default=None,
+        description=(
+            "Who the call whose media just came up is with, as the provider knows them. Carried "
+            "again here because media ready may be the first moment the call is whole; null when "
+            "the provider never learned the far end's identity."
+        ),
+        examples=["Front desk", "+15555550123"],
+    )
 
 class ServiceAudioData(audio.AudioOutputData):
     """Signal from a phone service provider carrying audio that should play from the phone speaker."""
@@ -405,6 +425,26 @@ class TransferFailedData(CallIdData):
 
 class PhoneCallData(CallIdData):
     """Committed public phone state for a specific call."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{"call_id": "livekit:caller", "party": "Front desk"}, {"call_id": "call-123"}],
+        },
+    )
+
+    party: Caller | None = pydantic.Field(
+        default=None,
+        description=(
+            "Who this call is with, reported the moment it connects: the caller on an answered "
+            "incoming call, whoever the dialled number reached on an outbound one. Stamped by the "
+            "phone service, which is the only part of the phone that can know — firmware carries "
+            "it unchanged. Null when the service never learned the far end: a withheld caller ID "
+            "or a number with no exchange entry still connects, and a connected call with nobody "
+            "to name is a real call, not a missing one."
+        ),
+        examples=["Front desk", "+15555550123", "phone-bot-bob"],
+    )
 
 
 class RingingData(pydantic.BaseModel):
