@@ -228,8 +228,11 @@ class Person(hsm.Instance):
         if mouth_model is None:
             raise RuntimeError("A mouth with no lifecycle model cannot be powered.")
         # hsm.started, not Speaker.start: starting a device is what binds its model, and
-        # Device.start is the override that runs inside it and joins environment presence.
-        _ = await hsm.started(environment, self._mouth, mouth_model)
+        # Device.start is the override that runs inside it and joins environment presence. The
+        # voice may already have powered it — Speaking starts an unstarted mouth it is given —
+        # so power it only when nobody has.
+        if not lifecycle.is_started(self._mouth):
+            _ = await hsm.started(environment, self._mouth, mouth_model)
         _ = await self._voice.attach(
             environment,
             attachment.AttachEvent.with_data_and_id(

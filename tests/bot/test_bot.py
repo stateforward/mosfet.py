@@ -1364,6 +1364,23 @@ def test_bot_uses_hsm_instance_identity() -> None:
     assert not hasattr(bot_instance, "name")
 
 
+def test_bot_snapshot_declares_owned_devices() -> None:
+    """Ownership binds each configured reference to the live actor's runtime id."""
+
+    async def run() -> None:
+        devices = configured_devices("phone", "browser")
+        active_bot = basic_agent(devices=devices)
+        _ = await start_bot_with_devices(active_bot)
+        snapshot = active_bot.take_snapshot()
+        assert snapshot.Attributes is not None
+        assert snapshot.Attributes["/Bot/owned_devices"] == {
+            "phone": hsm.id(devices["phone"]),
+            "browser": hsm.id(devices["browser"]),
+        }
+
+    asyncio.run(run())
+
+
 def test_bot_is_abstract_with_no_hard_coded_innate_abilities() -> None:
     assert inspect.isabstract(Bot)
 
@@ -4044,11 +4061,12 @@ async def a_bot_with_a_voice(
     ability = IgnoreAbility()
     listening_ability = listening_ability if listening_ability is not None else RecordingListening()
     active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
+    # The mouth is powered by the Speaking ability it was injected into — part of the bot, not a
+    # device the body starts — so bringing the bot up is what brings the mouth up.
     environment = await start_bot_with_devices(
         active_bot,
         placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
     )
-    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     ability.calls.clear()
     return active_bot, ability, listening_ability, voice, environment, mouth
 

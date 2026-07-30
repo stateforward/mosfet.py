@@ -822,3 +822,39 @@ def test_processing_cancellation_requires_owner_and_preserves_exact_token(active
         assert data.token == "exact-operation-token"
         assert acknowledgements[0].source
         assert acknowledgements[0].target
+
+
+class InstructionsRecordingProcessor(processing.Processor):
+    """Records the instructions each dispatched input carries when it reaches the processor."""
+
+    received: list[str | None]
+
+    def __init__(self) -> None:
+        self.received = []
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        self.received.append(input.instructions)
+        return ()
+
+
+def test_processor_receives_static_policy_composed_with_live_instructions() -> None:
+    """Per-turn live context (the device-state block) follows the static policy, never replaces it."""
+
+    async def run() -> list[str | None]:
+        processor = InstructionsRecordingProcessor()
+        instance = processing.Processing(processor=processor, instructions="Static policy.")
+        ctx = await start_abilities(instance)
+        _ = await dispatch_ability_for_test(
+            instance,
+            ctx,
+            processing.InputData(input="stimulus", instructions='<live_state>\n  <bot state="/Bot/active"/>\n</live_state>'),
+        )
+        # No live block: the static policy alone, exactly as before.
+        _ = await dispatch_ability_for_test(instance, ctx, processing.InputData(input="stimulus"))
+        return processor.received
+
+    assert asyncio.run(run()) == [
+        'Static policy.\n\n<live_state>\n  <bot state="/Bot/active"/>\n</live_state>',
+        "Static policy.",
+    ]

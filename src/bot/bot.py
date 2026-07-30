@@ -29,6 +29,7 @@ _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
+_OWNED_DEVICES_ATTRIBUTE = "owned_devices"
 
 # Lifecycle idempotency for attach/detach/activate (not peer-state gating; HSM-CONTEXT-001).
 # Prefer typed HSM errors when present. Stock stateforward-hsm still often surfaces these
@@ -1328,8 +1329,32 @@ class Bot(hsm.Instance, abc.ABC):
             if processing.active_operation(instance, cancel_id) is not None:
                 processing.finish_operation(ctx, instance, cancel_id)
 
+    @staticmethod
+    def _describe_owned_devices(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Declare which devices this body owns on its own snapshot, from its own records.
+
+        The devices map is fixed at construction, so the references are one unchanging truth;
+        the runtime ids bind only once the devices are actually up, which is why this restates
+        on every activation (a restarted device is a new actor with a new id) and never
+        earlier — an id that does not exist yet is not stamped. The body writes its own fact
+        where cognition can read it to say "devices you own" and to match an event's source id
+        to a device it holds: configured reference to live actor id, read straight from the
+        body's own configuration, with no tree walked and nothing reconstructed.
+        """
+
+        del ctx, event
+        _ = instance.set(
+            _OWNED_DEVICES_ATTRIBUTE,
+            {
+                reference: hsm.id(device)
+                for reference, device in instance._devices.items()
+                if lifecycle.is_started(device)
+            },
+        )
+
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Bot",
+        hsm.attribute(_OWNED_DEVICES_ATTRIBUTE),
         hsm.initial(hsm.target("inactive")),
         hsm.state(
             "inactive",
@@ -1468,6 +1493,8 @@ class Bot(hsm.Instance, abc.ABC):
         hsm.state(
             "active",
             hsm.initial(hsm.target("unfocused")),
+            # Devices are up by now (started during activation), so their runtime ids are real.
+            hsm.entry(_describe_owned_devices),
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),

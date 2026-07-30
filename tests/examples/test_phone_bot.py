@@ -691,9 +691,10 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     # far end ends up hearing itself.
     assert "_speaking(speaker=voice" in source
     assert "_speaking(speaker=speaker" not in source
-    # The voice transducer is one of the robot's own devices, so the body powers it. Handing
-    # Speaking a speaker nobody starts is what left the bot mute on a live call.
-    assert '"voice": self._voice' in source
+    # The voice transducer is the robot's mouth, not a device it owns: Speaking powers it, so it
+    # is injected into the ability and never registered with the body. Handing Speaking a speaker
+    # nothing starts is what left the bot mute on a live call.
+    assert '"voice": self._voice' not in source
     # One value for the robot's voice rate, reaching the encoder, Speaking, and the LiveKit
     # source. Three independent defaults is how a 24 kHz voice met a 48 kHz source and went mute.
     assert "uplink_sample_rate_hz=app_config.speech.output_sample_rate_hz" in source
@@ -868,10 +869,11 @@ def test_phone_bot_example_does_not_report_livekit_attempt_without_credentials()
 
 
 def test_phone_bot_powers_the_voice_transducer_it_speaks_through() -> None:
-    """The body starts the voice speaker, so Speaking has something live to attach to.
+    """Speaking starts the voice speaker with the ability, so playout has something live to attach to.
 
     Regression: the speaker split gave Speaking its own transducer and nothing started it, so the
     first utterance raised "Device is not started in this environment" and the bot never spoke.
+    The mouth is powered but not yet wired: attachment still waits for the first utterance.
     """
 
     code = """
@@ -897,4 +899,4 @@ async def main() -> None:
 asyncio.run(main())
 """
 
-    assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/attached"])
+    assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/detached"])

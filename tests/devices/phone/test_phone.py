@@ -923,6 +923,95 @@ def test_phone_media_ready_publishes_committed_event() -> None:
 
     asyncio.run(run())
 
+def test_phone_snapshot_names_who_is_on_the_line() -> None:
+    """Who is calling lives on the snapshot, from the ring onwards — not in any nerve payload.
+
+    Cognition renders live snapshots, so the phone's line knowledge is an attribute firmware
+    maintains itself: set at ring from the caller ID, confirmed on connect, cleared when the
+    call ends. A phone that never rang names nobody: null, never invented.
+    """
+
+    def current_caller(firmware: phone_device.PhoneFirmware) -> str | None:
+        attributes = firmware.take_snapshot().Attributes or {}
+        return typing.cast(str | None, attributes.get("/Phone/current_caller", "unset"))
+
+    async def run() -> None:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
+        # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        firmware = _phone_firmware(phone)
+
+        # A phone that never rang names nobody.
+        assert current_caller(firmware) is None
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/ringing")
+
+        # Ringing already says who: nobody has to answer to learn it.
+        assert current_caller(firmware) == "Front desk"
+
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        await _emit_service_event(
+            phone,
+            phone_device.CallConnectedEvent.with_data(
+                phone_device.CallConnectedData(call_id="call-123", party="Front desk")
+            ),
+        )
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/answered/media_connecting")
+        assert current_caller(firmware) == "Front desk"
+
+        await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()))
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/hung_up")
+
+        # The call is over; the line names nobody again.
+        assert current_caller(firmware) is None
+
+    asyncio.run(run())
+
+def test_phone_snapshot_keeps_the_ring_learned_caller_when_connect_names_nobody() -> None:
+    """A connect without a party erases nothing: the ring may already have named the caller.
+
+    Some providers report caller ID at ring but stamp no party on connect. Copying the absent
+    party over the ring-learned caller would regress known to unknown; only hanging up — which
+    every call passes through — resets who the line knows.
+    """
+
+    def current_caller(firmware: phone_device.PhoneFirmware) -> str | None:
+        attributes = firmware.take_snapshot().Attributes or {}
+        return typing.cast(str | None, attributes.get("/Phone/current_caller", "unset"))
+
+    async def run() -> None:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        firmware = _phone_firmware(phone)
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/ringing")
+
+        await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+        # The connect carries no party at all — the way a caller-ID-only provider connects.
+        await _emit_service_event(
+            phone,
+            phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-123")),
+        )
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/answered/media_connecting")
+
+        assert current_caller(firmware) == "Front desk"
+
+    asyncio.run(run())
+
 def test_phone_service_audio_routes_through_speaker_to_environment_observers() -> None:
     async def run() -> tuple[tuple[hsm.Event[typing.Any], ...], list[str], str]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}

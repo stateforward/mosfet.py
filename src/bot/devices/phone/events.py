@@ -283,6 +283,16 @@ class TransferRequestData(CallIdData):
 class CallConnectedData(CallIdData):
     """Signal from a phone service provider that the current call is connected."""
 
+    party: Caller | None = pydantic.Field(
+        default=None,
+        description=(
+            "Who the connected call is with, as the provider knows them. Null when the provider "
+            "never learned the far end's identity — a withheld caller ID or an unresolvable number "
+            "connects exactly like an identified call, and the provider invents nobody."
+        ),
+        examples=["Front desk", "+15555550123"],
+    )
+
 class MediaReadyData(CallIdData):
     """Signal from a phone service provider that call media is ready for audio routing."""
 

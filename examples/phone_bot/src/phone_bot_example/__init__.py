@@ -823,9 +823,9 @@ class PhoneBot(Bot):
         # earpiece belongs to the handset; the voice belongs to the robot. Nothing to enforce
         # between them any more — Environment.join rejects a speaker placed in two places.
         self._phone = phone if phone is not None else _handset()
-        # The voice transducer is the robot's own device, not a peripheral of its telephone: the
-        # robot speaks, and the handset is only what it holds to its ear. Registering it here is
-        # what powers it — Speaking attaches to it, but device lifetime belongs to the body.
+        # The voice transducer is the robot's own mouth, not a device it owns: Speaking brings it
+        # up with the ability and powers it down on the way out, the way phone firmware brings up
+        # an earpiece — so it is injected into Speaking and never registered with the body.
         self._voice = voice if voice is not None else _voice()
         speaking_instance = (
             speaking if speaking is not None else _speaking(speaker=self._voice, speech_config=speech_config)
@@ -839,7 +839,7 @@ class PhoneBot(Bot):
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
         super().__init__(
             # Phone first: an unfocused turn falls back to the first configured device.
-            devices={"phone": self._phone, "voice": self._voice},
+            devices={"phone": self._phone},
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),

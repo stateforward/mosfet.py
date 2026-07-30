@@ -188,6 +188,53 @@ class FirmwareProbeDevice(Device):
     )
 
 
+def _note_firmware_attributes(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+    del ctx, event
+    _ = instance.set("current_caller", "phone-bot-alice")
+    _ = instance.set("debug_blob", object())
+
+
+class FirmwareAttributeDevice(Device):
+    """Device whose firmware declares observation attributes (one scalar, one opaque object)."""
+
+    firmware_model: typing.ClassVar[hsm.Model] = hsm.define(
+        "FirmwareAttributeProbe",
+        hsm.attribute("current_caller"),
+        hsm.attribute("debug_blob"),
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle", hsm.entry(_note_firmware_attributes)),
+    )
+
+
+def test_device_snapshot_merges_firmware_attributes() -> None:
+    """A device snapshot exposes its firmware's declared attributes, like it merges transitions."""
+
+    async def run() -> hsm.Snapshot:
+        device = FirmwareAttributeDevice()
+        _ = await start_device_in_environment(device)
+        await wait_until(lambda: device.state() == "/Device/detached")
+        return device.take_snapshot()
+
+    snapshot = asyncio.run(run())
+    attributes = snapshot.Attributes
+    assert attributes is not None
+    assert attributes["/FirmwareAttributeProbe/current_caller"] == "phone-bot-alice"
+    assert isinstance(attributes["/FirmwareAttributeProbe/debug_blob"], object)
+
+
+def test_device_snapshot_presents_firmware_behavioral_state() -> None:
+    """Behaviorally the device IS its firmware: observers see ringing/idle, not attach plumbing."""
+
+    async def run() -> hsm.Snapshot:
+        device = FirmwareAttributeDevice()
+        _ = await start_device_in_environment(device)
+        await wait_until(lambda: device.state() == "/Device/detached")
+        return device.take_snapshot()
+
+    snapshot = asyncio.run(run())
+    assert snapshot.State == "/FirmwareAttributeProbe/idle"
+
+
 def test_device_describes_environment_interaction_surface() -> None:
     device = Device()
 

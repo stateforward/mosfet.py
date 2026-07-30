@@ -1365,6 +1365,69 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
     asyncio.run(run())
 
 
+def test_a_connected_call_names_who_is_on_the_line_on_the_snapshot() -> None:
+    """Both ends know who they are talking to, readable off their own firmware snapshots.
+
+    The callee learns the caller the SFU authenticated; the caller learns whoever the dial plan
+    resolved the number to. The provider stamps it on the connect payload and firmware keeps it
+    as an attribute, which is where cognition reads live snapshots — never by asking around.
+    """
+
+    def current_caller(phone: phone_device.Phone) -> object:
+        return (_require_firmware(phone).take_snapshot().Attributes or {}).get("/Phone/current_caller", "unset")
+
+    async def run() -> None:
+        sfu = FakeSfu()
+        alice_phone, _alice_service, alice_room, _alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+
+        await alice_phone.dispatch(
+            alice_phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
+
+        # Bob knows who is calling before anyone answers: the ring carried the caller.
+        assert current_caller(bob_phone) == ALICE_IDENTITY
+
+        await bob_phone.dispatch(
+            bob_phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+        await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/answered/media_ready")
+        await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/answered/media_ready")
+
+        # Connected, each phone names the other: Alice from her dial plan, Bob from the caller ID.
+        assert current_caller(alice_phone) == BOB_IDENTITY
+        assert current_caller(bob_phone) == ALICE_IDENTITY
+
+    asyncio.run(run())
+
+
+def test_a_call_with_a_withheld_caller_names_nobody() -> None:
+    """current_caller stays None when the provider never learned the far end — never invented.
+
+    A withheld caller ID still connects: the call is no less real for being anonymous, and
+    "unknown" is what a handset shows, not a made-up name.
+    """
+
+    async def run() -> None:
+        phone, service, _room, _recording = await _start_signalling_livekit_phone()
+
+        await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
+        await phone.dispatch(
+            phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
+
+        attributes = _require_firmware(phone).take_snapshot().Attributes or {}
+        assert attributes.get("/Phone/current_caller", "unset") is None
+
+    asyncio.run(run())
+
+
 def test_a_caller_cannot_open_its_line_on_a_phone_that_is_only_ringing() -> None:
     """Acked setup means ringing. Whether the call connects is the callee's to decide, not the wire's.
 

@@ -653,13 +653,15 @@ class Reasoning(processing.Processing):
             prior_episodes=data.prior_episodes,
             standing_directives=data.standing_directives,
         )
-        # Keep host tools/actors; nest reasoning payload as the process input.
+        # Keep host tools/actors and the host's live instructions (device-state block); nest
+        # reasoning payload as the process input.
         child_input = processing.Processing._input_for_processor(
             instance,
             processing.InputData(
                 input=reasoning_input,
                 schemas=data.host_input.schemas,
                 actors=data.host_input.actors,
+                instructions=data.host_input.instructions,
             ),
         )
         try:

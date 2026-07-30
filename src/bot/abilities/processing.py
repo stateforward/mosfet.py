@@ -1419,13 +1419,20 @@ class Processing(ability.Ability[InputData, CompletionData]):
 
     @staticmethod
     def _input_for_processor(instance: "Processing", input: InputData) -> InputData:
-        """Stamp Processing instructions onto the input for model-facing processors."""
+        """Stamp Processing instructions onto the input for model-facing processors.
+
+        The static policy leads; per-turn live context the input already carries (for example
+        the device-state block composed at ``build_processing_input``) follows it, so a turn
+        never loses either half to the other.
+        """
 
         instructions = instance._instructions.strip()
         if not instructions:
             return input
         if input.instructions == instructions:
             return input
+        if input.instructions:
+            return input.model_copy(update={"instructions": f"{instructions}\n\n{input.instructions}"})
         return input.model_copy(update={"instructions": instructions})
 
     @staticmethod

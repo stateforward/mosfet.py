@@ -357,8 +357,19 @@ class Device(hsm.Instance, attachment.Attachment):
         if not lifecycle.is_started(firmware):
             return snapshot
         firmware_snapshot = firmware.take_snapshot()
+        # What the firmware declares for observation is the device's to show: attributes merge
+        # the same way transitions do, so one snapshot of the device tells the whole story.
+        # Behaviorally the device IS its firmware — observers need the behavioral state; the
+        # shell's attach-lifecycle state stays observable live via ``instance.state()``.
+        attributes: dict[str, typing.Any] = {}
+        if snapshot.Attributes:
+            attributes.update(snapshot.Attributes)
+        if firmware_snapshot.Attributes:
+            attributes.update(firmware_snapshot.Attributes)
         return dataclasses.replace(
             snapshot,
+            State=firmware_snapshot.State or snapshot.State,
+            Attributes=attributes or None,
             Transitions=(*snapshot.Transitions, *firmware_snapshot.Transitions),
         )
 

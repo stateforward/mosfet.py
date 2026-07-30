@@ -1687,7 +1687,16 @@ class PhoneService(hsm.Instance):
         data = event.data
         assert isinstance(data, phone.CallConnectedData)
         instance._media_call_id = data.call_id
-        PhoneService._emit_phone_event(ctx, instance, event, phone.CallConnectedEvent.with_data(data))
+        # Stamp who the call is with at the boundary: the peer this phone adopted from setup or
+        # the dial plan. None when the far end was never identified — never invented.
+        PhoneService._emit_phone_event(
+            ctx,
+            instance,
+            event,
+            phone.CallConnectedEvent.with_data(
+                phone.CallConnectedData(call_id=data.call_id, party=instance._call_peer_identity)
+            ),
+        )
 
     @staticmethod
     def _emit_media_ready_for_connected_call(

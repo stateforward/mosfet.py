@@ -6,6 +6,7 @@ import asyncio
 import typing
 
 import hsm
+from bot import lifecycle
 from bot.abilities import processing
 
 from bot.abilities import encoding
@@ -118,8 +119,8 @@ def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
         # speaker transduces signal into environment.sound and every participant hears it.
         listener = SoundListener(sounds)
 
-        await start_ability_tree(environment, speaking_ability)
         _ = await hsm.started(environment, speaker, require_model(speaker.model))
+        await start_ability_tree(environment, speaking_ability)
         _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
@@ -413,6 +414,70 @@ def test_the_efference_event_is_never_offerable_to_a_model() -> None:
     assert speaking.InputEvent.kind == processing.EventKind
 
 
+def test_speaking_powers_an_unstarted_mouth_it_was_given() -> None:
+    """The mouth is part of the bot: the ability brings it up, the way firmware brings up an earpiece.
+
+    An injected speaker that nothing else started is started by this ability when the ability
+    starts — parented under the ability's own lifetime, so it outlives any single utterance —
+    and the very first word already plays out.
+    """
+
+    async def run() -> tuple[list[SoundData], bool]:
+        speaker = audio.Speaker()
+        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
+        environment = Environment()
+        sounds: list[SoundData] = []
+        listener = SoundListener(sounds)
+
+        await start_ability_tree(environment, speaking_ability)
+        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        environment.join(listener)
+
+        _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
+        await _wait_until(lambda: bool(sounds))
+        return sounds, lifecycle.is_started(speaker)
+
+    sounds, started = asyncio.run(run())
+
+    assert started
+    assert [sound.audio for sound in sounds] == [b"\x00\x01"]
+
+
+def test_speaking_stops_the_mouth_it_started() -> None:
+    """Stop powers down what start powered up — the same lifecycle, reversed."""
+
+    async def run() -> None:
+        speaker = audio.Speaker()
+        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(), speaker=speaker)
+        environment = Environment()
+
+        await start_ability_tree(environment, speaking_ability)
+        assert lifecycle.is_started(speaker)
+
+        await speaking_ability.stop(environment)
+        assert not lifecycle.is_started(speaker)
+
+    asyncio.run(run())
+
+
+def test_speaking_never_stops_a_mouth_it_did_not_start() -> None:
+    """An externally started speaker keeps running after the ability stops: shared, not owned."""
+
+    async def run() -> None:
+        speaker = audio.Speaker()
+        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(), speaker=speaker)
+        environment = Environment()
+
+        # Started by someone else before the ability ever runs: shared, not owned.
+        _ = await hsm.started(environment, speaker, require_model(speaker.model))
+        await start_ability_tree(environment, speaking_ability)
+
+        await speaking_ability.stop(environment)
+        assert lifecycle.is_started(speaker)
+
+    asyncio.run(run())
+
+
 def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
     """Acquire once, release on stop.
 
@@ -424,8 +489,8 @@ def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
         speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
         environment = Environment()
-        await start_ability_tree(environment, speaking_ability)
         _ = await hsm.started(environment, speaker, require_model(speaker.model))
+        await start_ability_tree(environment, speaking_ability)
 
         # Sequential utterances: let each finish so this pins "wired once", not a race with a
         # deferred queue.

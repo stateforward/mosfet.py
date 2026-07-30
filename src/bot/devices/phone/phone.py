@@ -111,6 +111,13 @@ position is — a device cannot know that.
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
 
+_CURRENT_CALLER_ATTRIBUTE = "current_caller"
+"""Snapshot attribute naming who is on the line: the caller on a ring, the reached party on a connect.
+
+Observation, not coordination: cognition renders it from live snapshots, and no machine reads it
+to decide anything. The call id remains the call's identity; this is who the call is with.
+"""
+
 
 def _load_sound_wav(name: str) -> bytes:
     """Load one package-local acoustic clip for environment.sound elevation."""
@@ -894,6 +901,31 @@ class PhoneFirmware(hsm.Instance):
         instance._current_call_id = data.call_id
 
     @staticmethod
+    def _note_current_caller(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """Remember who is on the line, for observation: the snapshot says who, the call id says which.
+
+        Set from what the payload itself declares — the caller ID on a ring, the provider-stamped
+        party on a connect — never looked up anywhere. A connect that names nobody writes nothing:
+        the ring may already have named the caller, and only entering hung_up resets who the line
+        knows, so a caller-ID-only provider never regresses known to unknown.
+        """
+
+        del ctx
+        data = event.data
+        if isinstance(data, IncomingCallData):
+            _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, data.caller)
+            return
+        if isinstance(data, CallConnectedData) and data.party is not None:
+            _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, data.party)
+
+    @staticmethod
+    def _clear_current_caller(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """A hung-up phone has nobody on the line; entering hung_up says so, including at start."""
+
+        del ctx, event
+        _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, None)
+
+    @staticmethod
     def _set_current_transfer_target(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
         del ctx
         data = event.data
@@ -928,9 +960,11 @@ class PhoneFirmware(hsm.Instance):
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Phone",
+        hsm.attribute(_CURRENT_CALLER_ATTRIBUTE),
         hsm.initial(hsm.target("/Phone/hung_up")),
         hsm.state(
             "hung_up",
+            hsm.entry(_clear_current_caller),
             hsm.transition(hsm.on(_HungUpCommittedEvent), hsm.effect(_publish_committed_hung_up)),
             hsm.transition(
                 hsm.on(_TransferCompletedCommittedEvent),
@@ -939,7 +973,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_is_new_incoming_call),
-                hsm.effect(_set_current_call),
+                hsm.effect(_set_current_call, _note_current_caller),
                 hsm.target("/Phone/ringing"),
             ),
             # Redial is always legal. A handset does not refuse a number because you just called
@@ -962,7 +996,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(CallConnectedEvent),
                 hsm.guard(_is_live_dial_observation),
-                hsm.effect(_set_current_call, _publish_answered),
+                hsm.effect(_set_current_call, _note_current_caller, _publish_answered),
                 hsm.target("/Phone/answered"),
             ),
             hsm.transition(
@@ -1034,7 +1068,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(CallConnectedEvent),
                 hsm.guard(_matches_current_call_connected),
-                hsm.effect(_publish_answered),
+                hsm.effect(_note_current_caller, _publish_answered),
                 hsm.target("/Phone/answered"),
             ),
             hsm.transition(

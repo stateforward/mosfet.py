@@ -299,6 +299,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
     # Live record of an attachment this ability acquired, so stop can release exactly what start
     # of speech took. The speaker is injected and often shared, so it is never ours to power.
     _speaker_attached: bool
+    # Live record of a speaker this ability powered up itself, so stop powers down exactly that
+    # and never a speaker someone else started.
+    _speaker_started: bool
     _sample_rate_hz: int
     _channels: int
     _media_type: str
@@ -320,19 +323,40 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._encoder = encoder
         self._speaker = speaker
         self._speaker_attached = False
+        self._speaker_started = False
         self._sample_rate_hz = sample_rate_hz
         self._channels = channels
         self._media_type = media_type
 
     @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        instance = await super().start(ctx, data)
+        speaker = self._speaker
+        if speaker is not None and not lifecycle.is_started(speaker):
+            # The mouth is part of the bot: this ability powers it the way phone firmware powers
+            # an earpiece. Parented under the ability's own durable context — never an activity
+            # context — so the speaker outlives any single utterance (HSM-CONTEXT-001). An
+            # injected speaker someone else already started is left alone, start and stop.
+            model = type(speaker).model
+            if model is None:
+                raise RuntimeError(f"{type(speaker).__name__} has no lifecycle model.")
+            _ = await hsm.started(self.context(), speaker, model)
+            self._speaker_started = True
+        return instance
+
+    @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Release the speaker this ability wired itself to, then stop."""
+        """Release the speaker this ability wired itself to, power down only what it powered up, then stop."""
 
         speaker = self._speaker
         if speaker is not None and self._speaker_attached:
             self._speaker_attached = False
             if lifecycle.is_started(speaker):
                 await speaker.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=self)))
+        if speaker is not None and self._speaker_started:
+            self._speaker_started = False
+            if lifecycle.is_started(speaker):
+                await speaker.stop(ctx)
         await super().stop(ctx)
 
     @staticmethod
