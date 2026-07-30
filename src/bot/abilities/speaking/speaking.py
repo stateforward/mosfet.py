@@ -1,9 +1,10 @@
-"""Speaking: bot output ability that utters text via an encoder and speaker.
+"""Speaking: bot output ability that utters text via an encoder.
 
 Model-facing contract is short text (not raw PCM). Internals encode speech and
-play through a ``Speaker`` (environment elevation and/or device path). Conversation is
-separate and may invoke Speaking later; cognition can select ``speaking.input``
-directly as an output ability.
+elevate playout as ``environment.sound``. An optional ``Speaker`` may still be
+injected for efference / later mouth wiring; playout does not require it.
+Conversation is separate and may invoke Speaking later; cognition can select
+``speaking.input`` directly as an output ability.
 """
 
 from __future__ import annotations
@@ -282,11 +283,11 @@ def _has_encoded_speech(ctx: hsm.Context, instance: "Speaking", event: hsm.Event
 
 
 class Speaking(ability.Ability[InputData, OutputData]):
-    """Bot output ability: encode text to speech and play it on a speaker.
+    """Bot output ability: encode text to speech and elevate it as ``environment.sound``.
 
-    Constructor-inject a TTS ``encoder`` and optional ``speaker``. When a speaker is
-    provided, completed audio is elevated as ``environment.sound`` (and available for device
-    uplink paths that watch speaker playout). Cognition selects ``bot.ability.speaking.input``.
+    Constructor-inject a TTS ``encoder`` and optional ``speaker`` (efference / future mouth
+    wiring). Playout broadcasts ``environment.sound`` from this ability. Cognition selects
+    ``bot.ability.speaking.input``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -478,37 +479,27 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     async def _run_playout_activity(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """Hand the encoded signal to the mouth. Completing means the act was committed."""
+        """Elevate encoded speech as ``environment.sound``. Completing means the act was committed."""
 
         encoded = event.data
         assert isinstance(encoded, _EncodedData)
         try:
-            # Lazy import: abilities package init must not import devices (cycle via device → abilities).
-            from bot.devices import audio
+            from bot.environment import Environment, SoundData, SoundEvent
 
-            frame = audio.AudioOutputData(
-                audio=encoded.audio,
-                media_type=encoded.media_type,
-                sample_rate_hz=encoded.sample_rate_hz,
-                channels=encoded.channels,
+            # Temporary: ability elevates sound directly. Mouth/Speaker transduction returns later.
+            sound = dataclasses.replace(
+                SoundEvent.with_data(
+                    SoundData(
+                        audio=encoded.audio,
+                        media_type=encoded.media_type,
+                        sample_rate_hz=encoded.sample_rate_hz,
+                        channels=encoded.channels,
+                    )
+                ),
+                source=hsm.id(instance),
+                metadata=dict(event.metadata),
             )
-            speaker = instance._speaker
-            if speaker is not None:
-                # This ability is the speaker's controller: wire to it once, then hand it signal.
-                # The speaker is the transducer that turns that into environment.sound, which is how bot
-                # input (and call uplink paths) hear playout. Wiring waits until first use because
-                # an injected speaker may start after this ability does; stop releases it.
-                if not instance._speaker_attached:
-                    await speaker.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=instance)))
-                    instance._speaker_attached = True
-                await speaker.dispatch(
-                    ctx,
-                    dataclasses.replace(
-                        audio.OutputEvent.with_data(frame),
-                        source=hsm.id(instance),
-                        metadata=dict(event.metadata),
-                    ),
-                )
+            _ = await Environment.from_context(ctx).broadcast(sound)
             product = OutputData(
                 text=encoded.text,
                 media_type=encoded.media_type,
