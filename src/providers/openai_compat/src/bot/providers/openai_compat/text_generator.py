@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bot.abilities.language import text
+import bot.telemetry
 
 import asyncio
 import collections.abc
@@ -176,7 +177,7 @@ def _extra_body_for_input(
         body["tool_choice"] = str(input.tool_selection)
         # GPT-5.6 Luna rejects function tools on chat completions unless reasoning is off.
         # (API: set reasoning_effort to "none", or use /v1/responses.)
-        body.setdefault("reasoning_effort", "none")
+        _ = body.setdefault("reasoning_effort", "none")
     return body
 
 
@@ -201,9 +202,20 @@ class TextGenerator(text.TextGenerator):
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        messages = [_message_to_openai(message) for message in input.messages]
+        tools = _tools_to_openai(input.tools)
+        model = getattr(self.client, "model", None)
+        # Processing (and other callers) reach the provider via TextGenerator;
+        # this records the wire request used on that path.
+        bot.telemetry.record_generator_request(
+            provider=self.provider or "",
+            model=model if isinstance(model, str) else None,
+            messages=messages,
+            tools=tools,
+        )
         response = self.client.create_chat_completion(
-            messages=[_message_to_openai(message) for message in input.messages],
-            tools=_tools_to_openai(input.tools),
+            messages=messages,
+            tools=tools,
             response_format=self.response_format,
             extra_body=_extra_body_for_input(input, self.extra_body),
         )
