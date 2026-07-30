@@ -1,4 +1,4 @@
-"""Speaking output ability: text → encoder → speaker environment elevation."""
+"""Speaking output ability: text → encoder → ``environment.sound`` elevation."""
 
 from __future__ import annotations
 
@@ -103,23 +103,20 @@ class SoundListener(hsm.Instance):
 
 
 def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
+    """Speaking elevates playout as ``environment.sound`` (ability emits; no Speaker required)."""
+
     async def run() -> tuple[list[bytes], list[SoundData], speaking.OutputData | None]:
         encoder = RecordingEncoder(audio=b"\x00\x01")
-        speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(
             encoder=encoder,
-            speaker=speaker,
             sample_rate_hz=24_000,
             channels=1,
             media_type="audio/pcm",
         )
         environment = Environment()
         sounds: list[SoundData] = []
-        # Listen the way anything in the environment does, rather than patching the speaker: the
-        # speaker transduces signal into environment.sound and every participant hears it.
         listener = SoundListener(sounds)
 
-        _ = await hsm.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
         _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
@@ -478,33 +475,23 @@ def test_speaking_never_stops_a_mouth_it_did_not_start() -> None:
     asyncio.run(run())
 
 
-def test_speaking_wires_the_speaker_once_and_releases_it_on_stop() -> None:
-    """Acquire once, release on stop.
+def test_speaking_playout_does_not_attach_optional_speaker() -> None:
+    """Temporary: playout elevates ``environment.sound`` without Speaker attachment.
 
-    The speaker is injected and often shared — in the phone_bot wiring it is the phone's own —
-    so this ability must not accumulate an attachment per utterance, nor hold one after it stops.
+    Mouth/Speaker transduction returns later; an injected speaker must not accumulate
+    controller attachments from utterances in the meantime.
     """
 
-    async def run() -> tuple[int, int]:
+    async def run() -> int:
         speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
         environment = Environment()
         _ = await hsm.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
 
-        # Sequential utterances: let each finish so this pins "wired once", not a race with a
-        # deferred queue.
         for _ in range(3):
             _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
             await _wait_until(lambda: speaking_ability.state().endswith("/idle"))
-        while_speaking = len(device_bots(speaker))
+        return len(device_bots(speaker))
 
-        await speaking_ability.stop(environment)
-        await _wait_until(lambda: not device_bots(speaker))
-
-        return while_speaking, len(device_bots(speaker))
-
-    while_speaking, after_stop = asyncio.run(run())
-
-    assert while_speaking == 1
-    assert after_stop == 0
+    assert asyncio.run(run()) == 0

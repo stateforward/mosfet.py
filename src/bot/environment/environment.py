@@ -2,6 +2,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import typing
+import uuid
 import weakref
 
 import hsm
@@ -9,6 +10,7 @@ import hsm
 from bot import lifecycle
 
 from . import events
+from . import snapshot
 from . import space
 
 
@@ -45,6 +47,11 @@ class Environment(hsm.Context):
     # Keyed by instance, not id: a placement cannot outlive the thing it places, so leaving a
     # environment needs no placement bookkeeping and a stale placement is not representable.
     _placements: weakref.WeakKeyDictionary[hsm.Instance, space.Placement]
+    # This environment's own identity for model-facing observation (the <environment id="…">
+    # attribute) — never an HSM actor id (never Python id()). Stable for the life of this object;
+    # a scope revived by from_context after cancellation carries it forward by assignment there,
+    # the same way it carries presence and placement forward by reference.
+    _id: str
 
     def __init__(self, context: hsm.Context | None = None) -> None:
         # Reuse an inherited addressing map, or seed one from a foreign mapping.
@@ -60,6 +67,7 @@ class Environment(hsm.Context):
                         self._instances[key] = value
         self._participants = weakref.WeakValueDictionary()
         self._placements = weakref.WeakKeyDictionary()
+        self._id = uuid.uuid4().hex
         parent = None if context is None or context.is_done() else context
         super().__init__(parent=parent, values={hsm.Keys.Instances: self._instances, _Scope: self})
 
@@ -85,6 +93,7 @@ class Environment(hsm.Context):
         if isinstance(scope, cls):
             revived._participants = scope._participants
             revived._placements = scope._placements
+            revived._id = scope._id
         return revived
 
     def join(self, instance: hsm.Instance, *, placement: space.Placement | None = None) -> None:
@@ -116,6 +125,37 @@ class Environment(hsm.Context):
         for identifier, participant in list(self._participants.items()):
             if participant is instance:
                 del self._participants[identifier]
+
+    def model_snapshot(self, perspective: hsm.Instance) -> str | None:
+        """Compose this turn's model-facing world block from ``perspective``'s own live snapshot.
+
+        The environment the bot is in takes the snapshot: this is the one place the world block
+        is assembled, not cognition, because everything in it — the world's own identity, which
+        actors are reachable, what a referenced device's snapshot says — is something only the
+        environment knows first-hand. ``perspective`` says whose turn this is; the environment
+        never invents "self" by scanning its own citizens, because which actor's viewpoint a turn
+        is taken from is the caller's to say, not the environment's to guess.
+
+        The root is ``<environment id="…">``, this environment's own identity (see ``_id``) —
+        never an HSM actor id and never Python ``id()``. Its single child is ``<self>``:
+        ``perspective``'s own snapshot, state as an attribute, its own snapshot attributes as
+        children. A declared ``owned_devices`` reference→id map among those attributes resolves
+        to full nested ``<device>`` elements by looking up each id in this environment's own
+        addressing scope — never a caller-supplied actor map, which would make cognition the one
+        deciding what the world contains.
+
+        Returns ``None`` when ``perspective`` has no honest snapshot to render (not started, or
+        started somewhere this environment cannot see): there is nothing true to put in the
+        envelope, and an envelope around nothing would claim an observation the system does not
+        have.
+        """
+
+        if _instance_scope(perspective) is not self._instances:
+            return None
+        self_element = snapshot.render_self(perspective, self._instances.get, 1)
+        if self_element is None:
+            return None
+        return snapshot.render_environment(self._id, self_element)
 
     def _reception(
         self,

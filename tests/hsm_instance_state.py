@@ -164,6 +164,10 @@ def phone_speaker(phone: phone_device.Phone) -> audio_device.Speaker:
     return typing.cast(audio_device.Speaker, object.__getattribute__(phone, "_speaker"))
 
 
+def phone_display(phone: phone_device.Phone) -> phone_device.Display:
+    return typing.cast(phone_device.Display, object.__getattribute__(phone, "_display"))
+
+
 def phone_current_call_id(firmware: phone_device.PhoneFirmware) -> str | None:
     return typing.cast(str | None, object.__getattribute__(firmware, "_current_call_id"))
 

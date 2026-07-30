@@ -4,9 +4,12 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import logging
 import typing
 
 import hsm
+import pytest
+
 import bot
 from bot.abilities import encoding
 from bot.abilities import processing
@@ -27,6 +30,7 @@ from tests.hsm_instance_state import (
     phone_current_call_id,
     phone_current_transfer_id,
     phone_current_transfer_target,
+    phone_display,
     phone_firmware,
     phone_microphone,
     phone_speaker,
@@ -139,26 +143,32 @@ def test_phone_has_no_speech_specific_operator_requirements() -> None:
     assert device_bots(phone) == ()
     assert phone_device.Phone.required_bot_abilities == ()
 
-def test_phone_owns_private_microphone_and_speaker_peripherals() -> None:
+def test_phone_owns_private_microphone_speaker_and_display_peripherals() -> None:
     phone = phone_device.Phone()
 
     assert isinstance(phone_microphone(phone), audio_device.Microphone)
     assert isinstance(phone_speaker(phone), audio_device.Speaker)
-    assert device_peripherals(phone) == (phone_microphone(phone), phone_speaker(phone))
+    assert isinstance(phone_display(phone), phone_device.Display)
+    assert device_peripherals(phone) == (phone_microphone(phone), phone_speaker(phone), phone_display(phone))
     assert not hasattr(phone, "microphone")
     assert not hasattr(phone, "speaker")
+    assert not hasattr(phone, "display")
     assert not hasattr(phone, "firmware")
     assert not hasattr(phone, "peripherals")
 
-def test_phone_accepts_injected_audio_peripherals() -> None:
+def test_phone_accepts_injected_audio_and_display_peripherals() -> None:
     microphone = audio_device.Microphone()
     speaker = audio_device.Speaker()
+    display = phone_device.Display()
     extra_peripheral = Device()
-    phone = phone_device.Phone(microphone=microphone, speaker=speaker, peripherals=(extra_peripheral,))
+    phone = phone_device.Phone(
+        microphone=microphone, speaker=speaker, display=display, peripherals=(extra_peripheral,)
+    )
 
     assert phone_microphone(phone) is microphone
     assert phone_speaker(phone) is speaker
-    assert device_peripherals(phone) == (microphone, speaker, extra_peripheral)
+    assert phone_display(phone) is display
+    assert device_peripherals(phone) == (microphone, speaker, display, extra_peripheral)
 
 def test_phone_uses_phone_firmware_instance() -> None:
     phone = phone_device.Phone()
@@ -923,27 +933,28 @@ def test_phone_media_ready_publishes_committed_event() -> None:
 
     asyncio.run(run())
 
-def test_phone_snapshot_names_who_is_on_the_line() -> None:
-    """Who is calling lives on the snapshot, from the ring onwards — not in any nerve payload.
+def _caller_id_shown(phone: phone_device.Phone) -> str | None:
+    attributes = phone_display(phone).take_snapshot().Attributes or {}
+    return typing.cast(str | None, attributes.get("/Device/caller_id", "unset"))
 
-    Cognition renders live snapshots, so the phone's line knowledge is an attribute firmware
-    maintains itself: set at ring from the caller ID, confirmed on connect, cleared when the
-    call ends. A phone that never rang names nobody: null, never invented.
+def test_phone_display_shows_who_is_on_the_line() -> None:
+    """Who is calling shows on the display, from the ring onwards — not in any nerve payload.
+
+    Caller ID appears on the handset's display, not on firmware's own snapshot: firmware is the
+    controller that decides what to show and the display is what shows it, driven by a typed
+    event rather than firmware reaching into the display's attribute directly. Set at ring from
+    the caller ID, confirmed on connect, cleared when the call ends. A phone that never rang
+    shows nobody: null, never invented.
     """
-
-    def current_caller(firmware: phone_device.PhoneFirmware) -> str | None:
-        attributes = firmware.take_snapshot().Attributes or {}
-        return typing.cast(str | None, attributes.get("/Phone/current_caller", "unset"))
 
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
-        firmware = _phone_firmware(phone)
 
-        # A phone that never rang names nobody.
-        assert current_caller(firmware) is None
+        # A phone that never rang shows nobody.
+        assert _caller_id_shown(phone) is None
 
         await _emit_service_event(
             phone,
@@ -953,8 +964,8 @@ def test_phone_snapshot_names_who_is_on_the_line() -> None:
         )
         await _wait_until(lambda: _firmware_state(phone) == "/Phone/ringing")
 
-        # Ringing already says who: nobody has to answer to learn it.
-        assert current_caller(firmware) == "Front desk"
+        # Ringing already shows who: nobody has to answer to learn it.
+        assert _caller_id_shown(phone) == "Front desk"
 
         await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _emit_service_event(
@@ -964,33 +975,148 @@ def test_phone_snapshot_names_who_is_on_the_line() -> None:
             ),
         )
         await _wait_until(lambda: _firmware_state(phone) == "/Phone/answered/media_connecting")
-        assert current_caller(firmware) == "Front desk"
+        assert _caller_id_shown(phone) == "Front desk"
 
         await phone.dispatch(phone.context(), phone_device.HangUpCallEvent.with_data(phone_device.HangUpCallData()))
         await _wait_until(lambda: _firmware_state(phone) == "/Phone/hung_up")
 
-        # The call is over; the line names nobody again.
-        assert current_caller(firmware) is None
+        # The call is over; the display shows nobody again.
+        assert _caller_id_shown(phone) is None
 
     asyncio.run(run())
 
-def test_phone_snapshot_keeps_the_ring_learned_caller_when_connect_names_nobody() -> None:
-    """A connect without a party erases nothing: the ring may already have named the caller.
+class _RingingCallerIdRecorder(hsm.Instance):
+    """Broadcast recipient that captures the phone's display fold synchronously on the ring.
 
-    Some providers report caller ID at ring but stamp no party on connect. Copying the absent
-    party over the ring-learned caller would regress known to unknown; only hanging up — which
-    every call passes through — resets who the line knows.
+    Recording happens inside the same HSM transition that delivers the sound stimulus — not
+    after a later ``_wait_until`` poll — so this pins that the caller id lands on the display
+    before, not after, the room is told the phone is ringing.
     """
 
-    def current_caller(firmware: phone_device.PhoneFirmware) -> str | None:
-        attributes = firmware.take_snapshot().Attributes or {}
-        return typing.cast(str | None, attributes.get("/Phone/current_caller", "unset"))
+    phone: phone_device.Phone
+    caller_id_at_delivery: list[str | None]
+
+    def __init__(self, phone: phone_device.Phone) -> None:
+        super().__init__()
+        self.phone = phone
+        self.caller_id_at_delivery = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "_RingingCallerIdRecorder", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        attributes = phone_display(instance.phone).take_snapshot().Attributes or {}
+        instance.caller_id_at_delivery.append(typing.cast(str | None, attributes.get("/Device/caller_id", "unset")))
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "RingingCallerIdRecorder",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
+    )
+
+def test_phone_display_caller_id_lands_before_the_ringing_nerve_reaches_the_room() -> None:
+    """The display is driven synchronously, before the ring reaches the room as sound.
+
+    Whatever perceives the ring — cognition, another listener — must never observe a phone
+    mid-ring with a blank display. This asserts the caller id is already on the display's own
+    snapshot the instant the ringing stimulus is delivered, captured from inside that very
+    delivery, not merely eventually once the caller polls again.
+    """
+
+    async def run() -> str | None:
+        environment = Environment()
+        phone = phone_device.Phone()
+        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        recorder = _RingingCallerIdRecorder(phone)
+        _ = await hsm.started(environment, recorder, recorder.model)
+        environment.join(recorder)
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: bool(recorder.caller_id_at_delivery))
+
+        return recorder.caller_id_at_delivery[0]
+
+    assert asyncio.run(run()) == "Front desk"
+
+def test_phone_firmware_logs_instead_of_silently_dropping_when_display_is_not_started(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Standalone firmware with an unstarted display cannot show a caller id; it says so.
+
+    ``PhoneFirmware()`` alone constructs its own default, unstarted ``Display`` — firmware driven
+    that way (bypassing ``Phone``, which starts every peripheral before firmware exists) has no
+    live display to put a caller id on. That used to vanish as a dispatch to nowhere with no
+    trace; it is now an observable warning instead of a silent drop.
+    """
+
+    async def run() -> None:
+        firmware = phone_device.PhoneFirmware()
+        event = phone_device.IncomingCallEvent.with_data(
+            phone_device.IncomingCallData(call_id="call-1", caller="Front desk")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="bot.devices.phone.phone"):
+            phone_device.PhoneFirmware._show_caller_id(hsm.Context(), firmware, event)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert "display" in caplog.text.lower()
+    assert "not started" in caplog.text.lower()
+
+def test_phone_snapshot_surfaces_display_caller_id_while_ringing() -> None:
+    """``phone.take_snapshot()`` folds the display's own observation, not just the display's own.
+
+    Cognition reads the phone's snapshot, never the display peripheral's directly — the display
+    is private to the phone. What the display shows must therefore appear on the phone's own
+    snapshot attributes, under the display's declared observation name, the same way firmware
+    attributes already do. A hung-up phone's screen is blank, not absent: the display is still
+    there and still folded in, showing ``caller_id: None`` rather than no ``display`` key at all.
+    """
 
     async def run() -> None:
         phone = phone_device.Phone()
         _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
-        firmware = _phone_firmware(phone)
+
+        attributes = phone.take_snapshot().Attributes or {}
+        display = attributes.get("display")
+        assert isinstance(display, dict)
+        assert display["caller_id"] is None
+
+        await _emit_service_event(
+            phone,
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await _wait_until(lambda: _firmware_state(phone) == "/Phone/ringing")
+
+        attributes = phone.take_snapshot().Attributes or {}
+        display = attributes.get("display")
+        assert isinstance(display, dict)
+        assert display["caller_id"] == "Front desk"
+
+    asyncio.run(run())
+
+
+def test_phone_display_keeps_the_ring_learned_caller_when_connect_names_nobody() -> None:
+    """A connect without a party erases nothing: the ring may already have shown the caller.
+
+    Some providers report caller ID at ring but stamp no party on connect. Copying the absent
+    party over the ring-shown caller would regress shown to blank; only hanging up — which every
+    call passes through — clears the display.
+    """
+
+    async def run() -> None:
+        phone = phone_device.Phone()
+        _ = await hsm.started(None, phone, typing.cast(hsm.Model, phone.model))
+        await _wait_until(lambda: phone.state() == "/Device/detached")
 
         await _emit_service_event(
             phone,
@@ -1008,7 +1134,7 @@ def test_phone_snapshot_keeps_the_ring_learned_caller_when_connect_names_nobody(
         )
         await _wait_until(lambda: _firmware_state(phone) == "/Phone/answered/media_connecting")
 
-        assert current_caller(firmware) == "Front desk"
+        assert _caller_id_shown(phone) == "Front desk"
 
     asyncio.run(run())
 

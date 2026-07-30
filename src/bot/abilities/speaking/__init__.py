@@ -1,4 +1,4 @@
-"""Bot output ability: speak text through TTS encoding and a speaker device."""
+"""Bot output ability: speak text through TTS encoding into ``environment.sound``."""
 
 from .speaking import (
     EfferenceData,

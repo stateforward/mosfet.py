@@ -39,14 +39,28 @@ import hsm
 _NOT_STARTED = "take snapshot requires a started HSM"
 
 
-def is_started(instance: hsm.Instance) -> bool:
-    """True when ``instance`` has a running HSM and can therefore be addressed by ``hsm.id``."""
+def snapshot_if_started(instance: hsm.Instance) -> hsm.Snapshot | None:
+    """``instance``'s snapshot when it has a running HSM, else ``None`` — one ``take_snapshot`` call.
+
+    The liveness check and the snapshot a caller wants afterward both come from the same
+    ``take_snapshot()`` call, which is not free: a caller that needs both (e.g. folding a
+    peripheral's own attributes only when it is live) should call this once rather than
+    probing with :func:`is_started` and then snapshotting again.
+    """
 
     try:
         snapshot = instance.take_snapshot()
     except (hsm.ErrorValidatingModel, RuntimeError) as error:
         if _NOT_STARTED not in str(error):
             raise
-        return False
+        return None
     # Mirrors hsm.TakeSnapshot: an all-empty snapshot means the instance was never started.
-    return bool(snapshot.ID or snapshot.QualifiedName or snapshot.State)
+    if not (snapshot.ID or snapshot.QualifiedName or snapshot.State):
+        return None
+    return snapshot
+
+
+def is_started(instance: hsm.Instance) -> bool:
+    """True when ``instance`` has a running HSM and can therefore be addressed by ``hsm.id``."""
+
+    return snapshot_if_started(instance) is not None

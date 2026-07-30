@@ -5,6 +5,7 @@ import collections.abc
 import dataclasses
 import datetime
 import importlib.resources
+import logging
 import typing
 
 import hsm
@@ -16,11 +17,15 @@ from bot.protocols import attachment
 from bot.telemetry import observer
 from bot.environment import SoundEvent, Environment, require_environment_scope, space
 
+# Flat symbol imports (not `from . import display`): both Phone and PhoneFirmware accept a
+# `display` constructor parameter, which would shadow a `display` module import.
+from .display import CallerIdData, CallerIdEvent, Display
 from .events import (
     AnswerCallData,
     AnswerCallEvent,
     AnswerRequestData,
     AnsweredEvent,
+    Caller,
     CallConnectedData,
     CallConnectedEvent,
     CallFailedData,
@@ -111,12 +116,7 @@ position is — a device cannot know that.
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
 
-_CURRENT_CALLER_ATTRIBUTE = "current_caller"
-"""Snapshot attribute naming who is on the line: the caller on a ring, the reached party on a connect.
-
-Observation, not coordination: cognition renders it from live snapshots, and no machine reads it
-to decide anything. The call id remains the call's identity; this is who the call is with.
-"""
+_LOG = logging.getLogger(__name__)
 
 
 def _load_sound_wav(name: str) -> bytes:
@@ -359,10 +359,11 @@ class PhoneFirmware(hsm.Instance):
 
     _service: PhoneService
     # Firmware owns transducer routing: the speaker transmits service audio into the environment
-    # (receiver), the microphone carries local speech to the service (mouthpiece). The service
-    # knows about neither.
+    # (receiver), the microphone carries local speech to the service (mouthpiece), the display
+    # shows who the call is with. The service knows about none of them.
     _speaker: audio.Speaker
     _microphone: audio.Microphone
+    _display: Display
     _answer_timeout: datetime.timedelta
     _transfer_timeout: datetime.timedelta
     _closed_call_ids: frozenset[str]
@@ -376,6 +377,7 @@ class PhoneFirmware(hsm.Instance):
         service: PhoneService | None = None,
         speaker: audio.Speaker | None = None,
         microphone: audio.Microphone | None = None,
+        display: Display | None = None,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
@@ -385,6 +387,7 @@ class PhoneFirmware(hsm.Instance):
         self._service = service if service is not None else PhoneEventRecorder()
         self._speaker = speaker if speaker is not None else audio.Speaker()
         self._microphone = microphone if microphone is not None else audio.Microphone()
+        self._display = display if display is not None else Display()
         self._answer_timeout = answer_timeout
         self._transfer_timeout = transfer_timeout
         self._closed_call_ids = frozenset()
@@ -429,6 +432,35 @@ class PhoneFirmware(hsm.Instance):
             dataclasses.replace(
                 event,
                 id=trigger.id if trigger.id else event.id,
+                metadata=dict(trigger.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _dispatch_to_peripheral(
+        ctx: hsm.Context,
+        instance: "PhoneFirmware",
+        peripheral: hsm.Instance,
+        event: hsm.Event[typing.Any],
+        trigger: hsm.Event,
+    ) -> None:
+        """Deliver one typed event to a firmware-driven peripheral, envelope stamped from ``trigger``.
+
+        Firmware is the controller for every transducer it drives — the speaker, the microphone's
+        uplink is published rather than dispatched, the display — so this is the one place that
+        stamps source/target/metadata for that outbound wire, rather than repeating the same
+        ``dataclasses.replace`` at each call site.
+        """
+
+        _ = peripheral.dispatch(
+            ctx,
+            dataclasses.replace(
+                event,
+                # Correlation only, and only when there is an id to correlate with: the live
+                # transition already requires both machines started, so an unstarted one here
+                # means a direct call, not a delivery decision.
+                source=hsm.id(instance) if lifecycle.is_started(instance) else "",
+                target=hsm.id(peripheral) if lifecycle.is_started(peripheral) else "",
                 metadata=dict(trigger.metadata),
             ),
         )
@@ -676,18 +708,7 @@ class PhoneFirmware(hsm.Instance):
 
         data = event.data
         assert isinstance(data, ServiceAudioData)
-        _ = instance._speaker.dispatch(
-            ctx,
-            dataclasses.replace(
-                audio.OutputEvent.with_data(data),
-                # Correlation only, and only when there is an id to correlate with: the live
-                # transition already requires both machines started, so an unstarted one here
-                # means a direct call, not a delivery decision.
-                source=hsm.id(instance) if lifecycle.is_started(instance) else "",
-                target=hsm.id(instance._speaker) if lifecycle.is_started(instance._speaker) else "",
-                metadata=dict(event.metadata),
-            ),
-        )
+        PhoneFirmware._dispatch_to_peripheral(ctx, instance, instance._speaker, audio.OutputEvent.with_data(data), event)
 
     @staticmethod
     def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -901,29 +922,54 @@ class PhoneFirmware(hsm.Instance):
         instance._current_call_id = data.call_id
 
     @staticmethod
-    def _note_current_caller(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        """Remember who is on the line, for observation: the snapshot says who, the call id says which.
+    def _drive_display(
+        ctx: hsm.Context,
+        instance: "PhoneFirmware",
+        trigger: hsm.Event,
+        caller_id: Caller | None,
+    ) -> None:
+        """Put a caller id (or clear one) on the display; log rather than silently drop when it is not live.
 
-        Set from what the payload itself declares — the caller ID on a ring, the provider-stamped
-        party on a connect — never looked up anywhere. A connect that names nobody writes nothing:
-        the ring may already have named the caller, and only entering hung_up resets who the line
-        knows, so a caller-ID-only provider never regresses known to unknown.
+        Firmware is the controller that wires and drives its own display, dispatching a typed
+        event rather than reaching into the display's attribute directly. The production path
+        (``Phone``) starts every peripheral before firmware exists, so a live display is the
+        supported contract. Firmware built and driven standalone with no started display — e.g.
+        constructing ``PhoneFirmware()`` directly, outside a ``Phone`` — has nowhere to put a
+        caller id; this makes that visible instead of dispatching to a peripheral that can never
+        receive it.
         """
 
-        del ctx
-        data = event.data
-        if isinstance(data, IncomingCallData):
-            _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, data.caller)
+        if not lifecycle.is_started(instance._display):
+            _LOG.warning("phone firmware display is not started; caller id drive dropped")
             return
-        if isinstance(data, CallConnectedData) and data.party is not None:
-            _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, data.party)
+        PhoneFirmware._dispatch_to_peripheral(
+            ctx, instance, instance._display, CallerIdEvent.with_data(CallerIdData(caller_id=caller_id)), trigger
+        )
 
     @staticmethod
-    def _clear_current_caller(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        """A hung-up phone has nobody on the line; entering hung_up says so, including at start."""
+    def _show_caller_id(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """Put a caller ID on the display: the caller on a ring, the provider-stamped party on a connect.
 
-        del ctx, event
-        _ = instance.set(_CURRENT_CALLER_ATTRIBUTE, None)
+        Set from what the payload itself declares — never looked up anywhere. A connect that names
+        nobody leaves the display alone: the ring may already have shown the caller, and only
+        entering hung_up clears the screen, so a caller-ID-only provider never regresses shown to
+        blank.
+        """
+
+        data = event.data
+        if isinstance(data, IncomingCallData):
+            caller = data.caller
+        elif isinstance(data, CallConnectedData) and data.party is not None:
+            caller = data.party
+        else:
+            return
+        PhoneFirmware._drive_display(ctx, instance, event, caller)
+
+    @staticmethod
+    def _clear_caller_id(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+        """A hung-up phone shows nobody on the line; entering hung_up clears the display, including at start."""
+
+        PhoneFirmware._drive_display(ctx, instance, event, None)
 
     @staticmethod
     def _set_current_transfer_target(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -960,11 +1006,10 @@ class PhoneFirmware(hsm.Instance):
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Phone",
-        hsm.attribute(_CURRENT_CALLER_ATTRIBUTE),
         hsm.initial(hsm.target("/Phone/hung_up")),
         hsm.state(
             "hung_up",
-            hsm.entry(_clear_current_caller),
+            hsm.entry(_clear_caller_id),
             hsm.transition(hsm.on(_HungUpCommittedEvent), hsm.effect(_publish_committed_hung_up)),
             hsm.transition(
                 hsm.on(_TransferCompletedCommittedEvent),
@@ -973,7 +1018,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_is_new_incoming_call),
-                hsm.effect(_set_current_call, _note_current_caller),
+                hsm.effect(_set_current_call, _show_caller_id),
                 hsm.target("/Phone/ringing"),
             ),
             # Redial is always legal. A handset does not refuse a number because you just called
@@ -996,7 +1041,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(CallConnectedEvent),
                 hsm.guard(_is_live_dial_observation),
-                hsm.effect(_set_current_call, _note_current_caller, _publish_answered),
+                hsm.effect(_set_current_call, _show_caller_id, _publish_answered),
                 hsm.target("/Phone/answered"),
             ),
             hsm.transition(
@@ -1068,7 +1113,7 @@ class PhoneFirmware(hsm.Instance):
             hsm.transition(
                 hsm.on(CallConnectedEvent),
                 hsm.guard(_matches_current_call_connected),
-                hsm.effect(_note_current_caller, _publish_answered),
+                hsm.effect(_show_caller_id, _publish_answered),
                 hsm.target("/Phone/answered"),
             ),
             hsm.transition(
@@ -1282,10 +1327,11 @@ class PhoneFirmware(hsm.Instance):
 
 
 class Phone(bot.device.Device):
-    """Phone device with privately owned audio peripherals and event-driven call control."""
+    """Phone device with privately owned audio/display peripherals and event-driven call control."""
 
     _microphone: audio.Microphone
     _speaker: audio.Speaker
+    _display: Display
     _service: PhoneService
     _firmware_instance: PhoneFirmware
     firmware_model: typing.ClassVar[hsm.Model] = PhoneFirmware.model
@@ -1295,6 +1341,7 @@ class Phone(bot.device.Device):
         *,
         microphone: audio.Microphone | None = None,
         speaker: audio.Speaker | None = None,
+        display: Display | None = None,
         peripherals: collections.abc.Iterable[bot.device.Device] = (),
         placement: space.Placement | None = None,
         service: PhoneService | None = None,
@@ -1303,15 +1350,18 @@ class Phone(bot.device.Device):
     ) -> None:
         resolved_microphone = microphone if microphone is not None else audio.Microphone()
         resolved_speaker = speaker if speaker is not None else audio.Speaker()
+        resolved_display = display if display is not None else Display()
         # Where the handset is. Its transducers carry their own placements: the earpiece is at the
         # ear and the mouthpiece MOUTH_OFFSET_M away, which is the whole point of them being
-        # separate devices.
+        # separate devices. The display shows caller ID rather than producing acoustic energy, so
+        # it carries no placement of its own.
         super().__init__(
-            peripherals=(resolved_microphone, resolved_speaker, *tuple(peripherals)),
+            peripherals=(resolved_microphone, resolved_speaker, resolved_display, *tuple(peripherals)),
             placement=placement,
         )
         self._microphone = resolved_microphone
         self._speaker = resolved_speaker
+        self._display = resolved_display
         observation_service = _PhoneObservationService(
             owner=self,
             service=service if service is not None else PhoneEventRecorder(),
@@ -1322,6 +1372,7 @@ class Phone(bot.device.Device):
             service=observation_service,
             speaker=resolved_speaker,
             microphone=resolved_microphone,
+            display=resolved_display,
             answer_timeout=answer_timeout,
             transfer_timeout=transfer_timeout,
         )
@@ -1446,6 +1497,12 @@ class Phone(bot.device.Device):
         wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=self._firmware))
         await self._microphone.attach(environment, wired)
         await self._speaker.attach(environment, wired)
+        # The display is attached the same way, for the same reason: firmware wires every
+        # peripheral it drives uniformly. Unlike the mouthpiece, the display's response is not
+        # gated on this attachment — firmware clears it on its own first entry into hung_up,
+        # before this attach has run — so the wire being present is an ownership fact, not a
+        # precondition for showing a caller ID.
+        await self._display.attach(environment, wired)
 
     @typing.override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:

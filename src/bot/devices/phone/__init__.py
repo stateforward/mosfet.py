@@ -1,6 +1,7 @@
 """Phone device and firmware contracts."""
 
-from . import phone
+from . import display, phone
+from bot.devices.phone.display import CallerIdData, CallerIdEvent, Display
 from bot.devices.phone.events import (
     AnswerCallData,
     AnswerCallEvent,
@@ -78,6 +79,7 @@ __all__ = [
     "CALL_PROGRESS_DB",
     "MOUTH_OFFSET_M",
     "RINGER_DB",
+    "display",
     "phone",
     "AnswerCallData",
     "AnswerCallEvent",
@@ -85,6 +87,8 @@ __all__ = [
     "AnsweredEvent",
     "CallConnectedData",
     "CallConnectedEvent",
+    "CallerIdData",
+    "CallerIdEvent",
     "CallFailedData",
     "CallFailedEvent",
     "CallIdData",
@@ -96,6 +100,7 @@ __all__ = [
     "DialData",
     "DialEvent",
     "DialFailedData",
+    "Display",
     "FailureKind",
     "HangUpCallData",
     "HangUpCallEvent",

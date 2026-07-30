@@ -12,6 +12,7 @@ from bot.abilities import processing
 from bot.abilities.cognition import input as cognition_input
 from bot.abilities.cognition import types
 from bot.device import Device
+from bot.devices import phone as phone_device
 from bot.environment import Environment
 from tests.bot.abilities.cognition.test_cognition import make_cognition, wait_until
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
@@ -135,6 +136,9 @@ def _note_snapshot_attributes(ctx: hsm.Context, instance: hsm.Instance, event: h
     _ = instance.set("escapade", 'a & <b> "c"')
     _ = instance.set("mood", _MoodValue())
     _ = instance.set("debug_blob", object())
+    # A folded peripheral observation (e.g. Device.take_snapshot merging a Display's own
+    # attributes under its declared observation name) is a mapping attribute like this one.
+    _ = instance.set("display", {"caller_id": "phone-bot-alice"})
 
 
 class _SnapshotAttributeDevice(Device):
@@ -146,6 +150,7 @@ class _SnapshotAttributeDevice(Device):
         hsm.attribute("escapade"),
         hsm.attribute("mood"),
         hsm.attribute("debug_blob"),
+        hsm.attribute("display"),
         hsm.initial(hsm.target("ringing")),
         hsm.state("ringing", hsm.entry(_note_snapshot_attributes)),
     )
@@ -174,7 +179,7 @@ class _OwnerBotActor(hsm.Instance):
 
 
 def test_build_processing_input_composes_live_device_state_instructions() -> None:
-    """Per-turn instructions carry the device block, owned by the bot's own declaration."""
+    """Per-turn instructions carry the world snapshot: self, owned devices nested inside it."""
 
     async def run() -> tuple[processing.InputData, str]:
         device = _SnapshotAttributeDevice()
@@ -200,19 +205,25 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
     # Well-formed XML, no header text around the block.
     assert "Devices you own" not in instructions
     root = xml.etree.ElementTree.fromstring(instructions)
-    assert root.tag == "live_state"
+    assert root.tag == "environment"
+    # The environment the bot is in takes the snapshot: the root carries its own identity.
+    assert root.get("id")
+    # The world holds no behavioral state of its own; state belongs on entities, not on the root.
+    assert root.get("state") is None
 
-    # The bot describes itself: one bot element, its owned_devices as nested elements.
-    bot_element = root.find("bot")
-    assert bot_element is not None
-    assert bot_element.get("state") == "/OwnerBotActor/active"
-    owned = bot_element.find("owned_devices/device")
-    assert owned is not None
-    assert owned.get("ref") == "phone"
-    assert owned.get("id") == device_id
+    # Whose perspective: the bot, as a single <self> child of the world.
+    self_element = root.find("self")
+    assert self_element is not None
+    assert self_element.get("state") == "/OwnerBotActor/active"
+    # No sibling top-level <device> elements under the root: a device is only ever described
+    # nested inside the bot that owns it.
+    assert root.findall("device") == []
+    assert root.findall("bot") == []
 
-    # One device element per owned reference: ref, runtime id, behavioral state as attributes.
-    devices = root.findall("device")
+    # Owned devices are nested inside self, not siblings of it.
+    owned_devices = self_element.find("owned_devices")
+    assert owned_devices is not None
+    devices = owned_devices.findall("device")
     assert len(devices) == 1
     device_element = devices[0]
     assert device_element.get("ref") == "phone"
@@ -225,6 +236,12 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
     mood = device_element.find("mood")
     assert mood is not None and mood.text == "cheerful(score=3)"
     assert device_element.find("debug_blob") is None
+    # A nested attribute mapping (the shape a folded peripheral observation takes) renders
+    # recursively, not as a ref/id stub.
+    display = device_element.find("display")
+    assert display is not None
+    caller_id = display.find("caller_id")
+    assert caller_id is not None and caller_id.text == "phone-bot-alice"
     # Present in the actors map but not in the bot's owned_devices: not the bot's to describe.
     assert "speaker" not in instructions
 
@@ -233,6 +250,54 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
     assert escapade is not None and escapade.text == 'a & <b> "c"'
     assert "&amp;" in instructions
     assert "&lt;b&gt;" in instructions
+
+
+def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> None:
+    """A real ringing Phone's folded display observation reaches the model as live XML.
+
+    Every other test in this module notes a device's snapshot attributes on a synthetic device
+    that sets them directly. This is the production path instead: ``Phone`` owns a ``Display``
+    peripheral, firmware drives it with a typed ``CallerIdEvent`` on ring, and
+    ``Device.take_snapshot`` folds that peripheral's own attributes under ``display`` — nothing
+    here invents or stubs the content the model ends up reading.
+    """
+
+    async def run() -> processing.InputData:
+        environment = Environment()
+        phone = phone_device.Phone()
+        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        firmware = device_firmware(phone)
+        await wait_until(lambda: firmware is not None and bot.lifecycle.is_started(firmware))
+        await wait_until(lambda: phone.state() == "/Device/detached")
+        owner = _OwnerBotActor({"phone": hsm.id(phone)})
+        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+
+        assert isinstance(firmware, phone_device.PhoneFirmware)
+        await firmware.event_recorder().receive(
+            phone.context(),
+            phone_device.IncomingCallEvent.with_data(
+                phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
+            ),
+        )
+        await wait_until(lambda: firmware.state() == "/Phone/ringing")
+
+        return cognition_input.build_processing_input(
+            cognition_input.InputData(
+                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                actors={"bot": owner, "phone": phone},
+            )
+        )
+
+    built = asyncio.run(run())
+    instructions = built.instructions
+    assert instructions is not None
+    root = xml.etree.ElementTree.fromstring(instructions)
+    device_element = root.find("self/owned_devices/device")
+    assert device_element is not None
+    display = device_element.find("display")
+    assert display is not None
+    caller_id = display.find("caller_id")
+    assert caller_id is not None and caller_id.text == "Front desk"
 
 
 def test_build_processing_input_without_devices_leaves_instructions_unset() -> None:

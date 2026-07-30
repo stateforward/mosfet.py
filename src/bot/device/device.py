@@ -72,6 +72,19 @@ class Device(hsm.Instance, attachment.Attachment):
     """Environment interaction surface that records attached external actors."""
 
     firmware_model: typing.ClassVar[hsm.Model] = _DEFAULT_FIRMWARE
+    observation_name: typing.ClassVar[str | None] = None
+    """Snapshot attribute key this device contributes when owned as another device's peripheral.
+
+    ``None`` is the default and means this peripheral declares no owner-visible observation —
+    right for a transducer like a microphone or speaker, which has no snapshot state of its own
+    to show. A peripheral with owner-visible state (a display showing caller ID) names itself
+    here; the owning device never invents that name on the peripheral's behalf. Set once per
+    subclass, never per instance: the owner folds each started peripheral's own attributes,
+    keyed by this leaf name, into its own :meth:`take_snapshot` the same way it already folds
+    firmware attributes. One name per owner is the contract, enforced at :meth:`Device.__init__`:
+    two owned peripherals declaring the same non-``None`` name raise there rather than silently
+    resolving by write order in a later snapshot.
+    """
     _attachment_limit: typing.ClassVar[int | None] = None
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
     required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
@@ -109,6 +122,21 @@ class Device(hsm.Instance, attachment.Attachment):
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._attachment_request_id = ""
         self._peripherals = tuple(peripherals)
+        # One observation name per owner is the documented contract (see ``observation_name``):
+        # a silent last-write-wins fold would corrupt a real device's snapshot with no
+        # diagnostic pointing at the modeling mistake. Catch it here, at construction, rather
+        # than inside live telemetry observation during a later transition.
+        seen_observation_names: set[str] = set()
+        for peripheral in self._peripherals:
+            name = type(peripheral).observation_name
+            if name is None:
+                continue
+            if name in seen_observation_names:
+                raise ValueError(
+                    f"Multiple peripherals declare the observation name {name!r}; an owner can fold "
+                    + "only one peripheral's observation under each name."
+                )
+            seen_observation_names.add(name)
         self._firmware = None
         self._firmware_init_operation_id = None
         self._firmware_cleanup_operation_id = None
@@ -349,14 +377,6 @@ class Device(hsm.Instance, attachment.Attachment):
     @typing.override
     def take_snapshot(self) -> hsm.Snapshot:
         snapshot = super().take_snapshot()
-        firmware = self._firmware
-        if firmware is None:
-            return snapshot
-        # Stopped machines cannot take_snapshot. Firmware may already be stopped during
-        # initialization_failing cleanup while still referenced here.
-        if not lifecycle.is_started(firmware):
-            return snapshot
-        firmware_snapshot = firmware.take_snapshot()
         # What the firmware declares for observation is the device's to show: attributes merge
         # the same way transitions do, so one snapshot of the device tells the whole story.
         # Behaviorally the device IS its firmware — observers need the behavioral state; the
@@ -364,13 +384,46 @@ class Device(hsm.Instance, attachment.Attachment):
         attributes: dict[str, typing.Any] = {}
         if snapshot.Attributes:
             attributes.update(snapshot.Attributes)
-        if firmware_snapshot.Attributes:
-            attributes.update(firmware_snapshot.Attributes)
+        state = snapshot.State
+        transitions = snapshot.Transitions
+        firmware = self._firmware
+        # Stopped machines cannot take_snapshot. Firmware may already be stopped during
+        # initialization_failing cleanup while still referenced here.
+        if firmware is not None and lifecycle.is_started(firmware):
+            firmware_snapshot = firmware.take_snapshot()
+            if firmware_snapshot.Attributes:
+                attributes.update(firmware_snapshot.Attributes)
+            state = firmware_snapshot.State or snapshot.State
+            transitions = (*snapshot.Transitions, *firmware_snapshot.Transitions)
+        # A started owned peripheral's own observation folds up under its declared
+        # ``observation_name``, the same way firmware attributes fold up under their own leaf
+        # names: one snapshot of the owner tells the whole story, including what a display shows.
+        # A peripheral that declares no observation name (the default) contributes nothing.
+        # A peripheral with nothing at all set on its own snapshot (no ``hsm.attribute`` ever
+        # written) also contributes nothing — but one whose attributes are all ``None`` still
+        # does: a display showing nobody is a fact about that display, not the absence of one,
+        # and folding it away would make "blank" indistinguishable from "not there". ``Device``
+        # guarantees at construction that at most one peripheral claims a given name, so this
+        # never has to arbitrate a collision.
+        for peripheral in self._peripherals:
+            name = type(peripheral).observation_name
+            if name is None:
+                continue
+            peripheral_snapshot = lifecycle.snapshot_if_started(peripheral)
+            if peripheral_snapshot is None or not peripheral_snapshot.Attributes:
+                continue
+            peripheral_attributes = typing.cast(
+                collections.abc.Mapping[str, object], peripheral_snapshot.Attributes
+            )
+            observation: dict[str, object] = {
+                key.rpartition("/")[2]: value for key, value in peripheral_attributes.items()
+            }
+            attributes[name] = observation
         return dataclasses.replace(
             snapshot,
-            State=firmware_snapshot.State or snapshot.State,
+            State=state,
             Attributes=attributes or None,
-            Transitions=(*snapshot.Transitions, *firmware_snapshot.Transitions),
+            Transitions=transitions,
         )
 
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
