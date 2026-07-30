@@ -716,10 +716,7 @@ def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
     items = _nested_dict(parameters, "properties", "events", "items")
     branches = items["anyOf"]
     assert isinstance(branches, list)
-    by_name = {
-        branch["properties"]["event"]["const"]: branch["properties"]["data"]
-        for branch in branches
-    }
+    by_name = {branch["properties"]["event"]["const"]: branch["properties"]["data"] for branch in branches}
     dial_data = by_name["phone.dial"]
     assert json_schema_is_embeddable(dial_data)
     assert "$defs" not in dial_data
@@ -848,13 +845,16 @@ def test_processor_receives_static_policy_composed_with_live_instructions() -> N
         _ = await dispatch_ability_for_test(
             instance,
             ctx,
-            processing.InputData(input="stimulus", instructions='<live_state>\n  <bot state="/Bot/active"/>\n</live_state>'),
+            processing.InputData(
+                input="stimulus",
+                instructions='<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
+            ),
         )
         # No live block: the static policy alone, exactly as before.
         _ = await dispatch_ability_for_test(instance, ctx, processing.InputData(input="stimulus"))
         return processor.received
 
     assert asyncio.run(run()) == [
-        'Static policy.\n\n<live_state>\n  <bot state="/Bot/active"/>\n</live_state>',
+        'Static policy.\n\n<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
         "Static policy.",
     ]

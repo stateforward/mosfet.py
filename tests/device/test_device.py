@@ -235,6 +235,108 @@ def test_device_snapshot_presents_firmware_behavioral_state() -> None:
     assert snapshot.State == "/FirmwareAttributeProbe/idle"
 
 
+class ObservingPeripheral(Device):
+    """Peripheral that declares an owner-visible observation name and one honest attribute.
+
+    Overrides ``take_snapshot`` directly (rather than a custom firmware model) so this test
+    exercises exactly the device-level fold contract without depending on unrelated firmware
+    activity timing.
+    """
+
+    observation_name: typing.ClassVar[str | None] = "display"
+
+    @override
+    def take_snapshot(self) -> hsm.Snapshot:
+        snapshot = super().take_snapshot()
+        return dataclasses.replace(
+            snapshot,
+            Attributes={
+                "/ObservingPeripheral/caller_id": "phone-bot-alice",
+                "/ObservingPeripheral/debug_blob": object(),
+            },
+        )
+
+
+class OtherObservingPeripheral(Device):
+    """A second, distinct peripheral class that also (wrongly) claims ``display``."""
+
+    observation_name: typing.ClassVar[str | None] = "display"
+
+    @override
+    def take_snapshot(self) -> hsm.Snapshot:
+        snapshot = super().take_snapshot()
+        return dataclasses.replace(snapshot, Attributes={"/OtherObservingPeripheral/caller_id": "someone-else"})
+
+
+class SilentObservingPeripheral(Device):
+    """Peripheral that declares an observation name but has nothing honest to show right now."""
+
+    observation_name: typing.ClassVar[str | None] = "silent"
+
+    @override
+    def take_snapshot(self) -> hsm.Snapshot:
+        snapshot = super().take_snapshot()
+        return dataclasses.replace(snapshot, Attributes={"/SilentObservingPeripheral/caller_id": None})
+
+
+def test_device_snapshot_folds_started_peripheral_observation_under_its_declared_name() -> None:
+    """A device's snapshot surfaces an owned peripheral's own attributes under its observation key."""
+
+    async def run() -> hsm.Snapshot:
+        peripheral = ObservingPeripheral()
+        device = Device(peripherals=(peripheral,))
+        _ = await start_device_in_environment(device)
+        return device.take_snapshot()
+
+    snapshot = asyncio.run(run())
+    attributes = snapshot.Attributes
+    assert attributes is not None
+    display = attributes["display"]
+    assert isinstance(display, dict)
+    assert display["caller_id"] == "phone-bot-alice"
+    assert isinstance(display["debug_blob"], object)
+    # The device's own attribute namespace stays flat except for the folded peripheral key.
+    assert "caller_id" not in attributes
+
+
+def test_device_snapshot_keeps_peripheral_observation_with_only_none_valued_attributes() -> None:
+    """A peripheral's observation with nothing to show right now stays observable, not omitted.
+
+    A display showing nobody and no display at all are different facts. Dropping an
+    all-``None`` observation would erase the first and make it indistinguishable from the
+    second — the same reason a blank handset screen still has a screen.
+    """
+
+    async def run() -> hsm.Snapshot:
+        peripheral = SilentObservingPeripheral()
+        device = Device(peripherals=(peripheral,))
+        _ = await start_device_in_environment(device)
+        return device.take_snapshot()
+
+    snapshot = asyncio.run(run())
+    attributes = snapshot.Attributes
+    assert attributes is not None
+    silent = attributes["silent"]
+    assert isinstance(silent, dict)
+    assert silent["caller_id"] is None
+
+
+def test_device_construction_rejects_colliding_peripheral_observation_names() -> None:
+    """Two owned peripherals cannot claim the same observation name.
+
+    Silent last-write-wins would corrupt a real device's snapshot: whichever peripheral
+    happened to be declared last would clobber the other's contribution with no diagnostic
+    pointing at the modeling mistake. Constructor time is the earliest, cheapest point to
+    catch it — well before either peripheral runs inside live telemetry observation.
+    """
+
+    first = ObservingPeripheral()
+    second = OtherObservingPeripheral()
+
+    with pytest.raises(ValueError, match="display"):
+        _ = Device(peripherals=(first, second))
+
+
 def test_device_describes_environment_interaction_surface() -> None:
     device = Device()
 

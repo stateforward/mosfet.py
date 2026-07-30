@@ -34,7 +34,7 @@ from bot.providers.livekit.room_audio import (
     RoomHandle,
 )
 from bot.environment import Environment
-from tests.hsm_instance_state import device_firmware
+from tests.hsm_instance_state import device_firmware, phone_display
 from tests.livekit_room_fakes import (
     FakeLocalParticipant,
     FakeRemoteParticipant,
@@ -1365,16 +1365,16 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
     asyncio.run(run())
 
 
-def test_a_connected_call_names_who_is_on_the_line_on_the_snapshot() -> None:
-    """Both ends know who they are talking to, readable off their own firmware snapshots.
+def test_a_connected_call_names_who_is_on_the_line_on_the_display() -> None:
+    """Both ends know who they are talking to, readable off their own display snapshots.
 
     The callee learns the caller the SFU authenticated; the caller learns whoever the dial plan
-    resolved the number to. The provider stamps it on the connect payload and firmware keeps it
-    as an attribute, which is where cognition reads live snapshots — never by asking around.
+    resolved the number to. The provider stamps it on the connect payload and firmware drives the
+    display with it, which is where cognition reads live snapshots — never by asking around.
     """
 
-    def current_caller(phone: phone_device.Phone) -> object:
-        return (_require_firmware(phone).take_snapshot().Attributes or {}).get("/Phone/current_caller", "unset")
+    def shown_caller(phone: phone_device.Phone) -> object:
+        return (phone_display(phone).take_snapshot().Attributes or {}).get("/Device/caller_id", "unset")
 
     async def run() -> None:
         sfu = FakeSfu()
@@ -1388,7 +1388,7 @@ def test_a_connected_call_names_who_is_on_the_line_on_the_snapshot() -> None:
         await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
 
         # Bob knows who is calling before anyone answers: the ring carried the caller.
-        assert current_caller(bob_phone) == ALICE_IDENTITY
+        assert shown_caller(bob_phone) == ALICE_IDENTITY
 
         await bob_phone.dispatch(
             bob_phone.context(),
@@ -1397,15 +1397,15 @@ def test_a_connected_call_names_who_is_on_the_line_on_the_snapshot() -> None:
         await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/answered/media_ready")
         await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/answered/media_ready")
 
-        # Connected, each phone names the other: Alice from her dial plan, Bob from the caller ID.
-        assert current_caller(alice_phone) == BOB_IDENTITY
-        assert current_caller(bob_phone) == ALICE_IDENTITY
+        # Connected, each phone shows the other: Alice from her dial plan, Bob from the caller ID.
+        assert shown_caller(alice_phone) == BOB_IDENTITY
+        assert shown_caller(bob_phone) == ALICE_IDENTITY
 
     asyncio.run(run())
 
 
-def test_a_call_with_a_withheld_caller_names_nobody() -> None:
-    """current_caller stays None when the provider never learned the far end — never invented.
+def test_a_call_with_a_withheld_caller_shows_nobody() -> None:
+    """The display stays None when the provider never learned the far end — never invented.
 
     A withheld caller ID still connects: the call is no less real for being anonymous, and
     "unknown" is what a handset shows, not a made-up name.
@@ -1422,8 +1422,8 @@ def test_a_call_with_a_withheld_caller_names_nobody() -> None:
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
 
-        attributes = _require_firmware(phone).take_snapshot().Attributes or {}
-        assert attributes.get("/Phone/current_caller", "unset") is None
+        attributes = phone_display(phone).take_snapshot().Attributes or {}
+        assert attributes.get("/Device/caller_id", "unset") is None
 
     asyncio.run(run())
 

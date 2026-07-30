@@ -1,11 +1,13 @@
 import asyncio
 import collections.abc
 import typing
+import xml.etree.ElementTree
 
 import hsm
 import pydantic
 import pytest
 
+from bot.device import Device
 from bot.environment import SoundData, SoundEvent, Environment, space
 
 
@@ -528,3 +530,149 @@ def test_environment_join_rejects_a_conflicting_placement() -> None:
             environment.join(speaker, placement=mouth)
 
     asyncio.run(run())
+
+
+class _OwnerActor(hsm.Instance):
+    """Minimal perspective actor that declares owned devices on its own snapshot."""
+
+    _owned: dict[str, str]
+
+    def __init__(self, owned: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self._owned = dict(owned) if owned else {}
+
+    @staticmethod
+    def _note_owned_devices(ctx: hsm.Context, instance: "_OwnerActor", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        _ = instance.set("owned_devices", dict(instance._owned))
+
+    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+        "OwnerActor",
+        hsm.attribute("owned_devices"),
+        hsm.initial(hsm.target("/OwnerActor/active")),
+        hsm.state("active", hsm.entry(_note_owned_devices)),
+    )
+
+
+def test_model_snapshot_returns_none_for_an_unstarted_perspective() -> None:
+    """No honest snapshot to render → no envelope invented around nothing."""
+
+    environment = Environment()
+
+    assert environment.model_snapshot(_OwnerActor()) is None
+
+
+def test_model_snapshot_composes_an_environment_root_around_the_perspective() -> None:
+    """The environment takes the snapshot: root is ``<environment id="…">``, self is the perspective."""
+
+    async def run() -> str | None:
+        environment = Environment()
+        owner = _OwnerActor()
+        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        return environment.model_snapshot(owner)
+
+    instructions = asyncio.run(run())
+    assert instructions is not None
+    root = xml.etree.ElementTree.fromstring(instructions)
+    assert root.tag == "environment"
+    # This environment's own identity, not any HSM actor id and never Python id().
+    assert root.get("id")
+    assert root.get("state") is None
+    self_element = root.find("self")
+    assert self_element is not None
+    assert self_element.get("state") == "/OwnerActor/active"
+
+
+def test_model_snapshot_reports_the_same_environment_identity_across_perspectives() -> None:
+    """Identity is the environment's own, not derived from whichever perspective is asked."""
+
+    async def run() -> tuple[str | None, str | None]:
+        environment = Environment()
+        first = _OwnerActor()
+        second = _OwnerActor()
+        _ = await hsm.started(environment, first, typing.cast(hsm.Model, first.model))
+        _ = await hsm.started(environment, second, typing.cast(hsm.Model, second.model))
+        return environment.model_snapshot(first), environment.model_snapshot(second)
+
+    first_block, second_block = asyncio.run(run())
+    assert first_block is not None and second_block is not None
+    first_id = xml.etree.ElementTree.fromstring(first_block).get("id")
+    second_id = xml.etree.ElementTree.fromstring(second_block).get("id")
+    assert first_id == second_id
+
+
+def test_model_snapshot_resolves_owned_devices_from_the_environments_own_scope() -> None:
+    """Owned devices resolve by runtime id in the environment's own addressing scope.
+
+    No actor map is passed in anywhere: the environment looks the id up itself.
+    """
+
+    async def run() -> tuple[str | None, str]:
+        environment = Environment()
+        device = Device()
+        _ = await hsm.started(environment, device, typing.cast(hsm.Model, device.model))
+        owner = _OwnerActor({"phone": hsm.id(device)})
+        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        return environment.model_snapshot(owner), hsm.id(device)
+
+    instructions, device_id = asyncio.run(run())
+    assert instructions is not None
+    root = xml.etree.ElementTree.fromstring(instructions)
+    device_element = root.find("self/owned_devices/device")
+    assert device_element is not None
+    assert device_element.get("ref") == "phone"
+    assert device_element.get("id") == device_id
+
+
+def test_model_snapshot_drops_an_owned_reference_the_environment_cannot_resolve() -> None:
+    """A device reference the perspective names but the environment cannot resolve is dropped."""
+
+    async def run() -> str | None:
+        environment = Environment()
+        owner = _OwnerActor({"phone": "not-a-live-runtime-id"})
+        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        return environment.model_snapshot(owner)
+
+    instructions = asyncio.run(run())
+    assert instructions is not None
+    root = xml.etree.ElementTree.fromstring(instructions)
+    owned_devices = root.find("self/owned_devices")
+    assert owned_devices is not None
+    assert owned_devices.findall("device") == []
+
+
+def test_model_snapshot_returns_none_for_a_perspective_started_in_another_environment() -> None:
+    """A perspective addressable only in a foreign scope has no honest block for this environment
+    to compose: this environment cannot see into another environment's addressing map, so it has
+    nothing true to render — the same "nothing honest to show" as an unstarted perspective."""
+
+    async def run() -> str | None:
+        environment = Environment()
+        other = Environment()
+        foreign = _OwnerActor()
+        _ = await hsm.started(other, foreign, typing.cast(hsm.Model, foreign.model))
+        return environment.model_snapshot(foreign)
+
+    assert asyncio.run(run()) is None
+
+
+def test_model_snapshot_omits_an_owned_device_that_has_since_stopped() -> None:
+    """A device the perspective still names but that has since stopped has no honest snapshot to
+    give — it must be dropped from ``owned_devices`` rather than crash the whole block, even though
+    it remains addressable (a strong reference keeps it in this environment's own scope)."""
+
+    async def run() -> str | None:
+        environment = Environment()
+        device = Device()
+        _ = await hsm.started(environment, device, typing.cast(hsm.Model, device.model))
+        owner = _OwnerActor({"phone": hsm.id(device)})
+        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        await hsm.stop(device)
+        return environment.model_snapshot(owner)
+
+    instructions = asyncio.run(run())
+    assert instructions is not None
+    root = xml.etree.ElementTree.fromstring(instructions)
+    owned_devices = root.find("self/owned_devices")
+    assert owned_devices is not None
+    assert owned_devices.findall("device") == []
