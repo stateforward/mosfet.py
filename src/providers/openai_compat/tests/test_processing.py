@@ -3,17 +3,24 @@ from __future__ import annotations
 from bot.abilities import processing
 from bot.abilities.language import text
 from bot.protocols import attachment
-from bot.providers.openai_compat import Processor, ProcessingError
+from bot.providers.openai_compat import Processor, ProcessingError, TextGenerator
 
 import asyncio
+import collections.abc
 import dataclasses
+import json
+import pathlib
 import typing
 import uuid
 import weakref
 
+import bot.telemetry
 import hsm
 import pydantic
 import pytest
+from opentelemetry import _logs
+
+from bot.telemetry.configure import logger_provider
 
 
 class _AnswerCallData(pydantic.BaseModel):
@@ -176,3 +183,107 @@ def test_processor_requires_stamped_instructions() -> None:
     processor = Processor(generator=RecordingGenerator(content="[]"))
     with pytest.raises(ProcessingError, match="instructions"):
         asyncio.run(process_for_test(processor, processing.InputData(input="hello")))
+
+
+@dataclasses.dataclass
+class _FakeChatClient:
+    """Minimal chat client so Processing uses a real TextGenerator (OTEL path)."""
+
+    response: dict[str, object]
+    model: str = "compat-model"
+    calls: list[dict[str, object]] = dataclasses.field(default_factory=list)
+
+    def create_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del response_format, extra_body
+        self.calls.append({"messages": [dict(message) for message in messages], "tools": list(tools)})
+        return self.response
+
+
+def test_processor_process_records_otel_wire_payload(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Processing → real TextGenerator records instructions / user content / tools in JSONL."""
+
+    monkeypatch.chdir(tmp_path)
+    bot.telemetry.reset()
+    monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    def _noop_set_logger_provider(_provider: object) -> None:
+        return None
+
+    monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
+
+    log_path = pathlib.Path("processing-otel.jsonl")
+    assert bot.telemetry.configure(log_file=log_path) is True
+
+    instructions = "Select events from schemas for Alice and Bob."
+    user_input = "Alice greets Bob"
+    client = _FakeChatClient(
+        response={
+            "model": "compat-model",
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "tc1",
+                                "type": "function",
+                                "function": {
+                                    "name": processing.DISPATCH_TOOL_NAME,
+                                    "arguments": json.dumps(
+                                        {
+                                            "events": [
+                                                {
+                                                    "event": "phone.answer_call",
+                                                    "data": {"call_id": "c1"},
+                                                }
+                                            ]
+                                        }
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    )
+    processor = Processor(generator=TextGenerator(client=client, provider="openai_compat"))
+    output = asyncio.run(
+        process_for_test(
+            processor,
+            processing.InputData(
+                input=user_input,
+                schemas=(_PHONE_ANSWER_CALL,),
+                instructions=instructions,
+            ),
+        )
+    )
+    assert len(output) == 1
+    assert output[0].event == "phone.answer_call"
+
+    otel_provider = logger_provider()
+    assert otel_provider is not None
+    _ = otel_provider.force_flush()
+
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    body_text = json.dumps(payload["body"])
+    assert instructions in body_text
+    assert user_input in body_text
+    assert processing.DISPATCH_TOOL_NAME in body_text
+    assert payload["body"]["tools"]
+    assert payload["attributes"]["provider"] == "openai_compat"
+    assert payload["attributes"]["stage"] == "request"
+    assert user_input not in json.dumps(payload["attributes"])
+    bot.telemetry.reset()

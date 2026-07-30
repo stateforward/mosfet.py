@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bot.abilities.language import text
+import bot.telemetry
 
 import asyncio
 import collections.abc
@@ -268,6 +269,15 @@ class TextGenerator(text.TextGenerator):
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:
         system_instruction, contents = _messages_to_gemini(input.messages)
         tools = _tools_to_gemini(input.tools)
+        model = getattr(self.client, "model", None)
+        # Processing (and other callers) reach the provider via TextGenerator;
+        # this records the wire request used on that path.
+        bot.telemetry.record_generator_request(
+            provider=self.provider or "",
+            model=model if isinstance(model, str) else None,
+            messages={"system_instruction": system_instruction, "contents": contents},
+            tools=tools,
+        )
         tool_config: dict[str, object] | None = None
         if tools:
             tool_config = {

@@ -5,6 +5,9 @@ from bot.abilities.language import text
 import asyncio
 import collections.abc
 import dataclasses
+import pathlib
+
+import pytest
 
 from bot.providers.gemini import TextGenerationError, TextGenerator
 
@@ -317,3 +320,68 @@ def test_text_generator_rejects_safety_finish() -> None:
         assert str(error) == "Gemini generate_content finished unsuccessfully: SAFETY."
     else:
         raise AssertionError("Expected TextGenerationError.")
+
+
+def test_text_generator_records_otel_request_when_configured(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live TextGenerator.generate records OTEL; covers generator requests used by processing."""
+
+    import json
+
+    import bot.telemetry
+    from opentelemetry import _logs
+
+    from bot.telemetry.configure import logger_provider
+
+    monkeypatch.chdir(tmp_path)
+    bot.telemetry.reset()
+    monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
+
+    log_path = pathlib.Path("gemini-generator.jsonl")
+    assert bot.telemetry.configure(log_file=log_path) is True
+
+    @dataclasses.dataclass
+    class ClientWithModel(FakeContentClient):
+        model: str = "gemini-test-model"
+
+    client = ClientWithModel(
+        response={
+            "model_version": "gemini-test-model",
+            "candidates": [
+                {
+                    "finish_reason": "STOP",
+                    "content": {"parts": [{"text": "ok"}]},
+                }
+            ],
+        }
+    )
+    generator = TextGenerator(client=client, provider="gemini")
+    _ = asyncio.run(
+        generator.generate(
+            text.InputData(
+                messages=(
+                    text.TextMessage(role=text.TextRole.SYSTEM, content="Be brief."),
+                    text.TextMessage(role=text.TextRole.USER, content="Alice greets Bob"),
+                ),
+            )
+        )
+    )
+
+    otel_provider = logger_provider()
+    assert otel_provider is not None
+    _ = otel_provider.force_flush()
+
+    lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["body"]["messages"]["system_instruction"] == "Be brief."
+    assert payload["body"]["messages"]["contents"] == [
+        {"role": "user", "parts": [{"text": "Alice greets Bob"}]},
+    ]
+    assert payload["attributes"]["provider"] == "gemini"
+    assert payload["attributes"]["model"] == "gemini-test-model"
+    assert payload["attributes"]["stage"] == "request"
+    assert "Alice greets Bob" not in json.dumps(payload["attributes"])

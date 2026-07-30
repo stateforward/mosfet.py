@@ -17,7 +17,7 @@ import tempfile
 import time
 import typing
 
-from phone_bot_example import AppConfig, mint_livekit_access_token, run
+from . import AppConfig, load_env, mint_livekit_access_token, run
 
 
 def _configure_logging(*, verbose: bool) -> None:
@@ -202,6 +202,8 @@ def _merge_env_file(base: pathlib.Path, overrides: collections.abc.Mapping[str, 
 
 
 def main(argv: list[str] | None = None) -> None:
+    import bot.telemetry
+
     parser = argparse.ArgumentParser(
         description="Turnkey phone bot: start local LiveKit if needed, mint token, join the room.",
     )
@@ -241,6 +243,12 @@ def main(argv: list[str] | None = None) -> None:
         _configure_logging(verbose=bool(args.verbose))
 
     env_path = _ensure_env_file(pathlib.Path(str(args.env)).expanduser())
+    # Surface OTEL knobs from the env file into the process env before configure (file does not win over shell).
+    for key, value in load_env(env_path).items():
+        if key in {"BOT_OTEL_DISABLED", "BOT_OTEL_LOG_FILE"} and key not in os.environ:
+            os.environ[key] = value
+    # Opt-out local OTEL JSONL export for generator request bodies (BOT_OTEL_DISABLED / BOT_OTEL_LOG_FILE).
+    _ = bot.telemetry.configure()
     if not bool(args.skip_livekit_start):
         _ensure_livekit()
 
