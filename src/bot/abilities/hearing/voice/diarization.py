@@ -1,5 +1,6 @@
 from ... import ability
 from ... import classifying
+from . import segment
 
 import abc
 import dataclasses
@@ -10,38 +11,69 @@ import pydantic
 
 from bot.telemetry import observer
 
-class VoiceDiarizationSegment(pydantic.BaseModel):
-    """A speaker-attributed time span in diarized voice input."""
+
+class InputData(pydantic.BaseModel):
+    """Raw PCM audio and the format needed by a voice diarizer."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
         json_schema_extra={
             "examples": [
                 {
-                    "speaker_label": "speaker_1",
+                    "audio": "AAA=",
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 48000,
+                    "channels": 1,
+                }
+            ],
+        },
+    )
+
+    audio: bytes = pydantic.Field(
+        min_length=1,
+        description="Raw signed 16-bit PCM audio bytes to diarize; JSON callers provide base64-encoded bytes.",
+        examples=["AAAA"],
+    )
+    media_type: typing.Literal["audio/pcm"] = pydantic.Field(
+        description="Media type of audio; diarization accepts raw signed 16-bit PCM only.",
+        examples=["audio/pcm"],
+    )
+    sample_rate_hz: int = pydantic.Field(
+        ge=1,
+        description="PCM sample rate in hertz.",
+        examples=[48000],
+    )
+    channels: int = pydantic.Field(
+        ge=1,
+        description="Number of interleaved PCM channels.",
+        examples=[1, 2],
+    )
+
+
+class VoiceDiarizationSegment(segment.VoiceSegment):
+    """One clipped, time-bounded audio segment produced by voice diarization."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+        json_schema_extra={
+            "examples": [
+                {
+                    "audio": "AAA=",
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 4,
+                    "channels": 1,
                     "start_seconds": 0.0,
-                    "end_seconds": 1.25,
+                    "end_seconds": 0.25,
                     "confidence": 0.87,
                 }
             ],
         },
     )
 
-    speaker_label: str = pydantic.Field(
-        min_length=1,
-        description="Provider-neutral speaker label that is stable within this diarization result.",
-        examples=["speaker_1"],
-    )
-    start_seconds: float = pydantic.Field(
-        ge=0.0,
-        description="Inclusive start time of this speaker segment, measured in seconds from the beginning of input.",
-        examples=[0.0],
-    )
-    end_seconds: float = pydantic.Field(
-        ge=0.0,
-        description="Exclusive end time of this speaker segment, measured in seconds from the beginning of input.",
-        examples=[1.25],
-    )
     confidence: float | None = pydantic.Field(
         default=None,
         ge=0.0,
@@ -50,13 +82,6 @@ class VoiceDiarizationSegment(pydantic.BaseModel):
         examples=[0.87],
     )
 
-    @pydantic.model_validator(mode="after")
-    def validate_time_span(self) -> typing.Self:
-        """Require each diarized segment to cover a positive time span."""
-
-        if self.end_seconds <= self.start_seconds:
-            raise ValueError("end_seconds must be greater than start_seconds.")
-        return self
 
 class OutputData(pydantic.BaseModel):
     """Provider-neutral diarization result for voice input."""
@@ -68,15 +93,21 @@ class OutputData(pydantic.BaseModel):
                 {
                     "segments": [
                         {
-                            "speaker_label": "speaker_1",
+                            "audio": "AAA=",
+                            "media_type": "audio/pcm",
+                            "sample_rate_hz": 4,
+                            "channels": 1,
                             "start_seconds": 0.0,
-                            "end_seconds": 1.25,
+                            "end_seconds": 0.25,
                             "confidence": 0.87,
                         },
                         {
-                            "speaker_label": "speaker_2",
-                            "start_seconds": 1.25,
-                            "end_seconds": 2.0,
+                            "audio": "AAAAAA==",
+                            "media_type": "audio/pcm",
+                            "sample_rate_hz": 4,
+                            "channels": 1,
+                            "start_seconds": 0.25,
+                            "end_seconds": 0.75,
                             "confidence": 0.82,
                         },
                     ]
@@ -87,13 +118,19 @@ class OutputData(pydantic.BaseModel):
 
     segments: tuple[VoiceDiarizationSegment, ...] = pydantic.Field(
         min_length=1,
-        description="Speaker-attributed segments ordered by ascending start time in the voice input.",
+        description=(
+            "Clipped audio segments ordered by ascending start time in the voice input. Each segment "
+            "retains its timing and optional diarization confidence."
+        ),
         examples=[
             [
                 {
-                    "speaker_label": "speaker_1",
+                    "audio": "AAA=",
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 4,
+                    "channels": 1,
                     "start_seconds": 0.0,
-                    "end_seconds": 1.25,
+                    "end_seconds": 0.25,
                     "confidence": 0.87,
                 }
             ]
@@ -105,14 +142,16 @@ class OutputData(pydantic.BaseModel):
         """Require diarization segments to be ordered by start time."""
 
         previous_start_seconds: float | None = None
-        for segment in self.segments:
-            if previous_start_seconds is not None and segment.start_seconds < previous_start_seconds:
+        for voice_segment in self.segments:
+            if previous_start_seconds is not None and voice_segment.start_seconds < previous_start_seconds:
                 raise ValueError("segments must be ordered by ascending start_seconds.")
-            previous_start_seconds = segment.start_seconds
+            previous_start_seconds = voice_segment.start_seconds
         return self
 
-class VoiceDiarizer(classifying.Classifier[bytes, OutputData], abc.ABC):
-    """Classifier that diarizes raw voice input into speaker-attributed segments."""
+
+class VoiceDiarizer(classifying.Classifier[InputData, OutputData], abc.ABC):
+    """Classifier that diarizes raw PCM voice input into speaker-attributed segments."""
+
 
 _VoiceDiarizationApplyCompletedEvent = hsm.Event[OutputData](
     name="bot.ability.hearing.voice.diarization.apply.completed",
@@ -125,13 +164,15 @@ _VoiceDiarizationApplyFailedEvent = hsm.Event[ability.FailureData](
     schema=ability.FailureData,
 )
 
+
 def _has_voice_diarization_input(
     ctx: hsm.Context,
     instance: "VoiceDiarization",
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx, instance
-    return isinstance(event.data, bytes)
+    return isinstance(event.data, InputData)
+
 
 def _has_voice_diarization_output(
     ctx: hsm.Context,
@@ -141,6 +182,7 @@ def _has_voice_diarization_output(
     del ctx, instance
     return isinstance(event.data, OutputData)
 
+
 def _has_invalid_voice_diarization_output(
     ctx: hsm.Context,
     instance: "VoiceDiarization",
@@ -148,6 +190,7 @@ def _has_invalid_voice_diarization_output(
 ) -> bool:
     del ctx, instance
     return not isinstance(event.data, OutputData)
+
 
 def _has_voice_diarization_failure(
     ctx: hsm.Context,
@@ -157,20 +200,19 @@ def _has_voice_diarization_failure(
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
 
-class VoiceDiarization(classifying.Classifying[bytes, OutputData]):
+
+class VoiceDiarization(classifying.Classifying[InputData, OutputData]):
     """Ability to diarize hearing input by speaker."""
 
-    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
+    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[bytes]] = ability.ability_input_event(
-        "bot.ability.hearing.voice.diarization.input",
-        bytes,
-        description="Raw hearing audio bytes to diarize by speaker.",
-        examples=["base64-encoded audio bytes"],
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+        name="bot.ability.hearing.voice.diarization.input",
+        schema=InputData,
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.hearing.voice.diarization.output",
-        OutputData,
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+        name="bot.ability.hearing.voice.diarization.output",
+        schema=OutputData,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _VoiceDiarizationApplyCompletedEvent
@@ -182,9 +224,7 @@ class VoiceDiarization(classifying.Classifying[bytes, OutputData]):
         instance: "VoiceDiarization",
         event: hsm.Event[typing.Any],
     ) -> None:
-        failure = ability.FailureData(
-            message="VoiceDiarization produced output that does not match its output schema."
-        )
+        failure = ability.FailureData(message="VoiceDiarization produced output that does not match its output schema.")
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=event.id or None,

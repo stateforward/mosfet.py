@@ -37,17 +37,13 @@ class Classifying(ability.Ability[ability.TInput, ability.TOutput]):
     classifier: Classifier[ability.TInput, ability.TOutput]
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
-    input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
+    input_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.classifying.input",
-        data_type=object,
-        description="InputData event data to classify.",
-        examples=["classification input"],
+        schema=object,
     )
-    output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
+    output_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.classifying.output",
-        data_type=object,
-        description="OutputData event data produced by classification.",
-        examples=["classification output"],
+        schema=object,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _ClassifyingApplyCompletedEvent

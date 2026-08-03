@@ -1,38 +1,20 @@
-from .. import ability
-from .. import cognition
 from .. import decoding
 from .. import encoding
-from .. import participating
+from .. import cognition
+from .. import turn_detector
 
 import abc
 import typing as typ
 
-import hsm
 import pydantic
 
-from ..participating import ParticipationStimulus
-from .conversation import (
-    Conversation,
-    Message,
-    VoiceMessage,
-    define_conversation_model,
-)
+from .conversation import ConversationInputData
 
 
-def _has_voice_message(
-    ctx: hsm.Context,
-    instance: Conversation[typ.Any, typ.Any],
-    event: hsm.Event[typ.Any],
-) -> bool:
-    del ctx, instance
-    return isinstance(event.data, Message) and isinstance(event.data.content, participating.AudioStimulus)
-
-
-class VoiceDecoder(decoding.Decoder[participating.AudioStimulus, str], abc.ABC):
+class VoiceDecoder(decoding.Decoder[turn_detector.AudioStimulus, str], abc.ABC):
     """Decoder for a voice conversation turn.
 
-    Implementations receive the accepted audio stimulus for the current voice turn and return decoded readable text
-    used by participation and host-owned cognition, memory, and response encoding.
+    Implementations receive audio for the current open turn (clip or assembled) and return readable text.
     """
 
 
@@ -48,37 +30,20 @@ class EncodeData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "message": {
-                        "conversation_ref": "support-call",
-                        "self_participant_ref": "bot",
-                        "participants": [
-                            {
-                                "ref": "bot",
-                                "kind": "bot",
-                                "state": {"presence": "present", "attention": "available", "turn": "listening"},
-                            },
-                            {
-                                "ref": "caller",
-                                "kind": "human",
-                                "state": {"presence": "present", "attention": "available", "turn": "holding"},
-                            },
-                        ],
-                        "content": {"kind": "audio", "source_participant_ref": "caller", "content": "aGVsbG8="},
-                    },
+                    "source_ids": ["caller"],
+                    "target_ids": ["bot"],
+                    "content": "aGVsbG8=",
+                    "content_type": "audio/raw",
                     "decoded_text": "hello",
                     "participation": {
-                        "participant_ref": "bot",
-                        "contribution": {
-                            "conversation_ref": "support-call",
-                            "participant_ref": "caller",
-                            "perception": {
-                                "source_participant_ref": "caller",
-                                "modality": "audio",
-                                "speech": "aGVsbG8=",
-                                "confidence": 0.91,
-                            },
+                        "conversation_ref": "support-call",
+                        "participant_ref": "caller",
+                        "perception": {
+                            "source_participant_ref": "caller",
+                            "modality": "audio",
+                            "speech": "aGVsbG8=",
+                            "confidence": 0.91,
                         },
-                        "reason": "DecodedData voice stimulus was accepted.",
                     },
                     "result": [],
                     "memory_context": [],
@@ -87,7 +52,7 @@ class EncodeData(pydantic.BaseModel):
         },
     )
 
-    message: VoiceMessage = pydantic.Field(
+    message: ConversationInputData = pydantic.Field(
         description="Original voice message accepted for this turn.",
     )
     decoded_text: str = pydantic.Field(
@@ -95,7 +60,7 @@ class EncodeData(pydantic.BaseModel):
         description="Readable text decoded from the accepted audio stimulus.",
         examples=["hello"],
     )
-    participation: participating.participating.OutputData = pydantic.Field(
+    participation: turn_detector.ParticipantContribution = pydantic.Field(
         description="Participant contribution produced from the decoded voice stimulus.",
     )
     result: cognition.types.OutputData = pydantic.Field(
@@ -112,59 +77,7 @@ class EncodeData(pydantic.BaseModel):
 
 
 class VoiceEncoder(encoding.Encoder[EncodeData, str | bytes], abc.ABC):
-    """Encoder for a completed voice conversation turn.
-
-    Implementations receive the public voice encoding input and produce the channel response bytes or text to publish.
-    Hosts own encoding after cognition and memory complete.
-    """
+    """Encoder for a completed voice conversation turn."""
 
 
-class VoiceConversation(Conversation[VoiceMessage, typ.Any]):
-    """Thin voice conversation coordinator (decode + participate).
-
-    Encoder is retained as a host-facing collaborator, not a conversation HSM child.
-    """
-
-    input_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = VoiceMessage
-    _encoding: encoding.Encoding[EncodeData, str | bytes]
-    input_event: typ.ClassVar[hsm.Event[VoiceMessage]] = ability.ability_input_event(
-        "bot.ability.conversation.voice.input",
-        VoiceMessage,
-    )
-
-    def __init__(
-        self,
-        *,
-        participating: participating.Participating,
-        decoder: VoiceDecoder | None,
-        encoder: VoiceEncoder | None,
-    ) -> None:
-        if decoder is None:
-            raise ValueError("VoiceConversation requires decoder.")
-        if encoder is None:
-            raise ValueError("VoiceConversation requires encoder.")
-        stimulus_decoding = decoding.Decoding(decoder=typ.cast(decoding.Decoder[ParticipationStimulus, str], decoder))
-        self._encoding = encoding.Encoding(encoder=encoder)
-        super().__init__(
-            decoding=stimulus_decoding,
-            participating=participating,
-        )
-
-    @property
-    def encoding(self) -> encoding.Encoding[EncodeData, str | bytes]:
-        """Host-facing voice encoding collaborator (not a conversation HSM child)."""
-
-        return self._encoding
-
-    @typ.override
-    def _conversation_kind(self) -> str:
-        return "voice"
-
-    submodel: typ.ClassVar[hsm.Model | None] = define_conversation_model(
-        "VoiceConversation",
-        input_event=input_event,
-        input_guard=_has_voice_message,
-    )
-
-
-__all__ = ["VoiceConversation", "VoiceMessage", "VoiceDecoder", "VoiceEncoder", "EncodeData"]
+__all__ = ["ConversationInputData", "VoiceDecoder", "VoiceEncoder", "EncodeData"]

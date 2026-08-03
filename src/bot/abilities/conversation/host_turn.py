@@ -1,7 +1,7 @@
 """Standalone host composition for conversation turns (tests / non-Bot hosts).
 
 Conversation coordinates decode → participate only and does not know its
-attachment owner. These helpers wire contribute → decide → remember → encode
+attachment owner. These helpers wire contribute → decide → encode
 for **standalone** composition where no Bot body bridge is in play.
 
 Product path when Conversation is on ``Bot(acquired_abilities=…)``: the Bot
@@ -19,17 +19,16 @@ from .. import ability
 from .. import cognition
 from .. import encoding
 from .. import language
-from .. import memory
 from ..cognition import is_output
 from ..language import text
 from . import decision_input
 from . import voice
 from .conversation import (
+    ConversationInputData,
     Conversation,
     ParticipatedTurn,
     Response,
-    TextMessage,
-    VoiceMessage,
+    participated_turn_from_response,
 )
 
 import asyncio
@@ -38,22 +37,21 @@ import typing
 import uuid
 
 import hsm
-from sqlalchemy import insert
-from sqlalchemy import select
 
 
 def _target_device_ref(participated: ParticipatedTurn) -> str:
-    source_ref = participated.participation.contribution.participant_ref
-    source = next(
-        (participant for participant in participated.input.participants if participant.ref == source_ref),
-        None,
-    )
-    if source is not None:
-        return source.ref
-    participant_ref = next((participant.ref for participant in participated.input.participants), None)
-    if participant_ref is not None:
-        return participant_ref
-    return source_ref
+    """Project the conversation identity onto the host's named device boundary."""
+
+    identity = next(iter(participated.input.target_ids), next(iter(participated.input.source_ids)))
+    if not isinstance(identity, str):
+        raise ValueError("host turn target_device requires a named target or source identity.")
+    return identity
+
+
+def _decoded_text(participated: ParticipatedTurn) -> str:
+    if participated.decoded_text is None:
+        raise RuntimeError("Conversation produced no decoded text for a text host turn.")
+    return participated.decoded_text
 
 
 def _cognition_input_for_participated(
@@ -105,42 +103,41 @@ async def _apply_and_await_output(
 
 
 async def contribute_conversation_turn(
-    conversation: Conversation[typing.Any, Response],
-    message: TextMessage | VoiceMessage,
+    conversation: Conversation,
+    message: ConversationInputData,
     *,
     ctx: hsm.Context | None = None,
 ) -> ParticipatedTurn:
     """Run an attached conversation through decode → participate for host composition."""
 
     context = conversation.context() if ctx is None else ctx
-    operation_id = uuid.uuid4().hex
-    result: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-    conversation.register_contribution_waiter(operation_id, result)
-    input_event = conversation.input_event.with_data_and_id(message, operation_id)
-    try:
-        _ = await hsm.dispatch(context, conversation, input_event)
-        participated = await asyncio.wait_for(result, timeout=5.0)
-    finally:
-        conversation.clear_contribution_waiter(operation_id)
-    if not isinstance(participated, ParticipatedTurn):
-        raise RuntimeError("Conversation produced no participated turn.")
-    return participated
+    response = await _apply_and_await_output(
+        conversation,
+        message,
+        ctx=context,
+        accept=lambda output: isinstance(output, Response),
+    )
+    assert isinstance(response, Response)
+    return participated_turn_from_response(message, response)
 
 
 async def run_host_voice_respond_turn(
     *,
-    conversation: voice.VoiceConversation,
+    conversation: Conversation,
     cognition: cognition.Cognition,
-    memory: memory.Memory | None,
-    message: VoiceMessage,
+    message: ConversationInputData,
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Standalone contribute → decide → remember → encode (not the Bot body product path)."""
+    """Standalone contribute → decide → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
+    decoded_text = _decoded_text(participated)
+    memory_context = tuple(
+        content for item in participated.memories if isinstance(content := item.content, str) and content.strip()
+    )
     cognition_input = _cognition_input_for_participated(
         participated,
         cognition=cognition,
@@ -154,45 +151,12 @@ async def run_host_voice_respond_turn(
     )
     assert is_output(brain_output)
 
-    memory_context: tuple[str, ...] = ()
-    if memory is not None:
-        contribution = participated.participation.contribution
-        scope = getattr(type(memory), "default_scope", "short_term")
-        table = abilities.memory.memory_table
-        select_clause = (
-            select(table.c.content)
-            .where(table.c.context_ref == contribution.conversation_ref)
-            .order_by(table.c.created_at)
-        )
-        insert_clause = insert(table).values(
-            memory_id=uuid.uuid4().hex,
-            scope=scope if isinstance(scope, str) else "short_term",
-            context_ref=contribution.conversation_ref,
-            subject_ref=contribution.participant_ref,
-            kind="task",
-            sensitivity="standard",
-            retention="retain",
-            content=participated.decoded_text,
-            content_format="text/plain",
-            query_tags=None,
-        )
-        memory_input = abilities.memory.InputData(
-            statements=abilities.memory.compile_statements(select_clause, insert_clause)
-        )
-        memory_output = await _apply_and_await_output(
-            memory,
-            memory_input,
-            ctx=context,
-            accept=lambda item: isinstance(item, abilities.memory.OutputData),
-        )
-        assert isinstance(memory_output, abilities.memory.OutputData)
-        memory_context = memory_output.contents(statement_index=0)
     assert conversation.encoding is not None
     encoded = await _apply_and_await_output(
         conversation.encoding,
         voice.EncodeData(
             message=message,
-            decoded_text=participated.decoded_text,
+            decoded_text=decoded_text,
             participation=participated.participation,
             result=brain_output,
             memory_context=memory_context,
@@ -202,29 +166,34 @@ async def run_host_voice_respond_turn(
     )
     assert isinstance(encoded, (str, bytes))
     return Response(
-        conversation_ref=message.conversation_ref,
-        self_participant_ref=message.self_participant_ref,
-        participants=message.participants,
+        source_ids=message.source_ids,
+        target_ids=message.target_ids,
         content=encoded,
+        content_type="audio/raw",
+        session_ref=participated.session_ref,
+        memories=participated.memories,
     )
 
 
 async def run_host_text_respond_turn(
     *,
-    conversation: Conversation[typing.Any, Response],
+    conversation: Conversation,
     cognition: cognition.Cognition,
-    memory: memory.Memory | None,
     text_generation: language.TextGeneration,
     encoding: encoding.Encoding[str, str | bytes],
-    message: TextMessage,
+    message: ConversationInputData,
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
 ) -> Response:
-    """Standalone contribute → decide → remember → generate → encode (not the Bot body product path)."""
+    """Standalone contribute → decide → generate → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
+    decoded_text = _decoded_text(participated)
+    memory_context = tuple(
+        content for item in participated.memories if isinstance(content := item.content, str) and content.strip()
+    )
     cognition_input = _cognition_input_for_participated(
         participated,
         cognition=cognition,
@@ -238,39 +207,6 @@ async def run_host_text_respond_turn(
     )
     assert is_output(brain_output)
 
-    memory_context: tuple[str, ...] = ()
-    if memory is not None:
-        contribution = participated.participation.contribution
-        scope = getattr(type(memory), "default_scope", "short_term")
-        table = abilities.memory.memory_table
-        select_clause = (
-            select(table.c.content)
-            .where(table.c.context_ref == contribution.conversation_ref)
-            .order_by(table.c.created_at)
-        )
-        insert_clause = insert(table).values(
-            memory_id=uuid.uuid4().hex,
-            scope=scope if isinstance(scope, str) else "short_term",
-            context_ref=contribution.conversation_ref,
-            subject_ref=contribution.participant_ref,
-            kind="task",
-            sensitivity="standard",
-            retention="retain",
-            content=participated.decoded_text,
-            content_format="text/plain",
-            query_tags=None,
-        )
-        memory_input = abilities.memory.InputData(
-            statements=abilities.memory.compile_statements(select_clause, insert_clause)
-        )
-        memory_output = await _apply_and_await_output(
-            memory,
-            memory_input,
-            ctx=context,
-            accept=lambda item: isinstance(item, abilities.memory.OutputData),
-        )
-        assert isinstance(memory_output, abilities.memory.OutputData)
-        memory_context = memory_output.contents(statement_index=0)
     system_parts = ["You are a concise conversational assistant."]
     if memory_context:
         system_parts.append("Relevant memory:\n" + "\n".join(memory_context))
@@ -282,7 +218,7 @@ async def run_host_text_respond_turn(
             ),
             text.generation.TextMessage(
                 role=language.TextRole.USER,
-                content=participated.decoded_text,
+                content=decoded_text,
             ),
         ),
     )
@@ -302,10 +238,12 @@ async def run_host_text_respond_turn(
     )
     assert isinstance(encoded, (str, bytes))
     return Response(
-        conversation_ref=message.conversation_ref,
-        self_participant_ref=message.self_participant_ref,
-        participants=message.participants,
+        source_ids=message.source_ids,
+        target_ids=message.target_ids,
         content=encoded,
+        content_type="text/plain",
+        session_ref=participated.session_ref,
+        memories=participated.memories,
     )
 
 

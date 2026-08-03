@@ -2,7 +2,7 @@
 
 Two things happen to an arriving sound and they happen on very different timescales. Weighing it
 against what the body is currently doing is about a *moment* and costs nothing. Working out what
-it was — voice detection, speech decoding — takes seconds and is somebody else's job
+it was — voice detection, direct voice identification, speech decoding — takes seconds and is somebody else's job
 (:class:`~bot.abilities.listening.interpretation.Interpretation`).
 
 Nothing sits between the ear and the prediction. That is the whole shape of this machine: a sound
@@ -16,6 +16,7 @@ from __future__ import annotations
 from . import interpretation
 from . import sensitivity
 from .. import ability
+from .. import classifying
 from ..hearing import sound
 from ..hearing import speech
 from ..hearing import voice
@@ -46,11 +47,6 @@ def _has_listening_input(ctx: hsm.Context, instance: "Listening", event: hsm.Eve
     return isinstance(event.data, SoundData)
 
 
-def _has_sensed_sound(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, sensitivity.OutputData)
-
-
 def _has_efference_copy(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
     return isinstance(event.data, speaking.EfferenceData)
@@ -72,7 +68,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     Public input is ``environment.sound``; the success terminal is cognitive input whose stimulus
     is the original sound or decoded speech. Scoring against the body's own predictions
     (:class:`~bot.abilities.listening.sensitivity.Sensitivity`) happens here, on arrival.
-    Everything slower is delegated to :class:`~bot.abilities.listening.interpretation.Interpretation`,
+    Everything slower, including direct voice identification, is delegated to
+    :class:`~bot.abilities.listening.interpretation.Interpretation`,
     whose products come back out through this ability's own terminals.
     """
 
@@ -91,6 +88,11 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+        voice_classifier: classifying.Classifier[
+            voice.identification.InputData,
+            voice.identification.OutputData,
+        ]
+        | None = None,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
     ) -> None:
         super().__init__()
@@ -100,9 +102,15 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             sound_classifier=sound_classifier,
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
+            voice_classifier=voice_classifier,
             product_threshold_db=product_threshold_db,
         )
         self._attachment_group = attachment.Group(self._sensitivity, self._interpretation)
+
+    @staticmethod
+    def _has_sensed_sound(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, sensitivity.OutputData)
 
     @staticmethod
     def _forward_efference_copy(

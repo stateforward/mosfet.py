@@ -1,7 +1,7 @@
 """Interpretation: working out what a heard sound turns out to be.
 
 Everything slow about hearing is here — voice detection, non-speech labelling, diarization,
-speech decoding — and it is a machine of its own for one reason: it is slow, and the thing in
+direct voice identification, speech decoding — and it is a machine of its own for one reason: it is slow, and the thing in
 front of it must not be. Scoring an arrival against what the body predicted is about a *moment*;
 working out what the arrival was takes seconds. While these shared one queue, a sound that
 reached the ear inside its window could be scored after the window closed, because the score was
@@ -22,11 +22,15 @@ from __future__ import annotations
 
 from . import sensitivity
 from .. import ability
+from .. import classifying
 from ..hearing import sound
 from ..hearing import speech
 from ..hearing import voice
+from ..identity import value
 
+import asyncio
 import dataclasses
+import math
 import typing
 import uuid
 
@@ -51,6 +55,7 @@ ListeningStage: typing.TypeAlias = typing.Literal[
     "voice_detection",
     "sound_classification",
     "voice_diarization",
+    "voice_identification",
     "speech_decoding",
 ]
 
@@ -92,7 +97,7 @@ class _VoiceDetectionCompletedEventData(pydantic.BaseModel):
     )
 
     sensed: sensitivity.OutputData
-    voice_detection: voice.detection.OutputData
+    voice_detection: voice.detection.ApplyData
 
 
 class _VoiceDiarizationCompletedEventData(pydantic.BaseModel):
@@ -105,8 +110,23 @@ class _VoiceDiarizationCompletedEventData(pydantic.BaseModel):
     )
 
     sensed: sensitivity.OutputData
-    voice_detection: voice.detection.OutputData
-    diarization: voice.diarization.OutputData
+    voice_detection: voice.detection.ApplyData
+    segments: tuple[voice.diarization.VoiceDiarizationSegment, ...]
+
+
+class _VoiceIdentificationCompletedEventData(pydantic.BaseModel):
+    """Private completion payload for direct voice identification inside Listening."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+    )
+
+    sensed: sensitivity.OutputData
+    voice_detection: voice.detection.ApplyData
+    segments: tuple[voice.VoiceSegment, ...]
+    embeddings: tuple[voice.identification.VoiceEmbedding, ...]
 
 
 class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
@@ -119,9 +139,8 @@ class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
     )
 
     sensed: sensitivity.OutputData
-    voice_detection: voice.detection.OutputData
+    voice_detection: voice.detection.ApplyData
     speech: bytes
-    diarization: voice.diarization.OutputData | None = None
 
 
 class _SoundClassificationCompletedEventData(pydantic.BaseModel):
@@ -134,13 +153,141 @@ class _SoundClassificationCompletedEventData(pydantic.BaseModel):
     )
 
     sensed: sensitivity.OutputData
-    voice_detection: voice.detection.OutputData
+    voice_detection: voice.detection.ApplyData
     classification: "sound.classification.OutputData"
+
+
+class SpeechData(pydantic.BaseModel):
+    """PCM speech observation for conversation turn assembly (no STT).
+
+    Listening VAD classifies one admission of sound. Sticky conversational turns assemble these
+    speech observations under Conversation turn Start/End; speech decoding belongs there.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+        json_schema_extra={
+            "description": (
+                "One Listening speech observation after voice detection: raw audio plus relative voice "
+                "spans. Empty segments means no voice in this observation (including silence used to "
+                "close a turn)."
+            ),
+            "examples": [
+                {
+                    "audio": "AAAA",
+                    "voice_detection": {
+                        "segments": [{"start_seconds": 0.0, "end_seconds": 0.4, "confidence": 0.9}],
+                    },
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 48000,
+                    "channels": 1,
+                },
+                {
+                    "audio": "AAAA",
+                    "voice_detection": {"segments": []},
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 48000,
+                    "channels": 1,
+                },
+            ],
+        },
+    )
+
+    audio: bytes = pydantic.Field(
+        min_length=1,
+        description=(
+            "PCM audio for this observation. Homogeneous with other observations on the same conversation "
+            "stream so turn assembly can concatenate bytes."
+        ),
+    )
+    start_seconds: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        description="Optional start time of this clipped voice segment in the source audio.",
+        examples=[0.0],
+    )
+    end_seconds: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        description="Optional exclusive end time of this clipped voice segment in the source audio.",
+        examples=[1.25],
+    )
+    confidence: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Optional diarizer confidence for this clipped speech segment.",
+        examples=[0.87],
+    )
+    voice_embedding: voice.identification.VoiceEmbedding | None = pydantic.Field(
+        default=None,
+        description="Optional voice embedding produced by the configured classifier.",
+    )
+    source_ids: value.IdentitySet = pydantic.Field(
+        default_factory=frozenset,
+        description=(
+            "Opaque source identities for this speech observation. Empty source_ids are permitted when "
+            "Listening has speech evidence but no identity classifier result; Conversation rejects them."
+        ),
+        examples=[[], [[0.12, -0.08, 0.31]]],
+    )
+    voice_detection: voice.detection.ApplyData = pydantic.Field(
+        description="Voice spans from VoiceDetection relative to the start of this observation.",
+    )
+    sample_rate_hz: int = pydantic.Field(
+        ge=1,
+        description="Sample rate of audio in hertz (required to place the observation on a conversation timeline).",
+        examples=[48000],
+    )
+    media_type: typing.Literal["audio/pcm"] = pydantic.Field(
+        description="Validated media type for the signed 16-bit PCM audio bytes.",
+        examples=["audio/pcm"],
+    )
+    channels: int = pydantic.Field(
+        default=1,
+        ge=1,
+        description="Channel count of audio.",
+        examples=[1],
+    )
+
+    @property
+    def duration_seconds(self) -> float:
+        """Duration of PCM audio using the stream's signed 16-bit sample convention, in seconds."""
+
+        frame_bytes = 2 * self.channels
+        return (len(self.audio) // frame_bytes) / float(self.sample_rate_hz) if frame_bytes > 0 else 0.0
+
+    @pydantic.model_validator(mode="after")
+    def validate_segment_timing(self) -> typing.Self:
+        """Require optional segment timing to be supplied as a positive span."""
+
+        if (self.start_seconds is None) != (self.end_seconds is None):
+            raise ValueError("start_seconds and end_seconds must be supplied together.")
+        if self.start_seconds is not None and self.end_seconds is not None and self.end_seconds <= self.start_seconds:
+            raise ValueError("end_seconds must be greater than start_seconds.")
+        return self
+
+    @pydantic.field_validator("source_ids", mode="before")
+    @classmethod
+    def validate_source_ids(cls, raw_value: object) -> value.IdentitySet:
+        """Canonicalize named or embedding source identities."""
+
+        return value.normalize_identity_set(raw_value, field_name="source_ids", allow_empty=True)
+
+    @pydantic.field_serializer("source_ids", when_used="json")
+    def serialize_source_ids(self, identities: value.IdentitySet) -> list[str | list[float]]:
+        return value.identities_json(identities)
 
 
 ListeningFailedEvent = hsm.Event[FailedEventData](
     name="bot.ability.listening.failed",
     schema=FailedEventData,
+)
+SpeechEvent = hsm.Event[SpeechData](
+    name="bot.ability.listening.speech.output",
+    schema=SpeechData,
 )
 _VoiceDetectionCompletedEvent = hsm.Event[_VoiceDetectionCompletedEventData](
     name="bot.ability.listening.voice_detection.completed",
@@ -156,6 +303,11 @@ _VoiceDiarizationCompletedEvent = hsm.Event[_VoiceDiarizationCompletedEventData]
     name="bot.ability.listening.voice_diarization.completed",
     kind=hsm.CompletionEventKind,
     schema=_VoiceDiarizationCompletedEventData,
+)
+_VoiceIdentificationCompletedEvent = hsm.Event[_VoiceIdentificationCompletedEventData](
+    name="bot.ability.listening.voice_identification.completed",
+    kind=hsm.CompletionEventKind,
+    schema=_VoiceIdentificationCompletedEventData,
 )
 _SpeechDecodingCompletedEvent = hsm.Event[_SpeechDecodingCompletedEventData](
     name="bot.ability.listening.speech_decoding.completed",
@@ -180,6 +332,7 @@ def _listening_sensed(event: hsm.Event[typing.Any]) -> sensitivity.OutputData | 
         _VoiceDetectionCompletedEventData
         | _SoundClassificationCompletedEventData
         | _VoiceDiarizationCompletedEventData
+        | _VoiceIdentificationCompletedEventData
         | _SpeechDecodingCompletedEventData,
     ):
         return data.sensed
@@ -189,13 +342,15 @@ def _listening_sensed(event: hsm.Event[typing.Any]) -> sensitivity.OutputData | 
 def _listening_event_with_context(
     event: hsm.Event[typing.Any],
     source: hsm.Event[typing.Any],
+    *,
+    operation_id: str | None = None,
 ) -> hsm.Event[typing.Any]:
     """Copy operation id, acoustic source, and metadata along the private completion chain."""
 
-    operation_id = source.id if source.id else None
-    if operation_id is None:
-        operation_id = uuid.uuid4().hex
-    event = event.with_data_and_id(event.data, operation_id)
+    resolved_operation_id = operation_id if operation_id is not None else source.id
+    if resolved_operation_id is None:
+        resolved_operation_id = uuid.uuid4().hex
+    event = event.with_data_and_id(event.data, resolved_operation_id)
     return dataclasses.replace(
         event,
         source=source.source or event.source,
@@ -203,11 +358,13 @@ def _listening_event_with_context(
     )
 
 
-def _dispatch_listening_cognition_input(
+def _dispatch_listening_cognition_input_with_operation(
     ctx: hsm.Context,
     instance: "Interpretation",
     event: hsm.Event[typing.Any],
     stimulus: hsm.Event[typing.Any],
+    *,
+    operation_id: str | None,
 ) -> None:
     """Terminal handoff: ``cognition.InputEvent`` for the body owner when listening finishes.
 
@@ -217,81 +374,286 @@ def _dispatch_listening_cognition_input(
     resolves which of its devices a sensory product belongs to.
     """
 
-    stimulus = _listening_event_with_context(stimulus, event)
+    resolved_operation_id = operation_id or event.id or uuid.uuid4().hex
+    stimulus = _listening_event_with_context(stimulus, event, operation_id=resolved_operation_id)
     stimulus = dataclasses.replace(
         stimulus,
         source=event.source or stimulus.source,
         metadata=dict(event.metadata),
     )
     handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus))
-    handoff = _listening_event_with_context(handoff, event)
+    handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
     handoff = dataclasses.replace(handoff, source=hsm.id(instance), metadata=dict(stimulus.metadata))
     _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
 
 
-def _dispatch_listening_terminal_failure(
+def _dispatch_listening_terminal_failure_with_operation(
     ctx: hsm.Context,
     instance: "Interpretation",
     source: hsm.Event[typing.Any],
     failure: FailedEventData,
+    *,
+    operation_id: str | None,
 ) -> None:
-    terminal = _listening_event_with_context(instance.failed_event.with_data(failure), source)
+    resolved_operation_id = operation_id or source.id or uuid.uuid4().hex
+    terminal = _listening_event_with_context(
+        instance.failed_event.with_data(failure), source, operation_id=resolved_operation_id
+    )
     terminal = dataclasses.replace(terminal, source=hsm.id(instance))
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
 
-def _dispatch_stage_failure(
+def _dispatch_stage_failure_with_operation(
     ctx: hsm.Context,
     instance: "Interpretation",
     source: hsm.Event[typing.Any],
     *,
     stage: ListeningStage,
     message: str,
+    operation_id: str | None,
 ) -> None:
     failure = FailedEventData(stage=stage, message=message)
     _ = hsm.dispatch(
         ctx,
         instance,
-        _listening_event_with_context(_ListeningStageFailedEvent.with_data(failure), source),
+        _listening_event_with_context(
+            _ListeningStageFailedEvent.with_data(failure),
+            source,
+            operation_id=operation_id or source.id or uuid.uuid4().hex,
+        ),
     )
 
 
-def _dispatch_product_cognition_input(
+def _speech_from_sensed(
+    *,
+    sensed: sensitivity.OutputData,
+    voice_detection: voice.detection.ApplyData,
+    source_ids: value.IdentitySet = frozenset(),
+    voice_embedding: voice.identification.VoiceEmbedding | None = None,
+) -> SpeechData | None:
+    """Build a public PCM speech product; unsupported or incomplete formats fail closed."""
+
+    sound = sensed.sound
+    sample_rate_hz = sound.sample_rate_hz
+    channels = sound.channels if sound.channels is not None else 1
+    if sound.media_type != "audio/pcm" or sample_rate_hz is None or not sound.audio:
+        return None
+    speech = SpeechData(
+        audio=sound.audio,
+        voice_detection=voice_detection,
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
+        media_type="audio/pcm",
+        source_ids=source_ids,
+        voice_embedding=voice_embedding,
+    )
+    return speech
+
+
+def _speech_from_voice_segment(
+    *,
+    sensed: sensitivity.OutputData,
+    segment: voice.VoiceSegment,
+    source_ids: value.IdentitySet = frozenset(),
+    voice_embedding: voice.identification.VoiceEmbedding | None = None,
+    voice_detection: voice.detection.ApplyData | None = None,
+) -> SpeechData | None:
+    """Build one public speech product from one already-clipped voice segment.
+
+    Conversion errors are raised so the owning Listening machine can publish its typed
+    listening-stage failure instead of silently dropping a product.
+    """
+
+    sound = sensed.sound
+    if sound.media_type != "audio/pcm" or sound.sample_rate_hz is None:
+        raise ValueError("voice segment speech requires source audio/pcm with a sample rate.")
+    source_channels = sound.channels if sound.channels is not None else 1
+    if (
+        segment.media_type != sound.media_type
+        or segment.sample_rate_hz != sound.sample_rate_hz
+        or segment.channels != source_channels
+    ):
+        raise ValueError("voice segment audio format does not match its source audio.")
+    if not segment.audio:
+        raise ValueError("voice segment audio is empty.")
+    diarization_confidence = (
+        segment.confidence if isinstance(segment, voice.diarization.VoiceDiarizationSegment) else None
+    )
+    segment_voice_detection = (
+        voice.detection.ApplyData(
+            segments=(
+                voice.detection.VoiceDetectionSegment(
+                    start_seconds=0.0,
+                    end_seconds=segment.duration_seconds,
+                    confidence=diarization_confidence,
+                ),
+            )
+        )
+        if isinstance(segment, voice.diarization.VoiceDiarizationSegment)
+        else voice_detection or voice.detection.ApplyData(segments=())
+    )
+    return SpeechData(
+        audio=segment.audio,
+        voice_detection=segment_voice_detection,
+        sample_rate_hz=segment.sample_rate_hz,
+        media_type="audio/pcm",
+        channels=segment.channels,
+        start_seconds=segment.start_seconds,
+        end_seconds=segment.end_seconds,
+        confidence=diarization_confidence,
+        source_ids=source_ids,
+        voice_embedding=voice_embedding,
+    )
+
+
+def _voice_segment_from_detection(
+    *,
+    sensed: sensitivity.OutputData,
+    segment: voice.detection.VoiceDetectionSegment,
+) -> voice.VoiceSegment:
+    """Clip the first VAD span into the provider-neutral classifier input contract."""
+
+    sound = sensed.sound
+    if sound.media_type != "audio/pcm" or sound.sample_rate_hz is None or sound.channels is None:
+        raise ValueError("voice identification requires audio/pcm with sample rate and channels.")
+    frame_bytes = 2 * sound.channels
+    if len(sound.audio) % frame_bytes:
+        raise ValueError("voice identification requires complete 16-bit PCM frames.")
+    duration_seconds = len(sound.audio) / float(frame_bytes * sound.sample_rate_hz)
+    end_seconds = min(segment.end_seconds, duration_seconds)
+    if end_seconds <= segment.start_seconds:
+        raise ValueError("voice detection span contains no source audio.")
+    start_frame = math.floor(segment.start_seconds * sound.sample_rate_hz)
+    end_frame = math.ceil(end_seconds * sound.sample_rate_hz)
+    audio = sound.audio[start_frame * frame_bytes : end_frame * frame_bytes]
+    if not audio:
+        raise ValueError("voice detection span contains no PCM frames.")
+    return voice.VoiceSegment(
+        audio=audio,
+        media_type="audio/pcm",
+        sample_rate_hz=sound.sample_rate_hz,
+        channels=sound.channels,
+        start_seconds=segment.start_seconds,
+        end_seconds=end_seconds,
+    )
+
+
+def _dispatch_product_cognition_input_with_operation(
     ctx: hsm.Context,
     instance: "Interpretation",
     event: hsm.Event[typing.Any],
+    *,
+    operation_id: str | None,
 ) -> None:
     """Hand off whatever product this pipeline arrived at, whichever route it came by.
 
-    Speech-decoding product bytes (typically a UTF-8 transcript after STT) when there is a
-    transcript, the original sound otherwise. When Conversation is Bot-acquired, Bot bridges a
-    speech product into a Conversation Message (``text_turn`` for TextConversation,
-    ``voice_turn`` for VoiceConversation with acoustic payload).
+    - STT configured and completed: UTF-8 speech-decoding product for Conversation bridge.
+    - No STT (acoustic path): ``SpeechEvent`` with VAD spans + audio for Conversation /
+      conversation turn End (including empty-segment silence observations that close a sticky turn).
+    - Labeled non-speech (ring, busy, …): original ``environment.sound``.
     """
 
     completion = event.data
     if isinstance(completion, _SpeechDecodingCompletedEventData):
-        _dispatch_listening_cognition_input(
+        _dispatch_listening_cognition_input_with_operation(
             ctx,
             instance,
             event,
             speech.SpeechDecoding.output_event.with_data(completion.speech),
+            operation_id=operation_id,
         )
         return
+    if isinstance(completion, _VoiceDiarizationCompletedEventData):
+        try:
+            speech_products = tuple(
+                _speech_from_voice_segment(sensed=completion.sensed, segment=segment) for segment in completion.segments
+            )
+        except Exception as error:
+            _dispatch_listening_terminal_failure_with_operation(
+                ctx,
+                instance,
+                event,
+                FailedEventData(
+                    stage="voice_diarization",
+                    message=f"Voice diarization product conversion failed: {error}",
+                ),
+                operation_id=operation_id,
+            )
+            return
+        for speech_data in speech_products:
+            assert speech_data is not None
+            _dispatch_listening_cognition_input_with_operation(
+                ctx, instance, event, SpeechEvent.with_data(speech_data), operation_id=operation_id
+            )
+        return
+    if isinstance(completion, _VoiceIdentificationCompletedEventData):
+        if len(completion.segments) != len(completion.embeddings):
+            _dispatch_listening_terminal_failure_with_operation(
+                ctx,
+                instance,
+                event,
+                FailedEventData(
+                    stage="voice_identification",
+                    message="Voice identification returned one embedding per voice segment; requirement unmet.",
+                ),
+                operation_id=operation_id,
+            )
+            return
+        try:
+            speech_products = tuple(
+                _speech_from_voice_segment(
+                    sensed=completion.sensed,
+                    segment=segment,
+                    voice_embedding=embedding,
+                    source_ids=frozenset({embedding.embedding}),
+                    voice_detection=completion.voice_detection,
+                )
+                for segment, embedding in zip(completion.segments, completion.embeddings, strict=True)
+            )
+        except Exception as error:
+            _dispatch_listening_terminal_failure_with_operation(
+                ctx,
+                instance,
+                event,
+                FailedEventData(
+                    stage="voice_identification",
+                    message=f"Voice identification product conversion failed: {error}",
+                ),
+                operation_id=operation_id,
+            )
+            return
+        for speech_data in speech_products:
+            assert speech_data is not None
+            _dispatch_listening_cognition_input_with_operation(
+                ctx, instance, event, SpeechEvent.with_data(speech_data), operation_id=operation_id
+            )
+        return
+    # Acoustic path reaches HandingOff with VAD/diarization/unlabeled-classification completions
+    # only when STT is not configured (STT path always completes as SpeechDecoding). Labeled
+    # non-speech falls through to environment.sound.
+    if isinstance(
+        completion,
+        _VoiceDetectionCompletedEventData,
+    ) or (isinstance(completion, _SoundClassificationCompletedEventData) and not completion.classification.is_labeled):
+        speech_data = _speech_from_sensed(
+            sensed=completion.sensed,
+            voice_detection=completion.voice_detection,
+        )
+        if speech_data is not None:
+            _dispatch_listening_cognition_input_with_operation(
+                ctx,
+                instance,
+                event,
+                SpeechEvent.with_data(speech_data),
+                operation_id=operation_id,
+            )
+            return
     sensed = _listening_sensed(event)
     if sensed is None:
         raise AssertionError("listening cognition handoff requires sound on the event chain.")
-    _dispatch_listening_cognition_input(ctx, instance, event, SoundEvent.with_data(sensed.sound))
-
-
-def _dispatch_listening_failure(
-    ctx: hsm.Context,
-    instance: "Interpretation",
-    event: hsm.Event[typing.Any],
-) -> None:
-    failure = event.data
-    assert isinstance(failure, FailedEventData)
-    _dispatch_listening_terminal_failure(ctx, instance, event, failure)
+    _dispatch_listening_cognition_input_with_operation(
+        ctx, instance, event, SoundEvent.with_data(sensed.sound), operation_id=operation_id
+    )
 
 
 def _has_sensed_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
@@ -299,51 +661,10 @@ def _has_sensed_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.E
     return isinstance(event.data, sensitivity.OutputData)
 
 
-def _has_detected_voice(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    data = event.data
-    return isinstance(data, _VoiceDetectionCompletedEventData) and data.voice_detection.is_voice
+def _has_current_operation(active_operation_id: str | None, event: hsm.Event[typing.Any]) -> bool:
+    """Compare an event id with the operation id supplied by the owning machine callback."""
 
-
-def _has_detected_no_voice(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    data = event.data
-    return isinstance(data, _VoiceDetectionCompletedEventData) and not data.voice_detection.is_voice
-
-
-def _has_labeled_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    data = event.data
-    return isinstance(data, _SoundClassificationCompletedEventData) and data.classification.is_labeled
-
-
-def _has_unlabeled_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    data = event.data
-    return isinstance(data, _SoundClassificationCompletedEventData) and not data.classification.is_labeled
-
-
-def _has_voice_diarization_completion(
-    ctx: hsm.Context,
-    instance: "Interpretation",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx, instance
-    return isinstance(event.data, _VoiceDiarizationCompletedEventData)
-
-
-def _has_speech_decoding_completion(
-    ctx: hsm.Context,
-    instance: "Interpretation",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx, instance
-    return isinstance(event.data, _SpeechDecodingCompletedEventData)
-
-
-def _has_listening_stage_failure(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, FailedEventData)
+    return active_operation_id is not None and event.id == active_operation_id
 
 
 class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData]):
@@ -353,10 +674,20 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     (:class:`~bot.abilities.listening.sensitivity.OutputData`), which is why this can take as
     long as it likes: the weighing already happened, at the moment the sound arrived.
 
-    Stages (VAD, optional non-speech classification, optional diarization, optional STT) are
-    internal. Success terminal is cognitive input whose stimulus is the original sound or decoded
-    speech. No-voice audio is skipped unless an optional sound classifier assigns labels. Stage
-    progress is carried only on typed private completion/failure events (HSM-COMPLETION-001).
+    Stages (VAD, optional non-speech classification, optional diarization, direct voice identification,
+    and optional STT) are
+    internal. After VAD Start (first voice observation), Interpretation stays in **HearingSpeech** and
+    continues feeding scored frames to VoiceDetection until VAD End. Speech observations stream while
+    speech is open; whole-utterance STT/diarization (when configured) run only after End.
+
+    Success terminal is cognitive input whose stimulus is:
+
+    - decoded speech (when STT is configured, after utterance End),
+    - a :class:`SpeechData` product (acoustic path: per-observation stream + empty-segment End), or
+    - the original labeled non-speech sound (ring/busy/…).
+
+    With STT configured, unlabeled no-voice audio before speech is still skipped. Stage progress is
+    carried only on typed private completion/failure events (HSM-COMPLETION-001).
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = sensitivity.OutputData
@@ -372,7 +703,18 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _sound_classification: sound.classification.SoundClassification | None
     _speech_decoding: speech.SpeechDecoding | None
     _voice_diarization: voice.diarization.VoiceDiarization | None
+    _voice_identification: voice.identification.VoiceIdentification | None
     _attachment_group: attachment.Group
+    # Open utterance PCM while HearingSpeech (machine-owned sticky stream, not peer coordination).
+    _open_speech_audio: bytearray
+    _open_speech_sample_rate_hz: int | None
+    _open_speech_channels: int
+    _open_speech_confidence: float | None
+    _open_speech_sensed: sensitivity.OutputData | None
+    _open_speech_format_error: str | None
+    _active_source_ids: value.IdentitySet
+    _active_voice_embedding: voice.identification.VoiceEmbedding | None
+    _active_operation_id: str | None
 
     def __init__(
         self,
@@ -381,6 +723,11 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+        voice_classifier: classifying.Classifier[
+            voice.identification.InputData,
+            voice.identification.OutputData,
+        ]
+        | None = None,
         product_threshold_db: float = DEFAULT_PRODUCT_THRESHOLD_DB,
     ) -> None:
         super().__init__()
@@ -397,14 +744,440 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._voice_diarization = (
             voice.diarization.VoiceDiarization(classifier=voice_diarizer) if voice_diarizer is not None else None
         )
+        if voice_classifier is not None and speech_decoder is not None:
+            raise ValueError(
+                "voice_classifier cannot be combined with speech_decoder because embedding correlation would be lost."
+            )
+        self._voice_identification = (
+            voice.identification.VoiceIdentification(classifier=voice_classifier)
+            if voice_classifier is not None
+            else None
+        )
         children: list[hsm.Instance] = [self._voice_detection]
         if self._sound_classification is not None:
             children.append(self._sound_classification)
         if self._voice_diarization is not None:
             children.append(self._voice_diarization)
+        if self._voice_identification is not None:
+            children.append(self._voice_identification)
         if self._speech_decoding is not None:
             children.append(self._speech_decoding)
         self._attachment_group = attachment.Group(*children)
+        self._open_speech_audio = bytearray()
+        self._open_speech_sample_rate_hz = None
+        self._open_speech_channels = 1
+        self._open_speech_confidence = None
+        self._open_speech_sensed = None
+        self._open_speech_format_error = None
+        self._active_source_ids = frozenset()
+        self._active_voice_embedding = None
+        self._active_operation_id = None
+
+    @staticmethod
+    def _dispatch_listening_cognition_input(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+        stimulus: hsm.Event[typing.Any],
+    ) -> None:
+        _dispatch_listening_cognition_input_with_operation(
+            ctx,
+            instance,
+            event,
+            stimulus,
+            operation_id=instance._active_operation_id,
+        )
+
+    @staticmethod
+    def _dispatch_listening_failure(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        failure = event.data
+        assert isinstance(failure, FailedEventData)
+        _dispatch_listening_terminal_failure_with_operation(
+            ctx,
+            instance,
+            event,
+            failure,
+            operation_id=instance._active_operation_id,
+        )
+
+    @staticmethod
+    def _dispatch_stage_failure(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        source: hsm.Event[typing.Any],
+        *,
+        stage: ListeningStage,
+        message: str,
+    ) -> None:
+        _dispatch_stage_failure_with_operation(
+            ctx,
+            instance,
+            source,
+            stage=stage,
+            message=message,
+            operation_id=instance._active_operation_id,
+        )
+
+    @staticmethod
+    def _dispatch_product_cognition_input(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        _dispatch_product_cognition_input_with_operation(
+            ctx,
+            instance,
+            event,
+            operation_id=instance._active_operation_id,
+        )
+
+    @staticmethod
+    def _begin_operation(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """Stamp one operation id at the interpretation ingress, including id-less ingress."""
+
+        del ctx
+        instance._active_operation_id = event.id or uuid.uuid4().hex
+
+    @staticmethod
+    def _clear_operation(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """Clear the owned operation correlation after terminal success, drop, or failure."""
+
+        del ctx, event
+        instance._active_operation_id = None
+
+    @staticmethod
+    def _has_detected_voice(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            _has_current_operation(instance._active_operation_id, event)
+            and isinstance(data, _VoiceDetectionCompletedEventData)
+            and bool(data.voice_detection.segments)
+        )
+
+    @staticmethod
+    def _has_detected_voice_and_direct_identification(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        return (
+            Interpretation._has_detected_voice(ctx, instance, event)
+            and instance._voice_identification is not None
+            and instance._voice_diarization is None
+        )
+
+    @staticmethod
+    def _has_detected_no_voice(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            _has_current_operation(instance._active_operation_id, event)
+            and isinstance(data, _VoiceDetectionCompletedEventData)
+            and not data.voice_detection.segments
+        )
+
+    @staticmethod
+    def _has_labeled_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            _has_current_operation(instance._active_operation_id, event)
+            and isinstance(data, _SoundClassificationCompletedEventData)
+            and data.classification.is_labeled
+        )
+
+    @staticmethod
+    def _has_unlabeled_sound(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            _has_current_operation(instance._active_operation_id, event)
+            and isinstance(data, _SoundClassificationCompletedEventData)
+            and not data.classification.is_labeled
+        )
+
+    @staticmethod
+    def _has_voice_diarization_completion(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(
+            event.data, _VoiceDiarizationCompletedEventData
+        )
+
+    @staticmethod
+    def _has_voice_identification_completion(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(
+            event.data, _VoiceIdentificationCompletedEventData
+        )
+
+    @staticmethod
+    def _has_speech_decoding_completion(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(
+            event.data, _SpeechDecodingCompletedEventData
+        )
+
+    @staticmethod
+    def _has_listening_stage_failure(
+        ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]
+    ) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(event.data, FailedEventData)
+
+    @staticmethod
+    async def _await_child_output(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+        *,
+        child: ability.Ability[typing.Any, typing.Any],
+        child_input: object,
+        stage: ListeningStage,
+    ) -> object | None:
+        """Await one nested ability apply via typed input/terminal events (never reach into collab).
+
+        Returns the child's successful terminal payload, or ``None`` after a stage failure.
+        This is not the Listening pipeline product (cognition handoff); that is decided later at
+        HandingOff.
+        """
+
+        operation_id = instance._active_operation_id or event.id or uuid.uuid4().hex
+        try:
+            terminal = await ability.Ability.await_child_terminal(
+                ctx,
+                owner=instance,
+                child=child,
+                operation_id=operation_id,
+                input=child_input,
+                metadata=event.metadata,
+            )
+        except asyncio.CancelledError:
+            raise
+        if terminal.name == child.failed_event.name:
+            message_text = getattr(terminal.data, "message", f"Listening {stage} child failed.")
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage=stage,
+                message=str(message_text),
+            )
+            return None
+        return terminal.data
+
+    @staticmethod
+    def _clear_open_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Drop sticky utterance PCM when leaving an open-speech window."""
+
+        del ctx, event
+        instance._open_speech_audio = bytearray()
+        instance._open_speech_sample_rate_hz = None
+        instance._open_speech_channels = 1
+        instance._open_speech_confidence = None
+        instance._open_speech_sensed = None
+        instance._open_speech_format_error = None
+        instance._active_source_ids = frozenset()
+        instance._active_voice_embedding = None
+
+    @staticmethod
+    def _append_open_speech(
+        instance: "Interpretation",
+        sensed: sensitivity.OutputData,
+        voice_detection: voice.detection.ApplyData,
+    ) -> None:
+        sound = sensed.sound
+        if sound.media_type != "audio/pcm" and instance._open_speech_format_error is None:
+            instance._open_speech_format_error = "source audio must use media_type audio/pcm."
+        if sound.sample_rate_hz is None and instance._open_speech_format_error is None:
+            instance._open_speech_format_error = "source audio must include a sample rate."
+        if sound.channels is None and instance._open_speech_format_error is None:
+            instance._open_speech_format_error = "source audio must include a channel count."
+        if (
+            sound.sample_rate_hz is not None
+            and instance._open_speech_sample_rate_hz is not None
+            and sound.sample_rate_hz != instance._open_speech_sample_rate_hz
+            and instance._open_speech_format_error is None
+        ):
+            instance._open_speech_format_error = "source audio sample rate changed during the utterance."
+        if (
+            sound.channels is not None
+            and instance._open_speech_audio
+            and sound.channels != instance._open_speech_channels
+            and instance._open_speech_format_error is None
+        ):
+            instance._open_speech_format_error = "source audio channel count changed during the utterance."
+        if sound.sample_rate_hz is not None:
+            if instance._open_speech_sample_rate_hz is None:
+                instance._open_speech_sample_rate_hz = sound.sample_rate_hz
+        if sound.channels is not None:
+            if not instance._open_speech_audio:
+                instance._open_speech_channels = sound.channels
+        if sound.audio:
+            instance._open_speech_audio.extend(sound.audio)
+        confidences = tuple(
+            segment.confidence for segment in voice_detection.segments if segment.confidence is not None
+        )
+        if confidences:
+            confidence = min(confidences)
+            instance._open_speech_confidence = (
+                confidence
+                if instance._open_speech_confidence is None
+                else min(instance._open_speech_confidence, confidence)
+            )
+
+    @staticmethod
+    def _remember_open_speech_sensed(
+        instance: "Interpretation",
+        sensed: sensitivity.OutputData,
+    ) -> None:
+        open_speech_sensed = instance._open_speech_sensed
+        if open_speech_sensed is None:
+            instance._open_speech_sensed = sensed
+        elif open_speech_sensed.perceived_level_db is None and sensed.perceived_level_db is not None:
+            instance._open_speech_sensed = sensed
+        elif (
+            open_speech_sensed.perceived_level_db is not None
+            and sensed.perceived_level_db is not None
+            and sensed.perceived_level_db > open_speech_sensed.perceived_level_db
+        ):
+            instance._open_speech_sensed = sensed
+
+    @staticmethod
+    def _open_speech_sensed_or(
+        instance: "Interpretation",
+        fallback: sensitivity.OutputData,
+    ) -> sensitivity.OutputData:
+        return instance._open_speech_sensed or fallback
+
+    @staticmethod
+    def _open_speech_bytes(instance: "Interpretation") -> bytes:
+        return bytes(instance._open_speech_audio)
+
+    @staticmethod
+    def _emit_speech_product(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+        completion: _VoiceDetectionCompletedEventData,
+    ) -> None:
+        """Stream one acoustic Speech cognition product when Listening owns no STT decoder."""
+
+        if (
+            instance._speech_decoding is not None
+            or instance._voice_diarization is not None
+        ):
+            return
+
+        sensed = completion.sensed
+        if sensed.perceived_level_db is not None and sensed.perceived_level_db < instance._product_threshold_db:
+            return
+        speech = _speech_from_sensed(
+            sensed=sensed,
+            voice_detection=completion.voice_detection,
+            source_ids=instance._active_source_ids,
+            voice_embedding=instance._active_voice_embedding,
+        )
+        if speech is None:
+            return
+        Interpretation._dispatch_listening_cognition_input(
+            ctx,
+            instance,
+            event,
+            SpeechEvent.with_data(speech),
+        )
+
+    @staticmethod
+    def _enter_hearing_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """VAD Start / first voice: open utterance window and stream the opening observation."""
+
+        completion = event.data
+        assert isinstance(completion, _VoiceDetectionCompletedEventData)
+        Interpretation._clear_open_speech(ctx, instance, event)
+        Interpretation._remember_open_speech_sensed(instance, completion.sensed)
+        Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
+        Interpretation._emit_speech_product(ctx, instance, event, completion)
+
+    @staticmethod
+    def _enter_hearing_speech_from_identification(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Commit the first-segment identity before emitting the opening product."""
+
+        completion = event.data
+        if not isinstance(completion, _VoiceIdentificationCompletedEventData) or not completion.embeddings:
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message="Voice identification produced no opening embedding.",
+            )
+            return
+        embedding = completion.embeddings[0]
+        Interpretation._clear_open_speech(ctx, instance, event)
+        instance._active_voice_embedding = embedding
+        instance._active_source_ids = frozenset({embedding.embedding})
+        detection = _VoiceDetectionCompletedEventData(
+            sensed=completion.sensed,
+            voice_detection=completion.voice_detection,
+        )
+        Interpretation._remember_open_speech_sensed(instance, completion.sensed)
+        Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
+        Interpretation._emit_speech_product(ctx, instance, event, detection)
+
+    @staticmethod
+    def _continue_hearing_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Still in voice: append PCM and stream an Update observation."""
+
+        completion = event.data
+        assert isinstance(completion, _VoiceDetectionCompletedEventData)
+        Interpretation._remember_open_speech_sensed(instance, completion.sensed)
+        Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
+        Interpretation._emit_speech_product(ctx, instance, event, completion)
+
+    @staticmethod
+    def _close_hearing_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """VAD End: stream silence/end observation; keep open PCM for optional STT/diarization."""
+
+        completion = event.data
+        assert isinstance(completion, _VoiceDetectionCompletedEventData)
+        Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
+        Interpretation._emit_speech_product(ctx, instance, event, completion)
 
     @staticmethod
     async def _run_voice_detection(
@@ -414,7 +1187,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     ) -> None:
         sensed = _listening_sensed(event)
         if sensed is None:
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -422,22 +1195,34 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="listening input is missing sound data.",
             )
             return
-        try:
-            voice_detection = await instance._voice_detection.classifier.classify(sensed.sound.audio)
-        except Exception as error:
-            _dispatch_stage_failure(
+        output = await Interpretation._await_child_output(
+            ctx,
+            instance,
+            event,
+            child=instance._voice_detection,
+            child_input=sensed.sound.audio,
+            stage="voice_detection",
+        )
+        if output is None:
+            return
+        if not isinstance(output, voice.detection.ApplyData):
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
                 stage="voice_detection",
-                message=str(error),
+                message="Voice detection child produced a non-ApplyData terminal.",
             )
             return
-        completion = _VoiceDetectionCompletedEventData(sensed=sensed, voice_detection=voice_detection)
+        completion = _VoiceDetectionCompletedEventData(sensed=sensed, voice_detection=output)
         _ = hsm.dispatch(
             ctx,
             instance,
-            _listening_event_with_context(_VoiceDetectionCompletedEvent.with_data(completion), event),
+            _listening_event_with_context(
+                _VoiceDetectionCompletedEvent.with_data(completion),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
         )
 
     @staticmethod
@@ -448,7 +1233,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     ) -> None:
         detection = event.data
         if not isinstance(detection, _VoiceDetectionCompletedEventData):
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -458,7 +1243,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             return
         sound_classification = instance._sound_classification
         if sound_classification is None:
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -466,28 +1251,39 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="sound classification is not configured.",
             )
             return
-        try:
-            # Pass full SoundData so kind/media provenance is available to classifiers
-            # (e.g. KindSoundClassifier labels from sound.kind without probing codecs).
-            classification = await sound_classification.classifier.classify(detection.sensed.sound)
-        except Exception as error:
-            _dispatch_stage_failure(
+        # Full SoundData (kind/media provenance) is the child's typed input contract.
+        output = await Interpretation._await_child_output(
+            ctx,
+            instance,
+            event,
+            child=sound_classification,
+            child_input=detection.sensed.sound,
+            stage="sound_classification",
+        )
+        if output is None:
+            return
+        if not isinstance(output, sound.classification.OutputData):
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
                 stage="sound_classification",
-                message=str(error),
+                message="Sound classification child produced invalid output.",
             )
             return
         completion = _SoundClassificationCompletedEventData(
             sensed=detection.sensed,
             voice_detection=detection.voice_detection,
-            classification=classification,
+            classification=output,
         )
         _ = hsm.dispatch(
             ctx,
             instance,
-            _listening_event_with_context(_SoundClassificationCompletedEvent.with_data(completion), event),
+            _listening_event_with_context(
+                _SoundClassificationCompletedEvent.with_data(completion),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
         )
 
     @staticmethod
@@ -498,7 +1294,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     ) -> None:
         detection = event.data
         if not isinstance(detection, _VoiceDetectionCompletedEventData):
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -508,7 +1304,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             return
         voice_diarization = instance._voice_diarization
         if voice_diarization is None:
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -516,26 +1312,193 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="voice diarization ability is not configured.",
             )
             return
-        try:
-            diarization = await voice_diarization.classifier.classify(detection.sensed.sound.audio)
-        except Exception as error:
-            _dispatch_stage_failure(
+        utterance = Interpretation._open_speech_bytes(instance)
+        diarize_audio = utterance if utterance else detection.sensed.sound.audio
+        sound = detection.sensed.sound
+        sample_rate_hz = instance._open_speech_sample_rate_hz or sound.sample_rate_hz
+        channels = (
+            instance._open_speech_channels if instance._open_speech_sample_rate_hz is not None else sound.channels
+        )
+        if sound.media_type != "audio/pcm" or sample_rate_hz is None or channels is None:
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
                 stage="voice_diarization",
-                message=str(error),
+                message="voice diarization requires raw audio/pcm with sample rate and channels.",
+            )
+            return
+        try:
+            diarize_input = voice.diarization.InputData(
+                audio=diarize_audio,
+                media_type="audio/pcm",
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+            )
+        except Exception as error:
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_diarization",
+                message=f"Voice diarization input conversion failed: {error}",
+            )
+            return
+        output = await Interpretation._await_child_output(
+            ctx,
+            instance,
+            event,
+            child=voice_diarization,
+            child_input=diarize_input,
+            stage="voice_diarization",
+        )
+        if output is None:
+            return
+        if not isinstance(output, voice.diarization.OutputData):
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_diarization",
+                message="Voice diarization child produced invalid output.",
             )
             return
         completion = _VoiceDiarizationCompletedEventData(
-            sensed=detection.sensed,
+            sensed=Interpretation._open_speech_sensed_or(instance, detection.sensed),
             voice_detection=detection.voice_detection,
-            diarization=diarization,
+            segments=output.segments,
         )
         _ = hsm.dispatch(
             ctx,
             instance,
-            _listening_event_with_context(_VoiceDiarizationCompletedEvent.with_data(completion), event),
+            _listening_event_with_context(
+                _VoiceDiarizationCompletedEvent.with_data(completion),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
+        )
+
+    @staticmethod
+    async def _run_voice_identification(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        completion = event.data
+        voice_detection = (
+            completion.voice_detection
+            if isinstance(
+                completion,
+                _VoiceDiarizationCompletedEventData | _VoiceDetectionCompletedEventData,
+            )
+            else None
+        )
+        if isinstance(completion, _VoiceDiarizationCompletedEventData):
+            segments = completion.segments
+        elif isinstance(completion, _VoiceDetectionCompletedEventData) and instance._voice_diarization is None:
+            # Direct identification owns the opening VAD span only. The resulting source id is
+            # then carried by every product until this VAD window closes.
+            if not completion.voice_detection.segments:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_identification",
+                    message="Voice identification requires a first voiced VAD segment.",
+                )
+                return
+            try:
+                segments = (
+                    _voice_segment_from_detection(
+                        sensed=completion.sensed,
+                        segment=completion.voice_detection.segments[0],
+                    ),
+                )
+            except Exception as error:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_identification",
+                    message=f"Voice identification opening segment conversion failed: {error}",
+                )
+                return
+            voice_detection = completion.voice_detection
+        else:
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message="voice identification requires a voice-diarization or voice-detection completion.",
+            )
+            return
+        voice_identification = instance._voice_identification
+        if voice_identification is None:
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message="voice identification ability is not configured.",
+            )
+            return
+        try:
+            identification_input = voice.identification.InputData(segments=segments)
+        except Exception as error:
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message=f"Voice identification input conversion failed: {error}",
+            )
+            return
+        output = await Interpretation._await_child_output(
+            ctx,
+            instance,
+            event,
+            child=voice_identification,
+            child_input=identification_input,
+            stage="voice_identification",
+        )
+        if output is None:
+            return
+        if not isinstance(output, voice.identification.OutputData):
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message="Voice identification child produced invalid output.",
+            )
+            return
+        if len(output.embeddings) != len(segments):
+            Interpretation._dispatch_stage_failure(
+                ctx,
+                instance,
+                event,
+                stage="voice_identification",
+                message=(
+                    "Voice identification must return exactly one embedding per voice segment; "
+                    f"received {len(output.embeddings)} for {len(segments)} segments."
+                ),
+            )
+            return
+        identified = _VoiceIdentificationCompletedEventData(
+            sensed=Interpretation._open_speech_sensed_or(instance, completion.sensed),
+            voice_detection=voice_detection or voice.detection.ApplyData(),
+            segments=segments,
+            embeddings=output.embeddings,
+        )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _listening_event_with_context(
+                _VoiceIdentificationCompletedEvent.with_data(identified),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
         )
 
     @staticmethod
@@ -546,7 +1509,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     ) -> None:
         detection = event.data
         if not isinstance(detection, _VoiceDetectionCompletedEventData):
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -558,9 +1521,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             ctx,
             instance,
             event,
-            sensed=detection.sensed,
+            sensed=Interpretation._open_speech_sensed_or(instance, detection.sensed),
             voice_detection=detection.voice_detection,
-            diarization=None,
         )
 
     @staticmethod
@@ -569,9 +1531,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        diarization = event.data
-        if not isinstance(diarization, _VoiceDiarizationCompletedEventData):
-            _dispatch_stage_failure(
+        completion = event.data
+        if not isinstance(completion, _VoiceDiarizationCompletedEventData):
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -583,9 +1545,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             ctx,
             instance,
             event,
-            sensed=diarization.sensed,
-            voice_detection=diarization.voice_detection,
-            diarization=diarization.diarization,
+            sensed=completion.sensed,
+            voice_detection=completion.voice_detection,
         )
 
     @staticmethod
@@ -595,12 +1556,11 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         event: hsm.Event[typing.Any],
         *,
         sensed: sensitivity.OutputData,
-        voice_detection: voice.detection.OutputData,
-        diarization: voice.diarization.OutputData | None,
+        voice_detection: voice.detection.ApplyData,
     ) -> None:
         speech_decoding = instance._speech_decoding
         if speech_decoding is None:
-            _dispatch_stage_failure(
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
@@ -608,27 +1568,41 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="speech decoding is not configured.",
             )
             return
-        try:
-            decoded = await speech_decoding.decoder.decode(sensed.sound.audio)
-        except Exception as error:
-            _dispatch_stage_failure(
+        utterance = Interpretation._open_speech_bytes(instance)
+        decode_audio = utterance if utterance else sensed.sound.audio
+        output = await Interpretation._await_child_output(
+            ctx,
+            instance,
+            event,
+            child=speech_decoding,
+            child_input=decode_audio,
+            stage="speech_decoding",
+        )
+        if output is None:
+            return
+        if not isinstance(output, bytes):
+            Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
                 stage="speech_decoding",
-                message=str(error),
+                message="Speech decoding child produced a non-bytes terminal.",
             )
             return
         completion = _SpeechDecodingCompletedEventData(
             sensed=sensed,
             voice_detection=voice_detection,
-            speech=decoded,
-            diarization=diarization,
+            speech=output,
         )
+        Interpretation._clear_open_speech(ctx, instance, event)
         _ = hsm.dispatch(
             ctx,
             instance,
-            _listening_event_with_context(_SpeechDecodingCompletedEvent.with_data(completion), event),
+            _listening_event_with_context(
+                _SpeechDecodingCompletedEvent.with_data(completion),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
         )
 
     @staticmethod
@@ -637,9 +1611,27 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        """No voice and no sound classifier: skip cognitive handoff."""
+        """No voice, no sound classifier, STT path: skip cognitive handoff (legacy)."""
 
-        return _has_detected_no_voice(ctx, instance, event) and instance._sound_classification is None
+        return (
+            Interpretation._has_detected_no_voice(ctx, instance, event)
+            and instance._sound_classification is None
+            and instance._speech_decoding is not None
+        )
+
+    @staticmethod
+    def _has_detected_no_voice_acoustic_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """No voice and no STT: hand off silence/ambient speech observation so sticky turns can close."""
+
+        return (
+            Interpretation._has_detected_no_voice(ctx, instance, event)
+            and instance._speech_decoding is None
+            and instance._sound_classification is None
+        )
 
     @staticmethod
     def _has_detected_no_voice_with_sound_classification(
@@ -647,9 +1639,31 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        """No voice with a sound classifier: try non-speech acoustic labeling."""
+        """No voice with a sound classifier: try non-speech acoustic labeling first."""
 
-        return _has_detected_no_voice(ctx, instance, event) and instance._sound_classification is not None
+        return (
+            Interpretation._has_detected_no_voice(ctx, instance, event) and instance._sound_classification is not None
+        )
+
+    @staticmethod
+    def _has_unlabeled_sound_drop(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """Unlabeled non-speech with STT path: drop (no conversation silence product)."""
+
+        return Interpretation._has_unlabeled_sound(ctx, instance, event) and instance._speech_decoding is not None
+
+    @staticmethod
+    def _has_unlabeled_sound_acoustic_speech(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """Unlabeled non-speech without STT: silence observation for turn detection."""
+
+        return Interpretation._has_unlabeled_sound(ctx, instance, event) and instance._speech_decoding is None
 
     @staticmethod
     def _is_audible_product(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
@@ -684,6 +1698,24 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         return instance._voice_diarization is not None
 
     @staticmethod
+    def _has_voice_identification_without_diarization(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, event
+        return instance._voice_identification is not None and instance._voice_diarization is None
+
+    @staticmethod
+    def _has_voice_identification_ability(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, event
+        return instance._voice_identification is not None
+
+    @staticmethod
     def _has_speech_decoding_ability(
         ctx: hsm.Context,
         instance: "Interpretation",
@@ -698,7 +1730,21 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return _has_voice_diarization_completion(ctx, instance, event) and instance._speech_decoding is not None
+        return (
+            Interpretation._has_voice_diarization_completion(ctx, instance, event)
+            and instance._speech_decoding is not None
+        )
+
+    @staticmethod
+    def _has_voice_diarization_completion_and_voice_identification(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        return (
+            Interpretation._has_voice_diarization_completion(ctx, instance, event)
+            and instance._voice_identification is not None
+        )
 
     @staticmethod
     def _has_voice_diarization_completion_without_speech_decoding(
@@ -706,7 +1752,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return _has_voice_diarization_completion(ctx, instance, event) and instance._speech_decoding is None
+        return (
+            Interpretation._has_voice_diarization_completion(ctx, instance, event) and instance._speech_decoding is None
+        )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Interpretation",
@@ -730,129 +1778,186 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_sensed_sound),
-                hsm.target("/Interpretation/DetectingVoice"),
+                hsm.effect(_begin_operation),
+                hsm.target("/Interpretation/Working/DetectingVoice"),
             ),
         ),
+        # One busy region: serial queue + stage failure policy live once (HI-01), not on every stage.
         hsm.state(
-            "DetectingVoice",
+            "Working",
+            hsm.initial(hsm.target("/Interpretation/Working/DetectingVoice")),
             hsm.defer(input_event),
-            hsm.activity(_run_voice_detection),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_no_voice_without_sound_classification),
-                hsm.target("/Interpretation/Idle"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_no_voice_with_sound_classification),
-                hsm.target("/Interpretation/ClassifyingSound"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDetectionCompletedEvent),
-                hsm.guard(_has_detected_voice),
-                hsm.target("/Interpretation/RoutingDetectedVoice"),
-            ),
             hsm.transition(
                 hsm.on(_ListeningStageFailedEvent),
                 hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Interpretation/Idle"),
-            ),
-        ),
-        hsm.state(
-            "ClassifyingSound",
-            hsm.defer(input_event),
-            hsm.activity(_run_sound_classification),
-            hsm.transition(
-                hsm.on(_SoundClassificationCompletedEvent),
-                hsm.guard(_has_labeled_sound),
-                hsm.target("/Interpretation/HandingOff"),
-            ),
-            hsm.transition(
-                hsm.on(_SoundClassificationCompletedEvent),
-                hsm.guard(_has_unlabeled_sound),
-                hsm.target("/Interpretation/Idle"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Interpretation/Idle"),
-            ),
-        ),
-        hsm.choice(
-            "RoutingDetectedVoice",
-            hsm.transition(
-                hsm.guard(_has_voice_diarization_ability),
-                hsm.target("/Interpretation/DiarizingVoice"),
-            ),
-            hsm.transition(
-                hsm.guard(_has_speech_decoding_ability),
-                hsm.target("/Interpretation/DecodingSpeech/Detected"),
-            ),
-            hsm.transition(
-                hsm.target("/Interpretation/HandingOff"),
-            ),
-        ),
-        # Every route through interpretation ends here, and this is the only place a level
-        # becomes a yes or a no. One comparison, whatever produced the product and whatever
-        # reduced its level on the way — which is what keeps a second contributor from
-        # needing a second threshold, or a second opinion about what quiet means.
-        hsm.choice(
-            "HandingOff",
-            hsm.transition(
-                hsm.guard(_is_audible_product),
-                hsm.effect(_dispatch_product_cognition_input),
-                hsm.target("/Interpretation/Idle"),
-            ),
-            hsm.transition(
-                hsm.target("/Interpretation/Idle"),
-            ),
-        ),
-        hsm.state(
-            "DiarizingVoice",
-            hsm.defer(input_event),
-            hsm.activity(_run_voice_diarization),
-            hsm.transition(
-                hsm.on(_VoiceDiarizationCompletedEvent),
-                hsm.guard(_has_voice_diarization_completion_and_speech_decoding),
-                hsm.target("/Interpretation/DecodingSpeech/Diarized"),
-            ),
-            hsm.transition(
-                hsm.on(_VoiceDiarizationCompletedEvent),
-                hsm.guard(_has_voice_diarization_completion_without_speech_decoding),
-                hsm.target("/Interpretation/HandingOff"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
-                hsm.target("/Interpretation/Idle"),
-            ),
-        ),
-        hsm.state(
-            "DecodingSpeech",
-            hsm.initial(hsm.target("/Interpretation/DecodingSpeech/Detected")),
-            hsm.transition(
-                hsm.on(_SpeechDecodingCompletedEvent),
-                hsm.guard(_has_speech_decoding_completion),
-                hsm.target("/Interpretation/HandingOff"),
-            ),
-            hsm.transition(
-                hsm.on(_ListeningStageFailedEvent),
-                hsm.guard(_has_listening_stage_failure),
-                hsm.effect(_dispatch_listening_failure),
+                hsm.effect(_clear_open_speech, _dispatch_listening_failure, _clear_operation),
                 hsm.target("/Interpretation/Idle"),
             ),
             hsm.state(
-                "Detected",
-                hsm.defer(input_event),
-                hsm.activity(_run_detected_speech_decoding),
+                "DetectingVoice",
+                hsm.activity(_run_voice_detection),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice_without_sound_classification),
+                    hsm.effect(_clear_open_speech, _clear_operation),
+                    hsm.target("/Interpretation/Idle"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice_acoustic_speech),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice_with_sound_classification),
+                    hsm.target("/Interpretation/Working/ClassifyingSound"),
+                ),
+                # First voice (VAD Start): open HearingSpeech and stream frames until VAD End.
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_voice_and_direct_identification),
+                    hsm.target("/Interpretation/Working/IdentifyingVoiceDirect"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_voice),
+                    hsm.effect(_enter_hearing_speech),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+            ),
+            # Open speech window: scored frames keep going to VAD until sticky End.
+            hsm.state(
+                "HearingSpeech",
+                hsm.transition(
+                    hsm.on(input_event),
+                    hsm.guard(_has_sensed_sound),
+                    hsm.effect(_begin_operation),
+                    hsm.target("/Interpretation/Working/FeedingSpeech"),
+                ),
             ),
             hsm.state(
-                "Diarized",
-                hsm.defer(input_event),
-                hsm.activity(_run_diarized_speech_decoding),
+                "FeedingSpeech",
+                hsm.activity(_run_voice_detection),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_voice),
+                    hsm.effect(_continue_hearing_speech),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDetectionCompletedEvent),
+                    hsm.guard(_has_detected_no_voice),
+                    hsm.effect(_close_hearing_speech),
+                    hsm.target("/Interpretation/Working/SpeechEnded"),
+                ),
+            ),
+            # After VAD End: direct identification, optional diarize/STT on the full utterance; else products already streamed.
+            hsm.choice(
+                "SpeechEnded",
+                hsm.transition(
+                    hsm.guard(_has_voice_diarization_ability),
+                    hsm.target("/Interpretation/Working/DiarizingVoice"),
+                ),
+                hsm.transition(
+                    hsm.guard(_has_speech_decoding_ability),
+                    hsm.target("/Interpretation/Working/DecodingSpeech/Detected"),
+                ),
+                hsm.transition(
+                    hsm.effect(_clear_open_speech, _clear_operation),
+                    hsm.target("/Interpretation/Idle"),
+                ),
+            ),
+            hsm.state(
+                "ClassifyingSound",
+                hsm.activity(_run_sound_classification),
+                hsm.transition(
+                    hsm.on(_SoundClassificationCompletedEvent),
+                    hsm.guard(_has_labeled_sound),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+                hsm.transition(
+                    hsm.on(_SoundClassificationCompletedEvent),
+                    hsm.guard(_has_unlabeled_sound_drop),
+                    hsm.effect(_clear_operation),
+                    hsm.target("/Interpretation/Idle"),
+                ),
+                hsm.transition(
+                    hsm.on(_SoundClassificationCompletedEvent),
+                    hsm.guard(_has_unlabeled_sound_acoustic_speech),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+            ),
+            # Every route through interpretation ends here, and this is the only place a level
+            # becomes a yes or a no. One comparison, whatever produced the product and whatever
+            # reduced its level on the way — which is what keeps a second contributor from
+            # needing a second threshold, or a second opinion about what quiet means.
+            hsm.choice(
+                "HandingOff",
+                hsm.transition(
+                    hsm.guard(_is_audible_product),
+                    hsm.effect(_dispatch_product_cognition_input, _clear_open_speech, _clear_operation),
+                    hsm.target("/Interpretation/Idle"),
+                ),
+                hsm.transition(
+                    hsm.effect(_clear_open_speech, _clear_operation),
+                    hsm.target("/Interpretation/Idle"),
+                ),
+            ),
+            hsm.state(
+                "DiarizingVoice",
+                hsm.activity(_run_voice_diarization),
+                hsm.transition(
+                    hsm.on(_VoiceDiarizationCompletedEvent),
+                    hsm.guard(_has_voice_diarization_completion_and_voice_identification),
+                    hsm.target("/Interpretation/Working/IdentifyingVoice"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDiarizationCompletedEvent),
+                    hsm.guard(_has_voice_diarization_completion_and_speech_decoding),
+                    hsm.target("/Interpretation/Working/DecodingSpeech/Diarized"),
+                ),
+                hsm.transition(
+                    hsm.on(_VoiceDiarizationCompletedEvent),
+                    hsm.guard(_has_voice_diarization_completion_without_speech_decoding),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+            ),
+            hsm.state(
+                "IdentifyingVoiceDirect",
+                # Identify the assembled VAD utterance directly, without a diarization pass.
+                hsm.activity(_run_voice_identification),
+                hsm.transition(
+                    hsm.on(_VoiceIdentificationCompletedEvent),
+                    hsm.guard(_has_voice_identification_completion),
+                    hsm.effect(_enter_hearing_speech_from_identification),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+            ),
+            hsm.state(
+                "IdentifyingVoice",
+                hsm.activity(_run_voice_identification),
+                hsm.transition(
+                    hsm.on(_VoiceIdentificationCompletedEvent),
+                    hsm.guard(_has_voice_identification_completion),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+            ),
+            hsm.state(
+                "DecodingSpeech",
+                hsm.initial(hsm.target("/Interpretation/Working/DecodingSpeech/Detected")),
+                hsm.transition(
+                    hsm.on(_SpeechDecodingCompletedEvent),
+                    hsm.guard(_has_speech_decoding_completion),
+                    hsm.target("/Interpretation/Working/HandingOff"),
+                ),
+                hsm.state(
+                    "Detected",
+                    hsm.activity(_run_detected_speech_decoding),
+                ),
+                hsm.state(
+                    "Diarized",
+                    hsm.activity(_run_diarized_speech_decoding),
+                ),
             ),
         ),
         hsm.state(
@@ -883,4 +1988,6 @@ __all__ = [
     "Interpretation",
     "ListeningFailedEvent",
     "ListeningStage",
+    "SpeechData",
+    "SpeechEvent",
 ]

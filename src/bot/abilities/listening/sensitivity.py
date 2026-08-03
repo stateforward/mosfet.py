@@ -72,10 +72,9 @@ class OutputData(pydantic.BaseModel):
     )
 
 
-OutputEvent = ability.ability_output_event(
-    "bot.ability.listening.sensitivity.output",
-    OutputData,
-    description="A received sound and the level of it the body could not account for.",
+OutputEvent = hsm.Event[OutputData](
+    name="bot.ability.listening.sensitivity.output",
+    schema=OutputData,
 )
 
 

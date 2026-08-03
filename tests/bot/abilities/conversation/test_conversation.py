@@ -1,834 +1,999 @@
-from bot import abilities
-import bot
 from bot.abilities import cognition
 from bot.abilities import conversation
 from bot.abilities import decoding
-from bot.abilities import encoding
-from bot.abilities import language
-from bot.abilities import memory
-from bot.abilities import participating
-from bot.abilities import processing
-from bot.abilities.language import text
-from bot.abilities.participating import Participating
+from bot.abilities import listening
+from bot.abilities import turn_detector
+from bot.abilities.hearing import voice
+from bot.abilities.conversation import memory as conversation_memory
+from bot.abilities.identity import value
 
 import asyncio
-import collections.abc
-import inspect
 import typing
 
 import hsm
 import pydantic
 import pytest
-from bot.abilities.conversation import conversation as conversation_impl
-from bot.protocols import attachment
 
-from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
-from tests.type_helpers import model_view
+from tests.hsm_instance_state import start_ability_tree
 
 
-def model_examples(model: type[pydantic.BaseModel]) -> list[dict[str, typing.Any]]:
-    extra = model.model_config.get("json_schema_extra")
-    assert isinstance(extra, dict)
-    examples = extra.get("examples")
-    assert isinstance(examples, list)
-    assert examples
-    return typing.cast(list[dict[str, typing.Any]], examples)
-
-
-class _ProcessHost(typing.Protocol):
-    async def process(self, input: processing.InputData) -> object: ...
-
-
-class _HostAsProcessor(processing.Processor):
-    def __init__(self, host: _ProcessHost) -> None:
-        self._host = host
-
-    @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
-        result = await self._host.process(input)
-        coerced = processing.coerce_event_selections(result)
-        if coerced is None:
-            raise TypeError(f"host process returned non-events: {type(result)!r}")
-        return coerced
-
-
-class RecordingTextStimulusDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
-    inputs: list[str]
-
-    def __init__(self) -> None:
-        self.inputs = []
-
-    @typing.override
-    async def decode(self, input: participating.ParticipationStimulus) -> str:
-        if isinstance(input, participating.TextStimulus):
-            self.inputs.append(input.content)
-            return input.content
-        if isinstance(input, participating.EventStimulus):
-            text_value = input.payload.get("text")
-            assert isinstance(text_value, str)
-            self.inputs.append(text_value)
-            return text_value
-        raise AssertionError(f"unexpected stimulus {input!r}")
-
-
-class RecordingAudioStimulusDecoder(conversation.VoiceDecoder):
-    inputs: list[bytes]
-
-    def __init__(self) -> None:
-        self.inputs = []
-
-    @typing.override
-    async def decode(self, input: participating.AudioStimulus) -> str:
-        self.inputs.append(input.content)
-        return "hello"
-
-
-class StaticTextGenerator(language.TextGenerator):
-    inputs: list[text.generation.InputData]
-    response: str
-
-    def __init__(self, response: str = "Conversation fixture response.") -> None:
-        self.inputs = []
-        self.response = response
-
-    @typing.override
-    async def generate(self, input: text.generation.InputData) -> text.generation.OutputData:
-        self.inputs.append(input)
-        return text.generation.OutputData(content=self.response)
-
-
-class RecordingConversationMemory(memory.ShortTermMemory):
-    inputs: list[abilities.memory.InputData]
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.inputs = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == self.input_event.name:
-            data = event.data
-            assert isinstance(data, abilities.memory.InputData)
-            self.inputs.append(data)
-        return super().dispatch(ctx, event)
-
-
-class PassthroughConversationEncoder(encoding.Encoder[str, str | bytes]):
-    inputs: list[str]
-
-    def __init__(self) -> None:
-        self.inputs = []
-
-    @typing.override
-    async def encode(self, input: str) -> str | bytes:
-        self.inputs.append(input)
-        return input
-
-
-class RecordingVoiceEncoder(conversation.VoiceEncoder):
-    inputs: list[conversation.EncodeData]
-
-    def __init__(self) -> None:
-        self.inputs = []
-
-    @typing.override
-    async def encode(self, input: conversation.EncodeData) -> str | bytes:
-        self.inputs.append(input)
-        return f"Voice fixture response for {input.decoded_text}.".encode()
-
-
-class RecordingIntuitionProcessor(processing.Processor):
-    calls: list[processing.InputData]
-
-    def __init__(self) -> None:
-        self.calls = []
-
-    @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
-        self.calls.append(input)
-        return ()
-
-
-class RecordingReasoningProcessor(processing.Processor):
-    calls: list[processing.InputData]
-
-    def __init__(self) -> None:
-        self.calls = []
-
-    @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
-        self.calls.append(input)
-        return ()
-
-
-class RecordingParticipating(participating.Participating):
-    calls: list[participating.participating.InputData]
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == self.input_event.name:
-            input = event.data
-            assert isinstance(input, participating.participating.InputData)
-            self.calls.append(input)
-        return super().dispatch(ctx, event)
-
-
-def text_decoding_ability(
-    decoder: decoding.Decoder[participating.ParticipationStimulus, str] | None = None,
-) -> decoding.Decoding[participating.ParticipationStimulus, str]:
-    return decoding.Decoding(decoder=RecordingTextStimulusDecoder() if decoder is None else decoder)
-
-
-def text_encoding_ability(
-    encoder: encoding.Encoder[str, str | bytes] | None = None,
-) -> encoding.Encoding[str, str | bytes]:
-    return encoding.Encoding(encoder=PassthroughConversationEncoder() if encoder is None else encoder)
-
-
-def typing_ability(generator: language.TextGenerator | None = None) -> language.TextGeneration:
-    return language.TextGeneration(generator=StaticTextGenerator() if generator is None else generator)
-
-
-def memory_ability() -> memory.Memory:
-    return RecordingConversationMemory()
-
-
-def brain_for_test(
-    intuition_processor: processing.Processor | None = None,
-) -> cognition.Cognition:
-    return cognition.Cognition(
-        intuition=cognition.Intuition(
-            processor=intuition_processor if intuition_processor is not None else RecordingIntuitionProcessor()
-        ),
-        reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor()),
-        reflection=cognition.Reflection(
-            processor=RecordingReasoningProcessor(),
-            memory=memory.Memory(),
-        ),
-    )
-
-
-def text_message(conversation_ref: str = "support-call", content: str = "hello") -> conversation.TextMessage:
-    return conversation.TextMessage(
-        conversation_ref=conversation_ref,
-        self_participant_ref="bot",
-        participants=(
-            participating.ParticipantSnapshot(
-                ref="bot",
-                kind="bot",
-                state=participating.ParticipantStateSnapshot(
-                    presence="present", attention="available", turn="listening"
-                ),
+def run_input(
+    ability: conversation.Conversation,
+    context: hsm.Context,
+    *,
+    source_ids: conversation.IdentitySet,
+    target_ids: conversation.IdentitySet,
+    content: object,
+    content_type: str,
+) -> conversation.ParticipatedTurn:
+    return asyncio.run(
+        conversation.contribute_conversation_input(
+            ability,
+            conversation.ConversationInputData(
+                source_ids=source_ids,
+                target_ids=target_ids,
+                content=content,
+                content_type=content_type,
             ),
-            participating.ParticipantSnapshot(
-                ref="caller",
-                kind="human",
-                state=participating.ParticipantStateSnapshot(presence="present", attention="available", turn="holding"),
-            ),
-        ),
-        content=participating.TextStimulus(source_participant_ref="caller", content=content),
+            ctx=context,
+        )
     )
 
 
-def voice_message(conversation_ref: str = "support-call") -> conversation.VoiceMessage:
-    return conversation.VoiceMessage(
-        conversation_ref=conversation_ref,
-        self_participant_ref="bot",
-        participants=text_message(conversation_ref).participants,
-        content=participating.AudioStimulus(source_participant_ref="caller", content=b"\x01\x00"),
+def started_conversation(
+    factory: conversation.TurnDetectorFactory | None = None,
+    *,
+    similarity_threshold: float = 0.85,
+    similarity_margin: float = 0.05,
+) -> tuple[conversation.Conversation, hsm.Context]:
+    ability = conversation.Conversation(
+        turn_detector_factory=factory,
+        similarity_threshold=similarity_threshold,
+        similarity_margin=similarity_margin,
+    )
+    context = hsm.Context()
+    asyncio.run(start_ability_tree(context, ability))
+    return ability, context
+
+
+def test_input_contract_has_exactly_four_fields_and_no_session_reference() -> None:
+    assert tuple(conversation.ConversationInputData.model_fields) == (
+        "source_ids",
+        "target_ids",
+        "content",
+        "content_type",
+    )
+    assert "conversation_ref" not in conversation.ConversationInputData.model_fields
+    assert "self_participant_ref" not in conversation.ConversationInputData.model_fields
+    assert "participants" not in conversation.ConversationInputData.model_fields
+    with pytest.raises(pydantic.ValidationError):
+        conversation.ConversationInputData.model_validate(
+            {
+                "source_ids": ["caller"],
+                "target_ids": ["bot"],
+                "content": "hello",
+                "content_type": "text/plain",
+                "conversation_ref": "legacy",
+            }
+        )
+    schema = typing.cast(type[pydantic.BaseModel], conversation.InputEvent.schema)
+    assert tuple(schema.model_fields) == tuple(conversation.ConversationInputData.model_fields)
+
+
+def test_zero_vector_is_rejected_at_the_input_boundary() -> None:
+    with pytest.raises(pydantic.ValidationError, match="zero vector"):
+        conversation.ConversationInputData(
+            source_ids=frozenset({(0.0, 0.0)}),
+            target_ids=frozenset({"bot"}),
+            content="invalid voice identity",
+            content_type="text/plain",
+        )
+
+
+def test_input_accepts_an_empty_target_set() -> None:
+    input_data = conversation.ConversationInputData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset(),
+        content="ambient message",
+        content_type="text/plain",
     )
 
-
-async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout_seconds: float = 5.0) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while asyncio.get_running_loop().time() < deadline:
-        if condition():
-            return
-        await asyncio.sleep(0.01)
-    raise RuntimeError("Timed out waiting for conversation condition.")
+    assert input_data.target_ids == frozenset()
 
 
-async def start_conversation(conversation: conversation.Conversation[typing.Any, typing.Any]) -> None:
-    await start_ability_tree(None, conversation)
-
-
-class RecordingConversation(conversation.TextConversation):
-    outputs: list[conversation.Response]
-    failures: list[conversation.FailureData]
-    snapshots: list[conversation.Snapshot]
-
-    def __init__(
-        self,
-        *,
-        decoding: decoding.Decoding[participating.ParticipationStimulus, str] | None = None,
-        participating: participating.Participating | None = None,
-        typing: language.TextGeneration | None = None,
-        encoding: encoding.Encoding[str, str | bytes] | None = None,
-    ) -> None:
-        super().__init__(
-            decoding=text_decoding_ability() if decoding is None else decoding,
-            participating=Participating() if participating is None else participating,
-            typing=typing_ability() if typing is None else typing,
-            encoding=text_encoding_ability() if encoding is None else encoding,
-        )
-        self.outputs = []
-        self.failures = []
-        self.snapshots = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == self.output_event.name:
-            output = event.data
-            assert isinstance(output, conversation.Response)
-            self.outputs.append(output)
-        if event.name == self.failed_event.name:
-            failure = event.data
-            assert isinstance(failure, conversation.FailureData)
-            self.failures.append(failure)
-        if event.name == self.snapshot_output_event.name:
-            snapshot = event.data
-            assert isinstance(snapshot, conversation.Snapshot)
-            self.snapshots.append(snapshot)
-        return super().dispatch(ctx, event)
-
-    def active_turn_id(self) -> str | None:
-        return self._active_turn_id
-
-    def set_active_turn_id(self, turn_id: str | None) -> None:
-        self._active_turn_id = turn_id
-
-    def matches_active_turn(self, event: hsm.Event[typing.Any]) -> bool:
-        return self._matches_active_turn(self, event)
-
-
-class RecordingVoiceConversation(conversation.VoiceConversation):
-    outputs: list[conversation.Response]
-    failures: list[conversation.FailureData]
-
-    def __init__(
-        self,
-        *,
-        decoder: conversation.VoiceDecoder | None = None,
-        encoder: conversation.VoiceEncoder | None = None,
-        participating: participating.Participating | None = None,
-    ) -> None:
-        super().__init__(
-            decoder=RecordingAudioStimulusDecoder() if decoder is None else decoder,
-            encoder=RecordingVoiceEncoder() if encoder is None else encoder,
-            participating=Participating() if participating is None else participating,
-        )
-        self.outputs = []
-        self.failures = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == self.output_event.name:
-            output = event.data
-            assert isinstance(output, conversation.Response)
-            self.outputs.append(output)
-        if event.name == self.failed_event.name:
-            failure = event.data
-            assert isinstance(failure, conversation.FailureData)
-            self.failures.append(failure)
-        return super().dispatch(ctx, event)
-
-
-TEXT_CONVERSATION_BEHAVIOR = "/TextConversationLifecycle/attached/behavior"
-VOICE_CONVERSATION_BEHAVIOR = "/VoiceConversationLifecycle/attached/behavior"
-RECORDING_CONVERSATION_BEHAVIOR = "/RecordingConversationLifecycle/attached/behavior"
-
-
-def test_conversation_exports_and_stage_contract() -> None:
-    assert conversation.Stage.__args__ == ("decoding", "participating")  # type: ignore[attr-defined]
-    assert set(conversation_impl.__all__) >= {
-        "Conversation",
-        "ParticipatedTurn",
-        "Response",
-        "define_conversation_model",
+@pytest.mark.parametrize("field_name", ("source_ids", "target_ids"))
+def test_input_rejects_identity_sets_above_the_provider_neutral_limit(field_name: str) -> None:
+    fields: dict[str, object] = {
+        "source_ids": frozenset({"caller"}),
+        "target_ids": frozenset(),
+        "content": "too many identities",
+        "content_type": "text/plain",
     }
+    fields[field_name] = frozenset(f"speaker-{index}" for index in range(value.MAX_IDENTITY_SET_SIZE + 1))
+
+    with pytest.raises(pydantic.ValidationError, match="maximum is 4"):
+        conversation.ConversationInputData.model_validate(fields)
 
 
-def test_conversation_module_has_no_decide_memory_product_pipeline() -> None:
-    source = inspect.getsource(conversation_impl)
-    assert "deciding" not in source
-    assert "active/memory" not in source
-    assert "BotInputData" not in source
-    assert "InputEventData" not in source
-    assert "cognition.processing" not in source
-    assert "ProcessingInput" not in source
-    assert "_cognition" not in source
-    assert "self._memory" not in source
-    assert "active/participating" in source
-    assert "active/decoding" in source
+def test_input_rejects_embeddings_above_the_provider_neutral_dimension_limit() -> None:
+    oversized = (1.0,) * (value.MAX_EMBEDDING_DIMENSION + 1)
+
+    with pytest.raises(pydantic.ValidationError, match="exceeds the maximum of 2048"):
+        conversation.ConversationInputData(
+            source_ids=frozenset({oversized}),
+            target_ids=frozenset(),
+            content="embedding too large",
+            content_type="application/octet-stream",
+        )
 
 
-def test_text_and_voice_constructors_are_thin() -> None:
-    text_value = conversation.TextConversation(
-        decoding=text_decoding_ability(),
-        participating=participating.Participating(),
-        typing=typing_ability(),
-        encoding=text_encoding_ability(),
+def test_source_only_embedding_turns_share_session_and_create_detectors() -> None:
+    created: list[tuple[str, conversation.TrackRef]] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        created.append((session_ref, source_id))
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
+        )
+
+    ability, context = started_conversation(factory)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(1.0, 0.0)}),
+        target_ids=frozenset(),
+        content="first speaker",
+        content_type="application/octet-stream",
     )
-    assert text_value.child_for_kind("decoding") is not None
-    assert text_value.child_for_kind("participating") is not None
-    assert text_value.typing is not None
-    assert text_value.encoding is not None
-
-    voice = conversation.VoiceConversation(
-        decoder=RecordingAudioStimulusDecoder(),
-        encoder=RecordingVoiceEncoder(),
-        participating=participating.Participating(),
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.0, 1.0)}),
+        target_ids=frozenset(),
+        content="second speaker",
+        content_type="application/octet-stream",
     )
-    assert voice.child_for_kind("decoding") is not None
-    assert voice.encoding is not None
+    third = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(1.0, 1.0)}),
+        target_ids=frozenset(),
+        content="bot speaker",
+        content_type="application/octet-stream",
+    )
+
+    assert first.session_ref == second.session_ref == third.session_ref
+    assert len(created) == 3
+    assert {session_ref for session_ref, _ in created} == {first.session_ref}
+    assert len({source_id for _, source_id in created}) == 3
+    assert all(source_id.startswith("track-") for _, source_id in created)
+    assert ability.session_refs == (first.session_ref,)
+    assert ability.detector_count == 3
+    assert len(ability.detector_refs) == 3
+    assert third.input.target_ids == frozenset()
 
 
-def test_conversation_requires_decoding_and_participating() -> None:
-    with pytest.raises(ValueError, match="Conversation requires decoding."):
-        _ = conversation.TextConversation(
-            decoding=None,
-            participating=participating.Participating(),
+def test_four_party_source_set_is_within_the_input_bound() -> None:
+    ability, context = started_conversation()
+    result = run_input(
+        ability,
+        context,
+        source_ids=frozenset(
+            {
+                (1.0, 0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0, 0.0),
+                (0.0, 0.0, 1.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+            }
+        ),
+        target_ids=frozenset(),
+        content="four-party input",
+        content_type="application/octet-stream",
+    )
+
+    assert result.session_ref in ability.session_refs
+    assert ability.detector_count == 4
+
+
+def test_four_party_embedding_assignment_reuses_the_relationship() -> None:
+    ability, context = started_conversation(similarity_threshold=0.8, similarity_margin=0.02)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset(
+            {
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (1.0, 1.0),
+                (-1.0, 1.0),
+            }
+        ),
+        target_ids=frozenset({"bot"}),
+        content="first four-party turn",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset(
+            {
+                (0.98, 0.02),
+                (0.02, 0.98),
+                (1.01, 0.99),
+                (-0.98, 1.02),
+            }
+        ),
+        target_ids=frozenset({"bot"}),
+        content="second four-party turn",
+        content_type="text/plain",
+    )
+
+    assert second.session_ref == first.session_ref
+    assert ability.detector_count == 4
+
+
+def test_global_embedding_assignment_reuses_relationship_without_row_margin() -> None:
+    ability, context = started_conversation(similarity_threshold=0.0)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(1.0, 0.0), (0.0, 1.0)}),
+        target_ids=frozenset({"bot"}),
+        content="first",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.8, 0.6), (0.999, 0.0447)}),
+        target_ids=frozenset({"bot"}),
+        content="second",
+        content_type="text/plain",
+    )
+
+    assert second.session_ref == first.session_ref
+
+
+def test_same_relationship_reuses_detector_without_a_session_registry() -> None:
+    created: list[tuple[str, conversation.IdentityValue]] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        created.append((session_ref, source_id))
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
         )
-    with pytest.raises(ValueError, match="Conversation requires participating."):
-        _ = conversation.TextConversation(
-            decoding=text_decoding_ability(),
-            participating=typing.cast(participating.Participating, typing.cast(object, None)),
+
+    ability, context = started_conversation(factory)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="first",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="second",
+        content_type="text/plain",
+    )
+
+    assert first.session_ref == second.session_ref
+    assert created == [(first.session_ref, "alice")]
+    assert ability.detector_refs == ((first.session_ref, "alice"),)
+    assert ability.session_refs == (first.session_ref,)
+    assert "_sessions" not in ability.__dict__
+
+
+def test_different_relationship_gets_a_new_detector() -> None:
+    created: list[tuple[str, conversation.IdentityValue]] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        created.append((session_ref, source_id))
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
         )
-    with pytest.raises(ValueError, match="VoiceConversation requires decoder."):
-        _ = conversation.VoiceConversation(
-            decoder=None,
-            encoder=RecordingVoiceEncoder(),
-            participating=participating.Participating(),
+
+    ability, context = started_conversation(factory)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="first",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"service"}),
+        content="second",
+        content_type="text/plain",
+    )
+
+    assert first.session_ref != second.session_ref
+    assert set(ability.session_refs) == {first.session_ref, second.session_ref}
+    assert created == [(first.session_ref, "alice"), (second.session_ref, "alice")]
+
+
+def test_small_voice_vector_drift_reuses_one_detector_and_preserves_raw_source() -> None:
+    created: list[tuple[str, str]] = []
+
+    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
+        created.append((session_ref, track_ref))
+        return turn_detector.TurnDetector(
+            participant_ref=track_ref,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
         )
-    with pytest.raises(ValueError, match="VoiceConversation requires encoder."):
-        _ = conversation.VoiceConversation(
-            decoder=RecordingAudioStimulusDecoder(),
-            encoder=None,
-            participating=participating.Participating(),
+
+    ability, context = started_conversation(factory)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(3.0, 4.0)}),
+        target_ids=frozenset({"bot"}),
+        content="first",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.6, 0.8)}),
+        target_ids=frozenset({"bot"}),
+        content="second",
+        content_type="text/plain",
+    )
+
+    assert first.session_ref == second.session_ref
+    assert len(created) == 1
+    assert created[0][1].startswith("track-")
+    assert first.input.source_ids == frozenset({(3.0, 4.0)})
+    assert second.input.source_ids == frozenset({(0.6, 0.8)})
+
+
+def test_three_voice_observations_reuse_one_detector_track() -> None:
+    created: list[str] = []
+
+    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
+        created.append(track_ref)
+        return turn_detector.TurnDetector(
+            participant_ref=track_ref,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
         )
 
+    ability, context = started_conversation(factory)
+    results = [
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({vector}),
+            target_ids=frozenset({"bot"}),
+            content="observation",
+            content_type="text/plain",
+        )
+        for vector in ((1.0, 0.0), (0.98, 0.2), (0.96, 0.28))
+    ]
 
-def test_thin_conversation_ends_after_participation() -> None:
-    async def run() -> tuple[
-        list[participating.InputData],
-        list[conversation.Response],
-        conversation.ParticipatedTurn,
-        str,
-    ]:
-        participating_ability = RecordingParticipating()
-        conversation_ability = RecordingConversation(participating=participating_ability)
-        await start_conversation(conversation_ability)
-        participated = await conversation.contribute_conversation_turn(conversation_ability, text_message())
-        await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
-        return (
-            participating_ability.calls,
-            conversation_ability.outputs,
-            participated,
-            conversation_ability.state(),
+    assert len(created) == 1
+    assert len({result.session_ref for result in results}) == 1
+
+
+def test_vector_context_basis_is_scale_invariant_and_collision_safe() -> None:
+    forward = conversation_memory.relationship_context_ref(
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(3.0, 4.0)}),
+    )
+    scaled = conversation_memory.relationship_context_ref(
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(0.6, 0.8)}),
+    )
+    reverse = conversation_memory.relationship_context_ref(
+        source_ids=frozenset({(0.6, 0.8)}),
+        target_ids=frozenset({"alice"}),
+    )
+    unrelated = conversation_memory.relationship_context_ref(
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(0.0, 1.0)}),
+    )
+
+    assert forward == scaled == reverse
+    assert forward != unrelated
+
+    ability, context = started_conversation()
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(3.0, 4.0)}),
+        content="first",
+        content_type="text/plain",
+    )
+    drifted = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.6, 0.8)}),
+        target_ids=frozenset({"alice"}),
+        content="drifted",
+        content_type="text/plain",
+    )
+    separate = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(0.0, 1.0)}),
+        content="separate",
+        content_type="text/plain",
+    )
+
+    assert first.session_ref == drifted.session_ref
+    assert first.session_ref != separate.session_ref
+
+
+def test_mixed_named_vector_direction_requires_matching_vector() -> None:
+    ability, context = started_conversation()
+    forward = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(3.0, 4.0)}),
+        content="forward",
+        content_type="text/plain",
+    )
+    reverse = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.6, 0.8)}),
+        target_ids=frozenset({"alice"}),
+        content="reverse",
+        content_type="text/plain",
+    )
+    unrelated = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({(0.0, 1.0)}),
+        content="unrelated",
+        content_type="text/plain",
+    )
+
+    assert forward.session_ref == reverse.session_ref
+    assert unrelated.session_ref != forward.session_ref
+
+
+def test_unrelated_voice_vector_creates_another_relationship() -> None:
+    created: list[str] = []
+
+    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
+        created.append(track_ref)
+        return turn_detector.TurnDetector(
+            participant_ref=track_ref,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
         )
 
-    participating_inputs, outputs, participated, state = asyncio.run(run())
+    ability, context = started_conversation(factory)
+    first = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(1.0, 0.0)}),
+        target_ids=frozenset({"bot"}),
+        content="first",
+        content_type="text/plain",
+    )
+    second = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.0, 1.0)}),
+        target_ids=frozenset({"bot"}),
+        content="second",
+        content_type="text/plain",
+    )
 
-    assert len(participating_inputs) == 1
-    assert len(outputs) == 1
-    assert outputs[0].content is None
-    assert outputs[0].decoded_text == "hello"
-    assert outputs[0].conversation_ref == "support-call"
-    assert participated.decoded_text == "hello"
-    assert state.endswith("/silent")
-    assert "/active/deciding" not in state
-    assert "/active/memory" not in state
-    assert "/active/encoding" not in state
-
-
-def test_voice_conversation_contribution_is_thin() -> None:
-    async def run() -> tuple[list[bytes], list[conversation.Response], conversation.ParticipatedTurn]:
-        decoder = RecordingAudioStimulusDecoder()
-        conversation_ability = RecordingVoiceConversation(decoder=decoder)
-        await start_conversation(conversation_ability)
-        participated = await conversation.contribute_conversation_turn(conversation_ability, voice_message())
-        await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
-        return decoder.inputs, conversation_ability.outputs, participated
-
-    decoding_inputs, outputs, participated = asyncio.run(run())
-    assert decoding_inputs == [b"\x01\x00"]
-    assert len(outputs) == 1
-    assert outputs[0].content is None
-    assert outputs[0].decoded_text == "hello"
-    assert participated.decoded_text == "hello"
+    assert first.session_ref != second.session_ref
+    assert len(created) == 2
+    assert len(set(created)) == 2
 
 
-def test_host_contribution_does_not_observe_machine_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> conversation.ParticipatedTurn:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
+def test_vector_profile_updates_only_after_a_completed_turn() -> None:
+    created: list[str] = []
 
-        def fail_state_read() -> str:
-            raise AssertionError("host composition must not inspect machine state")
+    class FailingDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
+        async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
+            del input
+            raise RuntimeError("turn did not complete")
 
-        monkeypatch.setattr(conversation_ability, "state", fail_state_read)
-        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
-
-    participated = asyncio.run(run())
-
-    assert participated.decoded_text == "hello"
-
-
-def test_host_contribution_does_not_replace_machine_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> conversation.ParticipatedTurn:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        original_setattr = RecordingConversation.__setattr__
-
-        def reject_dispatch_assignment(instance: RecordingConversation, name: str, value: object) -> None:
-            if name == "dispatch":
-                raise AssertionError("host composition must not replace machine dispatch")
-            original_setattr(instance, name, value)
-
-        monkeypatch.setattr(RecordingConversation, "__setattr__", reject_dispatch_assignment)
-        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
-
-    participated = asyncio.run(run())
-
-    assert participated.decoded_text == "hello"
-
-
-def test_concurrent_host_contributions_return_their_correlated_turns() -> None:
-    async def run() -> tuple[conversation.ParticipatedTurn, conversation.ParticipatedTurn, bool]:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        original_dispatch = conversation_ability.dispatch
-        first, second = await asyncio.gather(
-            conversation.contribute_conversation_turn(
-                conversation_ability,
-                text_message("first-call", "first"),
-            ),
-            conversation.contribute_conversation_turn(
-                conversation_ability,
-                text_message("second-call", "second"),
-            ),
+    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
+        created.append(track_ref)
+        return turn_detector.TurnDetector(
+            participant_ref=track_ref,
+            conversation_ref=session_ref,
+            decoder=FailingDecoder() if len(created) == 1 else None,
+            end_of_turn_silence_seconds=0.01,
         )
-        return first, second, conversation_ability.dispatch == original_dispatch
 
-    first, second, dispatch_restored = asyncio.run(run())
+    ability, context = started_conversation(factory)
+    with pytest.raises(RuntimeError, match="turn did not complete"):
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({(1.0, 0.0)}),
+            target_ids=frozenset({"bot"}),
+            content="failed",
+            content_type="text/plain",
+        )
 
-    assert (first.input.conversation_ref, first.decoded_text) == ("first-call", "first")
-    assert (second.input.conversation_ref, second.decoded_text) == ("second-call", "second")
-    assert dispatch_restored
+    completed = run_input(
+        ability,
+        context,
+        source_ids=frozenset({(0.99, 0.01)}),
+        target_ids=frozenset({"bot"}),
+        content="completed",
+        content_type="text/plain",
+    )
+
+    assert len(created) == 2
+    assert completed.input.source_ids == frozenset({(0.99, 0.01)})
 
 
-def test_host_contribution_reports_terminal_contract_failure(
+def test_ambiguous_or_dimension_mismatched_vectors_create_new_tracks() -> None:
+    created: list[str] = []
+
+    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
+        created.append(track_ref)
+        return turn_detector.TurnDetector(
+            participant_ref=track_ref,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
+        )
+
+    ability, context = started_conversation(factory, similarity_threshold=0.99, similarity_margin=0.05)
+    for vector in ((1.0, 0.0), (0.0, 1.0), (0.7071, 0.7071), (1.0, 0.0, 0.0)):
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({vector}),
+            target_ids=frozenset({"bot"}),
+            content="vector",
+            content_type="text/plain",
+        )
+
+    assert len(created) == 4
+
+
+def test_multi_valued_sources_create_one_detector_per_source() -> None:
+    created: list[tuple[str, conversation.IdentityValue]] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        created.append((session_ref, source_id))
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
+        )
+
+    ability, context = started_conversation(factory)
+    result = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice", "bob"}),
+        target_ids=frozenset({"bot"}),
+        content="shared message",
+        content_type="application/x-sign-language",
+    )
+
+    assert result.session_ref == ability.session_refs[0]
+    assert {source_id for _, source_id in created} == {"alice", "bob"}
+    assert ability.detector_count == 2
+    assert {source_id for _, source_id in ability.detector_refs} == {"alice", "bob"}
+
+
+def test_bot_initiated_input_creates_relationship_from_explicit_sets() -> None:
+    ability, context = started_conversation()
+
+    result = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"bot"}),
+        target_ids=frozenset({"alice"}),
+        content="I wanted to ask about the weather.",
+        content_type="text/plain",
+    )
+
+    assert result.session_ref in ability.session_refs
+    assert ability.detector_refs == ((result.session_ref, "bot"),)
+    assert result.input.source_ids == frozenset({"bot"})
+    assert result.input.target_ids == frozenset({"alice"})
+
+
+def test_source_only_embedding_turns_share_ambient_session_and_preserve_empty_targets() -> None:
+    created: list[tuple[str, conversation.IdentityValue]] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        created.append((session_ref, source_id))
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
+            end_of_turn_silence_seconds=0.01,
+        )
+
+    input_data = conversation.ConversationInputData(
+        source_ids=frozenset({(1.0, 0.0, 0.0)}),
+        target_ids=frozenset(),
+        content="ambient turn",
+        content_type="text/plain",
+    )
+    assert input_data.target_ids == frozenset()
+
+    ability, context = started_conversation(factory)
+    results = [
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({embedding}),
+            target_ids=frozenset(),
+            content="ambient turn",
+            content_type="text/plain",
+        )
+        for embedding in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    ]
+
+    assert len({result.session_ref for result in results}) == 1
+    assert len(created) == 3
+    assert ability.detector_count == 3
+    assert all(result.input.target_ids == frozenset() for result in results)
+
+
+def test_content_type_is_data_not_a_route_selector() -> None:
+    ability, context = started_conversation()
+
+    plain = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="hello",
+        content_type="text/plain",
+    )
+    mislabeled = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="hello again",
+        content_type="application/octet-stream",
+    )
+
+    assert plain.session_ref == mislabeled.session_ref
+    assert plain.decoded_text == "hello"
+    assert mislabeled.decoded_text is None
+    assert mislabeled.input.content == "hello again"
+    assert mislabeled.input.content_type == "application/octet-stream"
+    assert ability.detector_count == 1
+
+
+def test_reverse_direction_reuses_session_and_structured_ids_are_collision_safe() -> None:
+    ability, context = started_conversation()
+
+    forward = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice"}),
+        target_ids=frozenset({"bot"}),
+        content="hello",
+        content_type="text/plain",
+    )
+    reverse = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"bot"}),
+        target_ids=frozenset({"alice"}),
+        content="hi",
+        content_type="text/plain",
+    )
+    delimited = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"a,b"}),
+        target_ids=frozenset({"c"}),
+        content={"kind": "weather", "value": "sunny"},
+        content_type="application/x-sign-language",
+    )
+    separate = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"a", "b"}),
+        target_ids=frozenset({"c"}),
+        content={"kind": "weather", "value": "cloudy"},
+        content_type="application/x-sign-language",
+    )
+
+    assert forward.session_ref == reverse.session_ref
+    assert delimited.session_ref != separate.session_ref
+    assert delimited.input.content == {"kind": "weather", "value": "sunny"}
+    assert delimited.input.content_type == "application/x-sign-language"
+    assert delimited.participation.perception.content == {"kind": "weather", "value": "sunny"}
+    assert delimited.participation.perception.modality == "multimodal"
+
+
+def test_each_source_receives_the_typed_content_and_template_decoder_is_preserved() -> None:
+    class RecordingDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
+        def __init__(self) -> None:
+            self.calls: list[turn_detector.ParticipationStimulus] = []
+
+        async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
+            self.calls.append(input)
+            return "decoded"
+
+    decoder = RecordingDecoder()
+    template = turn_detector.TurnDetector(decoder=decoder)
+    context = hsm.Context()
+    # Use a template through the public Conversation constructor to exercise cloning.
+    ability = conversation.Conversation(turn_detector=template)
+    asyncio.run(start_ability_tree(context, ability))
+
+    result = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"alice", "bob"}),
+        target_ids=frozenset({"bot"}),
+        content={"gesture": "wave"},
+        content_type="application/x-sign-language",
+    )
+
+    assert result.input.source_ids == frozenset({"alice", "bob"})
+    assert result.input.content_type == "application/x-sign-language"
+    assert {call.source_participant_ref for call in decoder.calls} == {"alice", "bob"}
+    assert all(isinstance(call, turn_detector.ContentStimulus) for call in decoder.calls)
+
+
+def test_failed_detector_creation_is_not_cached() -> None:
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        del session_ref
+        if source_id == "alice":
+            raise RuntimeError("detector creation failed")
+        return turn_detector.TurnDetector(participant_ref=source_id)
+
+    ability, context = started_conversation(factory)
+    with pytest.raises(RuntimeError, match="detector creation failed"):
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({"alice", "bob"}),
+            target_ids=frozenset({"bot"}),
+            content="hello",
+            content_type="text/plain",
+        )
+    assert ability.detector_count == 0
+
+
+def test_failed_detector_readiness_stops_and_does_not_cache_detector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def run() -> None:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        monkeypatch.setattr(
-            conversation_impl.Conversation,
-            "_build_contribution_response",
-            staticmethod(lambda instance, participated: object()),
+    created: list[turn_detector.TurnDetector] = []
+    stopped: list[turn_detector.TurnDetector] = []
+
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        detector = turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
         )
-        with pytest.raises(RuntimeError, match="output type does not match"):
-            await conversation.contribute_conversation_turn(conversation_ability, text_message())
+        created.append(detector)
+        return detector
+
+    dispatch = hsm.dispatch
+
+    def fail_readiness(
+        ctx: hsm.Context | None,
+        target: hsm.Dispatchable | None,
+        event: hsm.Event[typing.Any],
+    ) -> typing.Awaitable[None]:
+        if event.name == turn_detector.TurnDetectorReadyRequestEvent.name:
+            async def fail() -> None:
+                raise RuntimeError("detector readiness dispatch failed")
+
+            return fail()
+        return dispatch(ctx, target, event)
+
+    stop = hsm.stop
+
+    def record_stop(
+        instance: hsm.Instance | hsm.Group,
+        ctx: hsm.Context | None = None,
+    ) -> typing.Awaitable[None]:
+        assert isinstance(instance, turn_detector.TurnDetector)
+        stopped.append(instance)
+        return stop(instance, ctx)
+
+    monkeypatch.setattr(hsm, "dispatch", fail_readiness)
+    monkeypatch.setattr(hsm, "stop", record_stop)
+    ability, context = started_conversation(factory)
+
+    with pytest.raises(RuntimeError, match="detector readiness dispatch failed"):
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({"alice"}),
+            target_ids=frozenset({"bot"}),
+            content="hello",
+            content_type="text/plain",
+        )
+
+    assert created and stopped == [created[0]]
+    assert ability.detector_count == 0
+
+
+def test_cancellation_stops_active_cached_detector_but_preserves_idle_detector() -> None:
+    async def run() -> None:
+        active_turn_started = asyncio.Event()
+        created: list[str] = []
+
+        class SequencedDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
+            def __init__(self, started: asyncio.Event) -> None:
+                self._started = started
+                self._calls = 0
+
+            async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
+                del input
+                self._calls += 1
+                if self._calls == 1:
+                    return "first turn"
+                self._started.set()
+                await asyncio.Future[None]()
+                raise AssertionError("unreachable")
+
+        def factory(session_ref: str, track_ref: conversation.TrackRef) -> turn_detector.TurnDetector:
+            created.append(track_ref)
+            decoder = SequencedDecoder(active_turn_started) if track_ref == "alice" else None
+            return turn_detector.TurnDetector(
+                participant_ref=track_ref,
+                conversation_ref=session_ref,
+                decoder=decoder,
+                end_of_turn_silence_seconds=0.01,
+            )
+
+        ability = conversation.Conversation(turn_detector_factory=factory)
+        context = hsm.Context()
+        await start_ability_tree(context, ability)
+        first = await conversation.contribute_conversation_input(
+            ability,
+            conversation.ConversationInputData(
+                source_ids=frozenset({"alice", "bob"}),
+                target_ids=frozenset({"bot"}),
+                content="first",
+                content_type="text/plain",
+            ),
+            ctx=context,
+        )
+
+        operation = asyncio.create_task(
+            conversation.contribute_conversation_input(
+                ability,
+                conversation.ConversationInputData(
+                    source_ids=frozenset({"alice", "bob"}),
+                    target_ids=frozenset({"bot"}),
+                    content="cancelled",
+                    content_type="text/plain",
+                ),
+                ctx=context,
+            )
+        )
+        await asyncio.wait_for(active_turn_started.wait(), timeout=1.0)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+        assert ability.detector_refs == ((first.session_ref, "bob"),)
+        assert ability.detector_count == 1
+
+        await conversation.contribute_conversation_input(
+            ability,
+            conversation.ConversationInputData(
+                source_ids=frozenset({"alice", "bob"}),
+                target_ids=frozenset({"bot"}),
+                content="retry",
+                content_type="text/plain",
+            ),
+            ctx=context,
+        )
+        assert created == ["alice", "bob", "alice"]
 
     asyncio.run(run())
 
 
-def test_host_correlation_metadata_is_not_owner_visible(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> list[dict[str, object]]:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        owner = ability_terminal_owner(conversation_ability)
-        assert owner is not None
-        metadata: list[dict[str, object]] = []
-        original_record = getattr(owner, "record")
+def test_public_input_only_accepts_the_first_missing_detector_failure() -> None:
+    failed_source = "alice"
+    attempted: list[conversation.IdentityValue] = []
 
-        def record(event: hsm.Event[typing.Any]) -> None:
-            metadata.append(dict(event.metadata))
-            original_record(event)
-
-        monkeypatch.setattr(owner, "record", record)
-        _ = await conversation.contribute_conversation_turn(conversation_ability, text_message())
-        return metadata
-
-    metadata = asyncio.run(run())
-
-    # Host waiters and stage context must not leak into owner-visible event.metadata.
-    forbidden = {
-        "bot.conversation.result",
-        "bot.ability.terminal.result",
-        "bot.conversation.message",
-        "bot.conversation.decoded",
-    }
-    assert all(forbidden.isdisjoint(item) for item in metadata)
-
-
-def test_start_ability_tree_waits_for_attachment_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> conversation.ParticipatedTurn:
-        conversation_ability = RecordingConversation()
-
-        def fail_state_read() -> str:
-            raise AssertionError("test lifecycle setup must await typed attachment events")
-
-        monkeypatch.setattr(conversation_ability, "state", fail_state_read)
-        await start_conversation(conversation_ability)
-        return await conversation.contribute_conversation_turn(conversation_ability, text_message())
-
-    participated = asyncio.run(run())
-
-    assert participated.decoded_text == "hello"
-
-
-def test_start_ability_tree_surfaces_typed_attachment_failure() -> None:
-    async def run() -> None:
-        decoding_ability = text_decoding_ability()
-        await start_ability_tree(None, decoding_ability)
-        conversation_ability = conversation.TextConversation(
-            decoding=decoding_ability,
-            participating=participating.Participating(),
+    def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
+        attempted.append(source_id)
+        if source_id == failed_source:
+            raise RuntimeError(f"detector creation failed for {source_id}")
+        return turn_detector.TurnDetector(
+            participant_ref=source_id,
+            conversation_ref=session_ref,
         )
-        with pytest.raises(RuntimeError, match="cannot accept this attachment"):
-            await start_ability_tree(None, conversation_ability)
 
-    asyncio.run(run())
-
-
-def test_conversation_detach_clears_prior_turn_state() -> None:
-    async def run() -> conversation.Snapshot:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        _ = await conversation.contribute_conversation_turn(conversation_ability, text_message())
-        await wait_until(lambda: bool(conversation_ability.outputs))
-        owner = ability_terminal_owner(conversation_ability)
-        assert owner is not None
-        _ = await conversation_ability.detach(
-            conversation_ability.context(),
-            attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
-        )
-        await wait_until(lambda: (conversation_ability.state() or "").endswith("/detached"))
-        await start_conversation(conversation_ability)
-        _ = await conversation_ability.dispatch(
-            conversation_ability.context(),
-            conversation.SnapshotRequestEvent.with_data(conversation.SnapshotRequest(request_ref="after-detach")),
-        )
-        await wait_until(lambda: bool(conversation_ability.snapshots))
-        return conversation_ability.snapshots[-1]
-
-    snapshot = asyncio.run(run())
-
-    assert snapshot.conversation_ref is None
-    assert snapshot.participants == ()
-
-
-def test_host_text_respond_turn_yields_encoded_response() -> None:
-    async def run() -> tuple[
-        conversation.Response,
-        list[processing.InputData],
-        list[abilities.memory.InputData],
-        list[str],
-    ]:
-        decoder = RecordingTextStimulusDecoder()
-        encoder = PassthroughConversationEncoder()
-        intuition = RecordingIntuitionProcessor()
-        store = RecordingConversationMemory()
-        typing = typing_ability()
-        encoding_ability = text_encoding_ability(encoder)
-        conversation_ability = conversation.TextConversation(
-            decoding=text_decoding_ability(decoder),
-            participating=participating.Participating(),
-            typing=typing,
-            encoding=encoding_ability,
-        )
-        cognition_ability = brain_for_test(intuition_processor=intuition)
-        await start_conversation(conversation_ability)
-        for stage in (cognition_ability, store, typing, encoding_ability):
-            await start_ability_tree(None, stage)
-        response = await conversation.run_host_text_respond_turn(
-            conversation=conversation_ability,
-            cognition=cognition_ability,
-            memory=store,
-            text_generation=typing,
-            encoding=encoding_ability,
-            message=text_message(),
-        )
-        return response, intuition.calls, store.inputs, encoder.inputs
-
-    response, cognition_inputs, memory_inputs, encoding_inputs = asyncio.run(run())
-    assert response.content == "Conversation fixture response."
-    assert len(cognition_inputs) == 1
-    assert isinstance(cognition_inputs[0].input, bot.InputEventData)
-    assert len(memory_inputs) == 1
-    assert encoding_inputs == ["Conversation fixture response."]
-
-
-def test_host_voice_respond_turn_yields_bytes_response() -> None:
-    async def run() -> tuple[conversation.Response, list[conversation.EncodeData]]:
-        encoder = RecordingVoiceEncoder()
-        conversation_ability = conversation.VoiceConversation(
-            decoder=RecordingAudioStimulusDecoder(),
-            encoder=encoder,
-            participating=participating.Participating(),
-        )
-        cognition_ability = brain_for_test()
-        store = memory_ability()
-        await start_conversation(conversation_ability)
-        assert conversation_ability.encoding is not None
-        for stage in (cognition_ability, store, conversation_ability.encoding):
-            await start_ability_tree(None, stage)
-        response = await conversation.run_host_voice_respond_turn(
-            conversation=conversation_ability,
-            cognition=cognition_ability,
-            memory=store,
-            message=voice_message(),
-        )
-        return response, encoder.inputs
-
-    response, encoding_inputs = asyncio.run(run())
-    assert isinstance(response.content, bytes)
-    assert response.content.startswith(b"Voice fixture response")
-    assert len(encoding_inputs) == 1
-    assert encoding_inputs[0].decoded_text == "hello"
-
-
-def test_bot_conversation_decision_input_builds_host_policy_frame() -> None:
-    stimulus = participating.EventStimulus(
-        source_participant_ref="caller",
-        event="conversation.decoding",
-        payload={"source_kind": "text", "text": "hello"},
+    ability, context = started_conversation(factory)
+    input_data = conversation.ConversationInputData(
+        source_ids=frozenset({"alice", "bob", "carol"}),
+        target_ids=frozenset({"bot"}),
+        content="hello",
+        content_type="text/plain",
     )
-    participated = conversation.ParticipatedTurn(
-        input=text_message(),
-        stimulus=stimulus,
-        decoded_text="hello",
-        participation=participating.participating.OutputData(
-            participant_ref="bot",
-            contribution=participating.ParticipantContribution(
-                conversation_ref="support-call",
-                participant_ref="caller",
-                perception=participating.Perception(
-                    source_participant_ref="caller",
-                    modality="event",
-                    structured={"event": "conversation.decoding", "payload": stimulus.payload},
-                ),
-            ),
-            reason="DecodedData stimulus was accepted.",
-        ),
+
+    def contribute() -> conversation.ParticipatedTurn:
+        return run_input(
+            ability,
+            context,
+            source_ids=input_data.source_ids,
+            target_ids=input_data.target_ids,
+            content=input_data.content,
+            content_type=input_data.content_type,
+        )
+
+    with pytest.raises(RuntimeError, match="failed for alice"):
+        contribute()
+    assert attempted == ["alice"]
+    assert ability.detector_count == 0
+
+    failed_source = "bob"
+    attempted.clear()
+    with pytest.raises(RuntimeError, match="failed for bob"):
+        contribute()
+    assert attempted == ["alice", "bob"]
+    assert ability.detector_refs == ((ability.session_refs[0], "alice"),)
+
+
+def test_identity_sets_reject_blank_members() -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        conversation.ConversationInputData(
+            source_ids=frozenset({" "}),
+            target_ids=frozenset({"bot"}),
+            content="hello",
+            content_type="text/plain",
+        )
+
+
+def test_listening_speech_without_source_ids_fails_at_conversation_boundary() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ability = conversation.Conversation()
+        context = hsm.Context()
+        await start_ability_tree(context, ability)
+        speech = listening.SpeechData(
+            audio=b"\x00\x00",
+            voice_detection=voice.detection.ApplyData(),
+            sample_rate_hz=1,
+            media_type="audio/pcm",
+        )
+        stimulus = listening.SpeechEvent.with_data(speech)
+        operation_id = "missing-voice-id"
+        waiter: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+        ability.register_terminal_waiter(operation_id, waiter)
+        try:
+            await hsm.dispatch(
+                context,
+                ability,
+                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=stimulus), operation_id),
+            )
+            return await asyncio.wait_for(waiter, timeout=1.0)
+        finally:
+            ability.clear_terminal_waiter(operation_id)
+
+    terminal = asyncio.run(run())
+    assert terminal.name == conversation.FailedEvent.name
+    assert terminal.data == conversation.FailureData(
+        stage="voice_routing",
+        message="Listening speech has no source_ids; configure a voice classifier or diarizer.",
     )
-    built = conversation.agent_conversation_decision_input(
-        participated,
-        target_device="caller",
-    )
-    assert isinstance(built.input, bot.InputEventData)
-    assert built.input.source_event == "bot.ability.conversation.participating"
-    assert built.actors == {}
-
-
-def test_conversation_snapshot_request() -> None:
-    async def run() -> list[conversation.Snapshot]:
-        conversation_ability = RecordingConversation()
-        await start_conversation(conversation_ability)
-        _ = await conversation_ability.apply(text_message())
-        await wait_until(lambda: bool(conversation_ability.outputs))
-        _ = await conversation_ability.dispatch(
-            conversation_ability.context(),
-            conversation.SnapshotRequestEvent.with_data(conversation.SnapshotRequest(request_ref="panel")),
-        )
-        await wait_until(lambda: bool(conversation_ability.snapshots))
-        return conversation_ability.snapshots
-
-    snapshots = asyncio.run(run())
-    assert snapshots[-1].request_ref == "panel"
-    assert snapshots[-1].conversation_ref == "support-call"
-
-
-def test_text_conversation_model_topology_is_thin() -> None:
-    model = conversation.TextConversation.model
-    assert model is not None
-    view = model_view(model)
-    assert view.qualified_name == "/TextConversationLifecycle"
-    joined = "\n".join(f"{key}" for key in view.transition_map)
-    assert "deciding" not in joined
-    assert "/memory" not in joined
-    assert "decoding" in joined or "participating" in joined
-
-
-def test_text_message_requires_self_participant_state_and_unique_participants() -> None:
-    with pytest.raises(ValueError, match="self_participant_ref must match one participant snapshot."):
-        _ = conversation.AnyMessage(
-            conversation_ref="support-call",
-            self_participant_ref="missing",
-            participants=(
-                participating.ParticipantSnapshot(
-                    ref="bot",
-                    kind="bot",
-                    state=participating.ParticipantStateSnapshot(
-                        presence="present", attention="available", turn="listening"
-                    ),
-                ),
-            ),
-            content=participating.TextStimulus(source_participant_ref="bot", content="hello"),
-        )
-
-
-class _BlockingTextDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
-    """Decoder that blocks until released so mid-turn isolation can be observed."""
-
-    def __init__(self) -> None:
-        self.gate = asyncio.Event()
-        self.inputs: list[str] = []
-
-    @typing.override
-    async def decode(self, input: participating.ParticipationStimulus) -> str:
-        if isinstance(input, participating.TextStimulus):
-            self.inputs.append(input.content)
-        await self.gate.wait()
-        return "live-decode"
-
-
-def test_conversation_phase_context_is_not_instance_stashed() -> None:
-    """Message/DecodedTurn are activity-local; only turn id is machine-owned correlation."""
-
-    conversation_ability = RecordingConversation()
-    assert "_active_message" not in conversation_ability.__dict__
-    assert "_active_decoded" not in conversation_ability.__dict__
-    assert conversation_ability.active_turn_id() is None
-
-
-def test_conversation_activity_holds_turn_without_stage_fields() -> None:
-    """While decoding, machine has turn id only — no Message/DecodedTurn instance stash."""
-
-    async def run() -> tuple[str | None, bool, bool, str]:
-        decoder = _BlockingTextDecoder()
-        conversation_ability = RecordingConversation(decoding=text_decoding_ability(decoder))
-        await start_conversation(conversation_ability)
-        turn_id = "turn-live-1"
-        _ = await conversation_ability.dispatch(
-            conversation_ability.context(),
-            conversation_ability.input_event.with_data_and_id(text_message(content="hello"), turn_id),
-        )
-        await wait_until(lambda: conversation_ability.state().endswith("/active/decoding"))
-        mid_id = conversation_ability.active_turn_id()
-        has_message = "_active_message" in conversation_ability.__dict__
-        has_decoded = "_active_decoded" in conversation_ability.__dict__
-        decoder.gate.set()
-        await wait_until(lambda: bool(conversation_ability.outputs) or bool(conversation_ability.failures))
-        return mid_id, has_message, has_decoded, conversation_ability.state()
-
-    mid_id, has_message, has_decoded, state = asyncio.run(run())
-    assert mid_id == "turn-live-1"
-    assert has_message is False
-    assert has_decoded is False
-    assert state.endswith("/silent")
-
-
-def test_conversation_active_turn_match_is_id_equality() -> None:
-    conversation_ability = RecordingConversation()
-    conversation_ability.set_active_turn_id("turn-a")
-    wrong = conversation_ability.input_event.with_data_and_id(text_message(), "turn-b")
-    right = conversation_ability.input_event.with_data_and_id(text_message(), "turn-a")
-    assert conversation_ability.matches_active_turn(wrong) is False
-    assert conversation_ability.matches_active_turn(right) is True

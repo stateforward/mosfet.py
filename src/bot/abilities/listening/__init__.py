@@ -6,6 +6,8 @@ from .interpretation import (
     ListeningFailedEvent,
     FailedEventData,
     ListeningStage,
+    SpeechData,
+    SpeechEvent,
 )
 from .listening import Listening
 from .sensitivity import Sensitivity
@@ -17,6 +19,8 @@ __all__ = [
     "FailedEventData",
     "ListeningStage",
     "Sensitivity",
+    "SpeechData",
+    "SpeechEvent",
     "interpretation",
     "listening",
     "sensitivity",

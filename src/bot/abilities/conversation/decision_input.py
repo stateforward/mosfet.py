@@ -7,7 +7,7 @@ bot-input shape.
 
 This module intentionally does not import conversation types so it stays free of
 import cycles with the conversation coordinator. Callers pass a participated
-turn object that exposes ``participation.contribution`` and ``stimulus.kind``.
+turn object that exposes ``participation`` and ``stimulus.kind``.
 """
 
 from __future__ import annotations
@@ -54,19 +54,18 @@ def agent_conversation_decision_input(
 
     ``participated`` must expose:
 
-    - ``participation.contribution.conversation_ref``
-    - ``participation.contribution.participant_ref``
-    - ``participation.contribution.perception.modality``
+    - ``participation.conversation_ref``
+    - ``participation.participant_ref``
+    - ``participation.perception.modality``
     - ``stimulus.kind``
     """
 
-    participation = typing.cast(typing.Any, participated).participation
-    contribution = participation.contribution
+    contribution = typing.cast(typing.Any, participated).participation
     stimulus = typing.cast(typing.Any, participated).stimulus
     host_input = bot.InputEventData(
         target_device=target_device,
         priority=0,
-        source_event="bot.ability.conversation.participating",
+        source_event="bot.ability.conversation.turn_detector",
         payload={
             "conversation_ref": contribution.conversation_ref,
             "participant_ref": contribution.participant_ref,

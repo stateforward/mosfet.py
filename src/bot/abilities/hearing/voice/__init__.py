@@ -5,8 +5,18 @@ Import ``InputData`` / ``OutputData`` from the defining leaf module
 re-export colliding type names.
 """
 
-from . import detection, diarization, identification
-from .detection import VoiceDetection, VoiceDetector
+from . import detection, diarization, identification, segment
+from .detection import (
+    ApplyData,
+    EndData,
+    EndEvent,
+    OutputEvent,
+    StartData,
+    StartEvent,
+    VoiceDetection,
+    VoiceDetectionSegment,
+    VoiceDetector,
+)
 from .diarization import (
     VoiceDiarization,
     VoiceDiarizationSegment,
@@ -14,22 +24,28 @@ from .diarization import (
 )
 from .identification import (
     VoiceIdentification,
-    VoiceIdentificationSegment,
-    VoiceIdentifier,
-    VoiceSignature,
+    VoiceEmbedding,
 )
+from .segment import VoiceSegment
 
 __all__ = [
+    "ApplyData",
+    "EndData",
+    "EndEvent",
+    "OutputEvent",
+    "StartData",
+    "StartEvent",
     "VoiceDiarization",
     "VoiceDiarizationSegment",
     "VoiceDetection",
+    "VoiceDetectionSegment",
     "VoiceDetector",
     "VoiceDiarizer",
     "VoiceIdentification",
-    "VoiceIdentificationSegment",
-    "VoiceIdentifier",
-    "VoiceSignature",
+    "VoiceEmbedding",
+    "VoiceSegment",
     "detection",
     "diarization",
     "identification",
+    "segment",
 ]
