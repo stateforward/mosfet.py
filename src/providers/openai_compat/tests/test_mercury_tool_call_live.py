@@ -141,14 +141,15 @@ def _ambient_stimulus() -> hsm.Event[SoundData]:
 
 
 def _intuition_input(stimulus: object) -> processing.InputData:
-    """Same shape Cognition stamps for Intuition (instructions + EventPatch confidence)."""
+    """Same shape Cognition stamps for Intuition (world XML system + EventPatch confidence)."""
 
     return processing.InputData(
         input=stimulus,
         schemas=_phone_bot_intuition_schemas(),
         # Actors map is model-facing only here; we assert selections, not live dispatch.
         actors={"phone": hsm.Instance()},
-        instructions=intuition.DEFAULT_INSTRUCTIONS,
+        # System channel is the per-turn world block only (no static ability prose).
+        instructions='<environment id="live-eval">\n  <self state="/PhoneBot/active"/>\n</environment>',
         patch=intuition.EventPatch,
     )
 

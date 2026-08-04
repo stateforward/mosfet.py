@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import bot.abilities
 from bot.abilities import cognition
-from bot.abilities import conversation
-from bot.abilities import participating
+from bot.abilities.communication import conversation
+from bot.abilities.communication.conversation import turn_detector
 from bot.abilities.hearing import speech
 
 import asyncio
@@ -33,34 +33,23 @@ class RecordingSpeechEncoder(bot.abilities.Encoder[bytes, bytes]):
         return b"encoded voice response"
 
 
-def voice_message() -> conversation.VoiceMessage:
-    return conversation.VoiceMessage(
-        conversation_ref="support-call",
-        self_participant_ref="bot",
-        participants=(
-            participating.ParticipantSnapshot(
-                ref="bot",
-                kind="bot",
-                state=participating.ParticipantStateSnapshot(
-                    presence="present", attention="available", turn="listening"
-                ),
-            ),
-        ),
-        content=participating.AudioStimulus(source_participant_ref="caller", content=b"encoded speech"),
+def voice_message() -> conversation.ConversationInputData:
+    return conversation.ConversationInputData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content=b"encoded speech",
+        content_type="audio/raw",
     )
 
 
-def participating_output() -> participating.OutputData:
-    return participating.OutputData(
-        participant_ref="bot",
-        contribution=participating.ParticipantContribution(
-            conversation_ref="support-call",
-            participant_ref="caller",
-            perception=participating.Perception(
-                source_participant_ref="caller",
-                modality="audio",
-                speech=b"encoded speech",
-            ),
+def turn_detector_output() -> turn_detector.ParticipantContribution:
+    return turn_detector.ParticipantContribution(
+        conversation_ref="support-call",
+        participant_ref="caller",
+        perception=turn_detector.Perception(
+            source_participant_ref="caller",
+            modality="audio",
+            speech=b"encoded speech",
         ),
     )
 
@@ -69,7 +58,7 @@ def test_voice_decoder_uses_mlx_speech_decoder() -> None:
     decoder = VoiceDecoder(speech_decoder=FixedSpeechDecoder(output=b"hello caller"))
 
     output = asyncio.run(
-        decoder.decode(participating.AudioStimulus(source_participant_ref="caller", content=b"encoded speech"))
+        decoder.decode(turn_detector.AudioStimulus(source_participant_ref="caller", content=b"encoded speech"))
     )
 
     assert output == "hello caller"
@@ -83,8 +72,8 @@ def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
         encoder.encode(
             conversation.EncodeData(
                 message=voice_message(),
-                decoded_text="hello caller",
-                participation=participating_output(),
+                text="hello caller",
+                participation=turn_detector_output(),
                 result=(
                     cognition.types.EventData(
                         event="phone.answer_call",
@@ -99,7 +88,7 @@ def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
     assert speech_encoder.calls == [b"I can help with that."]
 
 
-def test_voice_encoder_falls_back_to_decoded_text() -> None:
+def test_voice_encoder_falls_back_to_text() -> None:
     speech_encoder = RecordingSpeechEncoder()
     encoder = VoiceEncoder(speech_encoder=speech_encoder)
 
@@ -107,8 +96,8 @@ def test_voice_encoder_falls_back_to_decoded_text() -> None:
         encoder.encode(
             conversation.EncodeData(
                 message=voice_message(),
-                decoded_text="hello caller",
-                participation=participating_output(),
+                text="hello caller",
+                participation=turn_detector_output(),
                 result=(),
             )
         )

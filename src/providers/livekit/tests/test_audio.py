@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import bot.abilities
-from bot.abilities import participating
+from bot.abilities.communication.conversation import turn_detector
 from bot.abilities.hearing import speech
 from bot.devices import audio as audio_device
 
@@ -286,7 +286,7 @@ def test_livekit_voice_decoder_wraps_pcm_audio_for_injected_speech_decoder() -> 
     transcript = asyncio.run(
         await_value(
             decoder.decode(
-                participating.AudioStimulus(
+                turn_detector.AudioStimulus(
                     source_participant_ref="caller",
                     content=b"\x01\x00\x02\x00",
                 )

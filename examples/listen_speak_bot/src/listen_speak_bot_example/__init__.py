@@ -271,9 +271,9 @@ class AlwaysVoiceDetector(voice.detection.VoiceDetector):
     """Offline VAD: every acoustic chunk is voice (no ML dependency)."""
 
     @override
-    async def classify(self, input: bytes) -> voice.detection.OutputData:
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
-        return voice.detection.OutputData(is_voice=True, confidence=1.0)
+        return voice.detection.ApplyData(segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=1.0),))
 
 
 class FixedTranscriptDecoder(speech.SpeechDecoder):
@@ -396,9 +396,11 @@ class ListenSpeakBot(Bot):
             speech_decoder=self._decoder,
         )
         # No Speaker device: encoder still produces WAV; avoids self-hearing loop.
+        # listening= for composition-time nerve wiring (no mouth ⇒ no copy issued either way).
         self._speaking = speaking.Speaking(
             encoder=self._encoder,
             speaker=None,
+            listening=self._listening,
             sample_rate_hz=sample_rate_hz,
             channels=_DEFAULT_CHANNELS,
             media_type="audio/wav",

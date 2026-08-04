@@ -31,9 +31,9 @@ import hsm
 from bot.protocols import attachment
 
 from bot.abilities import cognition
-from bot.abilities import speaking
 from bot.telemetry import observer
 from bot.environment import SoundData, SoundEvent
+from ..speaking import EfferenceData, EfferenceEvent
 
 _SensitivityCompletedEvent = hsm.Event[sensitivity.OutputData](
     name="bot.ability.listening.sensitivity.completed",
@@ -49,7 +49,7 @@ def _has_listening_input(ctx: hsm.Context, instance: "Listening", event: hsm.Eve
 
 def _has_efference_copy(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, speaking.EfferenceData)
+    return isinstance(event.data, EfferenceData)
 
 
 def _has_interpreted_product(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
@@ -148,8 +148,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         assert isinstance(sound, SoundData)
         operation_id = event.id if event.id else uuid.uuid4().hex
         stage = instance._sensitivity
-        waiter: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
-        stage.register_terminal_waiter(operation_id, waiter)
+        # Owner-local waiter: Future on Listening, not a peer Future on Sensitivity.
+        waiter = ability.Ability.prepare_child_terminal_wait(instance, stage, operation_id)
         try:
             # Dispatched by hand rather than through the shared child-terminal helper for one
             # reason: that helper stamps the envelope source with whoever asked, and here the
@@ -172,7 +172,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 _ = waiter.cancel()
             raise
         finally:
-            stage.clear_terminal_waiter(operation_id)
+            ability.Ability.clear_child_terminal_wait(instance, stage, operation_id)
         sensed = terminal.data
         if not isinstance(sensed, sensitivity.OutputData):
             raise AssertionError("listening sensitivity must always return a scored sound.")
@@ -256,7 +256,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             # perception happens to be — a mouth does not wait for the ears to be free. Internal:
             # the report modulates perception, it does not interrupt it.
             hsm.transition(
-                hsm.on(speaking.EfferenceEvent),
+                hsm.on(EfferenceEvent),
                 hsm.guard(_has_efference_copy),
                 hsm.effect(_forward_efference_copy),
             ),

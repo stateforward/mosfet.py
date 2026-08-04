@@ -22,22 +22,10 @@ _DEFAULT_TUNER_WARMUP = 8
 # Variance floor on 0–100 scale (~std 10 when expressed as variance 100).
 _DEFAULT_TUNER_VAR_FLOOR = 100.0
 _DEFAULT_TUNER_MEAN = 70.0
-DEFAULT_INSTRUCTIONS = (
-    "Select one or more modeled events from the offered schemas. Multiple events may run in one "
-    "turn (for example speaking together with another offered ability). Every offered event schema "
-    "includes integer confidence 0–100: always set it on each selected event (whole number only, "
-    "never a fraction). Use high confidence (80–100) when the match is clear, mid (40–70) when "
-    "plausible but incomplete, and low (0–35) when guessing or the host likely cannot fulfill the "
-    "request—low confidence may still run environment actions while Cognition escalates an unhandled "
-    "turn to deliberation. "
-    "When no device, body, or speech action should run, select "
-    "bot.ability.cognition.ignore (with optional reason) for a deliberate handled pass. "
-    "An empty events list is treated as unhandled and falls through to deliberative reasoning. "
-    "Do not invent a device command or focus/clear_focus as a stand-in for ignore. "
-    "Prefer ignore for ambient or non-actionable stimuli. "
-    "Select deliberative reasoning only when the stimulus needs slower System-2 thought, or leave "
-    "events empty to force that cascade."
-)
+# No static system prose: the model-facing system channel is only the per-turn world block
+# (``Environment.model_snapshot`` XML stamped on ``InputData.instructions``). Tool schemas and
+# the stimulus carry the rest of the contract.
+DEFAULT_INSTRUCTIONS = ""
 
 
 class EventPatch(pydantic.BaseModel):
@@ -266,17 +254,19 @@ def _is_deliberative_input_event(
     event_name: str,
     schemas: dict[str, hsm.Event[typing.Any]],
 ) -> bool:
-    """True for reasoning invoke tools — host cascade / multi-select handoff to System 2."""
+    """True for deliberate handoff tools — host cascade / multi-select handoff to System 2.
 
-    from . import reasoning as reasoning_ability
+    Detected without importing reasoning: shared event-name constant and/or the schema
+    marker ``__deliberative_handoff__`` (see :func:`processing.is_deliberative_handoff_schema`).
+    Name match covers cascade selections that are not in the current tool menu.
+    """
 
-    if event_name == reasoning_ability.InputEvent.name:
+    if types.is_deliberative_handoff_event_name(event_name):
         return True
     schema_event = schemas.get(event_name)
     if schema_event is None:
         return False
-    schema = getattr(schema_event, "schema", None)
-    return schema is processing.InputData or schema is reasoning_ability.CallData
+    return processing.is_deliberative_handoff_schema(getattr(schema_event, "schema", None))
 
 
 def _environment_actions(
@@ -329,9 +319,9 @@ class Intuition(processing.Processing):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.intuition.input",
-        InputData,
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+        name="bot.ability.intuition.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
         name="bot.ability.intuition.output",
@@ -355,7 +345,8 @@ class Intuition(processing.Processing):
     @staticmethod
     def _has_intuition_applied(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return event.name == _AppliedEvent.name
+        # Topology is already on _AppliedEvent; narrow by typed completion payload.
+        return isinstance(event.data, types.CompletionData)
 
     @staticmethod
     def _has_apply_failure(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
@@ -567,10 +558,11 @@ class Intuition(processing.Processing):
         if not 0 <= confidence_floor <= 100:
             raise ValueError("confidence_floor must be an integer between 0 and 100.")
         resolved = type(self).instructions if instructions is None else instructions
-        if not resolved.strip():
-            raise ValueError("instructions must not be blank.")
+        if instructions is not None and not instructions.strip():
+            raise ValueError("instructions must not be blank when provided.")
+        # Empty default is intentional: system channel is only the per-turn world XML when present.
         ability.Ability.__init__(self)
-        self._instructions = resolved.strip()
+        self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._confidence_tuner = confidence_tuner or ConfidenceTuner(floor=confidence_floor)
 

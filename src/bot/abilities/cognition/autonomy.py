@@ -320,8 +320,9 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> bool:
             del ctx
+            # Topology is already on behavior.output_event; correlate envelope + non-failure payload.
             return (
-                event.name == behavior.output_event.name
+                not isinstance(event.data, ability.FailureData)
                 and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
@@ -333,8 +334,9 @@ class _CandidateRun(hsm.Instance):
             event: hsm.Event[typing.Any],
         ) -> bool:
             del ctx
+            # Topology is already on behavior.failed_event; correlate envelope + typed failure.
             return (
-                event.name == behavior.failed_event.name
+                isinstance(event.data, ability.FailureData)
                 and event.id == child_id
                 and event.source == hsm.id(behavior)
                 and event.target == hsm.id(instance)
@@ -760,19 +762,11 @@ def behavior_input_payload(cognition_input: input.InputData) -> object:
 
 
 def _json_like(value: object) -> object:
-    if isinstance(value, pydantic.BaseModel):
-        return value.model_dump(mode="json")
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _json_like(dataclasses.asdict(value))
-    if isinstance(value, collections.abc.Mapping):
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): _json_like(item) for key, item in mapping.items()}
-    if isinstance(value, list | tuple):
-        sequence = typing.cast(collections.abc.Sequence[object], value)
-        return [_json_like(item) for item in sequence]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
+    """Project values for Starlark / selection envelopes: bytes as base64 only."""
+
+    from bot.event_schema import project_json_value
+
+    return project_json_value(value)
 
 
 def _matches_trigger(behavior: Instance, stimulus: str | None) -> bool:
@@ -824,13 +818,15 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.TurnData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
-    input_event: typing.ClassVar[hsm.Event[types.TurnData]] = ability.ability_input_event(
-        "bot.ability.autonomy.input",
-        types.TurnData,
+    input_event: typing.ClassVar[hsm.Event[types.TurnData]] = hsm.Event[types.TurnData](
+    name="bot.ability.autonomy.input",
+    schema=types.TurnData,
+
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
-        name="bot.ability.autonomy.output",
-        schema=types.CompletionData,
+    name="bot.ability.autonomy.output",
+    schema=types.CompletionData,
+
     )
     failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
         name=ability.FailedEvent.name,
@@ -920,7 +916,8 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != attachment.DetachEvent.name:
+        # Shared exit fires on every exit; cascade only for typed DetachEvent payloads.
+        if not isinstance(event.data, attachment.DetachData):
             return
         Autonomy._cancel_active_candidate(ctx, instance, reason="Autonomy detached.")
         instance._behaviors = ()

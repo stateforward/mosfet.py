@@ -15,7 +15,7 @@ def main(argv: list[str] | None = None) -> None:
     _ = parser.add_argument("--room", default=os.environ.get("BOT_LIVEKIT_ROOM", "bot-phone-bot"))
     _ = parser.add_argument(
         "--identity",
-        default=os.environ.get("BOT_LIVEKIT_IDENTITY", "bot-phone-bot"),
+        default=os.environ.get("BOT_LIVEKIT_IDENTITY", "5550141"),
     )
     _ = parser.add_argument("--name", default=None)
     _ = parser.add_argument("--ttl-seconds", type=int, default=6 * 60 * 60)

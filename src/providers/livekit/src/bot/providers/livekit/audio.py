@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import bot.abilities
-from bot.abilities import conversation
+from bot.abilities.communication import conversation
 from bot.abilities.hearing import speech
 from bot.devices import audio as audio_device
 
@@ -324,8 +324,15 @@ class VoiceDecoder(conversation.voice.VoiceDecoder):
     pcm_decoder: PcmWavDecoder = dataclasses.field(default_factory=PcmWavDecoder)
 
     @typing.override
-    async def decode(self, input: bot.abilities.AudioStimulus) -> str:
-        wav = await self.pcm_decoder.decode(input.content)
+    async def decode(self, input: conversation.turn_detector.AudioStimulus) -> str:
+        rate = input.sample_rate_hz if input.sample_rate_hz is not None else self.pcm_decoder.sample_rate_hz
+        channels = input.channels if input.channels is not None else self.pcm_decoder.channels
+        pcm_decoder = (
+            self.pcm_decoder
+            if rate == self.pcm_decoder.sample_rate_hz and channels == self.pcm_decoder.channels
+            else PcmWavDecoder(sample_rate_hz=rate, channels=channels)
+        )
+        wav = await pcm_decoder.decode(input.content)
         transcript = await self.speech_decoder.decode(wav)
         return transcript.decode("utf-8")
 

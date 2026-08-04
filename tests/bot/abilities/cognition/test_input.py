@@ -119,8 +119,67 @@ def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
         names = {event.name for event in built.schemas}
         assert bot.FocusDeviceEvent.name in names
         assert bot.ClearFocusEvent.name in names
+        assert built.actor_events[bot.FocusDeviceEvent.name] == ("bot",)
+        assert built.actor_events[bot.ClearFocusEvent.name] == ("bot",)
 
     asyncio.run(run())
+
+
+def test_build_processing_input_records_multi_actor_enablers() -> None:
+    """Same event name enabled by two actor keys → actor_events lists both (sorted)."""
+
+    async def run() -> None:
+        left = _FocusBotActor()
+        right = _FocusBotActor()
+        ctx = shared_hsm_context()
+        assert left.model is not None and right.model is not None
+        _ = await hsm.started(ctx, left, left.model)
+        _ = await hsm.started(ctx, right, right.model)
+        built = cognition_input.build_processing_input(
+            cognition_input.InputData(
+                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                actors={"alpha": left, "beta": right},
+            ),
+        )
+        assert built.actor_events[bot.FocusDeviceEvent.name] == ("alpha", "beta")
+        tool = processing.dispatch_tool(
+            built.schemas,
+            targets_by_event=built.actor_events,
+        )
+        focus_target_enum: object | None = None
+        for branch in _nested_tool_branches(tool):
+            properties = branch["properties"]
+            assert isinstance(properties, dict)
+            event_schema = properties["event"]
+            assert isinstance(event_schema, dict)
+            if event_schema.get("const") == bot.FocusDeviceEvent.name:
+                target_schema = properties["target"]
+                assert isinstance(target_schema, dict)
+                focus_target_enum = target_schema.get("enum")
+                break
+        assert focus_target_enum == ["alpha", "beta"]
+
+    asyncio.run(run())
+
+
+def _nested_tool_branches(tool: dict[str, object]) -> list[dict[str, object]]:
+    function = tool["function"]
+    assert isinstance(function, dict)
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    properties = parameters["properties"]
+    assert isinstance(properties, dict)
+    events = properties["events"]
+    assert isinstance(events, dict)
+    items = events["items"]
+    assert isinstance(items, dict)
+    branches = items["anyOf"]
+    assert isinstance(branches, list)
+    typed: list[dict[str, object]] = []
+    for branch in branches:
+        assert isinstance(branch, dict)
+        typed.append(typing.cast(dict[str, object], branch))
+    return typed
 
 
 class _MoodValue:

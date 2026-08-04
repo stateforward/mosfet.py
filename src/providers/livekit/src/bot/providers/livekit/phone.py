@@ -1184,15 +1184,15 @@ class PhoneService(hsm.Instance):
         return bridge, track_path
 
     async def dial(self, request: phone.DialData) -> None:
-        """Route the number dialled to an endpoint, send call setup there, and return once it is ringing.
+        """Address setup at the dialled number's participant identity and return once it is ringing.
 
-        The number is not the address. A number is digits somebody can say and press; the address
-        is a LiveKit participant identity, and the dial plan is what turns one into the other —
-        which is the work an exchange does and the reason a handset never holds an identity.
+        On this SFU fiction the participant identity **is** the phone number (same normalized
+        digit form ``DialData`` already validated). Setup is sent to ``request.number`` unless an
+        optional :class:`~signaling.DialPlan` remaps aliases for tests or rare provisioning.
 
-        A number nothing is registered against is a wrong number: ``remote_unavailable``, the same
-        verdict the room gives for an endpoint that is not there. Both are the far end being
-        absent, which is all a caller ever learns from either.
+        When a plan is present and returns None, that is a wrong number answered by the exchange
+        with nothing put on the wire. When no plan (or the plan maps to an identity), the room
+        decides presence: no participant with that identity yields ``remote_unavailable``.
 
         Returning does **not** mean connected. The ack on setup means the far end is ringing; the
         connect arrives later, as an accept, because whether to answer is the callee's decision
@@ -1208,18 +1208,16 @@ class PhoneService(hsm.Instance):
             )
         dial_plan = self._dial_plan
         if dial_plan is None:
-            raise PhoneServiceError(
-                "This LiveKit phone is registered with no exchange, so no number leads anywhere from it.",
-                failure_kind="provider_unavailable",
-            )
-        endpoint = dial_plan.endpoint(request.number)
-        if endpoint is None:
-            # Deliberately says nothing about which number: a wrong number is all a caller is told,
-            # and a log line is not the place to start keeping a record of who was dialled.
-            raise PhoneServiceError(
-                "No line is registered against the number dialled.",
-                failure_kind="remote_unavailable",
-            )
+            endpoint = request.number
+        else:
+            endpoint = dial_plan.endpoint(request.number)
+            if endpoint is None:
+                # Deliberately says nothing about which number: a wrong number is all a caller is told,
+                # and a log line is not the place to start keeping a record of who was dialled.
+                raise PhoneServiceError(
+                    "No line is registered against the number dialled.",
+                    failure_kind="remote_unavailable",
+                )
         # A phone that has dialled knows who it dialled, before it knows whether they will answer.
         self._call_peer_identity = endpoint
         try:

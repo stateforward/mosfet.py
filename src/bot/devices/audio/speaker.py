@@ -38,6 +38,18 @@ class Speaker(Device):
         # which is what keeps geometry opt-in.
         self._amplitude_db = amplitude_db
 
+    @property
+    def amplitude_db(self) -> float | None:
+        """How loud this mouth plays at the reference distance, or None if unconstrained."""
+
+        return self._amplitude_db
+
+    @property
+    def placement(self) -> space.Placement | None:
+        """Where this transducer is in the environment, if known."""
+
+        return self._placement
+
     @staticmethod
     def _transduce(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
         """Convert signal from an attached controller into acoustic energy in the environment.

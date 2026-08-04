@@ -35,18 +35,11 @@ class VoiceDiarizationModel(typing.Protocol):
         ...
 
 
-class VoiceIdentificationModel(typing.Protocol):
-    def extract_speaker_embedding(self, audio: object, *, sr: int) -> object:
-        """Return a speaker embedding for decoded segment audio."""
-        ...
-
-
 SpeechEncodingModelLoader = collections.abc.Callable[[str], SpeechEncodingModel]
 SpeechDecodingModelLoader = collections.abc.Callable[[str], SpeechDecodingModel]
 SpeechAudioWriter = collections.abc.Callable[[object, int, str], bytes]
 VoiceDetectionModelLoader = collections.abc.Callable[[str], VoiceDetectionModel]
 VoiceDiarizationModelLoader = collections.abc.Callable[[str], VoiceDiarizationModel]
-VoiceIdentificationModelLoader = collections.abc.Callable[[str], VoiceIdentificationModel]
 
 
 def load_speech_encoding_model(model_id: str) -> SpeechEncodingModel:
@@ -78,12 +71,6 @@ def load_voice_detection_model(model_id: str) -> VoiceDetectionModel:
 def load_voice_diarization_model(model_id: str) -> VoiceDiarizationModel:
     module = importlib.import_module("mlx_audio.vad")
     load = typing.cast(collections.abc.Callable[[str], VoiceDiarizationModel], getattr(module, "load"))
-    return load(model_id)
-
-
-def load_voice_identification_model(model_id: str) -> VoiceIdentificationModel:
-    module = importlib.import_module("mlx_audio.tts.utils")
-    load = typing.cast(collections.abc.Callable[[str], VoiceIdentificationModel], getattr(module, "load"))
     return load(model_id)
 
 

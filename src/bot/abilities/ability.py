@@ -135,107 +135,13 @@ class FailureData(pydantic.BaseModel):
     )
 
 
-def _is_base_model_type(data_type: object) -> typing.TypeGuard[type[pydantic.BaseModel]]:
-    if not isinstance(data_type, type):
-        return False
-    try:
-        return issubclass(data_type, pydantic.BaseModel)
-    except TypeError:
-        return False
-
-
-def _model_with_json_schema_extra(
-    data_type: type[pydantic.BaseModel],
-    *,
-    description: str | None,
-    examples: collections.abc.Sequence[object] | None,
-) -> type[pydantic.BaseModel]:
-    """Return a BaseModel subclass with merged root json_schema_extra (still a model, not TypeAdapter)."""
-
-    existing_extra = data_type.model_config.get("json_schema_extra")
-    extra: dict[str, pydantic.JsonValue] = {}
-    if isinstance(existing_extra, dict):
-        extra = dict(existing_extra)
-    if description is not None:
-        extra["description"] = description
-    if examples is not None:
-        extra["examples"] = typing.cast(pydantic.JsonValue, list(examples))
-    # Preserve relevant base config; create_model needs an explicit ConfigDict for extra merge.
-    config = pydantic.ConfigDict(
-        frozen=bool(data_type.model_config.get("frozen", False)),
-        extra=data_type.model_config.get("extra", "ignore"),  # type: ignore[arg-type]
-        arbitrary_types_allowed=bool(data_type.model_config.get("arbitrary_types_allowed", False)),
-        json_schema_extra=extra,
-    )
-    return pydantic.create_model(
-        f"{data_type.__name__}EventSchema",
-        __base__=data_type,
-        __config__=config,
-    )
-
-
-def _schema_for_data_type(
-    data_type: type[object],
-    *,
-    description: str | None,
-    examples: collections.abc.Sequence[object] | None,
-) -> object:
-    """Resolve an event payload schema.
-
-    Prefer concrete ``BaseModel`` types (required fields / Field descriptions stay on the model).
-    Do not wrap models in ``TypeAdapter`` — that breaks create_model patching and hides
-    domain required lists. Non-model types may still use TypeAdapter when metadata is needed.
-    """
-
-    if _is_base_model_type(data_type):
-        if description is None and examples is None:
-            return data_type
-        return _model_with_json_schema_extra(
-            data_type,
-            description=description,
-            examples=examples,
-        )
-    if description is None and examples is None:
-        return data_type
-    # Non-BaseModel payloads (e.g. bytes) still need TypeAdapter to attach description/examples.
-    field = _schema_metadata_field(description=description, examples=examples)
-    schema_type: object = typing.Annotated[data_type, field]
-    return typing.cast(pydantic.TypeAdapter[object], pydantic.TypeAdapter(schema_type))
-
-
-def _schema_metadata_field(
-    *,
-    description: str | None,
-    examples: collections.abc.Sequence[object] | None,
-) -> object:
-    if description is None:
-        return typing.cast(object, pydantic.Field(examples=list(examples or ())))
-    if examples is None:
-        return typing.cast(object, pydantic.Field(description=description))
-    return typing.cast(object, pydantic.Field(description=description, examples=list(examples)))
-
-
-InputEvent = hsm.Event[typing.Any](
+InputEvent = hsm.Event[object](
     name="bot.ability.input",
-    schema=_schema_for_data_type(
-        object,
-        description=(
-            "InputData event data accepted by a generic ability. Concrete abilities should replace this with "
-            "a specific input event schema."
-        ),
-        examples=["Summarize this note."],
-    ),
+    schema=object,
 )
-OutputEvent = hsm.Event[typing.Any](
+OutputEvent = hsm.Event[object](
     name="bot.ability.output",
-    schema=_schema_for_data_type(
-        object,
-        description=(
-            "OutputData event data dispatched by a generic ability. Concrete abilities should replace this with "
-            "a specific output event schema."
-        ),
-        examples=["Summary text."],
-    ),
+    schema=object,
 )
 FailedEvent = hsm.Event[FailureData](
     name="bot.ability.failed",
@@ -257,46 +163,6 @@ RebootRequestEvent = hsm.Event[hsm.Event[typing.Any]](
     name="bot.ability.reboot.request",
     schema=hsm.Event[typing.Any],
 )
-
-
-def ability_input_event(
-    name: str,
-    data_type: type[TInput],
-    *,
-    description: str | None = None,
-    examples: collections.abc.Sequence[object] | None = None,
-) -> hsm.Event[TInput]:
-    """Build an ability input event with a concrete Pydantic payload schema."""
-
-    schema = _schema_for_data_type(
-        data_type,
-        description=description,
-        examples=examples,
-    )
-    return hsm.Event[TInput](
-        name=name,
-        schema=schema,
-    )
-
-
-def ability_output_event(
-    name: str,
-    data_type: type[TOutput],
-    *,
-    description: str | None = None,
-    examples: collections.abc.Sequence[object] | None = None,
-) -> hsm.Event[TOutput]:
-    """Build an ability output event with a concrete Pydantic payload schema."""
-
-    schema = _schema_for_data_type(
-        data_type,
-        description=description,
-        examples=examples,
-    )
-    return hsm.Event[TOutput](
-        name=name,
-        schema=schema,
-    )
 
 
 class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutput]):
@@ -328,15 +194,27 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     input_data_type: typing.ClassVar[_DataType] = None
     output_data_type: typing.ClassVar[_DataType] = None
     submodel: typing.ClassVar[hsm.Model | None] = None
-    # Host-boundary waiters keyed by operation id (not event.metadata). Single-flight hosts register before dispatch.
+    # Host-boundary waiters for THIS ability's own terminals (contribute / host apply).
+    # Keyed by operation id on the emitting machine — never a peer Future map.
     _terminal_waiters: dict[str, asyncio.Future[hsm.Event[typing.Any]]]
+    # Owner-local waiters for child ops this ability started. Keyed by (child_id, operation_id).
+    # Peers never write Futures into a child's dict; completion is owner-side.
+    _child_terminal_waiters: dict[tuple[str, str], asyncio.Future[hsm.Event[typing.Any]]]
+    # Child-local reply routing only (weakref to the Ability that started the wait). Not Futures.
+    # Lets unattached children notify the owner that holds the waiter. Residual cross-machine
+    # write is reply identity only; the Future stays on the owner.
+    _terminal_reply_owners: dict[str, weakref.ref["Ability[typing.Any, typing.Any]"]]
 
     def register_terminal_waiter(
         self,
         operation_id: str,
         waiter: asyncio.Future[hsm.Event[typing.Any]],
     ) -> None:
-        """Register a host Future completed when this ability emits a terminal for ``operation_id``."""
+        """Register a host Future completed when this ability emits a terminal for ``operation_id``.
+
+        Host-boundary only (this machine's own apply). For child ops use
+        :meth:`prepare_child_terminal_wait` so the Future lives on the owner.
+        """
 
         if not operation_id:
             raise ValueError("operation_id is required.")
@@ -347,11 +225,56 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
 
         _ = self._terminal_waiters.pop(operation_id, None)
 
+    def _complete_child_terminal_waiter(
+        self,
+        child_id: str,
+        terminal: hsm.Event[typing.Any],
+    ) -> None:
+        """Resolve an owner-local waiter for one child terminal (idempotent)."""
+
+        operation_id = terminal.id if terminal.id else ""
+        if not operation_id:
+            return
+        waiter = self._child_terminal_waiters.pop((child_id, operation_id), None)
+        if isinstance(waiter, asyncio.Future) and not waiter.done():
+            waiter.set_result(terminal)
+
+    @staticmethod
+    def prepare_child_terminal_wait(
+        owner: "Ability[typing.Any, typing.Any]",
+        child: "Ability[typing.Any, typing.Any]",
+        operation_id: str,
+    ) -> asyncio.Future[hsm.Event[typing.Any]]:
+        """Owner-local wait for one child terminal; child only stores a reply weakref.
+
+        The Future is registered on ``owner`` under ``(child_id, operation_id)``. The child
+        records a weakref to ``owner`` so unattached terminals can still complete the owner
+        waiter without the parent planting a Future on the child.
+        """
+
+        if not operation_id:
+            raise ValueError("operation_id is required.")
+        waiter: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+        owner._child_terminal_waiters[(hsm.id(child), operation_id)] = waiter
+        child._terminal_reply_owners[operation_id] = weakref.ref(owner)
+        return waiter
+
+    @staticmethod
+    def clear_child_terminal_wait(
+        owner: "Ability[typing.Any, typing.Any]",
+        child: "Ability[typing.Any, typing.Any]",
+        operation_id: str,
+    ) -> None:
+        """Drop owner-local waiter and child reply routing for one child op."""
+
+        _ = owner._child_terminal_waiters.pop((hsm.id(child), operation_id), None)
+        _ = child._terminal_reply_owners.pop(operation_id, None)
+
     @staticmethod
     async def await_child_terminal(
         ctx: hsm.Context,
         *,
-        owner: hsm.Instance,
+        owner: "Ability[typing.Any, typing.Any]",
         child: "Ability[typing.Any, typing.Any]",
         operation_id: str,
         input: object,
@@ -359,16 +282,14 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> hsm.Event[typing.Any]:
         """Dispatch one child apply and await its terminal by envelope id (HSM-CORRELATION-001).
 
-        Registers a waiter on ``child``, dispatches the child's input event with
-        ``source=owner`` / ``target=child`` / ``id=operation_id``, and returns the
-        terminal event. Cancels the waiter cleanly when the owning activity exits.
+        Registers an owner-local waiter (never a Future on ``child``), dispatches the child's
+        input event with ``source=owner`` / ``target=child`` / ``id=operation_id``, and returns
+        the terminal event. Cancels the waiter cleanly when the owning activity exits.
         """
 
         if not operation_id:
             raise ValueError("operation_id is required.")
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[hsm.Event[typing.Any]] = loop.create_future()
-        child.register_terminal_waiter(operation_id, waiter)
+        waiter = Ability.prepare_child_terminal_wait(owner, child, operation_id)
         try:
             child_event = dataclasses.replace(
                 child.input_event.with_data_and_id(input, operation_id),
@@ -379,12 +300,12 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             await hsm.dispatch(ctx, child, child_event)
             return await waiter
         except asyncio.CancelledError:
-            child.clear_terminal_waiter(operation_id)
+            Ability.clear_child_terminal_wait(owner, child, operation_id)
             if not waiter.done():
                 _ = waiter.cancel()
             raise
         finally:
-            child.clear_terminal_waiter(operation_id)
+            Ability.clear_child_terminal_wait(owner, child, operation_id)
 
     @staticmethod
     def _carries_event(
@@ -404,18 +325,31 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         terminal = event.data
         assert isinstance(terminal, hsm.Event)
         operation_id = terminal.id if terminal.id else ""
+        child_id = hsm.id(instance)
+        # Host self-waiters for this ability's own apply (contribute / host_turn).
         waiter = instance._terminal_waiters.pop(operation_id, None) if operation_id else None
         if isinstance(waiter, asyncio.Future) and not waiter.done():
             waiter.set_result(terminal)
+        # Owner-local child waiters: complete via reply bind (unattached) and/or attachment owner.
+        reply_owner: Ability[typing.Any, typing.Any] | None = None
+        if operation_id:
+            reply_ref = instance._terminal_reply_owners.pop(operation_id, None)
+            if reply_ref is not None:
+                resolved = reply_ref()
+                if isinstance(resolved, Ability):
+                    reply_owner = resolved
+                    reply_owner._complete_child_terminal_waiter(child_id, terminal)
         if not instance._attachments:
             return
         owner = instance._attachments[0]
+        if isinstance(owner, Ability) and owner is not reply_owner and operation_id:
+            owner._complete_child_terminal_waiter(child_id, terminal)
         _ = hsm.dispatch(
             ctx,
             owner,
             dataclasses.replace(
                 terminal,
-                source=hsm.id(instance),
+                source=child_id,
                 target=hsm.id(owner),
                 metadata=dict(terminal.metadata),
             ),
@@ -467,9 +401,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             # Start the group when it is not live yet, then attach members.
             if not lifecycle.is_started(instance._attachment_group):
                 try:
-                    _ = await hsm.started(
-                        private_scope, instance._attachment_group, instance._attachment_group.model
-                    )
+                    _ = await hsm.started(private_scope, instance._attachment_group, instance._attachment_group.model)
                 except Exception:
                     source = instance
                     raise
@@ -857,6 +789,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         submodel: hsm.Model,
         *,
         composite_attachment_lifecycle: bool = False,
+        initial_state: typing.Literal["detached", "attached"] = "detached",
     ) -> hsm.Model:
         root = f"/{name}Lifecycle"
         attached = f"{root}/attached"
@@ -907,7 +840,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
 
         return hsm.define(
             f"{name}Lifecycle",
-            hsm.initial(hsm.target(f"{root}/detached")),
+            hsm.initial(hsm.target(f"{root}/{initial_state}")),
             hsm.state(
                 "detached",
                 hsm.transition(
@@ -972,6 +905,24 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             hsm.observe(observer),
         )
 
+    @classmethod
+    def define_lifecycle_model(
+        cls,
+        name: str,
+        submodel: hsm.Model,
+        *,
+        composite_attachment_lifecycle: bool | None = None,
+    ) -> hsm.Model:
+        """Build the public lifecycle wrapper for an ability behavior model."""
+
+        if composite_attachment_lifecycle is None:
+            composite_attachment_lifecycle = cls._composite_attachment_lifecycle
+        return Ability._define_model(
+            name,
+            submodel,
+            composite_attachment_lifecycle=composite_attachment_lifecycle,
+        )
+
     def __init_subclass__(cls) -> None:
         super().__init_subclass__()
         declared_submodel = cls.__dict__.get("submodel")
@@ -992,6 +943,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._attachment_request_id = ""
         self._terminal_waiters = {}
+        self._child_terminal_waiters = {}
+        self._terminal_reply_owners = {}
 
     @typing.override
     def attach(
@@ -1096,6 +1049,4 @@ __all__ = [
     "FailureData",
     "TInput",
     "TOutput",
-    "ability_input_event",
-    "ability_output_event",
 ]

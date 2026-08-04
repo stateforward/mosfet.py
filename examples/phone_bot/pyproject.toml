@@ -1,7 +1,7 @@
 [project]
 name = "bot-example-phone-bot"
 version = "0.1.0"
-description = "Phone-capable stateforward.bot bots backed by LiveKit, Silero VAD, OpenAI Terra, and Gemini STT/TTS."
+description = "Phone-capable stateforward.bot bots backed by LiveKit, Silero VAD, pyannote voice identity, OpenAI Terra, and Gemini STT/TTS."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.bot",
@@ -10,6 +10,7 @@ dependencies = [
   "bot-provider-sqlite-memory",
   "bot-provider-gemini",
   "bot-provider-mlx-audio",
+  "bot-provider-pyannote",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ bot-provider-livekit = { path = "../../src/providers/livekit", editable = true }
 bot-provider-sqlite-memory = { path = "../../src/providers/sqlite_memory", editable = true }
 bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
 bot-provider-mlx-audio = { path = "../../src/providers/mlx_audio", editable = true }
+bot-provider-pyannote = { path = "../../src/providers/pyannote", editable = true }
 
 [dependency-groups]
 dev = [
@@ -54,6 +56,7 @@ extraPaths = [
   "../../src/providers/sqlite_memory/src",
   "../../src/providers/gemini/src",
   "../../src/providers/mlx_audio/src",
+  "../../src/providers/pyannote/src",
   "../../src",
 ]
 pythonVersion = "3.13"

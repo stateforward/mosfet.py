@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bot.abilities import ability
 from bot.abilities import memory
 
 import pathlib
@@ -20,15 +19,15 @@ class SqliteMemory(memory.Memory):
     """Durable SQLite Memory ability (Statement transactions against bot_memory)."""
 
     default_scope: typing.ClassVar[str] = "sqlite"
-    input_event: typing.ClassVar[hsm.Event[memory.InputData]] = ability.ability_input_event(
-        "bot.ability.memory.sqlite.input",
-        memory.InputData,
-        description="SQL transaction against SQLite-backed bot memory.",
+    input_event: typing.ClassVar[hsm.Event[memory.InputData]] = hsm.Event[memory.InputData](
+    name="bot.ability.memory.sqlite.input",
+    schema=memory.InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[memory.OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.sqlite.output",
-        memory.OutputData,
-        description="Per-statement results after a committed SQLite memory transaction.",
+    output_event: typing.ClassVar[hsm.Event[memory.OutputData]] = hsm.Event[memory.OutputData](
+    name="bot.ability.memory.sqlite.output",
+    schema=memory.OutputData,
+
     )
     submodel: typing.ClassVar[hsm.Model | None] = memory.memory_model(
         name="SqliteMemory",

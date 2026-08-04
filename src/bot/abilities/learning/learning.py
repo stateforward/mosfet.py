@@ -20,6 +20,7 @@ from .. import ability
 from .. import decoding
 from .. import memory
 from .. import processing
+
 # Revision's InputData still requires cognition-shaped turn fields. These imports exist only for
 # that authoring handoff — Learning never uses them to discover peer ability event contracts.
 from ..cognition import episodes
@@ -63,6 +64,7 @@ GENERATE_INSTRUCTIONS = (
     "bot.ability.learning.generate selection."
 )
 
+
 def _no_stimulus_message(prior_turns: tuple["RememberedTurn", ...]) -> str:
     """Fail-closed refusal that names what recall actually returned.
 
@@ -79,6 +81,7 @@ def _no_stimulus_message(prior_turns: tuple["RememberedTurn", ...]) -> str:
         f"Learning cannot determine the input stimulus: {len(prior_turns)} remembered turn(s) "
         "recalled but none record a stimulus_name. Refuse to invent runtime_input."
     )
+
 
 # Recall bound for generate grounding: enough turns to cover recent stimulus variety while
 # keeping the model-facing select input small and the query cost fixed (PY-MEM-001).
@@ -130,20 +133,13 @@ class InputData(pydantic.BaseModel):
     )
 
 
-_INPUT_EVENT = ability.ability_input_event(
-    "bot.ability.learning.input",
-    InputData,
-    description=(
-        "Teach the bot a standing rule from something it was just told, so the behavior runs "
-        "automatically next time instead of being reasoned about again. Select this when a turn is "
-        "instruction about what to do in future situations rather than a request to act now. content "
-        "is the instruction as heard; the bot grounds it against what it already remembers and authors "
-        "the behavior itself."
-    ),
-)
 # Model-callable so cognition can select learning from a live turn, the same way Speaking is
 # selected. Programmatic callers still dispatch this event directly.
-InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
+InputEvent = hsm.Event[InputData](
+    name="bot.ability.learning.input",
+    kind=event_schema.EventKind,
+    schema=InputData,
+)
 
 
 class DecodedData(pydantic.BaseModel):
@@ -736,10 +732,9 @@ class Learning(ability.Ability[InputData, OutputData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.learning.output",
-        OutputData,
-        description="Decoded lesson, memory-grounded runtime input, and inventory payload Revision applied.",
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+        name="bot.ability.learning.output",
+        schema=OutputData,
     )
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
@@ -1008,7 +1003,6 @@ class Learning(ability.Ability[InputData, OutputData]):
             instance,
             child,
             event,
-            name=child.output_event.name,
             request_id=Learning._child_id(instance, _SELECT_ID_SUFFIX),
             operation_id=select_input.operation_id,
             generation=select_input.generation,
@@ -1026,7 +1020,6 @@ class Learning(ability.Ability[InputData, OutputData]):
             instance,
             child,
             event,
-            name=child.failed_event.name,
             request_id=Learning._child_id(instance, _SELECT_ID_SUFFIX),
             operation_id=select_input.operation_id,
             generation=select_input.generation,
@@ -1158,7 +1151,6 @@ class Learning(ability.Ability[InputData, OutputData]):
             instance,
             child,
             event,
-            name=child.output_event.name,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
             generation=data.input.parent_generation,
@@ -1175,7 +1167,6 @@ class Learning(ability.Ability[InputData, OutputData]):
             instance,
             child,
             event,
-            name=child.failed_event.name,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
             generation=data.input.parent_generation,
@@ -1242,16 +1233,14 @@ class Learning(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
-        processing.request_reboot(
-            ctx,
-            instance,
-            event,
-            reason=(
-                "learning_detach_rollback_failed"
-                if event.name == ability.Ability._composite_attachment_terminal_event.name
-                else "learning_child_teardown_failed"
-            ),
-        )
+        # Cancel-timeout / child teardown path (not detach terminal).
+        processing.request_reboot(ctx, instance, event, reason="learning_child_teardown_failed")
+
+    @staticmethod
+    def _request_detach_rollback_reboot(
+        ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]
+    ) -> None:
+        processing.request_reboot(ctx, instance, event, reason="learning_detach_rollback_failed")
 
     @staticmethod
     def _cancel_select(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
@@ -1539,7 +1528,10 @@ class Learning(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_rollback_failure),
-                hsm.effect(ability.Ability._deliver_composite_attachment_terminal, _request_reboot),
+                hsm.effect(
+                    ability.Ability._deliver_composite_attachment_terminal,
+                    _request_detach_rollback_reboot,
+                ),
                 hsm.target("/Learning/rebooting"),
             ),
             hsm.transition(

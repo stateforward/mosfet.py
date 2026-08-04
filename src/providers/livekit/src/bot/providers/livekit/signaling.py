@@ -17,10 +17,10 @@ The caller's identity is never in a payload: LiveKit hands every handler the aut
 ``caller_identity`` of the participant that invoked it, and a self-declared caller id on the wire
 would be a claim rather than a fact.
 
-Addressing one endpoint means knowing which one, and that is the other half of this module: a
-:class:`DialPlan` turns the number a handset dialled into the participant identity setup is sent
-to. A phone dials digits; only the exchange holds the map from those digits to a place in the
-room.
+On this SFU fiction the participant identity **is** the phone number (normalized digits, the same
+form ``phone.PhoneNumber`` / ``DialData`` produce). Setup is addressed to that number by default.
+An optional :class:`DialPlan` is only an alias layer for rare remaps and tests — not required for
+normal dial-by-number operation.
 """
 
 from __future__ import annotations
@@ -81,26 +81,25 @@ class MessageData(pydantic.BaseModel):
 
 
 class DialPlan(typing.Protocol):
-    """The exchange's numbering plan: which endpoint in the room answers a dialled number.
+    """Optional alias map from a dialled number to a LiveKit participant identity.
 
-    A number is what somebody can say out loud, write down and press; a LiveKit participant
-    identity is where the packets go. Holding the two apart is what an exchange is for, and it is
-    why nothing outside this provider ever handles an identity — a phone dials digits, and the
-    network is what knows where they lead.
+    Default dialing does not need a plan: identity is the normalized number. Implement this only
+    when a number must resolve to a different identity (tests, temporary aliases). Returning
+    None means a wrong number for that map — setup is not sent.
     """
 
     def endpoint(self, number: str) -> str | None:
-        """LiveKit participant identity registered against ``number``, or None for a wrong number."""
+        """Participant identity for ``number``, or None when this plan does not route it."""
         ...
 
 
 class MappingDialPlan:
-    """Dial plan from an explicit ``number -> participant identity`` mapping.
+    """Optional ``number -> participant identity`` alias table.
 
-    Small-exchange provisioning: whoever mints the room tokens also declares which number rings
-    which endpoint, because those are the same registration fact written down once. Numbers are
-    checked against the same rule a dialled number is, so a plan cannot promise to route
-    something no keypad can produce.
+    Default operation uses identity = number and needs no plan. Use this when tests or rare
+    provisioning remap a dialled number onto a different participant identity. Numbers are checked
+    against the same rule a dialled number is, so a plan cannot promise to route something no
+    keypad can produce.
     """
 
     _endpoints: dict[str, str]

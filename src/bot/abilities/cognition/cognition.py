@@ -82,13 +82,17 @@ class _UseFailedEventData(pydantic.BaseModel):
     )
 
 
-InputEvent = ability.ability_input_event(
-    "bot.ability.cognition.input",
-    InputData,
+InputEvent = hsm.Event[InputData](
+    name="bot.ability.cognition.input",
+    schema=InputData,
+
+
+
 )
 OutputEvent = hsm.Event[OutputData](
     name="bot.ability.cognition.output",
     schema=OUTPUT_SCHEMA_CONTRACT,
+
 )
 CancelEvent = hsm.Event[CancelData](
     name="bot.ability.cognition.cancel",
@@ -196,17 +200,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         owner: "Cognition",
         child: ability.Ability[typing.Any, typing.Any],
         suffix: str,
-        terminal_name: str,
+        data_type: type[types.CompletionData] | type[types.FailureData],
     ) -> bool:
         data = event.data
-        if not isinstance(data, types.CompletionData | types.FailureData):
+        if not isinstance(data, data_type):
             return False
         operation = processing.active_operation(owner, data.turn.operation_id)
         # Phase identity is machine-owned active-child suffix (set when starting the child),
-        # not a state() probe (HSM-CONTEXT-001). Envelope id + generation still correlate the turn.
+        # not a state() probe (HSM-CONTEXT-001). Envelope id + generation + source correlate
+        # the turn (HSM-DELIVERY-001) — not event.name after topology selected the trigger.
         return (
-            event.name == terminal_name
-            and event.source == hsm.id(child)
+            event.source == hsm.id(child)
             and event.target == hsm.id(owner)
             and operation is not None
             and data.turn.generation == hsm.id(operation)
@@ -330,7 +334,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_AUTONOMY_ID_SUFFIX,
-            terminal_name=child.output_event.name,
+            data_type=types.CompletionData,
         )
 
     @staticmethod
@@ -348,7 +352,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_AUTONOMY_ID_SUFFIX,
-            terminal_name=child.failed_event.name,
+            data_type=types.FailureData,
         )
 
     @staticmethod
@@ -499,7 +503,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_INTUITION_ID_SUFFIX,
-            terminal_name=child.output_event.name,
+            data_type=types.CompletionData,
         )
 
     @staticmethod
@@ -515,7 +519,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_INTUITION_ID_SUFFIX,
-            terminal_name=child.failed_event.name,
+            data_type=types.FailureData,
         )
 
     @staticmethod
@@ -606,7 +610,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_REASONING_ID_SUFFIX,
-            terminal_name=child.output_event.name,
+            data_type=types.CompletionData,
         )
 
     @staticmethod
@@ -622,7 +626,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             owner=instance,
             child=child,
             suffix=_REASONING_ID_SUFFIX,
-            terminal_name=child.failed_event.name,
+            data_type=types.FailureData,
         )
 
     @staticmethod
@@ -677,11 +681,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name == ability.Ability._composite_attachment_terminal_event.name:
-            reason: bot.RebootReason = "cognition_detach_rollback_failed"
-        else:
-            reason = "cognition_child_teardown_failed"
-        processing.request_reboot(ctx, instance, event, reason=reason)
+        # Child-wait timeout / teardown path only (wired from hsm.after transitions).
+        processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
+
+    @staticmethod
+    def _request_detach_rollback_reboot(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        # Detach-terminal rollback failure path only (wired on composite attachment terminal).
+        processing.request_reboot(ctx, instance, event, reason="cognition_detach_rollback_failed")
 
     @staticmethod
     def _dispatch_failure(
@@ -1134,7 +1144,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_rollback_failure),
-                hsm.effect(ability.Ability._deliver_composite_attachment_terminal, _request_reboot),
+                hsm.effect(
+                    ability.Ability._deliver_composite_attachment_terminal,
+                    _request_detach_rollback_reboot,
+                ),
                 hsm.target("/Cognition/rebooting"),
             ),
             hsm.transition(

@@ -291,7 +291,9 @@ def _compile_behavior_statements(clauses: tuple[ClauseElement, ...]) -> tuple[me
 
 def _load_behavior(store: memory.Memory, *, name: str) -> Instance | None:
     out = store.execute(
-        memory.InputData(statements=_compile_behavior_statements(behavior_storage.select_behavior_by_name_clauses(name)))
+        memory.InputData(
+            statements=_compile_behavior_statements(behavior_storage.select_behavior_by_name_clauses(name))
+        )
     )
     if len(out.results) < 2:
         return None
@@ -362,15 +364,13 @@ class Reflection(processing.Processing):
     change_instructions: typing.ClassVar[str] = CHANGE_INSTRUCTIONS
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = type(None)
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.reflection.input",
-        InputData,
-        description="Post-output reflection input after cognition handled a turn.",
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+        name="bot.ability.reflection.input",
+        schema=InputData,
     )
-    output_event: typing.ClassVar[hsm.Event[None]] = ability.ability_output_event(
-        "bot.ability.reflection.output",
-        type(None),
-        description="Reflection completes with no product; behavior work is applied as side effects only.",
+    output_event: typing.ClassVar[hsm.Event[None]] = hsm.Event[type(None)](
+        name="bot.ability.reflection.output",
+        schema=type(None),
     )
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
@@ -612,16 +612,14 @@ class Reflection(processing.Processing):
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        processing.request_reboot(
-            ctx,
-            instance,
-            event,
-            reason=(
-                "cognition_detach_rollback_failed"
-                if event.name == ability.Ability._composite_attachment_terminal_event.name
-                else "cognition_child_teardown_failed"
-            ),
-        )
+        # Child teardown / revision-reboot / cancel-timeout path (not detach terminal).
+        processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
+
+    @staticmethod
+    def _request_detach_rollback_reboot(
+        ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]
+    ) -> None:
+        processing.request_reboot(ctx, instance, event, reason="cognition_detach_rollback_failed")
 
     @staticmethod
     def _is_revision_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -731,7 +729,6 @@ class Reflection(processing.Processing):
             instance,
             child,
             event,
-            name=child.output_event.name,
             request_id=Reflection._child_id(instance, _SELECT_ID_SUFFIX),
             operation_id=select_input.operation_id,
             generation=select_input.generation,
@@ -749,7 +746,6 @@ class Reflection(processing.Processing):
             instance,
             child,
             event,
-            name=child.failed_event.name,
             request_id=Reflection._child_id(instance, _SELECT_ID_SUFFIX),
             operation_id=select_input.operation_id,
             generation=select_input.generation,
@@ -766,7 +762,6 @@ class Reflection(processing.Processing):
             instance,
             child,
             event,
-            name=child.output_event.name,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
             generation=data.input.parent_generation,
@@ -783,7 +778,6 @@ class Reflection(processing.Processing):
             instance,
             child,
             event,
-            name=child.failed_event.name,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
             generation=data.input.parent_generation,
@@ -1279,7 +1273,10 @@ class Reflection(processing.Processing):
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_rollback_failure),
-                hsm.effect(ability.Ability._deliver_composite_attachment_terminal, _request_reboot),
+                hsm.effect(
+                    ability.Ability._deliver_composite_attachment_terminal,
+                    _request_detach_rollback_reboot,
+                ),
                 hsm.target("/Reflection/rebooting"),
             ),
             hsm.transition(

@@ -167,15 +167,15 @@ class PostgresMemory(ability.Ability[memory.InputData, memory.OutputData]):
     default_scope: typing.ClassVar[str] = "postgres"
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = memory.InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = memory.OutputData
-    input_event: typing.ClassVar[hsm.Event[memory.InputData]] = ability.ability_input_event(
-        "bot.ability.memory.postgres.input",
-        memory.InputData,
-        description="SQL transaction against Postgres-backed bot memory.",
+    input_event: typing.ClassVar[hsm.Event[memory.InputData]] = hsm.Event[memory.InputData](
+    name="bot.ability.memory.postgres.input",
+    schema=memory.InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[memory.OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.postgres.output",
-        memory.OutputData,
-        description="Per-statement results after a committed Postgres memory transaction.",
+    output_event: typing.ClassVar[hsm.Event[memory.OutputData]] = hsm.Event[memory.OutputData](
+    name="bot.ability.memory.postgres.output",
+    schema=memory.OutputData,
+
     )
 
     _database: Database

@@ -14,8 +14,8 @@ import typing
 
 import hsm
 
-from bot.abilities import speaking
 from bot.abilities.listening import sensitivity
+from bot.abilities.speaking import EfferenceData, EfferenceEvent
 from bot.environment import SoundData, SoundEvent
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
@@ -85,8 +85,8 @@ async def command_the_mouth(
     await hsm.dispatch(
         ctx,
         stage,
-        speaking.EfferenceEvent.with_data(
-            speaking.EfferenceData(mouth=mouth, duration=duration, media_type="audio/pcm", sample_rate_hz=16_000)
+        EfferenceEvent.with_data(
+            EfferenceData(mouth=mouth, duration=duration, media_type="audio/pcm", sample_rate_hz=16_000)
         ),
     )
 

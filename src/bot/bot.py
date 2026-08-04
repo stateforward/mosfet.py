@@ -1,8 +1,5 @@
 from bot.abilities import cognition
-from bot.abilities import conversation
 from bot.abilities import processing
-from bot.abilities import speaking
-from bot.abilities.hearing import speech
 
 import abc
 import asyncio
@@ -10,7 +7,6 @@ import collections.abc
 import dataclasses
 import datetime
 import typing
-import uuid
 import weakref
 
 import hsm
@@ -290,10 +286,6 @@ class _BotProcessingOperation(hsm.Instance):
             raise
 
 
-def _device_tree(*roots: Device) -> tuple[Device, ...]:
-    return Device.device_tree(*roots)
-
-
 def _private_scope(parent: hsm.Context) -> hsm.Context:
     """Child context with a private Instances map, off the environment addressing map.
 
@@ -308,12 +300,6 @@ def _private_scope(parent: hsm.Context) -> hsm.Context:
     return hsm.Context(parent=parent, values=values)
 
 
-def _instance_id(instance: hsm.Instance) -> str:
-    """Return the stable id of an active configured actor."""
-
-    return hsm.id(instance)
-
-
 class Bot(hsm.Instance, abc.ABC):
     """Interrupt-driven bot that observes and processes events while active."""
 
@@ -321,6 +307,10 @@ class Bot(hsm.Instance, abc.ABC):
     _processing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_PROCESSING_TIMEOUT
     _deactivation_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_BOT_DEACTIVATION_TIMEOUT
     _devices: dict[str, Device]
+    # Live actor id → configured device reference. Built when owned devices (and the
+    # peripherals they power) start; cleared when they stop. Hot-path ownership is map
+    # lookup only — never a per-event DFS of the device tree.
+    _device_source_refs: dict[str, str]
     _cognition: abilities.Ability[cognition.InputData, typing.Any]
     _focused_device: str | None
     # Turn-scoped attention policy for the active processing operation (body-owned).
@@ -348,6 +338,7 @@ class Bot(hsm.Instance, abc.ABC):
         if self._deactivation_timeout <= datetime.timedelta():
             raise ValueError("deactivation_timeout must be positive.")
         self._devices = dict(devices)
+        self._device_source_refs = {}
         self._cognition = cognition
         self._focused_device = None
         self._processing_focus_candidates = ()
@@ -507,6 +498,8 @@ class Bot(hsm.Instance, abc.ABC):
                     continue
                 await hsm.stop(ability, lifetime)
         processing.finish_operations(ctx, instance)
+        # Ownership map is only valid while active; rebuild happens on next active entry.
+        Bot._clear_owned_device_sources(ctx, instance, event)
         terminal = _BotCleanupData(request_id=event.id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
@@ -534,10 +527,9 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _device_reference_for_source(instance: "Bot", source: str) -> str | None:
-        for reference, device in instance._devices.items():
-            if any(_instance_id(candidate) == source for candidate in _device_tree(device)):
-                return reference
-        return None
+        """Resolve a live actor id to a configured device ref via the start-time ownership map."""
+
+        return instance._device_source_refs.get(source)
 
     @staticmethod
     def _device_references_for_event(instance: "Bot", event: hsm.Event[typing.Any]) -> tuple[str, ...]:
@@ -552,10 +544,10 @@ class Bot(hsm.Instance, abc.ABC):
     def _interrupt_reference(instance: "Bot", input: events.InputEventData, source: str) -> str | None:
         """Which of this bot's devices an interrupt arrived from.
 
-        A device has no idea what its bot files it under — a handset does not know it is the
-        "work phone" — so a device leaves ``target_device`` unset and the body resolves the
-        device from the envelope source, the nerve the signal came in on. Identity only: this
-        never reads what happened to decide whose interrupt it is.
+        Prefer a stamped ``target_device`` when the producer already carried ownership. Otherwise
+        resolve the envelope source id through the body-owned flat map registered when devices
+        (and known peripherals) started — never a per-event tree walk. Identity only: this never
+        reads what happened to decide whose interrupt it is.
         """
 
         if input.target_device is not None:
@@ -744,7 +736,33 @@ class Bot(hsm.Instance, abc.ABC):
         return instance._deactivation_timeout
 
     @staticmethod
+    def _ability_actor_key(ability: abilities.Ability[typing.Any, typing.Any], actors: dict[str, hsm.Instance]) -> str:
+        name = type(ability).__name__
+        chars: list[str] = []
+        for index, char in enumerate(name):
+            if (
+                char.isupper()
+                and index > 0
+                and (name[index - 1].islower() or (index + 1 < len(name) and name[index + 1].islower()))
+            ):
+                chars.append("_")
+            chars.append(char.lower())
+        key = "".join(chars) or "actor"
+        if key in actors:
+            suffix = 2
+            while f"{key}_{suffix}" in actors:
+                suffix += 1
+            key = f"{key}_{suffix}"
+        return key
+
+    @staticmethod
     def _dispatch_actors(instance: "Bot") -> dict[str, hsm.Instance]:
+        """Map cognition-visible actors: devices, abilities, and nested ability actors.
+
+        Abilities that expose ``nested_actors()`` (e.g. Communication → conversation) are
+        flattened so tools resolve ``conversation.input`` without dual-acquiring Conversation.
+        """
+
         actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
         for ability in (
             *instance._input,
@@ -752,168 +770,37 @@ class Bot(hsm.Instance, abc.ABC):
             *instance._innate_ability_instances,
             *instance._acquired_abilities,
         ):
-            name = type(ability).__name__
-            chars: list[str] = []
-            for index, char in enumerate(name):
-                if (
-                    char.isupper()
-                    and index > 0
-                    and (name[index - 1].islower() or (index + 1 < len(name) and name[index + 1].islower()))
-                ):
-                    chars.append("_")
-                chars.append(char.lower())
-            key = "".join(chars) or "actor"
-            if key in actors:
-                suffix = 2
-                while f"{key}_{suffix}" in actors:
-                    suffix += 1
-                key = f"{key}_{suffix}"
+            key = Bot._ability_actor_key(ability, actors)
             actors[key] = ability
+            nested_method = getattr(ability, "nested_actors", None)
+            if not callable(nested_method):
+                continue
+            nested_map = nested_method()
+            if not isinstance(nested_map, collections.abc.Mapping):
+                continue
+            typed_nested = typing.cast(collections.abc.Mapping[object, object], nested_map)
+            for nested_key, nested_actor in typed_nested.items():
+                if not isinstance(nested_key, str) or not nested_key:
+                    continue
+                if not isinstance(nested_actor, hsm.Instance):
+                    continue
+                resolved = nested_key
+                if resolved in actors:
+                    suffix = 2
+                    while f"{resolved}_{suffix}" in actors:
+                        suffix += 1
+                    resolved = f"{resolved}_{suffix}"
+                actors[resolved] = nested_actor
         return actors
-
-    @staticmethod
-    def _is_conversation_contribution(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        """True when the delivered event is a contribution-only conversation Response.
-
-        Transition is already ``hsm.on(conversation.OutputEvent)``; guard is payload-only.
-        Delivery is the gate — no event.name / target re-admission.
-        """
-
-        del ctx, instance
-        response = event.data
-        if not isinstance(response, conversation.Response):
-            return False
-        # Contribution-only: no host-encoded channel payload. decoded_text may be empty
-        # (silence / partial voice) so cognition can still decide; None is not a contribution.
-        return response.content is None and response.decoded_text is not None
-
-    @staticmethod
-    def _acquired_conversation(instance: "Bot") -> conversation.Conversation[typing.Any, typing.Any] | None:
-        """Return the first acquired Conversation ability, if any."""
-
-        for ability in instance._acquired_abilities:
-            if isinstance(ability, conversation.Conversation):
-                return ability
-        return None
-
-    @staticmethod
-    def _listening_speech_bytes(event: hsm.Event[typing.Any]) -> bytes | None:
-        """Return Listening speech-decoding product bytes when event is a sensory speech handoff."""
-
-        data = event.data
-        if not isinstance(data, cognition.InputData):
-            return None
-        stimulus = data.stimulus
-        if not isinstance(stimulus, hsm.Event):
-            return None
-        if not isinstance(stimulus.data, bytes):
-            return None
-        # SpeechDecoding public output identity (delivery already selected this event type on Listening).
-        if stimulus.name != speech.SpeechDecoding.output_event.name:
-            return None
-        return stimulus.data
-
-    @staticmethod
-    def _conversation_message_from_speech(
-        conversation_ability: conversation.Conversation[typing.Any, typing.Any],
-        speech_bytes: bytes,
-    ) -> conversation.TextMessage | conversation.VoiceMessage | None:
-        """Map Listening speech product into a Conversation Message for the acquired ability.
-
-        Listening STT typically yields UTF-8 transcript → ``text_turn`` for TextConversation.
-        VoiceConversation requires acoustic payload (non-UTF-8 speech product); UTF-8 STT text
-        is refused for VoiceMessage so STT text is not mislabeled as audio.
-
-        Total fail-closed helper: returns ``None`` for modality mismatch, empty transcript, or any
-        Message construction/validation failure. HSM effects must drop without raising so a bad
-        product never bricks the Bot actor.
-        """
-
-        input_type = conversation_ability.input_data_type
-        try:
-            if input_type is conversation.VoiceMessage:
-                try:
-                    _ = speech_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    return conversation.voice_turn(speech_bytes)
-                # UTF-8 STT transcript must not be mislabeled as acoustic VoiceMessage payload.
-                return None
-            try:
-                text = speech_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                # Non-UTF-8 product is not a TextConversation transcript.
-                return None
-            if not text:
-                # Empty STT is not a TextStimulus (min_length=1); drop rather than raise in effect.
-                return None
-            return conversation.text_turn(text)
-        except (pydantic.ValidationError, ValueError, TypeError):
-            return None
-
-    @staticmethod
-    def _should_bridge_speech_to_conversation(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        """True when Listening speech should enter Conversation instead of deliberative cognition."""
-
-        del ctx
-        if Bot._acquired_conversation(instance) is None:
-            return False
-        return Bot._listening_speech_bytes(event) is not None
-
-    @staticmethod
-    def _should_process_cognition_input(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        """Process sensory cognition.InputEvent only when not bridged to Conversation."""
-
-        return not Bot._should_bridge_speech_to_conversation(ctx, instance, event)
-
-    @staticmethod
-    def _dispatch_speech_to_conversation(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Bridge Listening speech product into acquired Conversation as a Message turn.
-
-        Mismatched product shapes fail closed by dropping the bridge (no HSM effect raise).
-        The exclusive bridge guard already kept the product out of deliberative cognition.
-        """
-
-        conversation_ability = Bot._acquired_conversation(instance)
-        speech_bytes = Bot._listening_speech_bytes(event)
-        assert conversation_ability is not None and speech_bytes is not None
-        message = Bot._conversation_message_from_speech(conversation_ability, speech_bytes)
-        if message is None:
-            return
-        operation_id = event.id or uuid.uuid4().hex
-        input_event = dataclasses.replace(
-            conversation_ability.input_event.with_data_and_id(message, operation_id),
-            source=hsm.id(instance),
-            target=hsm.id(conversation_ability),
-            metadata=dict(event.metadata),
-        )
-        _ = hsm.dispatch(ctx, conversation_ability, input_event)
 
     @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         if isinstance(event.data, events.InputEventData):
             stimulus = event.data
         elif isinstance(event.data, cognition.InputData):
-            # Speech→Conversation is handled on dedicated unfocused/focused transitions before processing.
+            # Sensory / contribution products hand cognition.InputEvent (Listening pattern).
+            # Body admits the handoff; it does not inspect conversation or other product domains.
             stimulus = event.data.stimulus
-        elif isinstance(event.data, conversation.Response):
-            # Contribution terminal is the stimulus product (Listening-style ObservedBotEvent path).
-            stimulus = event
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
         focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
@@ -944,8 +831,9 @@ class Bot(hsm.Instance, abc.ABC):
         _ = await processing.start_operation(instance, cancel_id)
         try:
             input_event = dataclasses.replace(
-                cognition.InputEvent.with_data(cognition_input),
-                id=request_id,
+                cognition.InputEvent.with_data_and_id(cognition_input, request_id),
+                source=hsm.id(instance),
+                target=hsm.id(instance._cognition),
                 metadata=dict(event.metadata),
             )
             _ = hsm.dispatch(ctx, instance._cognition, input_event)
@@ -1290,6 +1178,7 @@ class Bot(hsm.Instance, abc.ABC):
         # Device.stop stops the peripherals that device powers, so this owns configured devices only.
         for device in reversed(list(instance._devices.values())):
             await device.stop(environment)
+        Bot._clear_owned_device_sources(ctx, instance, event)
         terminal = _BotCleanupData(request_id=event.id, kind="activation")
         _ = hsm.dispatch(
             ctx,
@@ -1331,26 +1220,38 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _describe_owned_devices(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        """Declare which devices this body owns on its own snapshot, from its own records.
+        """Declare owned devices on the body snapshot and rebuild the flat ownership map.
 
         The devices map is fixed at construction, so the references are one unchanging truth;
         the runtime ids bind only once the devices are actually up, which is why this restates
         on every activation (a restarted device is a new actor with a new id) and never
-        earlier — an id that does not exist yet is not stamped. The body writes its own fact
-        where cognition can read it to say "devices you own" and to match an event's source id
-        to a device it holds: configured reference to live actor id, read straight from the
-        body's own configuration, with no tree walked and nothing reconstructed.
+        earlier — an id that does not exist yet is not stamped.
+
+        Snapshot ``owned_devices`` is configured reference → shell device id (environment
+        presence). ``_device_source_refs`` is the reverse hot-path map: every started actor id
+        in each owned shell's powered tree (shell + peripherals) → configured reference, so
+        interrupt and stimulus sources resolve by lookup without walking the tree per event.
         """
 
         del ctx, event
-        _ = instance.set(
-            _OWNED_DEVICES_ATTRIBUTE,
-            {
-                reference: hsm.id(device)
-                for reference, device in instance._devices.items()
-                if lifecycle.is_started(device)
-            },
-        )
+        owned: dict[str, str] = {}
+        source_refs: dict[str, str] = {}
+        for reference, device in instance._devices.items():
+            if not lifecycle.is_started(device):
+                continue
+            owned[reference] = hsm.id(device)
+            for candidate in Device.device_tree(device):
+                if lifecycle.is_started(candidate):
+                    source_refs[hsm.id(candidate)] = reference
+        instance._device_source_refs = source_refs
+        _ = instance.set(_OWNED_DEVICES_ATTRIBUTE, owned)
+
+    @staticmethod
+    def _clear_owned_device_sources(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Drop start-time ownership ids when devices are no longer live under this body."""
+
+        del ctx, event
+        instance._device_source_refs = {}
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
         "Bot",
@@ -1502,16 +1403,9 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.target("../reboot_deactivating"),
             ),
             # Explicit environment input events fan out in parallel to input abilities (never cognition).
+            # Efference is Speaking→Listening only (speaking-owned product), not body fan-out.
             hsm.transition(
                 hsm.on(SoundEvent, VisualEvent),
-                hsm.effect(_fan_out_input),
-            ),
-            # A copy of what an effector was told to do, going to the senses. Guardless like its
-            # neighbour and over the same fan-out, because that is all it is: a nerve running
-            # from mouth to ears. The body does not read it, rank it, or decide anything with
-            # it — what it means for perception is perception's, and nothing here can tell.
-            hsm.transition(
-                hsm.on(speaking.EfferenceEvent),
                 hsm.effect(_fan_out_input),
             ),
             hsm.transition(
@@ -1543,24 +1437,12 @@ class Bot(hsm.Instance, abc.ABC):
                     hsm.effect(_focus_event_target),
                     hsm.target("../processing"),
                 ),
-                # Sensory products: explicit cognition.InputEvent handoff (never raw environment media).
-                # Speech products with acquired Conversation bridge to Message (not deliberative yet).
+                # Sensory / contribution products: explicit cognition.InputEvent handoff
+                # (never raw environment media; never conversation.OutputEvent special-case).
+                # Bot grants Cognition the turn; it does not inspect or route the stimulus.
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
-                    hsm.guard(_should_bridge_speech_to_conversation),
                     hsm.effect(_focus_event_target),
-                    hsm.effect(_dispatch_speech_to_conversation),
-                ),
-                hsm.transition(
-                    hsm.on(cognition.InputEvent),
-                    hsm.guard(_should_process_cognition_input),
-                    hsm.effect(_focus_event_target),
-                    hsm.target("../processing"),
-                ),
-                # Acquired Conversation contribution → body-enriched cognition (not host_turn).
-                hsm.transition(
-                    hsm.on(conversation.OutputEvent),
-                    hsm.guard(_is_conversation_contribution),
                     hsm.target("../processing"),
                 ),
             ),
@@ -1581,17 +1463,6 @@ class Bot(hsm.Instance, abc.ABC):
                 ),
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
-                    hsm.guard(_should_bridge_speech_to_conversation),
-                    hsm.effect(_dispatch_speech_to_conversation),
-                ),
-                hsm.transition(
-                    hsm.on(cognition.InputEvent),
-                    hsm.guard(_should_process_cognition_input),
-                    hsm.target("../processing"),
-                ),
-                hsm.transition(
-                    hsm.on(conversation.OutputEvent),
-                    hsm.guard(_is_conversation_contribution),
                     hsm.target("../processing"),
                 ),
             ),
@@ -1600,7 +1471,6 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.activity(_dispatch_bot_processing),
                 hsm.defer(events.InputEvent),
                 hsm.defer(cognition.InputEvent),
-                hsm.defer(conversation.OutputEvent),
                 hsm.transition(
                     hsm.on(events.ClearFocusEvent),
                     hsm.guard(_ability_selected_clear_focus),
@@ -1652,7 +1522,6 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.activity(_cancelling_processing_activity),
                 hsm.defer(events.InputEvent),
                 hsm.defer(cognition.InputEvent),
-                hsm.defer(conversation.OutputEvent),
                 hsm.transition(
                     hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
                     hsm.guard(_matches_cognition_cancelled),

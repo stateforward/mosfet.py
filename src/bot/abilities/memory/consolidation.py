@@ -338,13 +338,15 @@ class MemoryConsolidation(ability.Ability[InputData, OutputData]):
     decoder: decoding.Decoder[classification.EncodedMemory, classification.GeneratedMemory]
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.memory.consolidation.input",
-        InputData,
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.memory.consolidation.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.consolidation.output",
-        OutputData,
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.memory.consolidation.output",
+    schema=OutputData,
+
     )
 
     def __init__(

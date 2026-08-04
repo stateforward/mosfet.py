@@ -610,8 +610,8 @@ def main() -> None:
     _ = parser.add_argument("--identity", default="caller-agent")
     _ = parser.add_argument(
         "--dial",
-        default="bot-phone-bot",
-        help="Participant identity to place the call to (the phone bot's BOT_LIVEKIT_IDENTITY).",
+        default="5550141",
+        help="Participant identity to place the call to (the phone bot's number / BOT_LIVEKIT_IDENTITY).",
     )
     _ = parser.add_argument(
         "--tts",

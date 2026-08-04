@@ -3,7 +3,6 @@ from .speech_encoder import SpeechEncoder, SpeechEncodingError
 from .voice import VoiceDecoder, VoiceEncoder
 from .voice_detection import VoiceDetectionError, VoiceDetector
 from .voice_diarization import VoiceDiarizationError, VoiceDiarizer
-from .voice_identification import VoiceIdentificationError, VoiceIdentifier
 
 __version__ = "0.1.0"
 
@@ -18,7 +17,5 @@ __all__ = [
     "VoiceDetector",
     "VoiceDiarizationError",
     "VoiceDiarizer",
-    "VoiceIdentificationError",
-    "VoiceIdentifier",
     "__version__",
 ]

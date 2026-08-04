@@ -37,17 +37,13 @@ class Decoding(ability.Ability[ability.TInput, ability.TOutput]):
     decoder: Decoder[ability.TInput, ability.TOutput]
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
-    input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
+    input_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.decoding.input",
-        data_type=object,
-        description="InputData event data to decode.",
-        examples=["encoded input"],
+        schema=object,
     )
-    output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
+    output_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.decoding.output",
-        data_type=object,
-        description="OutputData event data produced by decoding.",
-        examples=["decoded output"],
+        schema=object,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _DecodingApplyCompletedEvent

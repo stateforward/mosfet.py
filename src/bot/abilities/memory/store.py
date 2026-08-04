@@ -323,15 +323,15 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.memory.store.input",
-        InputData,
-        description="SQL transaction: one or more parameterized statements.",
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.memory.store.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.store.output",
-        OutputData,
-        description="Per-statement results after a committed memory transaction.",
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.memory.store.output",
+    schema=OutputData,
+
     )
 
     _engine: Engine

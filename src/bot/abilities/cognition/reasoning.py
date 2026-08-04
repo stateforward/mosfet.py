@@ -19,12 +19,10 @@ from . import directives
 from . import episodes
 from . import types
 
-DEFAULT_INSTRUCTIONS = (
-    "Return the best typed result for the input; use prior_episodes when present; "
-    "treat standing_directives as things you were told and still owe, and decide for yourself "
-    "whether this moment is one to act on them; "
-    "set create/change/break only for clear repeated behavior patterns; else omit them."
-)
+# No static system prose: deliberative turns use the same per-turn world XML on the system
+# channel as intuition (plus the deliberative user payload). Behavior create/change/break stay
+# on offered schemas and processor input fields, not a standing assistant policy.
+DEFAULT_INSTRUCTIONS = ""
 _InitializingCompleteEvent = hsm.Event[object](
     name="bot.ability.reasoning.initializing.complete",
     kind=hsm.CompletionEventKind,
@@ -37,9 +35,11 @@ class CallData(pydantic.BaseModel):
 
     The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
     stimulus, schemas, or instructions here — leave ``data`` empty / omit fields.
-    Prefer selecting this together with ``bot.ability.speaking.input`` when the user is waiting
-    on speech while deliberation runs.
     """
+
+    # Schema marker: selecting this event hands the turn to deliberate processing. Shared so
+    # intuition can detect handoff without importing this module (see processing.is_deliberative_handoff_schema).
+    __deliberative_handoff__: typing.ClassVar[bool] = True
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -48,7 +48,7 @@ class CallData(pydantic.BaseModel):
             "description": (
                 "Invoke deliberate reasoning for the current turn. The host supplies the deliberative "
                 "frame; do not include stimulus text, tools, or schemas in data. Use an empty object "
-                "as data. Often multi-selected with speaking.input for a short spoken bridge."
+                "as data."
             ),
             "examples": [
                 {},
@@ -360,7 +360,7 @@ class Reasoning(processing.Processing):
     # CallData remains the model-facing schema; Cognition dispatches the full InputData frame
     # only after autonomy and intuition leave the turn unhandled.
     input_event: typing.ClassVar[hsm.Event[CallData | InputData]] = hsm.Event[CallData | InputData](
-        name="bot.ability.reasoning.input",
+        name=types.DELIBERATIVE_HANDOFF_EVENT_NAME,
         kind=event_schema.EventKind,
         schema=CallData,
     )
@@ -951,11 +951,12 @@ class Reasoning(processing.Processing):
         memory: memory.Memory | None = None,
     ) -> None:
         resolved = type(self).instructions if instructions is None else instructions
-        if not resolved.strip():
-            raise ValueError("instructions must not be blank.")
-        # Composition host: leaf Processor is transport; system policy is ability instructions.
+        if instructions is not None and not instructions.strip():
+            raise ValueError("instructions must not be blank when provided.")
+        # Empty default is intentional: system channel is only the per-turn world XML when present.
+        # Composition host: leaf Processor is transport; any static policy is ability instructions.
         ability.Ability.__init__(self)
-        self._instructions = resolved.strip()
+        self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._memory = memory
 

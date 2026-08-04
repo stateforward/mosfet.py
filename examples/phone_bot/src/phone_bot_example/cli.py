@@ -79,8 +79,8 @@ _DEFAULT_URL = "ws://127.0.0.1:7880"
 _DEFAULT_API_KEY = "devkey"
 _DEFAULT_API_SECRET = "secret"
 _DEFAULT_ROOM = "bot-phone-bot"
-_DEFAULT_IDENTITY = "bot-phone-bot"
-_DEFAULT_TRACK = "bot-phone-bot"
+_DEFAULT_IDENTITY = "5550141"
+_DEFAULT_TRACK = "5550141"
 
 
 def _example_root() -> pathlib.Path:

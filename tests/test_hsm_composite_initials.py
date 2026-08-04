@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hsm
 
-from bot.abilities.conversation.text import TextConversation
+from bot.abilities.communication.conversation.conversation import Conversation
 from bot.abilities.listening.interpretation import Interpretation
-from bot.abilities.participating.participating import Participating
 from bot.abilities.reading.reading import Reading
 
 
@@ -40,11 +39,10 @@ def test_hsm_init_required_composites_declare_nested_initials() -> None:
 
     cases: list[tuple[type[hsm.Instance], str, str]] = [
         (Reading, "Focused", "Classifying/Applying"),
-        (Participating, "perceiving", "routing"),
         (Interpretation, "DecodingSpeech", "Detected"),
         # Revision.authoring is a leaf: attempt index is free-running on the write payload,
         # not nested attempt_0/1/2 states (retries continue until same diagnostics twice).
-        (TextConversation, "active", "decoding"),
+        (Conversation, "active", "waiting"),
     ]
     for machine_cls, composite_name, expected_target_suffix in cases:
         model = _behavior_model(machine_cls)

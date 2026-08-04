@@ -37,17 +37,13 @@ class Generative(ability.Ability[ability.TInput, ability.TOutput]):
     generator: Generator[ability.TInput, ability.TOutput]
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = object
-    input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
+    input_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.generative.input",
-        data_type=object,
-        description="InputData event data for generation.",
-        examples=["generation input"],
+        schema=object,
     )
-    output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
+    output_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[object](
         name="bot.ability.generative.output",
-        data_type=object,
-        description="OutputData event data produced by generation.",
-        examples=["generated output"],
+        schema=object,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _GenerativeApplyCompletedEvent

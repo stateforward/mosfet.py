@@ -37,8 +37,8 @@ class FailingVoiceDetectionModel:
 
 
 async def await_voice_detection(
-    output: collections.abc.Awaitable[voice.detection.OutputData],
-) -> voice.detection.OutputData:
+    output: collections.abc.Awaitable[voice.detection.ApplyData],
+) -> voice.detection.ApplyData:
     return await output
 
 
@@ -49,7 +49,11 @@ def test_voice_detector_uses_injected_model() -> None:
 
     output = asyncio.run(await_voice_detection(detector.classify(b"audio")))
 
-    assert output == voice.detection.OutputData(is_voice=True, confidence=None)
+    assert output == voice.detection.ApplyData(
+        segments=(
+            voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.7),
+        )
+    )
     assert len(model.calls) == 1
     assert not model.calls[0].exists()
     assert isinstance(detector, voice.VoiceDetector)
@@ -68,7 +72,7 @@ def test_voice_detector_uses_injected_loader() -> None:
 
     output = asyncio.run(await_voice_detection(detector.classify(b"audio")))
 
-    assert output == voice.detection.OutputData(is_voice=False, confidence=None)
+    assert output == voice.detection.ApplyData(segments=())
     assert len(models) == 1
 
 
@@ -78,7 +82,7 @@ def test_voice_detector_is_awaitable() -> None:
     output = detector.classify(b"audio")
 
     assert isinstance(output, collections.abc.Coroutine)
-    assert asyncio.run(output) == voice.detection.OutputData(is_voice=False, confidence=None)
+    assert asyncio.run(output) == voice.detection.ApplyData(segments=())
 
 
 def test_voice_detector_wraps_provider_errors() -> None:
@@ -100,12 +104,11 @@ def test_real_detector_hears_no_voice_in_the_ring_but_hears_speech() -> None:
     voice in a ringtone would silently cost the phone its ring perception.
 
     The speech assertion is what makes the ring assertion mean anything, and it is not optional.
-    ``is_voice`` is ``bool(timestamps)``, so "no timestamps" is equally what this detector returns
-    when the weights fail to load, when the model returns nothing, or when it degrades to
-    always-False — the ring assertion passes trivially in every one of those cases. Putting the
-    *same* detector instance against real speech proves it loaded, ran, and is able to answer True,
-    which is what turns "no timestamps" into "correctly heard no voice." Neither half is worth
-    keeping without the other.
+    Empty ``segments`` is equally what this detector returns when the weights fail to load, when
+    the model returns nothing, or when it degrades to always-empty — the ring assertion passes
+    trivially in every one of those cases. Putting the *same* detector instance against real
+    speech proves it loaded, ran, and emitted begin/end spans, which is what turns "no segments"
+    into "correctly heard no voice." Neither half is worth keeping without the other.
     """
 
     detector = VoiceDetector()
@@ -113,5 +116,6 @@ def test_real_detector_hears_no_voice_in_the_ring_but_hears_speech() -> None:
     ring = asyncio.run(await_voice_detection(detector.classify(phone.RING_SOUND_WAV)))
     speech = asyncio.run(await_voice_detection(detector.classify(SPEECH_WAV)))
 
-    assert ring.is_voice is False
-    assert speech.is_voice is True
+    assert ring.segments == ()
+    assert speech.segments
+    assert speech.segments[0].end_seconds > speech.segments[0].start_seconds

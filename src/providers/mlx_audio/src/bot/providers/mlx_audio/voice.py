@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import bot.abilities
-from bot.abilities import conversation
+from bot.abilities.communication import conversation
 from bot.abilities.hearing import speech
 
 import dataclasses
@@ -18,7 +18,7 @@ class VoiceDecoder(conversation.voice.VoiceDecoder):
     speech_decoder: speech.SpeechDecoder = dataclasses.field(default_factory=SpeechDecoder)
 
     @typing.override
-    async def decode(self, input: bot.abilities.AudioStimulus) -> str:
+    async def decode(self, input: conversation.turn_detector.AudioStimulus) -> str:
         decoded = await self.speech_decoder.decode(input.content)
         return decoded.decode("utf-8")
 
@@ -41,7 +41,7 @@ def _response_text(input: bot.abilities.EncodeData) -> str:
         return reason
     if input.memory_context:
         return "\n".join(input.memory_context)
-    return input.decoded_text
+    return input.text
 
 
 __all__ = ["VoiceDecoder", "VoiceEncoder"]

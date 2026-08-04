@@ -690,9 +690,95 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     assert "text" in data_schema.get("required", [])
     assert "confidence" in data_schema["properties"]
     assert "event" in branch["required"] and "data" in branch["required"]
+    # No free-form target when offer map is absent (schema-only tools).
+    assert "target" not in branch["properties"]
     description = function["description"]
     assert isinstance(description, str)
     assert "multi-select" in description.lower() or "multiple" in description.lower()
+
+
+def _dispatch_tool_branch(tool: dict[str, object], *, index: int = 0) -> dict[str, object]:
+    items = _nested_dict(tool, "function", "parameters", "properties", "events", "items")
+    branches = items["anyOf"]
+    assert isinstance(branches, list)
+    return object_dict(branches[index])
+
+
+def test_dispatch_tool_single_enabler_stamps_const_target() -> None:
+    tool = processing.dispatch_tool(
+        (_SPEAK_EVENT,),
+        patch=_ConfidencePatch,
+        targets_by_event={_SPEAK_EVENT.name: ("speaking",)},
+    )
+    branch = _dispatch_tool_branch(tool)
+    target_schema = object_dict(branch["properties"])["target"]
+    target = object_dict(target_schema)
+    assert target["type"] == "string"
+    assert target["const"] == "speaking"
+    assert isinstance(target["description"], str)
+    required = branch["required"]
+    assert isinstance(required, list) and "target" in required
+    # Free-form string target is gone.
+    assert "enum" not in target
+    examples = branch.get("examples")
+    if isinstance(examples, list) and examples:
+        assert object_dict(examples[0]).get("target") == "speaking"
+
+
+def test_dispatch_tool_multi_enabler_stamps_enum_target() -> None:
+    tool = processing.dispatch_tool(
+        (_SPEAK_EVENT,),
+        targets_by_event={_SPEAK_EVENT.name: ("bot", "speaking")},
+    )
+    branch = _dispatch_tool_branch(tool)
+    target = object_dict(object_dict(branch["properties"])["target"])
+    assert target["type"] == "string"
+    assert target["enum"] == ["bot", "speaking"]
+    required = branch["required"]
+    assert isinstance(required, list) and "target" in required
+    assert "const" not in target
+
+
+def test_dispatch_tool_omits_event_with_empty_target_list() -> None:
+    tool = processing.dispatch_tool(
+        (_SPEAK_EVENT,),
+        targets_by_event={_SPEAK_EVENT.name: ()},
+    )
+    items = _nested_dict(tool, "function", "parameters", "properties", "events", "items")
+    assert "anyOf" not in items
+
+
+def test_events_from_dispatch_args_fills_unique_target() -> None:
+    selections = processing.events_from_dispatch_args(
+        {
+            "events": [
+                {
+                    "event": _SPEAK_EVENT.name,
+                    "data": {"text": "hi"},
+                }
+            ]
+        },
+        offered=(_SPEAK_EVENT,),
+        targets_by_event={_SPEAK_EVENT.name: ("speaking",)},
+    )
+    assert len(selections) == 1
+    assert selections[0].target == "speaking"
+
+
+def test_events_from_dispatch_args_does_not_invent_multi_target() -> None:
+    selections = processing.events_from_dispatch_args(
+        {
+            "events": [
+                {
+                    "event": _SPEAK_EVENT.name,
+                    "data": {"text": "hi"},
+                }
+            ]
+        },
+        offered=(_SPEAK_EVENT,),
+        targets_by_event={_SPEAK_EVENT.name: ("bot", "speaking")},
+    )
+    assert selections[0].target is None
 
 
 def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
@@ -751,6 +837,70 @@ def test_events_from_dispatch_args_parses_canonical_names() -> None:
     assert selections[0].event == "bot.ability.speaking.input"
     assert selections[0].data == {"text": "hi"}
     assert selections[0].confidence == 90
+
+
+def test_dispatch_selected_events_rejects_wrong_target_and_accepts_unique_omit() -> None:
+    """Regression: model target 'bot' for speaking.input fails; sole enabler omit/correct succeeds."""
+
+    async def run() -> None:
+        actor = _ControllableDispatchActor()
+        ctx = shared_hsm_context()
+        _ = await hsm.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaking"))
+        actor.result.set_result(None)
+        input = processing.InputData(
+            input="speak",
+            schemas=(_SPEAK_EVENT,),
+            actors={"speaking": actor, "bot": hsm.Instance()},
+            actor_events={_SPEAK_EVENT.name: ("speaking",)},
+        )
+
+        with pytest.raises(RuntimeError, match="unavailable event for target bot"):
+            await processing.dispatch_selected_events(
+                ctx,
+                input,
+                (
+                    processing.SelectedEvent(
+                        event=_SPEAK_EVENT.name,
+                        target="bot",
+                        data={"text": "nope"},
+                    ),
+                ),
+                operation_id="op-wrong-target",
+                source=actor,
+            )
+
+        await processing.dispatch_selected_events(
+            ctx,
+            input,
+            (
+                processing.SelectedEvent(
+                    event=_SPEAK_EVENT.name,
+                    data={"text": "hello"},
+                ),
+            ),
+            operation_id="op-omit-unique",
+            source=actor,
+        )
+        assert len(actor.events) == 1
+        assert actor.events[0].target == "speaking"
+
+        actor.events.clear()
+        await processing.dispatch_selected_events(
+            ctx,
+            input,
+            (
+                processing.SelectedEvent(
+                    event=_SPEAK_EVENT.name,
+                    target="speaking",
+                    data={"text": "hello again"},
+                ),
+            ),
+            operation_id="op-explicit-speaking",
+            source=actor,
+        )
+        assert len(actor.events) == 1
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("active", [False, True])
@@ -836,25 +986,33 @@ class InstructionsRecordingProcessor(processing.Processor):
 
 
 def test_processor_receives_static_policy_composed_with_live_instructions() -> None:
-    """Per-turn live context (the device-state block) follows the static policy, never replaces it."""
+    """When a Processing host still has static policy, live context follows it; empty host leaves live alone."""
 
     async def run() -> list[str | None]:
-        processor = InstructionsRecordingProcessor()
-        instance = processing.Processing(processor=processor, instructions="Static policy.")
-        ctx = await start_abilities(instance)
+        with_static = InstructionsRecordingProcessor()
+        static_host = processing.Processing(processor=with_static, instructions="Static policy.")
+        no_static = InstructionsRecordingProcessor()
+        xml_only_host = processing.Processing(processor=no_static)
+        ctx_static = await start_abilities(static_host)
+        ctx_xml = await start_abilities(xml_only_host)
+        world = '<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>'
         _ = await dispatch_ability_for_test(
-            instance,
-            ctx,
-            processing.InputData(
-                input="stimulus",
-                instructions='<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
-            ),
+            static_host,
+            ctx_static,
+            processing.InputData(input="stimulus", instructions=world),
         )
         # No live block: the static policy alone, exactly as before.
-        _ = await dispatch_ability_for_test(instance, ctx, processing.InputData(input="stimulus"))
-        return processor.received
+        _ = await dispatch_ability_for_test(static_host, ctx_static, processing.InputData(input="stimulus"))
+        # Default cognition path: no static ability policy — system channel is the world XML only.
+        _ = await dispatch_ability_for_test(
+            xml_only_host,
+            ctx_xml,
+            processing.InputData(input="stimulus", instructions=world),
+        )
+        return [*with_static.received, *no_static.received]
 
     assert asyncio.run(run()) == [
         'Static policy.\n\n<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
         "Static policy.",
+        '<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
     ]

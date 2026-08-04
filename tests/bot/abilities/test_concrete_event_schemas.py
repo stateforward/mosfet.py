@@ -17,12 +17,11 @@ def test_speech_decoding_events_use_concrete_pydantic_schemas() -> None:
     assert hearing_speech.decoding.SpeechDecoding.input_event.name == "bot.ability.hearing.speech.decoding.input"
     assert input_schema["type"] == expected_input_schema["type"]
     assert input_schema["format"] == expected_input_schema["format"]
-    assert input_schema["examples"] == ["encoded speech bytes"]
+    # Bare ``bytes`` schema — no event-level examples ceremony.
 
     assert hearing_speech.decoding.SpeechDecoding.output_event.name == "bot.ability.hearing.speech.decoding.output"
     assert output_schema["type"] == expected_output_schema["type"]
     assert output_schema["format"] == expected_output_schema["format"]
-    assert output_schema["examples"] == ["normalized speech bytes"]
 
 def test_speech_encoding_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(vocal_speech.encoding.SpeechEncoding.input_event.schema)
@@ -33,9 +32,7 @@ def test_speech_encoding_events_use_concrete_pydantic_schemas() -> None:
     assert vocal_speech.encoding.SpeechEncoding.input_event.name == "bot.ability.vocal.speech.encoding.input"
     assert input_schema["type"] == expected_input_schema["type"]
     assert input_schema["format"] == expected_input_schema["format"]
-    assert input_schema["examples"] == ["normalized speech bytes"]
 
     assert vocal_speech.encoding.SpeechEncoding.output_event.name == "bot.ability.vocal.speech.encoding.output"
     assert output_schema["type"] == expected_output_schema["type"]
     assert output_schema["format"] == expected_output_schema["format"]
-    assert output_schema["examples"] == ["encoded vocal speech bytes"]

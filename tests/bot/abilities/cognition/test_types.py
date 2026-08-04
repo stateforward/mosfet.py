@@ -24,7 +24,7 @@ def test_dispatch_ignore_only_is_cognition_no_actor_delivery() -> None:
             (
                 processing.SelectedEvent(
                     event=types.IgnoreEvent.name,
-                    data={"reason": "Not actionable."},
+                    reason="Not actionable.",
                     confidence=90,
                 ),
             ),
@@ -38,7 +38,7 @@ def test_dispatch_ignore_only_is_cognition_no_actor_delivery() -> None:
 
 def test_without_ignore_selections_keeps_environment_actions() -> None:
     mixed = (
-        processing.SelectedEvent(event=types.IgnoreEvent.name, data={"reason": "nope"}),
+        processing.SelectedEvent(event=types.IgnoreEvent.name, reason="nope"),
         processing.SelectedEvent(event=phone_events.AnswerCallEvent.name, data={"call_id": "x"}),
     )
     kept = types.without_ignore_selections(mixed)

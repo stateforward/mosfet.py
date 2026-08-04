@@ -81,20 +81,26 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "bot-provider-sqlite-memory" in pyproject
     assert "bot-provider-openai-compat" in pyproject
     assert "bot-provider-mlx-audio" in pyproject
+    assert "bot-provider-pyannote" in pyproject
     assert "bot-provider-elevenlabs" not in pyproject
     assert "from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder" in source
     assert "from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder" in source
     assert "from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector" in source
+    assert "from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
     assert "from bot.providers.openai_compat import Processor as OpenAIProcessor" in source
     assert "AlwaysVoiceDetector" not in source
     assert "PeakEnergyVoiceDetector" not in source
     assert "PcmAwareVoiceDetector" in source
     assert "_silero_voice_detector" in source
+    assert "_pyannote_voice_classifier" in source
+    assert "voice_classifier=classifier" in source
     assert "KindSoundClassifier" in source
     assert "from bot.devices import phone as phone_device" in source
     assert "from bot.providers.livekit import PhoneService" in source
     assert "from bot.providers.livekit.audio import PcmWavDecoder" in source
-    assert "VoiceDecoder" not in source
+    assert "class LiveKitVoiceDecoder" not in source
+    assert "class GeminiVoiceDecoder" in source
+    assert "abilities.VoiceDecoder" in source
     assert "RoomAudioEndpoint" not in source
     assert "RoomAudioConnectData" not in source
     assert "create_audio_bridge" not in source
@@ -107,9 +113,8 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert 'DEFAULT_GEMINI_TTS_VOICE = "Kore"' in source
     assert 'DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"' in source
     assert "ShortTermMemory()" in source
-    assert "class LiveKitVoiceDecoder" not in source
-    assert "class ExampleTextConversation" in source
-    assert "ExampleVoiceConversation" not in source
+    assert "class ExampleConversation" in source
+    assert "speech_decoder=None" in source
     assert "PhoneService(" in source
     assert "create_phone_gateway" not in source
     assert "_gemini_speech_decoder" in source
@@ -281,7 +286,7 @@ def test_a_failed_utterance_never_repeats_what_somebody_said() -> None:
     the exception chain behind it carries the utterance anywhere.
     """
 
-    code = '''
+    code = """
 import asyncio
 import subprocess
 
@@ -298,7 +303,7 @@ except Exception as error:
     print(any(SAID in link for link in chain))
 finally:
     person.subprocess.run = real
-'''
+"""
 
     assert _run_phone_bot_python(code) == "\n".join(["say failed with exit status 1", "False"])
 
@@ -491,12 +496,12 @@ def test_nothing_in_this_example_can_be_told_anything_before_it_wakes() -> None:
             assert gone not in text, f"{gone} in {path.name}"
 
 
-def test_the_example_gives_the_exchange_a_dial_plan_and_the_bot_only_digits() -> None:
-    """The exchange holds number → participant identity; the bot holds a number and nothing else.
+def test_the_example_uses_number_as_identity_and_optional_dial_plan() -> None:
+    """Identity is the line number; optional MappingDialPlan is alias-only; bot dials digits only.
 
     Not the deleted directory, which aliased a *name* to an address — that is a contact list, and
-    it belongs on a handset rather than in a room. This is the mapping a telephone network really
-    does have, so it lives in the provider and no identity ever reaches the bot.
+    it belongs on a handset rather than in a room. No identity ever reaches the bot as a dial plan
+    requirement: dialing addresses the normalized number.
     """
 
     source = _example_source()
@@ -507,19 +512,24 @@ def test_the_example_gives_the_exchange_a_dial_plan_and_the_bot_only_digits() ->
     )
 
     assert "signaling.MappingDialPlan(app_config.livekit.dial_plan)" in source
-    for text in (source, env_example, readme, harness):
+    assert "BOT_LIVEKIT_IDENTITY=5550141" in env_example
+    for text in (source, env_example, readme):
         assert "BOT_LIVEKIT_DIAL_PLAN" in text
         # The name→address alias table is gone for good, not renamed.
         assert "BOT_LIVEKIT_DIRECTORY" not in text
         assert "LIVEKIT_DIRECTORY" not in text
         assert "MappingDirectory" not in text
+    assert "BOT_LIVEKIT_DIRECTORY" not in harness
     assert "directory=" not in source
     assert "_directory_entries" not in source
     assert "from bot.providers.livekit import PhoneService" in source
+    # Two-bots harness identities are normalized numbers, not pretty names.
+    assert "phone-bot-alice" not in harness
+    assert "phone-bot-bob" not in harness
     # Fictional 555-01xx only: a harness default that could ring a real subscriber is a defect
     # whether or not anybody notices it dialling. Compared as digits, because the defaults are
     # written the way somebody would say them out loud and the punctuation is not the number.
-    for number in re.findall(r'--call(?:er|ee)-number", default="([^"]+)"', harness):
+    for number in re.findall(r'--call(?:er|ee)-number",\s*\n\s*default="([^"]+)"', harness):
         assert re.fullmatch(r"55501\d\d", re.sub(r"\D", "", number)), number
         # Said aloud, not spelled out as a digit run: the sentence has to survive being spoken.
         assert "-" in number, number
@@ -557,8 +567,7 @@ def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_pa
     assert summary["status"] == "blocked"
     assert summary["can_talk"] is False
     assert (
-        summary["cognition_client"]
-        == "mercury=mercury-2@https://api.inceptionlabs.ai/v1 "
+        summary["cognition_client"] == "mercury=mercury-2@https://api.inceptionlabs.ai/v1 "
         "openai_terra_reasoning=gpt-test-terra@https://api.openai.com/v1 "
         "openai_terra_reflection=gpt-5.6-terra"
     )
@@ -578,7 +587,7 @@ def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_pa
         "token_loaded": False,
         "api_key_loaded": False,
         "room": "bot-phone-bot",
-        "identity": "bot-phone-bot",
+        "identity": "5550141",
         "track_name": "test-track",
         "dial_plan_entries": 0,
     }
@@ -587,9 +596,11 @@ def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_pa
         "tts_model": "gemini-tts-test",
         "stt_model": "gemini-stt-test",
         "vad_model_id": "local/silero-test",
+        "voice_identity_model_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
         "api_key_loaded": True,
         "stt_provider": "gemini",
         "vad_provider": "silero",
+        "voice_identity_provider": "pyannote",
         "tts_provider": "gemini",
         "input_sample_rate_hz": 48000,
         "input_channels": 1,
@@ -673,7 +684,7 @@ def test_phone_bot_example_start_bot_returns_active_bot() -> None:
     assert _run_phone_bot_python(code) == "\n".join(
         [
             "/PhoneBot/active/unfocused",
-            "/ExampleTextConversationLifecycle/attached/behavior/silent",
+            "/ExampleConversationLifecycle/attached/behavior/inactive",
         ]
     )
 
@@ -900,3 +911,265 @@ asyncio.run(main())
 """
 
     assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/detached"])
+
+
+def test_phone_bot_listening_speech_products_carry_source_ids_into_conversation() -> None:
+    """Listening labels speech; Communication seed + Conversation.input admit labeled products."""
+
+    code = """
+from __future__ import annotations
+
+import asyncio
+
+import hsm
+from bot.abilities import listening, memory
+from bot.abilities.communication import conversation
+from bot.abilities.communication import behaviors
+from bot.abilities.hearing import voice
+from phone_bot_example import SpeechConfig, _listening, _pyannote_voice_classifier
+
+
+class FixedInference:
+    def __call__(self, waveform):
+        del waveform
+        return [[0.12, -0.08, 0.31]]
+
+
+async def wait_until(condition, *, timeout_s: float = 5.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise TimeoutError("wait_until timeout")
+
+
+async def main() -> None:
+    config = SpeechConfig()
+    _ = _listening(
+        config,
+        voice_classifier=_pyannote_voice_classifier(config, inference=FixedInference()),
+    )
+    store = memory.Memory()
+    installed = behaviors.install_seed_behaviors(store)
+    assert installed[0].triggers == (listening.SpeechEvent.name,)
+
+    speech = listening.SpeechData(
+        audio=bytes([0, 1]) * 160,
+        voice_detection=voice.detection.ApplyData(
+            segments=(
+                voice.detection.VoiceDetectionSegment(
+                    start_seconds=0.0,
+                    end_seconds=0.02,
+                    confidence=0.9,
+                ),
+            )
+        ),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+    )
+    assert speech.source_ids == frozenset({(0.12, -0.08, 0.31)})
+
+    conversation_ability = conversation.Conversation()
+    ctx = hsm.Context()
+    assert conversation_ability.model is not None
+    _ = await hsm.started(ctx, conversation_ability, conversation_ability.model)
+    from bot.protocols import attachment
+    class Owner(hsm.Instance):
+        model = hsm.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+    owner = Owner()
+    _ = await hsm.started(ctx, owner, owner.model)
+    _ = await conversation_ability.attach(
+        ctx,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
+    await wait_until(lambda: "/behavior/inactive" in (conversation_ability.state() or ""))
+
+    operation_id = "seed-admit"
+    await hsm.dispatch(
+        ctx,
+        conversation_ability,
+        conversation.InputEvent.with_data_and_id(
+            conversation.ConversationInputData(
+                source_ids=speech.source_ids,
+                target_ids=frozenset(),
+                content=speech.audio,
+                content_type="audio/raw",
+            ),
+            operation_id,
+        ),
+    )
+    await wait_until(lambda: "/active/" in (conversation_ability.state() or ""))
+    print(bool(speech.source_ids))
+    print(list(next(iter(speech.source_ids))))
+    print("/active/" in (conversation_ability.state() or ""))
+    print(installed[0].name)
+
+
+asyncio.run(main())
+"""
+
+    assert _run_phone_bot_python(code) == "\n".join(
+        [
+            "True",
+            "[0.12, -0.08, 0.31]",
+            "True",
+            "AdmitListeningSpeech",
+        ]
+    )
+
+
+
+def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
+    """Real PhoneBot + live cognition: time until SpeechEvent→Conversation behavior appears.
+
+    No seeded behaviors. Ambient speech goes through Listening into live bot cognition.
+    Reflection must author the wire itself (no FixedProcessor ignore stub).
+    """
+
+    code = r"""
+from __future__ import annotations
+
+import asyncio
+import pathlib
+import time
+
+from bot.abilities import listening, memory
+from bot.abilities.communication import conversation
+from bot.behavior import storage as behavior_storage
+from bot.environment import Environment
+from phone_bot_example import AppConfig, start_bot, _someone_in_the_room
+
+SPEECH_EVENT = listening.SpeechEvent.name
+CONVERSATION_INPUT = conversation.InputEvent.name
+MAX_TURNS = 12
+TURN_TIMEOUT_S = 180.0
+OVERALL_TIMEOUT_S = 900.0
+
+
+def _wires_speech_to_conversation(item) -> bool:
+    triggers = tuple(item.triggers or ())
+    if SPEECH_EVENT not in triggers:
+        return False
+    return CONVERSATION_INPUT in (item.source or "")
+
+
+def _inventory(store: memory.Memory):
+    select = memory.InputData(
+        statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
+    )
+    out = store.execute(select)
+    if len(out.results) < 2:
+        return ()
+    return behavior_storage.instances_from_behavior_results(
+        tuple(row.as_mapping() for row in out.results[0].rows),
+        tuple(row.as_mapping() for row in out.results[1].rows),
+    )
+
+
+async def wait_until(condition, *, timeout_s: float) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise TimeoutError(f"condition not met within {timeout_s}s")
+
+
+async def main() -> None:
+    config = AppConfig.from_env_file(pathlib.Path(".env"))
+    if not config.cognition.can_process():
+        print("SKIP missing cognition credentials")
+        return
+
+    store = memory.ShortTermMemory()
+    environment = Environment()
+    body = await start_bot(
+        "e2e-speech-wire",
+        config=config,
+        environment=environment,
+        memory=store,
+        connect_livekit=False,
+    )
+    someone = _someone_in_the_room()
+    await someone.enter(environment)
+
+    started = time.perf_counter()
+    found = None
+    turns = 0
+    handoffs_before = len(body.listening_handoffs())
+    elapsed = 0.0
+
+    try:
+        while turns < MAX_TURNS and (time.perf_counter() - started) < OVERALL_TIMEOUT_S:
+            turns += 1
+            await someone.say("Call Bob at 555-0142.", ctx=environment)
+            await wait_until(
+                lambda: len(body.listening_handoffs()) > handoffs_before
+                or len(body.outputs()) >= turns
+                or len(body.failures()) >= turns,
+                timeout_s=TURN_TIMEOUT_S,
+            )
+            handoffs_before = len(body.listening_handoffs())
+            await wait_until(
+                lambda: (body.state() or "").endswith("/active/unfocused")
+                or (body.state() or "").endswith("/active/focused")
+                or (body.state() or "").endswith("/inactive"),
+                timeout_s=TURN_TIMEOUT_S,
+            )
+            for item in _inventory(store):
+                if _wires_speech_to_conversation(item):
+                    found = item
+                    break
+            if found is not None:
+                break
+    finally:
+        elapsed = time.perf_counter() - started
+        try:
+            await someone.leave(environment)
+        except Exception:
+            pass
+
+    if found is None:
+        print(
+            f"NEVER turns={turns} elapsed_s={elapsed:.3f} "
+            f"handoffs={len(body.listening_handoffs())} "
+            f"outputs={len(body.outputs())} failures={len(body.failures())} "
+            f"stimulus={SPEECH_EVENT!r} target={CONVERSATION_INPUT!r}"
+        )
+        raise SystemExit(2)
+
+    print(
+        f"WIRED turns={turns} elapsed_s={elapsed:.3f} "
+        f"behavior={found.name!r} triggers={list(found.triggers)}"
+    )
+
+
+asyncio.run(main())
+"""
+
+    import os
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd="examples/phone_bot",
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=960,
+        check=False,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if "SKIP missing cognition credentials" in out:
+        import pytest
+
+        pytest.skip("cognition credentials unavailable for live e2e")
+    assert proc.returncode == 0, out
+    assert "WIRED" in out, out
+

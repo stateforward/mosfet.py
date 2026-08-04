@@ -1,8 +1,8 @@
 # phone_bot example
 
 stateforward.bot phone bot against a real LiveKit SFU: core `Phone` + LiveKit `PhoneService`,
-with Mercury 2 intuition, OpenAI Terra reasoning/reflection, **local Silero VAD**, and
-**off-device Gemini** STT/TTS.
+with Mercury 2 intuition, OpenAI Terra reasoning/reflection, **local Silero VAD**,
+**local pyannote voice identity**, and **off-device Gemini** STT/TTS.
 
 ## Local run (turnkey)
 
@@ -81,19 +81,22 @@ Every line you type is **said out loud** in the robot's room. A mouth — the sa
 `bot.devices.audio.Speaker` the robot uses for its own voice — stands a metre in front of it,
 renders your words locally with macOS `say`, and broadcasts them through `Environment.broadcast`
 at 60 dB from where it is standing. The robot hears them the way it hears anything: environment
-sound → its ears (its placement's `threshold_db`) → Listening → voice detection → speech
-decoding → cognition. Step far enough away, or raise its hearing floor, and it genuinely does not
-hear you. Nothing is dispatched at the body.
+sound → its ears (its placement's `threshold_db`) → Listening (VAD + pyannote voice embeddings for
+`source_ids`) → participant-owned TurnDetector TurnStart/TurnUpdate/TurnPause/TurnEnd + STT while
+the turn is open → TurnComplete Conversation product → cognition when the turn closes. Step far enough away,
+or raise its hearing floor, and it genuinely does not hear you. Nothing is dispatched at the
+body.
 
 A number is digits, because that is what makes it sayable out loud and pressable on a keypad.
-Set `BOT_LIVEKIT_DIAL_PLAN` (`number=identity`, comma separated) and the exchange knows which
-LiveKit participant a dialled number rings; the bot only ever handles the digits. Unset it and
-the phone is registered with no exchange: it can be called, and no number leads anywhere from it.
-Use the fictional `555-0100`–`555-0199` range so nothing here can resemble a real subscriber.
+On this LiveKit fiction the **participant identity is the phone number** (normalized digits, e.g.
+`5550141`). Set `BOT_LIVEKIT_IDENTITY` to that form so token mint and dial destination agree.
+`BOT_LIVEKIT_DIAL_PLAN` (`number=identity`, comma separated) is **optional** and only for rare
+aliases; empty means dial-by-number. Use the fictional `555-0100`–`555-0199` range so nothing here
+can resemble a real subscriber.
 
 Say it the way you would say it. The number goes out of your mouth as sound and comes back
 through speech recognition, which chooses its own punctuation — so `555-0142`, `5550142`,
-`555 0142` and `(555) 0142` are one number, in the dial plan and on the keypad alike. Spelled-out
+`555 0142` and `(555) 0142` are one number on the keypad and one identity on the wire. Spelled-out
 digits ("five five five…") are **not** a number and the dial is refused; if your STT returns words
 rather than figures, that is a real limit and you will see it as a rejected dial rather than a
 wrong one.
@@ -117,9 +120,13 @@ Any other `Encoder[bytes, bytes]` drops in — the Moonshine `SpeechEncoder` in
 | `can_talk` | Room connected **and** OpenAI + Mercury cognition keys **and** Gemini speech key |
 
 Room join alone does not require model keys; full agent talk does. VAD is local Silero
-(`mlx-community/silero-vad` via `bot-provider-mlx-audio`). STT/TTS stay off-device Gemini
-(`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
-`BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL`).
+(`mlx-community/silero-vad` via `bot-provider-mlx-audio`). Voice identity is local pyannote
+speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `bot-provider-pyannote`) so
+Listening speech products carry non-empty `source_ids` into Conversation. STT/TTS stay off-device
+Gemini (`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
+`BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL` /
+`BOT_PYANNOTE_VOICE_IDENTITY_MODEL`). Live pyannote weights use the Hugging Face/pyannote auth
+already required by that provider package.
 
 ## Layout
 
@@ -138,7 +145,7 @@ Both sides use **off-device Gemini** for speech so dual talk does not load local
 
 | Side | Process | Speech |
 |---|---|---|
-| Agent A | `phone-bot` | Silero VAD (local) + Gemini STT + Gemini TTS |
+| Agent A | `phone-bot` | Silero VAD + pyannote identity (local) + Gemini STT + Gemini TTS |
 | Agent B | blackbox / `caller_agent` | Gemini TTS (default; `--tts say` for offline) |
 
 ```bash
@@ -163,21 +170,21 @@ Verdict uses LiveKit media plus optional scrapes of `/tmp/phone-bot-live.log`
 
 ## Blackbox two bots (caller and callee)
 
-Two real `phone-bot` processes, two lines on one exchange:
+Two real `phone-bot` processes, two lines on one exchange. Identities are the line numbers
+(normalized digits); no dial plan is required:
 
 ```bash
 uv run python scripts/blackbox_livekit_two_bots.py \
-  --caller phone-bot-alice --callee phone-bot-bob \
   --caller-number 555-0141 --callee-number 555-0142
 ```
 
 Somebody walks up to the caller and says `Call Bob at 555-0142.` out loud; nobody says anything to
 the callee. The harness writes the sentence to the caller's stdin once it is awake, and the bot
-hears it as sound. Their env files are identical — same room, same dial plan, both bots able to
-dial — so the whole difference between the roles is that one of them was spoken to. Whether the
-caller dials, and whether the callee answers, stay theirs to decide. The verdict prints `dialed=` for the
-caller, `rang=` for the callee and `decoded=` for whoever turned audio into words, and both sides
-must be audible to pass. A run where the caller never dials is reported, not failed.
+hears it as sound. Both join the same room as their number identities and can dial each other by
+number. Whether the caller dials, and whether the callee answers, stay theirs to decide. The
+verdict prints `dialed=` for the caller, `rang=` for the callee and `decoded=` for whoever turned
+audio into words, and both sides must be audible to pass. A run where the caller never dials is
+reported, not failed.
 
 ## Unit tests (no LiveKit)
 

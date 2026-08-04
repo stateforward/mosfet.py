@@ -25,7 +25,6 @@ comparison, made once, at the point perception becomes a product.
 from __future__ import annotations
 
 from .. import ability
-from .. import speaking
 
 import dataclasses
 import datetime
@@ -36,6 +35,7 @@ import pydantic
 
 from bot.environment import SoundData, SoundEvent
 from bot.telemetry import observer
+from ..speaking import EfferenceData, EfferenceEvent
 
 _PLAYOUT_SECONDS_ATTRIBUTE = "sensitivity_playout_seconds"
 _PRODUCING_MOUTH_ATTRIBUTE = "sensitivity_producing_mouth"
@@ -107,7 +107,7 @@ def _has_sound(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typin
 
 def _has_efference_copy(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, speaking.EfferenceData)
+    return isinstance(event.data, EfferenceData)
 
 
 class Sensitivity(ability.Ability[SoundData, OutputData]):
@@ -129,7 +129,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
 
         del ctx
         copy = event.data
-        assert isinstance(copy, speaking.EfferenceData)
+        assert isinstance(copy, EfferenceData)
         _ = instance.set(_PLAYOUT_SECONDS_ATTRIBUTE, copy.duration)
         _ = instance.set(_PRODUCING_MOUTH_ATTRIBUTE, copy.mouth)
 
@@ -246,7 +246,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
                 hsm.effect(_score_unproduced),
             ),
             hsm.transition(
-                hsm.on(speaking.EfferenceEvent),
+                hsm.on(EfferenceEvent),
                 hsm.guard(_has_efference_copy),
                 hsm.effect(_remember_command),
                 hsm.target("/Sensitivity/producing"),
@@ -263,7 +263,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
             # and re-enters, which is what restarts the window on the new duration. Utterances
             # queue behind one another, so the later one is the one still to be heard.
             hsm.transition(
-                hsm.on(speaking.EfferenceEvent),
+                hsm.on(EfferenceEvent),
                 hsm.guard(_has_efference_copy),
                 hsm.effect(_remember_command),
                 hsm.target("/Sensitivity/producing"),

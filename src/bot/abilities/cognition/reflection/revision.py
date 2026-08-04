@@ -416,15 +416,15 @@ class Revision(processing.Processing):
     instructions: typing.ClassVar[str] = CHANGE_INSTRUCTIONS
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.reflection.revision.input",
-        InputData,
-        description="Create or revise one installed behavior from a reflected cognition turn.",
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.reflection.revision.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.reflection.revision.output",
-        OutputData,
-        description="A validated behavior revision persisted to inventory.",
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.reflection.revision.output",
+    schema=OutputData,
+
     )
     failed_event: typing.ClassVar[hsm.Event[FailureData]] = hsm.Event[FailureData](
         name=ability.FailedEvent.name,

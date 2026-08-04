@@ -7,14 +7,6 @@ from bot import event_schema
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import PlainSerializer
 
-BotOperationReason = typing.Annotated[
-    str,
-    pydantic.Field(
-        min_length=1,
-        description="Concise reason the ability selected this output or operation.",
-        examples=["The interrupt is lower priority than the active turn."],
-    ),
-]
 DeviceReference = typing.Annotated[
     str,
     pydantic.Field(
@@ -177,7 +169,11 @@ BotInputData: typing.TypeAlias = InputEventData | ObservedBotEvent
 
 
 class FocusDeviceEventData(pydantic.BaseModel):
-    """Command payload that requests moving bot focus to one configured device."""
+    """Command payload that requests moving bot focus to one configured device.
+
+    Selection rationale belongs on the cognition selection envelope (``EventData.reason`` /
+    dispatch item ``reason``), not on this payload.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -185,9 +181,10 @@ class FocusDeviceEventData(pydantic.BaseModel):
             "description": (
                 "Move body attention (focus) to one configured device. device is required and must "
                 "be a live focus candidate. Prefer this only when a device should become the active "
-                "attention target — not as a substitute for speaking or reasoning."
+                "attention target — not as a substitute for speaking or reasoning. Why this was "
+                "selected is selection-envelope reason, not a field here."
             ),
-            "examples": [{"device": "device-a", "reason": "This turn's stimulus came from that device."}],
+            "examples": [{"device": "device-a"}],
         },
     )
 
@@ -195,14 +192,14 @@ class FocusDeviceEventData(pydantic.BaseModel):
         description="Required stable configured device reference that should become focused.",
         examples=["device-a"],
     )
-    reason: BotOperationReason | None = pydantic.Field(
-        default=None,
-        description="Optional reason the focus operation was selected.",
-    )
 
 
 class ClearFocusEventData(pydantic.BaseModel):
-    """Command payload that requests leaving the bot without a focused device."""
+    """Command payload that requests leaving the bot without a focused device.
+
+    Selection rationale belongs on the cognition selection envelope (``EventData.reason`` /
+    dispatch item ``reason``), not on this payload.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -210,15 +207,11 @@ class ClearFocusEventData(pydantic.BaseModel):
             "description": (
                 "Clear body focus so no device is the active attention target. Use only when focus "
                 "should end (for example the focused device is gone). Do not use this as a default "
-                "response to user speech — prefer speaking.input and/or reasoning.input."
+                "response to user speech — prefer speaking.input and/or reasoning.input. Why this "
+                "was selected is selection-envelope reason, not a field here."
             ),
-            "examples": [{"reason": "The focused device has no remaining available transition."}],
+            "examples": [{}],
         },
-    )
-
-    reason: BotOperationReason | None = pydantic.Field(
-        default=None,
-        description="Optional reason the clear-focus operation was selected.",
     )
 
 

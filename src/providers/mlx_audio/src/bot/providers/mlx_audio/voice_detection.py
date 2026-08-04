@@ -3,6 +3,7 @@ from __future__ import annotations
 from bot.abilities.hearing import voice
 
 import asyncio
+import collections.abc
 import dataclasses
 import typing
 
@@ -36,10 +37,10 @@ class VoiceDetector(voice.VoiceDetector):
     load_model: VoiceDetectionModelLoader = load_voice_detection_model
 
     @typing.override
-    async def classify(self, input: bytes) -> voice.detection.OutputData:
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
         return await asyncio.to_thread(self._classify_blocking, input)
 
-    def _classify_blocking(self, audio: bytes) -> voice.detection.OutputData:
+    def _classify_blocking(self, audio: bytes) -> voice.detection.ApplyData:
         model = self._resolve_model()
         try:
             with temporary_audio_file(audio, suffix=self.audio_file_suffix) as audio_path:
@@ -51,9 +52,29 @@ class VoiceDetector(voice.VoiceDetector):
             message = "MLX Audio voice detection failed."
             raise VoiceDetectionError(message) from error
 
-        # `confidence` stays unset: MLX Audio derives these records from per-frame speech
-        # probabilities but emits only `{"start", "end"}`, so no score survives the call.
-        return voice.detection.OutputData(is_voice=bool(timestamps))
+        # MLX Audio emits only `{"start", "end"}` per talkspurt (seconds when return_seconds=True).
+        # Per-frame probabilities do not survive the call, so segment confidence stays unset.
+        segments: list[voice.detection.VoiceDetectionSegment] = []
+        for item in timestamps:
+            if not isinstance(item, collections.abc.Mapping):
+                raise VoiceDetectionError(
+                    f"MLX Audio speech timestamp is not a mapping: {type(item).__name__}."
+                )
+            try:
+                start_seconds = float(item["start"])
+                end_seconds = float(item["end"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise VoiceDetectionError(
+                    "MLX Audio speech timestamp must include numeric start and end."
+                ) from error
+            segments.append(
+                voice.detection.VoiceDetectionSegment(
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                )
+            )
+        segments.sort(key=lambda segment: segment.start_seconds)
+        return voice.detection.ApplyData(segments=tuple(segments))
 
     def _resolve_model(self) -> VoiceDetectionModel:
         if self.model is not None:

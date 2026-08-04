@@ -114,10 +114,14 @@ class _DispatchHost:
             raise CallbackError("guards cannot dispatch events.")
         eventspec = self._eventspec(event)
         target_id = _optional_target_id(target)
+        # Always project: bytes → base64 text on every selection/dispatch hop (effects and activities).
+        projected = _json_like({} if data is None else data)
         if current.queue_dispatches:
-            current.dispatches.append(_EventDispatch(eventspec=eventspec, data=_json_like(data), target=target_id))
+            current.dispatches.append(
+                _EventDispatch(eventspec=eventspec, data=projected, target=target_id)
+            )
             return
-        self._dispatch_event(current, eventspec, data, target=target_id)
+        self._dispatch_event(current, eventspec, projected, target=target_id)
 
     def dispatch_prepared_event(self, current: _CallbackContext, dispatch: _PreparedEventDispatch) -> None:
         """Dispatch an activity event after the activity batch has passed preflight."""
@@ -469,19 +473,11 @@ def _event_facade(event: hsm.Event[object]) -> dict[str, object]:
 
 
 def _json_like(value: object) -> object:
-    if isinstance(value, pydantic.BaseModel):
-        return value.model_dump(mode="json")
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _json_like(dataclasses.asdict(value))
-    if isinstance(value, collections.abc.Mapping):
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): _json_like(item) for key, item in mapping.items()}
-    if isinstance(value, tuple | list):
-        sequence = typing.cast(collections.abc.Sequence[object], value)
-        return [_json_like(item) for item in sequence]
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
+    """Project values for Starlark facades/dispatches: bytes as base64 only."""
+
+    from bot.event_schema import project_json_value
+
+    return project_json_value(value)
 
 
 __all__ = [

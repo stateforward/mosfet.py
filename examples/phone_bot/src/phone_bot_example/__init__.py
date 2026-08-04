@@ -4,10 +4,9 @@ from bot import abilities
 import bot
 from bot.abilities import ability
 from bot.abilities import cognition
-from bot.abilities import decoding
 from bot.abilities import listening
 from bot.abilities import memory
-from bot.abilities import participating
+from bot.abilities.communication.conversation import turn_detector
 from bot.abilities import speaking
 
 from bot.abilities.hearing import sound as sound_hearing
@@ -42,6 +41,9 @@ from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
 from bot.providers.livekit import signaling
 from bot.providers.livekit.audio import PcmWavDecoder
+from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier
+from bot.providers.pyannote import SpeakerEmbeddingInference
+from bot.providers.pyannote import SpeakerEmbeddingInferenceLoader
 from bot.telemetry import observed_event, observed_occurrence
 from bot.environment import Environment, space
 
@@ -56,12 +58,13 @@ DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 DEFAULT_OPENAI_REASONING_MODEL = "gpt-5.6-terra"
 DEFAULT_OPENAI_REFLECTION_MODEL = "gpt-5.6-terra"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-# Local Silero VAD (cheap) + off-device Gemini STT/TTS (no local whisper/Qwen).
+# Local Silero VAD (cheap) + pyannote voice embeddings + off-device Gemini STT/TTS.
 DEFAULT_GEMINI_STT_MODEL = "gemini-3.5-flash"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
-DEFAULT_LIVEKIT_TRACK_NAME = "bot-phone-bot"
+DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+DEFAULT_LIVEKIT_TRACK_NAME = "5550141"
 DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ = 48_000
 # Gemini TTS default playout rate (speaker / LiveKit metadata).
 DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ = 24_000
@@ -158,14 +161,14 @@ class LiveKitConfig:
     api_key: str | None = None
     api_secret: str | None = None
     room: str = "bot-phone-bot"
-    identity: str = "bot-phone-bot"
+    identity: str = "5550141"
     track_name: str = DEFAULT_LIVEKIT_TRACK_NAME
     dial_plan: dict[str, str] = dataclasses.field(default_factory=dict)
-    """The exchange's numbering plan: which number rings which participant identity.
+    """Optional number→identity alias remaps. Empty is normal: identity is the number.
 
-    Provisioned by whoever mints the tokens, because "this identity is on the room" and "this
-    number rings it" are the same registration written down once. The bot never reads it — it
-    dials digits, and this is what the room does with them.
+    On this SFU fiction the LiveKit participant identity is the line's phone number (same
+    normalized digit form a dial request carries, e.g. ``5550141``). Mint tokens with that
+    identity. BOT_LIVEKIT_DIAL_PLAN is only for rare aliases; dialing does not require it.
     """
 
     @classmethod
@@ -175,7 +178,7 @@ class LiveKitConfig:
         api_key = _env_first(env, "BOT_LIVEKIT_API_KEY", "LIVEKIT_API_KEY", "VA_LIVEKIT_API_KEY")
         api_secret = _env_first(env, "BOT_LIVEKIT_API_SECRET", "LIVEKIT_API_SECRET", "VA_LIVEKIT_API_SECRET")
         room = _env_first(env, "BOT_LIVEKIT_ROOM", "LIVEKIT_ROOM", "VA_LIVEKIT_ROOM") or "bot-phone-bot"
-        identity = _env_first(env, "BOT_LIVEKIT_IDENTITY", "LIVEKIT_IDENTITY", "VA_LIVEKIT_IDENTITY") or "bot-phone-bot"
+        identity = _env_first(env, "BOT_LIVEKIT_IDENTITY", "LIVEKIT_IDENTITY", "VA_LIVEKIT_IDENTITY") or "5550141"
         track_name = (
             _env_first(env, "BOT_LIVEKIT_TRACK_NAME", "LIVEKIT_TRACK_NAME", "VA_LIVEKIT_TRACK_NAME")
             or DEFAULT_LIVEKIT_TRACK_NAME
@@ -231,13 +234,14 @@ class CognitionConfig:
 
 @dataclasses.dataclass(frozen=True)
 class SpeechConfig:
-    """Silero VAD (local) + off-device Gemini STT/TTS."""
+    """Silero VAD + pyannote voice identity (local) + off-device Gemini STT/TTS."""
 
     api_key: str | None = None
     voice_name: str = DEFAULT_GEMINI_TTS_VOICE
     tts_model: str = DEFAULT_GEMINI_TTS_MODEL
     stt_model: str = DEFAULT_GEMINI_STT_MODEL
     vad_model_id: str = DEFAULT_SILERO_VAD_MODEL
+    voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
     input_sample_rate_hz: int = DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ
     input_channels: int = DEFAULT_AUDIO_CHANNELS
     output_sample_rate_hz: int = DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ
@@ -280,6 +284,12 @@ class SpeechConfig:
                 "SILERO_VAD_MODEL",
             )
             or DEFAULT_SILERO_VAD_MODEL,
+            voice_identity_model_id=_env_first(
+                env,
+                "BOT_PYANNOTE_VOICE_IDENTITY_MODEL",
+                "PYANNOTE_VOICE_IDENTITY_MODEL",
+            )
+            or DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL,
             input_sample_rate_hz=_env_int(
                 env,
                 DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ,
@@ -417,6 +427,11 @@ def _phone_cognition(
 ) -> cognition.Cognition:
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
+    # Communication ships a seeded autonomy wire: SpeechEvent → Conversation.input
+    # (active conversation flattened from Communication.nested_actors).
+    from bot.abilities import communication as communication_ability
+
+    _ = communication_ability.install_seed_behaviors(store)
     # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
     # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
     # execute capability as injected collaborators without attaching it again.
@@ -449,22 +464,58 @@ def _phone_cognition(
     )
 
 
-class TranscriptTextDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
-    """Decode TextStimulus (Listening STT transcript) for conversation participation."""
+class GeminiVoiceDecoder(abilities.VoiceDecoder):
+    """STT after turn assembly: PCM/WAV audio stimulus → UTF-8 transcript for participation."""
+
+    pcm_decoder: PcmWavDecoder
+    speech_decoder: speech.SpeechDecoder
+
+    def __init__(self, *, pcm_decoder: PcmWavDecoder, speech_decoder: speech.SpeechDecoder) -> None:
+        self.pcm_decoder = pcm_decoder
+        self.speech_decoder = speech_decoder
 
     @typing.override
-    async def decode(self, input: participating.ParticipationStimulus) -> str:
-        if isinstance(input, participating.TextStimulus):
-            return input.content
-        if isinstance(input, participating.EventStimulus):
-            text = input.payload.get("text")
-            if isinstance(text, str):
-                return text
-        raise AssertionError(f"unexpected conversation stimulus {input!r}")
+    async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
+        # Decoding may hand any ParticipationStimulus; only audio has PCM packaging metadata.
+        if not isinstance(input, turn_detector.AudioStimulus):
+            raise TypeError(
+                f"GeminiVoiceDecoder requires AudioStimulus, got {type(input).__name__}."
+            )
+        audio = input.content
+        if _is_wav_container(audio):
+            wav = audio
+        else:
+            # Raw PCM must be wrapped with the stimulus rate/channels. Using the LiveKit default
+            # (often 48 kHz) for 16 kHz room speech produces a wrong WAV and empty Gemini STT.
+            rate = input.sample_rate_hz if input.sample_rate_hz is not None else self.pcm_decoder.sample_rate_hz
+            channels = input.channels if input.channels is not None else self.pcm_decoder.channels
+            pcm_decoder = (
+                self.pcm_decoder
+                if rate == self.pcm_decoder.sample_rate_hz and channels == self.pcm_decoder.channels
+                else PcmWavDecoder(sample_rate_hz=rate, channels=channels)
+            )
+            wav = await pcm_decoder.decode(audio)
+        transcript = await self.speech_decoder.decode(wav)
+        try:
+            text = transcript.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AssertionError("Gemini speech decoder must return UTF-8 transcript bytes.") from error
+        if not text:
+            raise AssertionError("Gemini speech decoder returned empty transcript.")
+        return text
 
 
-class ExampleTextConversation(abilities.TextConversation):
-    """Thin text conversation for product path: Listening STT → Message → contribution → Bot → Speaking."""
+class HostOwnedVoiceEncoder(abilities.VoiceEncoder):
+    """Constructor-required VoiceEncoder; Bot product path uses Speaking for TTS, not host_turn encode."""
+
+    @typing.override
+    async def encode(self, input: abilities.EncodeData) -> bytes:
+        del input
+        return b""
+
+
+class ExampleConversation(abilities.Conversation):
+    """Voice conversation: Listening VAD speech observations → participant-owned turn boundaries → product."""
 
     _outputs: list[abilities.Response]
     _failures: list[abilities.FailureData]
@@ -472,12 +523,12 @@ class ExampleTextConversation(abilities.TextConversation):
     def __init__(
         self,
         *,
-        participating: abilities.Participating,
-        decoder: decoding.Decoder[participating.ParticipationStimulus, str] | None = None,
+        turn_detector: turn_detector.TurnDetector,
+        encoder: abilities.VoiceEncoder | None = None,
     ) -> None:
         super().__init__(
-            participating=participating,
-            decoding=decoding.Decoding(decoder=decoder if decoder is not None else TranscriptTextDecoder()),
+            turn_detector=turn_detector,
+            encoder=encoder if encoder is not None else HostOwnedVoiceEncoder(),
         )
         self._outputs = []
         self._failures = []
@@ -508,7 +559,7 @@ class ExampleTextConversation(abilities.TextConversation):
 
 
 def _is_wav_container(audio: bytes) -> bool:
-    """True when bytes already look like a RIFF/WAVE container (e.g. ring clip)."""
+    """True when bytes already look like a RIFF/WAVE container (e.g. ring audio)."""
 
     return len(audio) >= 12 and audio.startswith(b"RIFF") and audio[8:12] == b"WAVE"
 
@@ -521,22 +572,9 @@ class PcmAwareVoiceDetector(voice.detection.VoiceDetector):
     voice_detector: voice.detection.VoiceDetector
 
     @typing.override
-    async def classify(self, input: bytes) -> voice.detection.OutputData:
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
         wav = input if _is_wav_container(input) else await self.pcm_decoder.decode(input)
         return await self.voice_detector.classify(wav)
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class PcmListeningSpeechDecoder(speech.SpeechDecoder):
-    """Cloud Gemini STT: wrap LiveKit PCM as WAV; leave WAV (ring clip) alone."""
-
-    pcm_decoder: PcmWavDecoder
-    speech_decoder: speech.SpeechDecoder
-
-    @typing.override
-    async def decode(self, input: bytes) -> bytes:
-        wav = input if _is_wav_container(input) else await self.pcm_decoder.decode(input)
-        return await self.speech_decoder.decode(wav)
 
 
 def _gemini_speech_client(config: SpeechConfig) -> GeminiChatClient:
@@ -569,30 +607,76 @@ def _silero_voice_detector(config: SpeechConfig) -> SileroVoiceDetector:
     return SileroVoiceDetector(model_id=config.vad_model_id)
 
 
-def _conversation(speech_config: SpeechConfig | None = None) -> ExampleTextConversation:
-    """Acquired Conversation for product path: Listening STT transcript → text Message → Speaking.
+def _pyannote_voice_classifier(
+    config: SpeechConfig,
+    *,
+    inference: SpeakerEmbeddingInference | None = None,
+    load_inference: SpeakerEmbeddingInferenceLoader | None = None,
+) -> PyannoteVoiceClassifier:
+    """Local pyannote speaker embeddings so Listening speech products carry source_ids.
+
+    Production loads weights lazily through the provider default loader (HF/pyannote auth is the
+    runtime's business). Tests inject ``inference`` or ``load_inference`` so proof stays off-network.
+    """
+
+    if load_inference is not None:
+        return PyannoteVoiceClassifier(
+            model_id=config.voice_identity_model_id,
+            inference=inference,
+            load_inference=load_inference,
+        )
+    return PyannoteVoiceClassifier(model_id=config.voice_identity_model_id, inference=inference)
+
+
+def _conversation(speech_config: SpeechConfig | None = None) -> ExampleConversation:
+    """Acquired Conversation: identity-bearing VAD speech → participant-owned turns; Gemini STT while open.
 
     TTS remains on Bot Speaking (not host_turn / Conversation encoder).
     """
 
-    del speech_config
-    return ExampleTextConversation(participating=abilities.Participating())
-
-
-def _listening(speech_config: SpeechConfig | None = None) -> listening.Listening:
     config = speech_config or SpeechConfig()
     pcm_decoder = PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels)
-    return listening.Listening(
-        voice_detector=PcmAwareVoiceDetector(
+    return ExampleConversation(
+        turn_detector=turn_detector.TurnDetector(
+            decoder=GeminiVoiceDecoder(
+                pcm_decoder=pcm_decoder,
+                speech_decoder=_gemini_speech_decoder(config),
+            ),
+            end_of_turn_silence_seconds=0.5,
+        ),
+        encoder=HostOwnedVoiceEncoder(),
+    )
+
+
+def _listening(
+    speech_config: SpeechConfig | None = None,
+    *,
+    voice_detector: voice.detection.VoiceDetector | None = None,
+    voice_classifier: abilities.Classifier[
+        voice.identification.InputData,
+        voice.identification.OutputData,
+    ]
+    | None = None,
+) -> listening.Listening:
+    """Ear: Silero VAD + pyannote voice identity (+ ring classifier). STT stays on Conversation."""
+
+    config = speech_config or SpeechConfig()
+    pcm_decoder = PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels)
+    detector = (
+        voice_detector
+        if voice_detector is not None
+        else PcmAwareVoiceDetector(
             pcm_decoder=pcm_decoder,
             voice_detector=_silero_voice_detector(config),
-        ),
+        )
+    )
+    classifier = voice_classifier if voice_classifier is not None else _pyannote_voice_classifier(config)
+    return listening.Listening(
+        voice_detector=detector,
         # Non-voice environment.sound with SoundData.kind (e.g. ring) becomes cognition.InputEvent.
         sound_classifier=sound_hearing.classification.KindSoundClassifier(),
-        speech_decoder=PcmListeningSpeechDecoder(
-            pcm_decoder=pcm_decoder,
-            speech_decoder=_gemini_speech_decoder(config),
-        ),
+        speech_decoder=None,
+        voice_classifier=classifier,
     )
 
 
@@ -795,7 +879,8 @@ class PhoneBot(Bot):
     _phone: phone_device.Phone
     _listening: listening.Listening
     _speaking: speaking.Speaking
-    _conversation: ExampleTextConversation
+    _conversation: ExampleConversation
+    _communication: abilities.Communication
     _memory: memory.Memory
     _outputs: list[cognition.types.OutputData]
     _failures: list[bot.ProcessingFailedEventData]
@@ -815,7 +900,7 @@ class PhoneBot(Bot):
         cognition: cognition.Cognition | None = None,
         listening: listening.Listening | None = None,
         speaking: speaking.Speaking | None = None,
-        conversation: ExampleTextConversation | None = None,
+        conversation: ExampleConversation | None = None,
         memory: memory.Memory | None = None,
     ) -> None:
         self._label = label
@@ -836,16 +921,20 @@ class PhoneBot(Bot):
         )
         self._listening = listening if listening is not None else _listening(speech_config)
         self._speaking = speaking_instance
+        # Speaking→Listening nerve: motor-command copy is peer delivery, not body/environment.
+        self._speaking.link_listening(self._listening)
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
+        # Bot acquires Communication; Conversation is nested under it for tool resolution.
+        self._communication = abilities.Communication(active_conversation=self._conversation)
         super().__init__(
             # Phone first: an unfocused turn falls back to the first configured device.
             devices={"phone": self._phone},
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),
-            # Conversation is bot-acquired. Memory is attached under Reflection only
-            # (Ability attachment is exclusive; do not double-attach the same instance).
-            acquired_abilities=(self._conversation,),
+            # Communication is bot-acquired and owns Conversation lifecycle. Memory is attached
+            # under Reflection only (Ability attachment is exclusive; do not double-attach).
+            acquired_abilities=(self._communication,),
         )
         self._outputs = []
         self._failures = []
@@ -888,8 +977,11 @@ class PhoneBot(Bot):
     def phone(self) -> phone_device.Phone:
         return self._phone
 
-    def conversation(self) -> ExampleTextConversation:
+    def conversation(self) -> ExampleConversation:
         return self._conversation
+
+    def communication(self) -> abilities.Communication:
+        return self._communication
 
     def speaking(self) -> speaking.Speaking:
         return self._speaking
@@ -939,7 +1031,7 @@ async def _wait_for_active_bot(body: PhoneBot) -> None:
     if not (body.state() or "").endswith("/active/unfocused"):
         raise RuntimeError(f"Phone bot activation failed in state {body.state()}.")
     await _wait_until(
-        lambda: (body.conversation().state() or "").endswith("/behavior/silent"),
+        lambda: (body.conversation().state() or "").endswith("/behavior/inactive"),
         timeout_seconds=30.0,
     )
 
@@ -956,7 +1048,7 @@ async def start_bot(
     cognition: cognition.Cognition | None = None,
     listening: listening.Listening | None = None,
     speaking: speaking.Speaking | None = None,
-    conversation: ExampleTextConversation | None = None,
+    conversation: ExampleConversation | None = None,
     memory: memory.Memory | None = None,
 ) -> PhoneBot:
     app_config = config or AppConfig.from_env_file()
@@ -1033,11 +1125,6 @@ def _warnings(config: AppConfig, *, connect_livekit: bool) -> list[str]:
         )
     if config.livekit.can_connect_room() and not connect_livekit:
         warnings.append("LiveKit room config is loaded but connection is opt-in; pass --connect-livekit to attempt it.")
-    if not config.livekit.dial_plan:
-        warnings.append(
-            "BOT_LIVEKIT_DIAL_PLAN is empty; this phone is registered with no exchange, so it can be called "
-            "but no number leads anywhere from it."
-        )
     try:
         person.require_local_speech_tools()
     except RuntimeError as error:
@@ -1112,8 +1199,7 @@ def _summary_for(
             "room": app_config.livekit.room,
             "identity": app_config.livekit.identity,
             "track_name": app_config.livekit.track_name,
-            # How many numbers this exchange can route, not which ones: an operator needs to know
-            # whether the phone can place a call at all, and a readiness report is not a directory.
+            # Optional alias remaps only; empty means dial-by-number (identity is the number).
             "dial_plan_entries": len(app_config.livekit.dial_plan),
         },
         "speech": {
@@ -1121,9 +1207,11 @@ def _summary_for(
             "tts_model": app_config.speech.tts_model,
             "stt_model": app_config.speech.stt_model,
             "vad_model_id": app_config.speech.vad_model_id,
+            "voice_identity_model_id": app_config.speech.voice_identity_model_id,
             "api_key_loaded": bool(app_config.speech.api_key),
             "stt_provider": "gemini",
             "vad_provider": "silero",
+            "voice_identity_provider": "pyannote",
             "tts_provider": "gemini",
             "input_sample_rate_hz": app_config.speech.input_sample_rate_hz,
             "input_channels": app_config.speech.input_channels,
@@ -1150,9 +1238,8 @@ async def run(
         url=livekit_url,
         token=livekit_token,
         track_name=app_config.livekit.track_name,
-        # The exchange this phone is registered with. Empty means registered with none: it can be
-        # called, and no number leads anywhere from it — which is a real state for a phone to be
-        # in, not a configuration error to paper over.
+        # Optional alias layer only. Empty/None: setup is addressed to the dialled number
+        # (participant identity is the number on this SFU fiction).
         dial_plan=(signaling.MappingDialPlan(app_config.livekit.dial_plan) if app_config.livekit.dial_plan else None),
         # One value decides the robot's voice rate: the TTS encoder, Speaking's label, and the
         # LiveKit source all take it from here. They used to be three defaults that happened to
@@ -1160,17 +1247,19 @@ async def run(
         uplink_sample_rate_hz=app_config.speech.output_sample_rate_hz,
     )
     phone = _handset(service=phone_service)
-    # Explicit speech wiring: Silero VAD (local, cheap) + Gemini STT/TTS (off-device).
+    # Explicit speech wiring: Silero VAD + pyannote voice identity (local) + Gemini STT/TTS (off-device).
     listening_ability = _listening(app_config.speech)
     voice = _voice()
     speaking_ability = _speaking(speaker=voice, speech_config=app_config.speech)
     _LOG.info(
         "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
-        "tts_voice=%s vad_provider=silero vad_model_id=%s api_key_loaded=%s",
+        "tts_voice=%s vad_provider=silero vad_model_id=%s voice_identity_provider=pyannote "
+        "voice_identity_model_id=%s api_key_loaded=%s",
         app_config.speech.stt_model,
         app_config.speech.tts_model,
         app_config.speech.voice_name,
         app_config.speech.vad_model_id,
+        app_config.speech.voice_identity_model_id,
         bool(app_config.speech.api_key),
     )
     environment = Environment()
@@ -1320,8 +1409,9 @@ def main() -> None:
 __all__ = [
     "AppConfig",
     "CognitionConfig",
-    "ExampleTextConversation",
-    "TranscriptTextDecoder",
+    "ExampleConversation",
+    "GeminiVoiceDecoder",
+    "HostOwnedVoiceEncoder",
     "LiveKitConfig",
     "SpeechConfig",
     "PhoneBot",

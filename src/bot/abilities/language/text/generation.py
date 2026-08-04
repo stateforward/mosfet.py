@@ -194,13 +194,15 @@ class TextGeneration(generative.Generative[InputData, OutputData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        name="bot.ability.language.text.generation.input",
-        data_type=InputData,
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.language.text.generation.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        name="bot.ability.language.text.generation.output",
-        data_type=OutputData,
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.language.text.generation.output",
+    schema=OutputData,
+
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _TextGenerationApplyCompletedEvent

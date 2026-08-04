@@ -293,6 +293,7 @@ def _events_from_dispatch_tool_calls(
     offered: collections.abc.Sequence[processing.Event[typing.Any]],
     *,
     patch: processing.SchemaPatch | None = None,
+    targets_by_event: collections.abc.Mapping[str, collections.abc.Sequence[str]] | None = None,
 ) -> processing.Events:
     if not tool_calls:
         return ()
@@ -312,6 +313,7 @@ def _events_from_dispatch_tool_calls(
                 call.args,
                 patch=patch,
                 offered=offered,
+                targets_by_event=targets_by_event,
             )
         except ValueError as error:
             raise _StructuredOutputValidationError(str(error)) from error
@@ -371,6 +373,7 @@ def _events_from_content(
     offered: collections.abc.Sequence[processing.Event[typing.Any]],
     *,
     patch: processing.SchemaPatch | None = None,
+    targets_by_event: collections.abc.Mapping[str, collections.abc.Sequence[str]] | None = None,
 ) -> processing.Events:
     if not content.strip():
         return ()
@@ -390,6 +393,7 @@ def _events_from_content(
                 typing.cast(collections.abc.Mapping[str, object], parsed),
                 patch=patch,
                 offered=offered,
+                targets_by_event=targets_by_event,
             )
         else:
             selections = processing.coerce_event_selections(parsed, patch=patch)
@@ -400,6 +404,8 @@ def _events_from_content(
                 for item in selections:
                     if item.event not in allowed:
                         raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+            if targets_by_event is not None:
+                selections = processing.fill_unique_selection_targets(selections, targets_by_event)
     except ValueError as error:
         raise _StructuredOutputValidationError(str(error)) from error
     if offered:
@@ -633,7 +639,13 @@ class Processor(processing.Processor):
             raise ProcessingError("Gemini processing requires non-blank instructions stamped by Processing.")
         operation_tools: tuple[dict[str, object], ...] = ()
         if input.schemas:
-            operation_tools = (processing.dispatch_tool(input.schemas, patch=input.patch),)
+            operation_tools = (
+                processing.dispatch_tool(
+                    input.schemas,
+                    patch=input.patch,
+                    targets_by_event=input.actor_events,
+                ),
+            )
         generation_input = text.generation.InputData(
             messages=(
                 text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
@@ -657,8 +669,14 @@ class Processor(processing.Processor):
                     output.tool_calls,
                     input.schemas,
                     patch=input.patch,
+                    targets_by_event=input.actor_events,
                 )
-            return _events_from_content(output.content, input.schemas, patch=input.patch)
+            return _events_from_content(
+                output.content,
+                input.schemas,
+                patch=input.patch,
+                targets_by_event=input.actor_events,
+            )
         except (pydantic.ValidationError, _StructuredOutputValidationError) as error:
             message = f"Gemini processing response did not produce a valid events array: {error}"
             raise ProcessingError(message) from error

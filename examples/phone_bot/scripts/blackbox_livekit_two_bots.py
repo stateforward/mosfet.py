@@ -17,8 +17,9 @@ The words go in on the caller's stdin and are spoken by a mouth standing a metre
 They are never parsed here, and the bot is never handed them as anything but audio.
 
 The room is what makes the call itself possible. A LiveKit room is an exchange: joining it makes a
-phone reachable, dialing is call setup addressed to one participant, and the dial plan is what
-turns a dialled number into which participant. So the callee rings because the caller called its
+phone reachable, and dialing is call setup addressed to one participant. On this SFU fiction the
+participant identity **is** the phone number (normalized digits), so dialing 5550142 addresses
+setup at that identity with no dial plan required. The callee rings because the caller called its
 number, not because the caller walked into the room.
 
 The numbers come from the 555-0100..555-0199 range that exists so nothing written down can ring a
@@ -89,20 +90,24 @@ def _frame_pcm(event: object) -> tuple[bytes, int, int]:
     return pcm, int(getattr(frame, "sample_rate", 0)), int(getattr(frame, "num_channels", 1))
 
 
+def _digits(number: str) -> str:
+    """Same separators a written phone number strips: identity must match dialed digits."""
+
+    return number.translate(str.maketrans("", "", " \t\u00a0-‐‑‒–—―−.()/"))
+
+
 def _bot_env_file(
     base: pathlib.Path,
     target: pathlib.Path,
     *,
     identity: str,
     room: str,
-    dial_plan: dict[str, str],
 ) -> pathlib.Path:
-    """One env file per bot: same room and same exchange, distinct identity and track.
+    """One env file per bot: same room, identity = line number (normalized digits).
 
     Identity has to differ or the two processes collide on the SFU; track name differs so each
-    bot's audio is attributable to it in the observer's capture. Both get the whole dial plan,
-    because both are lines on one exchange and either could call the other. Nothing here
-    distinguishes caller from callee: the two configurations are identical, and the only
+    bot's audio is attributable to it in the observer's capture. No dial plan: dialing addresses
+    the number as participant identity. Nothing here distinguishes caller from callee — the only
     difference between the roles is that somebody spoke to one of them.
     """
 
@@ -116,7 +121,12 @@ def _bot_env_file(
     values["BOT_LIVEKIT_ROOM"] = room
     values["BOT_LIVEKIT_IDENTITY"] = identity
     values["BOT_LIVEKIT_TRACK_NAME"] = identity
-    values["BOT_LIVEKIT_DIAL_PLAN"] = ",".join(f"{number}={endpoint}" for number, endpoint in dial_plan.items())
+    # Dial-by-number: identity is the number; optional alias plan not required.
+    _ = values.pop("BOT_LIVEKIT_DIAL_PLAN", None)
+    # One JSONL per bot under the record dir so generator prompts stay with the run and do not
+    # collide when both processes export. Path must stay under the phone_bot cwd (OTEL confine).
+    otel_path = target.with_name(f"{identity}-otel-logs.jsonl").resolve()
+    values["BOT_OTEL_LOG_FILE"] = str(otel_path)
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
@@ -192,10 +202,16 @@ async def _main() -> int:
     _ = parser.add_argument("--api-key", default=os.environ.get("LIVEKIT_API_KEY", "devkey"))
     _ = parser.add_argument("--api-secret", default=os.environ.get("LIVEKIT_API_SECRET", "secret"))
     _ = parser.add_argument("--room", default="bot-two-bots")
-    _ = parser.add_argument("--caller", default="phone-bot-alice", help="Bot somebody speaks to.")
-    _ = parser.add_argument("--callee", default="phone-bot-bob", help="Bot nobody speaks to.")
-    _ = parser.add_argument("--caller-number", default="555-0141", help="Number the exchange rings the caller on.")
-    _ = parser.add_argument("--callee-number", default="555-0142", help="Number the exchange rings the callee on.")
+    _ = parser.add_argument(
+        "--caller-number",
+        default="555-0141",
+        help="Caller line number; participant identity is its normalized digits (e.g. 5550141).",
+    )
+    _ = parser.add_argument(
+        "--callee-number",
+        default="555-0142",
+        help="Callee line number; participant identity is its normalized digits (e.g. 5550142).",
+    )
     _ = parser.add_argument(
         "--say",
         default=None,
@@ -228,11 +244,10 @@ async def _main() -> int:
         record_dir = (example_root / record_dir).resolve()
     record_dir.mkdir(parents=True, exist_ok=True)
 
-    caller, callee = str(args.caller), str(args.callee)
+    # Identity is the number (normalized digits); no number→pretty-name dial plan.
+    caller = _digits(str(args.caller_number))
+    callee = _digits(str(args.callee_number))
     identities = [caller, callee]
-    # One exchange, both lines on it. Numbers are what a bot can be told and can dial; identities
-    # are where the packets go, and only this map connects the two.
-    dial_plan = {str(args.caller_number): caller, str(args.callee_number): callee}
     # A sentence with the callee's number in it, said out loud to the one bot somebody talks to.
     # Nothing on this side reads the sentence back, and nothing resolves the number for the bot.
     said = {
@@ -248,7 +263,6 @@ async def _main() -> int:
                 record_dir / f"{identity}.env",
                 identity=identity,
                 room=str(args.room),
-                dial_plan=dial_plan,
             )
             utterance = said[identity]
             log_path = record_dir / f"{identity}.log"
@@ -326,7 +340,8 @@ async def _main() -> int:
         "caller": caller,
         "callee": callee,
         "identities": identities,
-        "dial_plan": dial_plan,
+        "caller_number": str(args.caller_number),
+        "callee_number": str(args.callee_number),
         # How much was said to each bot, not what. The console line says it this way too; a
         # recording that quotes the sentence back is the first step toward reading it.
         "said_characters": {identity: None if text is None else len(text) for identity, text in said.items()},

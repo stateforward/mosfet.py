@@ -2,7 +2,9 @@
 
 Model-facing contract is short text (not raw PCM). Internals encode speech and
 elevate playout as ``environment.sound``. An optional ``Speaker`` may still be
-injected for efference / later mouth wiring; playout does not require it.
+injected for mouth identity / later mouth wiring; playout does not require it.
+On playout entry, Speaking delivers a motor-command copy (efference) directly to
+registered Listening peers — not via body fan-out or environment broadcast.
 Conversation is separate and may invoke Speaking later; cognition can select
 ``speaking.input`` directly as an output ability.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 from .. import ability
 from .. import encoding
 
+import collections.abc
 import dataclasses
 import typing
 
@@ -112,8 +115,67 @@ class OutputData(pydantic.BaseModel):
     )
 
 
+class _EncodedData(pydantic.BaseModel):
+    """Synthesized speech waiting to be played: the encoding stage's product."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        ser_json_bytes="base64",
+        val_json_bytes="base64",
+    )
+
+    text: str = pydantic.Field(min_length=1)
+    audio: bytes = pydantic.Field(min_length=1)
+    media_type: str = pydantic.Field(min_length=1)
+    sample_rate_hz: int = pydantic.Field(ge=1)
+    channels: int = pydantic.Field(ge=1)
+
+
+def _playout_duration(encoded: _EncodedData) -> float | None:
+    """Seconds of sound ``encoded`` will make, or ``None`` when the form does not say.
+
+    For linear PCM the byte count *is* the duration, so this is a measurement of the command
+    that was built, not a guess about it.
+    """
+
+    if encoded.media_type not in _LINEAR_PCM_MEDIA_TYPES:
+        return None
+    frame_bytes = encoded.sample_rate_hz * encoded.channels * _LINEAR_PCM_BYTES_PER_SAMPLE
+    duration = len(encoded.audio) / frame_bytes
+    return duration if duration > 0.0 else None
+
+
+_SpeechEncodedEvent = hsm.Event[_EncodedData](
+    name="bot.ability.speaking.encoded",
+    kind=hsm.CompletionEventKind,
+    schema=_EncodedData,
+)
+_SpeakCompletedEvent = hsm.Event[OutputData](
+    name="bot.ability.speaking.apply.completed",
+    kind=hsm.CompletionEventKind,
+    schema=OutputData,
+)
+_SpeakFailedEvent = hsm.Event[ability.FailureData](
+    name="bot.ability.speaking.apply.failed",
+    kind=hsm.ErrorEventKind,
+    schema=ability.FailureData,
+)
+
+# Selectable by Processing / cognition: mark the ability's one front door offerable.
+InputEvent = hsm.Event[InputData](
+    name="bot.ability.speaking.input",
+    kind=event_schema.EventKind,
+    schema=InputData,
+)
+
+OutputEvent = hsm.Event[OutputData](
+    name="bot.ability.speaking.output",
+    schema=OutputData,
+)
+
+
 class EfferenceData(pydantic.BaseModel):
-    """A copy of the motor command driving the mouth, issued as the command is issued.
+    """A copy of a motor command issued as the command is issued.
 
     Not a description of the utterance and not a recording of it: the words are deliberately
     absent. Perception matching on words would be self-*recognition*, and people are famously
@@ -125,6 +187,9 @@ class EfferenceData(pydantic.BaseModel):
     What the bot expects to *hear* as a result is not here either. That is a forward model — the
     mapping from a command to its sensory consequences — and it belongs to perception, which is
     the only thing positioned to learn it and the only thing that ever sees whether it held.
+
+    Owned by Speaking and delivered directly to linked Listening peers on playout entry — a nerve
+    between effector and ear, not an environment stimulus and not body fan-out.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -132,7 +197,7 @@ class EfferenceData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Copy of a motor command sent to the mouth, delivered to perception at the moment "
+                "Copy of a motor command sent to a mouth, delivered to perception at the moment "
                 "the command is issued and before the sound exists in the environment."
             ),
             "examples": [
@@ -185,81 +250,36 @@ class EfferenceData(pydantic.BaseModel):
     )
 
 
-class _EncodedData(pydantic.BaseModel):
-    """Synthesized speech waiting to be played: the encoding stage's product."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
-    )
-
-    text: str = pydantic.Field(min_length=1)
-    audio: bytes = pydantic.Field(min_length=1)
-    media_type: str = pydantic.Field(min_length=1)
-    sample_rate_hz: int = pydantic.Field(ge=1)
-    channels: int = pydantic.Field(ge=1)
-
-
-def _playout_duration(encoded: _EncodedData) -> float | None:
-    """Seconds of sound ``encoded`` will make, or ``None`` when the form does not say.
-
-    For linear PCM the byte count *is* the duration, so this is a measurement of the command
-    that was built, not a guess about it.
-    """
-
-    if encoded.media_type not in _LINEAR_PCM_MEDIA_TYPES:
-        return None
-    frame_bytes = encoded.sample_rate_hz * encoded.channels * _LINEAR_PCM_BYTES_PER_SAMPLE
-    duration = len(encoded.audio) / frame_bytes
-    return duration if duration > 0.0 else None
-
-
 EfferenceEvent = hsm.Event[EfferenceData](
     name="bot.ability.speaking.efference",
     schema=EfferenceData,
 )
-"""Copy of the command to the mouth, routed to the body's input abilities.
+"""Copy of a motor command, delivered Speaking → linked Listening on playout entry.
 
-Deliberately a plain event and never ``processing.EventKind``: this is a nerve, not a tool. A
-bot does not decide to send an efference copy any more than it decides to send one to its own
+Deliberately a plain event and never a model-offerable tool: this is a nerve, not a selection.
+A bot does not decide to send an efference copy any more than it decides to send one to its own
 cerebellum, and it must never appear in a menu of things a model can select.
 """
 
-_SpeechEncodedEvent = hsm.Event[_EncodedData](
-    name="bot.ability.speaking.encoded",
-    kind=hsm.CompletionEventKind,
-    schema=_EncodedData,
-)
-_SpeakCompletedEvent = hsm.Event[OutputData](
-    name="bot.ability.speaking.apply.completed",
-    kind=hsm.CompletionEventKind,
-    schema=OutputData,
-)
-_SpeakFailedEvent = hsm.Event[ability.FailureData](
-    name="bot.ability.speaking.apply.failed",
-    kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
-)
 
-_INPUT_EVENT = ability.ability_input_event(
-    "bot.ability.speaking.input",
-    InputData,
-    description=(
-        "Say something aloud, in the bot's own voice, now. This is the ability that turns chosen words "
-        "into sound and it does nothing else: what to say, and whether to say anything at all, is the "
-        "bot's own to decide, and this event only carries the words it settled on. Selecting it does not "
-        "end the turn — it can accompany events that go on deliberating."
-    ),
-)
-# Selectable by Processing / cognition: mark the ability's one front door offerable.
-InputEvent = dataclasses.replace(_INPUT_EVENT, kind=event_schema.EventKind)
+def _normalize_efference_targets(
+    listening: hsm.Instance | collections.abc.Sequence[hsm.Instance] | None,
+) -> tuple[hsm.Instance, ...]:
+    if listening is None:
+        return ()
+    if isinstance(listening, hsm.Instance):
+        return (listening,)
+    return tuple(listening)
 
-OutputEvent = ability.ability_output_event(
-    "bot.ability.speaking.output",
-    OutputData,
-    description="Speak completed with text and audio format metadata.",
-)
+
+def link_listening(speaking: "Speaking", *listening: hsm.Instance) -> None:
+    """Register Listening peers that receive motor-command copies from ``speaking`` on playout.
+
+    Composition-time wiring when both abilities already exist. Prefer
+    ``Speaking(..., listening=...)`` at construction when the peer is available then.
+    """
+
+    speaking.link_listening(*listening)
 
 
 def _has_speak_input(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
@@ -285,9 +305,10 @@ def _has_encoded_speech(ctx: hsm.Context, instance: "Speaking", event: hsm.Event
 class Speaking(ability.Ability[InputData, OutputData]):
     """Bot output ability: encode text to speech and elevate it as ``environment.sound``.
 
-    Constructor-inject a TTS ``encoder`` and optional ``speaker`` (efference / future mouth
-    wiring). Playout broadcasts ``environment.sound`` from this ability. Cognition selects
-    ``bot.ability.speaking.input``.
+    Constructor-inject a TTS ``encoder``, optional ``speaker`` (mouth identity / future mouth
+    wiring), and optional ``listening`` peer(s) for the motor-command copy on playout entry.
+    Playout broadcasts ``environment.sound`` from this ability; efference is delivered only to
+    registered Listening targets. Cognition selects ``bot.ability.speaking.input``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -306,12 +327,16 @@ class Speaking(ability.Ability[InputData, OutputData]):
     _sample_rate_hz: int
     _channels: int
     _media_type: str
+    # Listening peers that receive the playout-entry motor-command copy. Composition/DI only —
+    # never walked from the actor graph, never the body attachment list.
+    _efference_targets: tuple[hsm.Instance, ...]
 
     def __init__(
         self,
         *,
         encoder: encoding.Encoder[bytes, bytes],
         speaker: Speaker | None = None,
+        listening: hsm.Instance | collections.abc.Sequence[hsm.Instance] | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
         channels: int = _DEFAULT_CHANNELS,
         media_type: str = "audio/pcm",
@@ -328,6 +353,21 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._sample_rate_hz = sample_rate_hz
         self._channels = channels
         self._media_type = media_type
+        self._efference_targets = _normalize_efference_targets(listening)
+
+    def link_listening(self, *listening: hsm.Instance) -> None:
+        """Register Listening peer(s) that receive motor-command copies on playout entry.
+
+        Idempotent for already-registered targets. Does not mutate Listening fields.
+        """
+
+        if not listening:
+            return
+        existing = list(self._efference_targets)
+        for target in listening:
+            if target not in existing:
+                existing.append(target)
+        self._efference_targets = tuple(existing)
 
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
@@ -436,46 +476,48 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _issue_efference_copy(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """Copy the command to the mouth to the body, on the way to the mouth.
+        """Copy the command to the mouth to linked Listening peers, on the way to the mouth.
 
         Entry, not activity: the copy has to leave before the signal does, which is the whole
         point of an efference copy. A command that reached the air first would arrive at
         perception as something that merely happened.
 
-        Nothing is sent when there is no mouth or the mouth is unpowered (no signal will exist),
-        when the encoded form does not give a duration (an unbounded window is worse than none),
-        or when nothing owns this ability (nothing to route through). Silence here degrades to
-        the untouched behaviour: the bot hears itself.
+        Delivery is Speaking → Listening only (registered peers). Not body fan-out, not
+        environment broadcast. Nothing is sent when there is no mouth or the mouth is unpowered
+        (no signal will exist), when the encoded form does not give a duration (an unbounded
+        window is worse than none), or when no Listening peer is linked. Silence here degrades
+        to the untouched behaviour: the bot hears itself.
         """
 
         encoded = event.data
         assert isinstance(encoded, _EncodedData)
         speaker = instance._speaker
-        if speaker is None or not lifecycle.is_started(speaker) or not instance._attachments:
+        if speaker is None or not lifecycle.is_started(speaker) or not instance._efference_targets:
             return
         duration = _playout_duration(encoded)
         if duration is None:
             return
-        body = instance._attachments[0]
-        _ = hsm.dispatch(
-            ctx,
-            body,
-            dataclasses.replace(
-                EfferenceEvent.with_data(
-                    EfferenceData(
-                        mouth=hsm.id(speaker),
-                        duration=duration,
-                        media_type=encoded.media_type,
-                        sample_rate_hz=encoded.sample_rate_hz,
-                        channels=encoded.channels,
-                    )
-                ),
-                id=event.id or None,
-                source=hsm.id(instance),
-                target=hsm.id(body),
-                metadata=dict(event.metadata),
-            ),
+        copy = EfferenceData(
+            mouth=hsm.id(speaker),
+            duration=duration,
+            media_type=encoded.media_type,
+            sample_rate_hz=encoded.sample_rate_hz,
+            channels=encoded.channels,
         )
+        for peer in instance._efference_targets:
+            if not lifecycle.is_started(peer):
+                continue
+            _ = hsm.dispatch(
+                ctx,
+                peer,
+                dataclasses.replace(
+                    EfferenceEvent.with_data(copy),
+                    id=event.id or None,
+                    source=hsm.id(instance),
+                    target=hsm.id(peer),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     async def _run_playout_activity(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -487,6 +529,12 @@ class Speaking(ability.Ability[InputData, OutputData]):
             from bot.environment import Environment, SoundData, SoundEvent
 
             # Temporary: ability elevates sound directly. Mouth/Speaker transduction returns later.
+            # When a mouth is injected, stamp its public amplitude and origin so distance
+            # filtering still works (Person geometry, far/near ears).
+            speaker = instance._speaker
+            amplitude_db = None if speaker is None else speaker.amplitude_db
+            placement = None if speaker is None else speaker.placement
+            origin = None if placement is None else placement.position
             sound = dataclasses.replace(
                 SoundEvent.with_data(
                     SoundData(
@@ -494,12 +542,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
                         media_type=encoded.media_type,
                         sample_rate_hz=encoded.sample_rate_hz,
                         channels=encoded.channels,
+                        amplitude_db=amplitude_db,
                     )
                 ),
-                source=hsm.id(instance),
+                source=hsm.id(instance) if speaker is None else hsm.id(speaker),
                 metadata=dict(event.metadata),
             )
-            _ = await Environment.from_context(ctx).broadcast(sound)
+            _ = await Environment.from_context(ctx).broadcast(sound, origin=origin)
             product = OutputData(
                 text=encoded.text,
                 media_type=encoded.media_type,
@@ -577,6 +626,7 @@ __all__ = [
     "EfferenceEvent",
     "InputData",
     "InputEvent",
+    "link_listening",
     "OutputData",
     "OutputEvent",
     "Speaking",

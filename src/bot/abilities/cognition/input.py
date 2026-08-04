@@ -127,17 +127,12 @@ def build_processing_input(
     if authority is not None and not any(actor is authority for actor in actors.values()):
         # Host call surface (ignore, …) comes from Cognition's snapshot, not a schema allowlist.
         actors = {**actors, "cognition": authority}
-    schemas: list[processing.Event[typing.Any]] = []
-    seen: set[str] = set()
-    for instance in actors.values():
-        for event in processing.enabled_call_events(instance):
-            if event.name not in seen:
-                seen.add(event.name)
-                schemas.append(event)
+    schemas, actor_events = processing.collect_offered_events(actors)
     return processing.InputData(
         input=cognition_input.stimulus,
-        schemas=tuple(schemas),
+        schemas=schemas,
         actors=actors,
+        actor_events=actor_events,
         authority=authority,
         instructions=_device_state_instructions(actors),
     )

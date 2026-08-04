@@ -62,34 +62,28 @@ _FORWARDED_PHONE_EVENT_NAMES = frozenset(
 )
 
 
-ALICE_IDENTITY = "phone-bot-alice"
-"""The phone under test, as a LiveKit participant identity: where packets go, not a number."""
-
-BOB_IDENTITY = "phone-bot-bob"
-"""The endpoint DIAL_NUMBER rings — and it rings it only because the dial plan says so."""
-
-CALLER_IDENTITY = "human"
-"""The far end that dials this phone, and where its answer/decline/bye go back to."""
-
 ALICE_NUMBER = "5550141"
 DIAL_NUMBER = "5550142"
 """The number the tests dial. Fictional 555-01xx, so nothing here resembles a real subscriber."""
 
 ABSENT_NUMBER = "5550143"
-"""A number with a line registered against it whose endpoint is not in the room: nobody home."""
+"""A number whose participant is not in the room: nobody home."""
 
 UNLISTED_NUMBER = "5550199"
-"""A number no line is registered against. A wrong number, which is a thing a real phone dials."""
+"""A number used with an optional alias plan that deliberately omits it (plan miss)."""
 
-DIAL_PLAN_ENTRIES: typing.Final[dict[str, str]] = {
-    ALICE_NUMBER: ALICE_IDENTITY,
-    DIAL_NUMBER: BOB_IDENTITY,
-    ABSENT_NUMBER: "phone-bot-nobody",
-}
-"""The exchange's numbering plan for these tests. UNLISTED_NUMBER is deliberately absent from it."""
+# On this provider the participant identity is the phone number (normalized digits).
+ALICE_IDENTITY = ALICE_NUMBER
+"""The phone under test: LiveKit identity equals its line number."""
 
-DIAL_PLAN: typing.Final[signaling.DialPlan] = signaling.MappingDialPlan(DIAL_PLAN_ENTRIES)
-"""The exchange these phones are registered with. Passing ``None`` instead is being registered with none."""
+BOB_IDENTITY = DIAL_NUMBER
+"""Far-end line identity: dialing DIAL_NUMBER addresses this participant."""
+
+CALLER_IDENTITY = "5550100"
+"""Inbound far end that dials this phone; answer/decline/bye go back to this identity."""
+
+ALIAS_IDENTITY = "alias-bob"
+"""Optional MappingDialPlan target: number remapped away from identity=number for alias tests."""
 
 
 async def await_value[T](value: collections.abc.Awaitable[T]) -> T:
@@ -271,14 +265,14 @@ async def _start_phone_on_room(
     sfu: FakeSfu,
     *,
     setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
-    dial_plan: signaling.DialPlan | None = DIAL_PLAN,
+    dial_plan: signaling.DialPlan | None = None,
     forwarded_events: list[hsm.Event[typing.Any]] | None = None,
     connect_room: bool = True,
 ) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
     """A real PhoneService answering to ``identity`` on ``sfu``, connected, call-setup wire live.
 
-    Registered with the exchange whose plan is DIAL_PLAN, because a phone that is on a line but
-    on no numbering plan can be called and cannot call.
+    Default ``dial_plan=None``: setup is addressed to the dialled number (identity = number).
+    Pass a MappingDialPlan only when testing optional alias remaps.
 
     ``connect_room=False`` leaves the handset plugged into nothing: it has a room configured and
     no line on it yet, which is the only way to hold a call and its media apart in time.
@@ -497,11 +491,11 @@ def test_phone_service_default_call_control_is_unavailable() -> None:
 
 
 def test_livekit_phone_dials_the_number_it_was_given() -> None:
-    """A dialled number reaches the endpoint the exchange routes it to, and connects on accept.
+    """A dialled number addresses that participant identity and connects on accept.
 
-    The number is not the address: the handset dials digits and the dial plan is what turns them
-    into the participant identity setup is addressed to. And the acked setup leaves the caller
-    *dialing* — the connect arrives later, from the callee, because answering was theirs to decide.
+    Identity is the number: setup's destination is the normalized digits. The acked setup leaves
+    the caller *dialing* — the connect arrives later, from the callee, because answering was
+    theirs to decide.
     """
 
     async def run() -> None:
@@ -515,6 +509,7 @@ def test_livekit_phone_dials_the_number_it_was_given() -> None:
         await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
         setup = participant.rpc_calls[0]
+        assert setup.destination_identity == DIAL_NUMBER
         assert setup.destination_identity == BOB_IDENTITY
         assert setup.method == signaling.SetupMethod
         call_id = _dialed_call_id(room)
@@ -561,12 +556,10 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
 
 
 def test_a_number_reaches_the_same_phone_however_it_was_written_down() -> None:
-    """The whole path, once per way a transcriber might have written the number down.
+    """Every written form normalizes to the same digit identity on the wire.
 
-    Nothing between the bot and the wire may treat punctuation as part of the number: the plan is
-    keyed on a written form here on purpose, and every variant still has to arrive at the one
-    endpoint registered against it. A plan keyed on an exact literal would fail on a hyphen the
-    bot never chose, and that would look exactly like a bot dialling the wrong number.
+    DialData strips punctuation before setup is addressed; without a dial plan the destination
+    identity is those digits. Hyphens the STT invented must not look like a wrong number.
     """
 
     async def run() -> None:
@@ -575,8 +568,7 @@ def test_a_number_reaches_the_same_phone_however_it_was_written_down() -> None:
             phone, service, room, _recording = await _start_phone_on_room(
                 ALICE_IDENTITY,
                 sfu,
-                # Registered as somebody would write it down, dialled as somebody would say it.
-                dial_plan=signaling.MappingDialPlan({"(555) 0142": BOB_IDENTITY}),
+                dial_plan=None,
             )
             _ = _endpoint_in_room(sfu, BOB_IDENTITY)
 
@@ -586,16 +578,15 @@ def test_a_number_reaches_the_same_phone_however_it_was_written_down() -> None:
             )
             await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
-            assert room.local_participant.rpc_calls[0].destination_identity == BOB_IDENTITY, written
+            assert room.local_participant.rpc_calls[0].destination_identity == DIAL_NUMBER, written
 
     asyncio.run(run())
 
 
 def test_livekit_phone_reports_a_line_that_is_not_there_as_remote_unavailable() -> None:
-    """The number is in the plan and the line it names is not in the room. Nobody home.
+    """Setup addresses the dialled number; the room has no such participant. Nobody home.
 
-    Setup goes out to the endpoint the plan gave and comes back RECIPIENT_NOT_FOUND, which is the
-    far end being absent — a fact the room establishes and the plan could not have predicted.
+    RECIPIENT_NOT_FOUND from the SFU is the far end being absent — a fact the room establishes.
     """
 
     async def run() -> None:
@@ -608,24 +599,26 @@ def test_livekit_phone_reports_a_line_that_is_not_there_as_remote_unavailable() 
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert room.local_participant.rpc_calls[0].destination_identity == DIAL_PLAN_ENTRIES[ABSENT_NUMBER]
+        assert room.local_participant.rpc_calls[0].destination_identity == ABSENT_NUMBER
         failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
         assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
 
     asyncio.run(run())
 
 
-def test_livekit_phone_reports_a_wrong_number_as_remote_unavailable() -> None:
-    """A number no line is registered against is a wrong number, and nothing goes on the wire.
-
-    The exchange answers this one itself, the way it does when digits lead nowhere: the caller
-    hears the same unreachable verdict as for a line that is simply not there, because from the
-    caller's end those are the same fact. Nothing is addressed anywhere, because there is nowhere.
-    """
+def test_an_optional_dial_plan_miss_is_a_wrong_number_with_nothing_on_the_wire() -> None:
+    """When a MappingDialPlan is present and omits the number, the exchange answers and setup is not sent."""
 
     async def run() -> None:
         forwarded: list[hsm.Event[typing.Any]] = []
-        phone, _service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
+        sfu = FakeSfu()
+        phone, _service, room, _recording = await _start_phone_on_room(
+            ALICE_IDENTITY,
+            sfu,
+            dial_plan=signaling.MappingDialPlan({DIAL_NUMBER: BOB_IDENTITY}),
+            forwarded_events=forwarded,
+        )
+        _ = _endpoint_in_room(sfu, BOB_IDENTITY)
 
         await phone.dispatch(
             phone.context(),
@@ -640,17 +633,15 @@ def test_livekit_phone_reports_a_wrong_number_as_remote_unavailable() -> None:
     asyncio.run(run())
 
 
-def test_livekit_phone_with_no_exchange_cannot_place_a_call() -> None:
-    """On a line but on no numbering plan: it can be called, and no number leads anywhere from it."""
+def test_dial_with_no_plan_addresses_the_number_as_identity() -> None:
+    """Default operation: dial_plan=None means destination_identity is the dialled number."""
 
     async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
         sfu = FakeSfu()
-        phone, _service, room, _recording = await _start_phone_on_room(
+        phone, service, room, _recording = await _start_phone_on_room(
             ALICE_IDENTITY,
             sfu,
             dial_plan=None,
-            forwarded_events=forwarded,
         )
         _ = _endpoint_in_room(sfu, BOB_IDENTITY)
 
@@ -658,11 +649,32 @@ def test_livekit_phone_with_no_exchange_cannot_place_a_call() -> None:
             phone.context(),
             phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
-        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
+        await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
 
-        assert room.local_participant.rpc_calls == []
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="provider_unavailable")
+        assert room.local_participant.rpc_calls[0].destination_identity == DIAL_NUMBER
+
+    asyncio.run(run())
+
+
+def test_optional_dial_plan_can_remap_a_number_to_a_different_identity() -> None:
+    """MappingDialPlan remains for rare aliases: number → non-number identity."""
+
+    async def run() -> None:
+        sfu = FakeSfu()
+        phone, service, room, _recording = await _start_phone_on_room(
+            ALICE_IDENTITY,
+            sfu,
+            dial_plan=signaling.MappingDialPlan({DIAL_NUMBER: ALIAS_IDENTITY}),
+        )
+        _ = _endpoint_in_room(sfu, ALIAS_IDENTITY)
+
+        await phone.dispatch(
+            phone.context(),
+            phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
+        )
+        await _wait_until(lambda: service.state() == "/PhoneService/dialing/ringing")
+
+        assert room.local_participant.rpc_calls[0].destination_identity == ALIAS_IDENTITY
 
     asyncio.run(run())
 
@@ -670,14 +682,14 @@ def test_livekit_phone_with_no_exchange_cannot_place_a_call() -> None:
 def test_a_dial_plan_only_registers_numbers_a_handset_could_dial() -> None:
     """The plan is checked against the same rule a dialled number is, so the two cannot disagree."""
 
-    plan = signaling.MappingDialPlan({"(555) 555-0142": BOB_IDENTITY})
+    plan = signaling.MappingDialPlan({"(555) 555-0142": ALIAS_IDENTITY})
 
     # Written separators are stripped on the way into the plan exactly as they are on the keypad.
-    assert plan.endpoint("5555550142") == BOB_IDENTITY
+    assert plan.endpoint("5555550142") == ALIAS_IDENTITY
     assert plan.endpoint(UNLISTED_NUMBER) is None
     for not_a_number in ("phone-bot-bob", "", "reception"):
         with pytest.raises(ValueError):
-            _ = signaling.MappingDialPlan({not_a_number: BOB_IDENTITY})
+            _ = signaling.MappingDialPlan({not_a_number: ALIAS_IDENTITY})
     with pytest.raises(ValueError):
         _ = signaling.MappingDialPlan({DIAL_NUMBER: ""})
 

@@ -3,21 +3,6 @@ import typing
 import hsm
 import pydantic
 
-TInput = typing.TypeVar("TInput", bound=pydantic.BaseModel)
-TOutput = typing.TypeVar("TOutput", bound=pydantic.BaseModel)
-
-
-class InputEventData(pydantic.BaseModel, typing.Generic[TInput]):
-    """Payload that contains input data for an event."""
-
-    data: TInput
-
-
-class OutputEventData(pydantic.BaseModel, typing.Generic[TOutput]):
-    """Payload that contains output data for an event."""
-
-    data: TOutput
-
 
 class FirmwareInitializingDoneEventData(pydantic.BaseModel):
     """Completion signal that device firmware finished initializing."""
@@ -68,17 +53,3 @@ FirmwareInitializingFailedEvent = hsm.Event[FirmwareInitializingFailedEventData]
     kind=hsm.ErrorEventKind,
     schema=FirmwareInitializingFailedEventData,
 )
-
-
-def OutputEvent(name: str, data_type: type[TOutput]) -> hsm.Event[OutputEventData[TOutput]]:
-    return hsm.Event[OutputEventData[TOutput]](
-        name=name,
-        schema=OutputEventData[data_type],
-    )
-
-
-def InputEvent(name: str, data_type: type[TInput]) -> hsm.Event[InputEventData[TInput]]:
-    return hsm.Event[InputEventData[TInput]](
-        name=name,
-        schema=InputEventData[data_type],
-    )

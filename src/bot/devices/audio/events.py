@@ -73,10 +73,14 @@ class AudioOutputData(AudioFrameData):
 InputEvent = hsm.Event[AudioInputData](
     name="devices.audio.input",
     schema=AudioInputData,
+
+
+
 )
 OutputEvent = hsm.Event[AudioOutputData](
     name="devices.audio.output",
     schema=AudioOutputData,
+
 )
 
 

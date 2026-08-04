@@ -50,18 +50,32 @@ CONFIDENCE_MIN: typing.Final[int] = 0
 CONFIDENCE_MAX: typing.Final[int] = 100
 
 
+def is_deliberative_handoff_schema(schema: object | None) -> bool:
+    """True when a model-facing schema marks deliberate (System-2) handoff.
+
+    Schemas opt in with ``__deliberative_handoff__ = True`` (for example reasoning
+    ``CallData``). Intuition and other stages detect handoff via this marker so they
+    never hard-import the reasoning module.
+    """
+
+    return getattr(schema, "__deliberative_handoff__", False) is True
+
+
 @dataclasses.dataclass(frozen=True)
 class SelectedEvent:
     """One selected event to dispatch.
 
     ``confidence`` / ``meta`` hold model-facing patch values lifted by ``unpatch_event_data``
     (not domain event data). ``meta`` is the full patch map; ``confidence`` is a convenience
-    when the active patch includes that field (0–100 integer scale).
+    when the active patch includes that field (0–100 integer scale). Selection rationale is
+    ``reason`` on this envelope — not on the event payload.
     """
 
     event: str
     target: str | None = None
-    data: dict[str, object] | None = None
+    # Domain payload: JSON dict from model/Starlark selections, or a typed event data model
+    # (e.g. ConversationInputData with audio bytes) when rebuilt from a live stimulus.
+    data: object | None = None
     reason: str | None = None
     confidence: int | None = None
     meta: dict[str, object] | None = None
@@ -269,16 +283,49 @@ def _object_schema_required_names(schema: collections.abc.Mapping[str, object]) 
     return []
 
 
+def collect_offered_events(
+    actors: collections.abc.Mapping[str, hsm.Instance],
+) -> tuple[tuple[Event[typing.Any], ...], collections.abc.Mapping[str, tuple[str, ...]]]:
+    """Collect enabled call events and the actor keys that enable each event name.
+
+    Walks ``actors.items()`` so provenance is live topology keys, never hard-coded product
+    names. One canonical ``Event`` object is kept per name (first enabler). Actor keys per
+    name are sorted for stable tool enums.
+    """
+
+    events_by_name: dict[str, Event[typing.Any]] = {}
+    targets_by_name: dict[str, list[str]] = {}
+    for actor_key, instance in actors.items():
+        for event in enabled_call_events(instance):
+            if not event.name:
+                continue
+            if event.name not in events_by_name:
+                events_by_name[event.name] = event
+            targets_by_name.setdefault(event.name, []).append(actor_key)
+    actor_events = {name: tuple(sorted(set(keys))) for name, keys in targets_by_name.items()}
+    return tuple(events_by_name.values()), actor_events
+
+
+def _normalized_targets(targets: collections.abc.Sequence[str]) -> tuple[str, ...]:
+    return tuple(sorted({key for key in targets if key}))
+
+
 def _selection_item_branch(
     event: Event[typing.Any],
     *,
     patch: SchemaPatch | None = None,
+    targets: collections.abc.Sequence[str] = (),
 ) -> dict[str, object]:
     """One anyOf branch: const event name + projected event payload schema as ``data``.
 
     Payload required/description/examples come only from the event (and optional patch) models.
     Nested model ``$defs``/``$ref`` from Pydantic are closed via ``embeddable_json_schema`` so
     document-root ``#/$defs/…`` refs remain valid after this branch is nested under ``dispatch``.
+
+    ``target`` is stamped from live topology keys that enable this event this turn:
+    single enabler → JSON Schema ``const`` (required); multiple → ``enum`` of those keys
+    (required). Free-form target strings are never offered. Domain event payloads stay free of
+    routing target.
     """
 
     data_schema = model_facing_event_json_schema(event, patch=patch)
@@ -308,26 +355,43 @@ def _selection_item_branch(
     data_required = _object_schema_required_names(data_schema)
     item_required = ["event", "data"] if data_required else ["event"]
 
+    properties: dict[str, object] = {
+        "event": {
+            "type": "string",
+            "const": event.name,
+        },
+        "data": data_schema,
+        "reason": {
+            "type": "string",
+            "description": "Optional short reason this event was selected.",
+        },
+    }
+    legal_targets = _normalized_targets(targets)
+    if len(legal_targets) == 1:
+        properties["target"] = {
+            "type": "string",
+            "const": legal_targets[0],
+            "description": (
+                "Actor that receives this event. Fixed for this turn because only one actor "
+                "enables it in the live topology."
+            ),
+        }
+        item_required.append("target")
+    elif len(legal_targets) > 1:
+        properties["target"] = {
+            "type": "string",
+            "enum": list(legal_targets),
+            "description": (
+                "Actor that should receive the event. Required because multiple actors enable "
+                "this event this turn; choose exactly one offered actor key."
+            ),
+        }
+        item_required.append("target")
+
     branch: dict[str, object] = {
         "type": "object",
         "description": event_description,
-        "properties": {
-            "event": {
-                "type": "string",
-                "const": event.name,
-            },
-            "data": data_schema,
-            "target": {
-                "type": "string",
-                "description": (
-                    "Optional actor name that should receive the event when more than one actor can accept it."
-                ),
-            },
-            "reason": {
-                "type": "string",
-                "description": "Optional short reason this event was selected.",
-            },
-        },
+        "properties": properties,
         "required": item_required,
         "additionalProperties": False,
     }
@@ -335,7 +399,10 @@ def _selection_item_branch(
     if isinstance(data_examples, list) and data_examples:
         first = data_examples[0]
         if isinstance(first, dict):
-            branch["examples"] = [{"event": event.name, "data": first}]
+            example: dict[str, object] = {"event": event.name, "data": first}
+            if len(legal_targets) == 1:
+                example["target"] = legal_targets[0]
+            branch["examples"] = [example]
     return branch
 
 
@@ -343,6 +410,7 @@ def dispatch_tool(
     events: collections.abc.Sequence[Event[typing.Any]],
     *,
     patch: SchemaPatch | None = None,
+    targets_by_event: collections.abc.Mapping[str, collections.abc.Sequence[str]] | None = None,
 ) -> dict[str, object]:
     """Build the single model-facing ``dispatch`` function tool.
 
@@ -350,28 +418,41 @@ def dispatch_tool(
     ``data`` is the embeddable (ref-closed) projection of the event payload schema
     (Pydantic/event contract + optional patch). Composition never nests document-root
     ``#/$defs/…`` refs under the tool parameters document.
+
+    ``targets_by_event`` maps event name → actor keys that enable it this turn (from live
+    ``enabled_call_events``). Branches stamp ``target`` as ``const`` or ``enum`` from that map.
+    Events with an empty target list in the map are omitted (not offerable without a receiver).
     """
 
+    target_map = targets_by_event or {}
     unique: list[Event[typing.Any]] = []
     seen: set[str] = set()
     for event in events:
         if not event.name or event.name in seen:
             continue
+        # When the offer map lists this event with no enablers, drop it from tools.
+        if event.name in target_map and not _normalized_targets(target_map[event.name]):
+            continue
         seen.add(event.name)
         unique.append(event)
 
     description = (
-        "Dispatch zero or more modeled events for this turn. Call once. "
-        "Multi-select by listing multiple items (for example speaking and reasoning together). "
+        "Dispatch all events necessary for the input. Call once. "
+        "Multi-select by listing every offered event this turn requires in the events array "
+        "(for example a device action and speech together when both are needed). "
         "Each item must match one offered event branch; payload fields and requirements are "
         "defined on that event's data schema. An empty events list leaves the turn unhandled for "
         "the host cascade (e.g. deliberative reasoning); use an explicit ignore/pass event when "
         "the stage should handle the turn with no environment actions."
     )
 
+    def branch_for(event: Event[typing.Any]) -> dict[str, object]:
+        targets = target_map.get(event.name, ())
+        return _selection_item_branch(event, patch=patch, targets=targets)
+
     if unique:
         item_schema: dict[str, object] = {
-            "anyOf": [_selection_item_branch(event, patch=patch) for event in unique],
+            "anyOf": [branch_for(event) for event in unique],
         }
     else:
         item_schema = {
@@ -386,7 +467,7 @@ def dispatch_tool(
 
     array_examples: list[object] = [[]]
     if unique:
-        first_branch = _selection_item_branch(unique[0], patch=patch)
+        first_branch = branch_for(unique[0])
         branch_examples = first_branch.get("examples")
         if isinstance(branch_examples, list) and branch_examples:
             array_examples.append(branch_examples)
@@ -397,8 +478,9 @@ def dispatch_tool(
             "events": {
                 "type": "array",
                 "description": (
-                    "Events to dispatch this turn. Each item is one offered event branch "
-                    "(const name + that event's data schema). Empty array selects none."
+                    "All events necessary for the input this turn. Each item is one offered "
+                    "event branch (const name + that event's data schema). Include every action "
+                    "required together; empty array selects none."
                 ),
                 "items": item_schema,
                 "examples": array_examples,
@@ -417,13 +499,38 @@ def dispatch_tool(
     }
 
 
+def fill_unique_selection_targets(
+    selections: Events,
+    targets_by_event: collections.abc.Mapping[str, collections.abc.Sequence[str]],
+) -> Events:
+    """Fill ``SelectedEvent.target`` when omitted and exactly one actor enables the event."""
+
+    filled: list[SelectedEvent] = []
+    for item in selections:
+        if item.target is not None:
+            filled.append(item)
+            continue
+        legal = _normalized_targets(targets_by_event.get(item.event, ()))
+        if len(legal) == 1:
+            filled.append(dataclasses.replace(item, target=legal[0]))
+        else:
+            filled.append(item)
+    return tuple(filled)
+
+
 def events_from_dispatch_args(
     args: collections.abc.Mapping[str, object],
     *,
     patch: SchemaPatch | None = None,
     offered: collections.abc.Sequence[Event[typing.Any]] | None = None,
+    targets_by_event: collections.abc.Mapping[str, collections.abc.Sequence[str]] | None = None,
 ) -> Events:
-    """Parse a ``dispatch`` tool's args into validated ``Events``."""
+    """Parse a ``dispatch`` tool's args into validated ``Events``.
+
+    When ``targets_by_event`` is provided and a selection omits ``target`` while exactly one
+    actor enables that event, the unique actor key is filled so dispatch is explicit.
+    Multi-enabler omissions stay unresolved until ``_resolve_target`` fails closed.
+    """
 
     raw_events = args.get("events")
     if raw_events is None:
@@ -436,6 +543,8 @@ def events_from_dispatch_args(
         for item in selections:
             if item.event not in allowed:
                 raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+    if targets_by_event is not None:
+        selections = fill_unique_selection_targets(selections, targets_by_event)
     return selections
 
 
@@ -642,9 +751,7 @@ def active_operation_id(owner: hsm.Instance) -> str | None:
     active = [
         key.removeprefix(prefix)
         for key, operation in instances.items()
-        if isinstance(key, str)
-        and key.startswith(prefix)
-        and isinstance(operation, Operation)
+        if isinstance(key, str) and key.startswith(prefix) and isinstance(operation, Operation)
     ]
     return active[0] if len(active) == 1 else None
 
@@ -720,20 +827,20 @@ def matches_child_terminal(
     child: hsm.Instance,
     event: Event[typing.Any],
     *,
-    name: str,
     request_id: str,
     operation_id: str,
     generation: str,
 ) -> bool:
     """Whether ``event`` is the exact terminal ``child`` owes ``owner`` for one live operation.
 
-    Callers narrow the typed payload first; this correlates the already-delivered terminal with
-    the live operation actor and the request identity the owner used to address ``child``.
+    Callers narrow the typed payload first (output vs failure); this correlates the already-delivered
+    terminal with the live operation actor and the request identity the owner used to address
+    ``child``. Topology has already selected the transition — post-delivery correlation only
+    (HSM-DELIVERY-001).
     """
 
     return (
         matches_operation(owner, operation_id, generation)
-        and event.name == name
         and event.target == hsm.id(owner)
         and event.source == hsm.id(child)
         and event.id == request_id
@@ -874,6 +981,17 @@ class InputData(pydantic.BaseModel):
         exclude=True,
         repr=False,
         description="Named instances used only to dispatch selected events (not model-facing).",
+    )
+    actor_events: SkipJsonSchema[collections.abc.Mapping[str, tuple[str, ...]]] = pydantic.Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+        description=(
+            "Event name → sorted actor keys that enable that event this turn (live "
+            "enabled_call_events snapshot). Used to stamp dispatch-tool target const/enum and "
+            "to fill unique omitted targets at parse. Dispatch delivery still validates against "
+            "declared call events on the actor model."
+        ),
     )
     authority: SkipJsonSchema[hsm.Instance | None] = pydantic.Field(
         default=None,
@@ -1157,6 +1275,10 @@ async def dispatch_selected_events(
 
     if not selections:
         return
+    # Prefer offered-map unique fill so illegal multi-target omissions fail the same way as
+    # parse-time omissions; dispatch still re-validates with declared call events.
+    if input.actor_events:
+        selections = fill_unique_selection_targets(selections, input.actor_events)
     by_name = {event.name: event for event in input.schemas}
     event_metadata = dict(metadata or {})
     prepared: list[tuple[hsm.Instance, hsm.Event[typing.Any]]] = []
@@ -1169,8 +1291,14 @@ async def dispatch_selected_events(
         domain_data, _meta = unpatch_event_data(selection.data, patch=input.patch)
         if domain_data is None:
             raw: object = {}
+        elif isinstance(domain_data, pydantic.BaseModel):
+            # Already typed event data (or a selection that carried a model instance).
+            raw = domain_data
         elif isinstance(domain_data, collections.abc.Mapping):
-            raw = dict(typing.cast(collections.abc.Mapping[str, object], domain_data))
+            # JSON / Starlark hop: project any leftover bytes to base64 before schema rehydrate.
+            from bot.event_schema import project_json_value
+
+            raw = project_json_value(dict(typing.cast(collections.abc.Mapping[str, object], domain_data)))
         else:
             # Live deliberative frames (processing.InputData) and other non-mapping payloads.
             raw = domain_data
@@ -1178,7 +1306,9 @@ async def dispatch_selected_events(
         try:
             _ = validate_event_data(offered, raw)
         except Exception as error:
-            raise RuntimeError(f"Processing selected invalid event data for event: {selection.event}.") from error
+            raise RuntimeError(
+                f"Processing selected invalid event data for event: {selection.event}: {error}"
+            ) from error
 
         target = _resolve_target(input, selection)
         declared = _instance_event_map(target).get(selection.event)
@@ -1187,7 +1317,9 @@ async def dispatch_selected_events(
         try:
             validated = validate_event_data(declared, raw)
         except Exception as error:
-            raise RuntimeError(f"Processing selected invalid event data for event: {selection.event}.") from error
+            raise RuntimeError(
+                f"Processing selected invalid event data for event: {selection.event}: {error}"
+            ) from error
         dispatch_event = declared if validated is None else declared.with_data(validated)
         prepared.append(
             (
@@ -1269,13 +1401,13 @@ class Processing(ability.Ability[InputData, CompletionData]):
     _instructions: str
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = CompletionData
-    input_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_input_event(
+    input_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[InputData](
         name="bot.ability.processing.input",
-        data_type=InputData,
+        schema=InputData,
     )
-    output_event: typing.ClassVar[hsm.Event[typing.Any]] = ability.ability_output_event(
+    output_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[CompletionData](
         name="bot.ability.processing.output",
-        data_type=CompletionData,
+        schema=CompletionData,
     )
     failed_event: typing.ClassVar[hsm.Event[typing.Any]] = hsm.Event[FailureData](
         name=ability.FailedEvent.name,
@@ -1635,6 +1767,7 @@ __all__ = [
     "active_operation_id",
     "cancellation_operation_id",
     "coerce_event_selections",
+    "collect_offered_events",
     "dispatch_child_cancel",
     "dispatch_selected_events",
     "dispatch_terminal_failure",
@@ -1642,8 +1775,10 @@ __all__ = [
     "dispatch_tool",
     "enabled_call_events",
     "events_from_dispatch_args",
+    "fill_unique_selection_targets",
     "finish_operation",
     "finish_operations",
+    "is_deliberative_handoff_schema",
     "model_facing_event_json_schema",
     "matches_child_terminal",
     "matches_operation",

@@ -12,6 +12,7 @@ from bot.abilities import processing
 from bot.abilities import encoding
 from bot.abilities import speaking
 from bot.devices import audio
+from bot.abilities.speaking import EfferenceData, EfferenceEvent
 from bot.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, start_ability_tree
 from tests.bot.abilities.support import require_model
@@ -256,12 +257,11 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
     assert "bot.ability.speaking.input" in {event.name for event in inputs[0].schemas}
 
 
-class OwnerEar(hsm.Instance):
-    """Stands where the body stands: attaches to Speaking and records what it is told.
+class ListeningPeer(hsm.Instance):
+    """Stands where Listening stands: receives the Speaking→Listening motor-command copy.
 
-    The efference copy goes to whatever owns this ability, which in a real bot is the body. Here
-    it is the only thing this test needs, so the recorded order is exactly the order the body
-    would see.
+    The efference copy is delivered to registered peers, not the body. This records arrival order
+    for the nerve under test.
     """
 
     def __init__(self, seen: list[str]) -> None:
@@ -269,15 +269,15 @@ class OwnerEar(hsm.Instance):
         self._seen = seen
 
     @staticmethod
-    def _record(ctx: hsm.Context, instance: "OwnerEar", event: hsm.Event[typing.Any]) -> None:
+    def _record(ctx: hsm.Context, instance: "ListeningPeer", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        if isinstance(event.data, speaking.EfferenceData):
+        if isinstance(event.data, EfferenceData):
             instance._seen.append("efference")
 
     model: typing.ClassVar[hsm.Model] = hsm.define(
-        "OwnerEar",
-        hsm.initial(hsm.target("owning")),
-        hsm.state("owning", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+        "ListeningPeer",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(EfferenceEvent), hsm.effect(_record))),
     )
 
 
@@ -301,49 +301,63 @@ class OrderingSoundListener(hsm.Instance):
     )
 
 
-async def _speak_with_owner(
+class AbilityOwner(hsm.Instance):
+    """Attachment owner so Speaking can leave detached lifecycle and run behavior."""
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "AbilityOwner",
+        hsm.initial(hsm.target("owning")),
+        hsm.state("owning"),
+    )
+
+
+async def _speak_with_listening_peer(
     *,
     media_type: str = "audio/pcm",
     audio_bytes: bytes = b"\x00" * 32_000,
     speaker: audio.Speaker | None = None,
-) -> tuple[list[str], list[speaking.EfferenceData]]:
-    """Say one thing with a real mouth in a real environment; return what the owner saw."""
+) -> tuple[list[str], list[EfferenceData]]:
+    """Say one thing with a real mouth; return order and copies seen by the linked Listening peer."""
 
     from bot.protocols import attachment
 
     mouth = audio.Speaker() if speaker is None else speaker
+    environment = Environment()
+    order: list[str] = []
+    copies: list[EfferenceData] = []
+
+    peer = ListeningPeer(order)
+    owner = AbilityOwner()
+    _ = await hsm.started(environment, peer, peer.model)
+    _ = await hsm.started(environment, owner, owner.model)
     speaking_ability = speaking.Speaking(
         encoder=RecordingEncoder(audio=audio_bytes),
         speaker=mouth,
+        listening=peer,
         sample_rate_hz=16_000,
         channels=1,
         media_type=media_type,
     )
-    environment = Environment()
-    order: list[str] = []
-    copies: list[speaking.EfferenceData] = []
-
-    owner = OwnerEar(order)
-    _ = await hsm.started(environment, owner, owner.model)
     _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     listener = OrderingSoundListener(order)
     _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
     environment.join(listener)
 
     _ = await hsm.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
+    # Attach is ability lifecycle only; the motor-command copy goes to ``listening=peer``, not owner.
     _ = await speaking_ability.attach(
         environment,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
     )
 
-    original = owner.dispatch
+    original = peer.dispatch
 
     def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> typing.Awaitable[None]:
-        if isinstance(event.data, speaking.EfferenceData):
+        if isinstance(event.data, EfferenceData):
             copies.append(event.data)
         return original(ctx, event)
 
-    owner.dispatch = capture  # type: ignore[method-assign]
+    peer.dispatch = capture  # type: ignore[method-assign]
     try:
         await speaking_ability.dispatch(
             environment, speaking.InputEvent.with_data(speaking.InputData(text="Hello there."))
@@ -351,7 +365,7 @@ async def _speak_with_owner(
         await _wait_until(lambda: "sound" in order)
         await asyncio.sleep(0.02)
     finally:
-        owner.dispatch = original  # type: ignore[method-assign]
+        peer.dispatch = original  # type: ignore[method-assign]
     return order, copies
 
 
@@ -363,7 +377,7 @@ def test_the_copy_of_a_command_leaves_before_the_sound_does() -> None:
     not at completion, which means the act was committed, not that the sound stopped.
     """
 
-    order, copies = asyncio.run(_speak_with_owner())
+    order, copies = asyncio.run(_speak_with_listening_peer())
 
     assert order[:2] == ["efference", "sound"]
     assert len(copies) == 1
@@ -376,9 +390,9 @@ def test_the_copy_says_which_mouth_how_long_and_in_what_form_and_never_the_words
     sound, and that is how long the consequences of this command are expected to last.
     """
 
-    async def run() -> tuple[audio.Speaker, list[speaking.EfferenceData]]:
+    async def run() -> tuple[audio.Speaker, list[EfferenceData]]:
         mouth = audio.Speaker()
-        _, copies = await _speak_with_owner(speaker=mouth)
+        _, copies = await _speak_with_listening_peer(speaker=mouth)
         return mouth, copies
 
     mouth, copies = asyncio.run(run())
@@ -396,7 +410,7 @@ def test_the_copy_says_which_mouth_how_long_and_in_what_form_and_never_the_words
 def test_no_copy_is_issued_for_a_form_whose_byte_count_is_not_a_duration() -> None:
     """A compressed buffer says nothing about time, and a made-up window is worse than none."""
 
-    order, copies = asyncio.run(_speak_with_owner(media_type="audio/opus"))
+    order, copies = asyncio.run(_speak_with_listening_peer(media_type="audio/opus"))
 
     assert copies == []
     assert "sound" in order
@@ -405,7 +419,8 @@ def test_no_copy_is_issued_for_a_form_whose_byte_count_is_not_a_duration() -> No
 def test_the_efference_event_is_never_offerable_to_a_model() -> None:
     """A nerve, not a tool. Nothing decides to send one, so nothing may select one."""
 
-    assert speaking.EfferenceEvent.kind != processing.EventKind
+    assert EfferenceEvent.kind != processing.EventKind
+    assert EfferenceEvent.name == "bot.ability.speaking.efference"
     # Contrast: the ability's one front door is offerable, which is what makes the difference
     # between them a decision rather than an oversight.
     assert speaking.InputEvent.kind == processing.EventKind

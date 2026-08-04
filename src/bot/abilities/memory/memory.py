@@ -125,13 +125,15 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
     encoder: encoding.Encoder[classification_mod.GeneratedMemory, classification_mod.EncodedMemory] | None
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = SourceData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = CandidateData
-    input_event: typing.ClassVar[hsm.Event[SourceData]] = ability.ability_input_event(
-        "bot.ability.memory.generation.input",
-        SourceData,
+    input_event: typing.ClassVar[hsm.Event[SourceData]] = hsm.Event[SourceData](
+    name="bot.ability.memory.generation.input",
+    schema=SourceData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[CandidateData]] = ability.ability_output_event(
-        "bot.ability.memory.generation.output",
-        CandidateData,
+    output_event: typing.ClassVar[hsm.Event[CandidateData]] = hsm.Event[CandidateData](
+    name="bot.ability.memory.generation.output",
+    schema=CandidateData,
+
     )
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _MemoryGenerationApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryGenerationApplyFailedEvent
@@ -393,15 +395,15 @@ class Memory(store.MemoryStore):
     """
 
     default_scope: typing.ClassVar[str] = "memory"
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.memory.input",
-        InputData,
-        description="One transaction: ordered parameterized Statements (all commit or all roll back).",
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.memory.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.output",
-        OutputData,
-        description="Per-statement results after a committed transaction.",
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.memory.output",
+    schema=OutputData,
+
     )
     submodel: typing.ClassVar[hsm.Model | None] = memory_model(name="Memory", input_event=input_event)
 

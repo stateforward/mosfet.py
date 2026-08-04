@@ -13,7 +13,6 @@ from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
 from bot.devices import audio
 from bot.devices import phone as phone_device
-
 import asyncio
 from pathlib import Path
 import collections.abc
@@ -35,7 +34,15 @@ from bot import event_schema
 from bot.event_schema import event_json_schema
 from bot.protocols import attachment
 
-from bot.environment import SoundData, SoundEvent, VisualData, VisualEvent, Environment, space
+from bot.abilities.speaking import EfferenceData, EfferenceEvent
+from bot.environment import (
+    SoundData,
+    SoundEvent,
+    VisualData,
+    VisualEvent,
+    Environment,
+    space,
+)
 from tests.hsm_instance_state import (
     device_firmware,
     bot_has_focus,
@@ -767,7 +774,9 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
         )
         reboot_state = active_bot.state()
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-        timer_stopped = bool(operations) and all(operation.state() in {"", "/BotProcessingTimer"} for operation in operations)
+        timer_stopped = bool(operations) and all(
+            operation.state() in {"", "/BotProcessingTimer"} for operation in operations
+        )
         _ = release.set()
         await active_bot.dispatch(
             active_bot.context(),
@@ -1316,16 +1325,12 @@ async def ring_phone(phone: phone_device.Phone, call_id: str = "call-123", calle
     await emit_phone_service_event(
         phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller=caller))
     )
-    await wait_until(
-        lambda: (firmware := device_firmware(phone)) is not None and firmware.state() == "/Phone/ringing"
-    )
+    await wait_until(lambda: (firmware := device_firmware(phone)) is not None and firmware.state() == "/Phone/ringing")
 
 
 async def answer_phone(phone: phone_device.Phone, call_id: str = "call-123") -> None:
     await ring_phone(phone, call_id=call_id)
-    await phone.dispatch(
-        phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData())
-    )
+    await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
     await emit_phone_service_event(
         phone, phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id=call_id))
     )
@@ -1807,18 +1812,63 @@ def test_bot_processes_environment_broadcast_from_configured_device_event() -> N
     assert actions == [no_output("priority:0")]
 
 
-class FixedVoiceDetector(voice.detection.VoiceDetector):
-    is_voice: bool
-    confidence: float
+_VOICE_APPLY = voice.detection.ApplyData(
+    segments=(
+        voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.91),
+    )
+)
+_SILENCE_APPLY = voice.detection.ApplyData(segments=())
 
-    def __init__(self, *, is_voice: bool = True, confidence: float = 0.91) -> None:
-        self.is_voice = is_voice
-        self.confidence = confidence
+
+class FixedVoiceDetector(voice.detection.VoiceDetector):
+    """Always returns the same ApplyData (ring/no-voice fixtures)."""
+
+    output: voice.detection.ApplyData
+
+    def __init__(
+        self,
+        *,
+        segments: tuple[voice.detection.VoiceDetectionSegment, ...] | None = None,
+        is_voice: bool | None = None,
+        confidence: float = 0.91,
+        output: voice.detection.ApplyData | None = None,
+    ) -> None:
+        if output is not None:
+            self.output = output
+        elif segments is not None:
+            self.output = voice.detection.ApplyData(segments=segments)
+        elif is_voice is False:
+            self.output = _SILENCE_APPLY
+        else:
+            self.output = voice.detection.ApplyData(
+                segments=(
+                    voice.detection.VoiceDetectionSegment(
+                        start_seconds=0.0,
+                        end_seconds=1.0,
+                        confidence=confidence,
+                    ),
+                )
+            )
 
     @typing.override
-    async def classify(self, input: bytes) -> voice.detection.OutputData:
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
-        return voice.detection.OutputData(is_voice=self.is_voice, confidence=self.confidence)
+        return self.output
+
+
+class ContentVoiceDetector(voice.detection.VoiceDetector):
+    """Voice when audio is non-zero; silence when it is near-empty (closes HearingSpeech).
+
+    Streaming VAD needs a silence frame after speech. Tests inject zero PCM via
+    :func:`close_hearing_speech`; real utterance bytes stay voice so interrupts and
+    residuals are not swallowed as End frames.
+    """
+
+    @typing.override
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
+        if not input or not any(input):
+            return _SILENCE_APPLY
+        return _VOICE_APPLY
 
 
 class RecordingSpeechDecoder(speech.SpeechDecoder):
@@ -1853,8 +1903,14 @@ class RecordingListening(listening.Listening):
             decoder = RecordingSpeechDecoder()
         else:
             decoder = speech_decoder
+        # Voice path: content-based VAD so zero-PCM silence frames end HearingSpeech.
+        detector: voice.detection.VoiceDetector
+        if is_voice:
+            detector = ContentVoiceDetector()
+        else:
+            detector = FixedVoiceDetector(is_voice=False)
         super().__init__(
-            voice_detector=FixedVoiceDetector(is_voice=is_voice),
+            voice_detector=detector,
             sound_classifier=sound_classifier,
             speech_decoder=decoder,
         )
@@ -1877,6 +1933,37 @@ class RecordingListening(listening.Listening):
         return super().dispatch(ctx, event)
 
 
+def silence_sound(
+    *,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    amplitude_db: float | None = None,
+    received_level_db: float | None = None,
+) -> SoundData:
+    """A short no-voice frame used to close HearingSpeech after a voice frame."""
+
+    return SoundData(
+        audio=b"\x00" * 320,
+        media_type="audio/pcm",
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
+        amplitude_db=amplitude_db,
+        received_level_db=received_level_db,
+    )
+
+
+async def close_hearing_speech(bot: Bot, environment: Environment, **sound_kwargs: object) -> None:
+    """Dispatch a silence frame so streaming VAD can End an open HearingSpeech window.
+
+    Default ``received_level_db=0.0`` keeps the silence frame below the product threshold so
+    closing VAD does not invent a deliberative turn of its own.
+    """
+
+    if "received_level_db" not in sound_kwargs:
+        sound_kwargs["received_level_db"] = 0.0
+    await bot.dispatch(environment, SoundEvent.with_data(silence_sound(**sound_kwargs)))  # type: ignore[arg-type]
+
+
 def ring_hearing(*, is_voice: bool = False) -> RecordingListening:
     """Sensory Listening for phone ring: no-voice sound labeled from SoundData.kind."""
 
@@ -1897,11 +1984,13 @@ def test_bot_fans_out_sound_event_to_input_listening() -> None:
         ability = IgnoreAbility()
         listening_ability = RecordingListening()
         active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
-        _ = await start_bot_with_devices(active_bot)
+        environment = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
         )
         await active_bot.dispatch(active_bot.context(), sound)
+        # Streaming VAD: voice frame opens HearingSpeech; silence frame closes it for STT.
+        await close_hearing_speech(active_bot, environment, sample_rate_hz=48_000)
         await wait_until(lambda: len(ability.calls) == 1)
         assert listening_ability.speech_decoder is not None
         return (
@@ -1916,8 +2005,8 @@ def test_bot_fans_out_sound_event_to_input_listening() -> None:
     assert len(calls) == 1
     assert isinstance(calls[0].input, hsm.Event)
     assert calls[0].input.name == speech.SpeechDecoding.output_event.name
-    assert calls[0].input.data == b"decoded:heard-chunk"
-    assert decoder_calls == [b"heard-chunk"]
+    assert calls[0].input.data == b"decoded:heard-chunk" + silence_sound(sample_rate_hz=48_000).audio
+    assert decoder_calls == [b"heard-chunk" + silence_sound(sample_rate_hz=48_000).audio]
     assert (
         state.endswith("/active/focused") or state.endswith("/active/processing") or state.endswith("/active/unfocused")
     )
@@ -1973,9 +2062,17 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    # Speaker elevates to environment.sound; Listening skips ordinary no-voice playback (not cognition).
-    assert calls == []
-    assert actions == []
+    # Unlabeled no-voice without STT is a silence observation (sticky turn close), not deliberative speech.
+    # ring_hearing has no speech_decoder, so playback still hands off SpeechData with empty VAD segments.
+    assert len(calls) == 1
+    stimulus = calls[0].input
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == listening.SpeechEvent.name
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.audio == b"playback-audio"
+    assert stimulus.data.voice_detection.segments == ()
+    # Silence observation is still a turn (sticky-turn close); IgnoreAbility yields empty output.
+    assert actions == [()]
 
 
 def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() -> None:
@@ -2013,8 +2110,12 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
 
     owner_calls, sibling_calls, owner_focus, sibling_focus = asyncio.run(run())
 
+    # Sibling has no input Listening, so speaker sound cannot become cognition there.
     assert sibling_calls == []
-    assert owner_calls == []
+    # Owner receives a silence observation (no STT on ring_hearing); not a deliberative speech product.
+    assert len(owner_calls) == 1
+    assert isinstance(owner_calls[0].input, hsm.Event)
+    assert owner_calls[0].input.name == listening.SpeechEvent.name
     assert owner_focus
     assert not sibling_focus
 
@@ -2526,8 +2627,8 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
     assert state == "/Bot/active/focused"
     assert actions == []
     assert len(failures) == 1
-    assert failures[0].message == (
-        f"Processing selected invalid event data for event: {phone_device.TransferCallEvent.name}."
+    assert failures[0].message.startswith(
+        f"Processing selected invalid event data for event: {phone_device.TransferCallEvent.name}"
     )
 
 
@@ -2674,7 +2775,7 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
 
         # Correct cognition source/target, wrong turn id — must not move focus.
         stale_focus = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="screen", reason="stale")),
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="screen")),
             id="not-stale-focus-live",
             source=hsm.id(cognitive),
             target=hsm.id(active_bot),
@@ -2709,7 +2810,7 @@ def test_bot_rejects_forged_focus_for_unconfigured_device() -> None:
         active_bot = basic_agent(devices={})
         _ = await start_bot_with_devices(active_bot)
         forged = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="ghost", reason="forged")),
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="ghost")),
             metadata={"bot.focus_candidates": ("ghost",)},
         )
 
@@ -2751,7 +2852,7 @@ def test_bot_rejects_forged_focus_action_source_during_current_processing() -> N
         await wait_until(lambda: len(cognitive.input_events) == 2)
         request = cognitive.input_events[1]
         forged = dataclasses.replace(
-            bot.ClearFocusEvent.with_data(bot.ClearFocusEventData(reason="forged source")),
+            bot.ClearFocusEvent.with_data(bot.ClearFocusEventData()),
             id=f"{request.id}:intuition",
             source="forged-source",
             target=hsm.id(active_bot),
@@ -2887,7 +2988,7 @@ def test_bot_focus_change_during_processing_does_not_swallow_completion() -> Non
         await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
 
         focus = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser", reason="operator choice")),
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser")),
             metadata={"bot.focus_candidates": ("phone", "browser")},
         )
         await active_bot.dispatch(active_bot.context(), focus)
@@ -3244,7 +3345,7 @@ def test_bot_rejects_focus_for_wrong_turn_id_during_processing() -> None:
         )
         await wait_until(lambda: len(cognitive.inputs) == 2 and active_bot.state() == "/Bot/active/processing")
         forged = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser", reason="wrong turn")),
+            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser")),
             id="not-focus-live-turn",
             source=hsm.id(cognitive),
             target=hsm.id(active_bot),
@@ -3447,7 +3548,9 @@ def test_completed_turn_cancels_processing_timer(monkeypatch: pytest.MonkeyPatch
 
     failures, actions = asyncio.run(run())
 
-    timer_stopped = bool(operations) and all(operation.state() in {"", "/BotProcessingTimer"} for operation in operations)
+    timer_stopped = bool(operations) and all(
+        operation.state() in {"", "/BotProcessingTimer"} for operation in operations
+    )
 
     # Completing the turn exits processing; the owning activity stops the timer explicitly.
     assert timer_stopped
@@ -3949,6 +4052,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
         ability.calls.clear()
 
         _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=1.0))
+        await close_hearing_speech(active_bot, environment)
 
         await wait_until(lambda: bool(ability.calls), timeout=10.0)
         return [call.input for call in ability.calls if isinstance(call.input, hsm.Event)]
@@ -3956,7 +4060,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
     stimuli = asyncio.run(run())
 
     assert [stimulus.name for stimulus in stimuli] == [speech.SpeechDecoding.output_event.name]
-    assert stimuli[0].data == b"decoded:spoken:Call Bob at 555-0142."
+    assert stimuli[0].data == b"decoded:spoken:Call Bob at 555-0142." + silence_sound().audio
 
 
 def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
@@ -3978,11 +4082,13 @@ def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
         ability.calls.clear()
 
         _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=500.0))
+        await close_hearing_speech(active_bot, environment)
         # Long enough for the near case to have finished decoding twice over.
         await asyncio.sleep(0.5)
         shouted_from_far = len(ability.calls)
 
         _ = await somebody_speaks(environment, "Call Bob at 555-0142.", position=space.Position(x=0.0, y=1.0))
+        await close_hearing_speech(active_bot, environment)
         await wait_until(lambda: bool(ability.calls), timeout=10.0)
         return shouted_from_far, len(ability.calls)
 
@@ -4051,15 +4157,16 @@ async def a_bot_with_a_voice(
         placement=space.Placement(position=space.Position(x=MOUTH_OFFSET_M, y=0.0)),
         amplitude_db=60.0,
     )
+    ability = IgnoreAbility()
+    listening_ability = listening_ability if listening_ability is not None else RecordingListening()
     voice = speaking.Speaking(
         encoder=TimedUtteranceEncoder(seconds=utterance_seconds, sample_rate_hz=sample_rate_hz),
         speaker=mouth,
+        listening=listening_ability,
         sample_rate_hz=sample_rate_hz,
         channels=1,
         media_type="audio/pcm",
     )
-    ability = IgnoreAbility()
-    listening_ability = listening_ability if listening_ability is not None else RecordingListening()
     active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
     # The mouth is powered by the Speaking ability it was injected into — part of the bot, not a
     # device the body starts — so bringing the bot up is what brings the mouth up.
@@ -4098,7 +4205,7 @@ async def own_voice_from_the_mouth(environment: Environment, mouth: audio.Speake
 def test_perception_sees_the_copy_of_a_command_before_the_sound_it_predicts() -> None:
     """The ordering the whole mechanism rests on, over the real chain rather than a stub.
 
-    The copy leaves ``Speaking``'s entry into playout and travels body → input abilities; the
+    The copy leaves ``Speaking``'s entry into playout and goes Speaking → linked Listening; the
     sound leaves the playout activity and travels mouth → environment → body → input abilities.
     The copy is dispatched strictly earlier in program order and the environment adds a hop, but
     that is an argument about queue semantics, not a proof, and if the copy ever lost the race
@@ -4123,7 +4230,7 @@ def test_perception_sees_the_copy_of_a_command_before_the_sound_it_predicts() ->
             def arrivals() -> list[str]:
                 seen: list[str] = []
                 for event in list(listening_ability.received):
-                    if isinstance(event.data, speaking.EfferenceData):
+                    if isinstance(event.data, EfferenceData):
                         seen.append("copy")
                     elif isinstance(event.data, SoundData) and event.source == mouth_id:
                         seen.append("sound")
@@ -4154,9 +4261,13 @@ def test_a_bot_does_not_deliberate_its_own_utterance() -> None:
     """
 
     async def run() -> tuple[list[processing.InputData], list[bytes]]:
-        _, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.4)
+        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(
+            utterance_seconds=0.4
+        )
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        # Close streaming VAD so speech decoding can finish on the attenuated own-voice frame.
+        await close_hearing_speech(active_bot, environment)
         # Well past playout, and past anything the pipeline could still be chewing on.
         await asyncio.sleep(1.0)
         assert listening_ability.speech_decoder is not None
@@ -4181,13 +4292,17 @@ def test_a_bot_hears_its_own_voice_coming_back_late() -> None:
     """
 
     async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
-        _, ability, listening_ability, voice, environment, mouth = await a_bot_with_a_voice(utterance_seconds=0.2)
+        active_bot, ability, listening_ability, voice, environment, mouth = await a_bot_with_a_voice(
+            utterance_seconds=0.2
+        )
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        await close_hearing_speech(active_bot, environment)
         await asyncio.sleep(1.0)
         during = list(ability.calls)
 
         await own_voice_from_the_mouth(environment, mouth, b"spoken:Hello, this is Alice.")
+        await close_hearing_speech(active_bot, environment)
         await wait_until(lambda: bool(ability.calls), timeout=5.0)
         return during, list(ability.calls)
 
@@ -4198,7 +4313,7 @@ def test_a_bot_hears_its_own_voice_coming_back_late() -> None:
     stimulus = after[0].input
     assert isinstance(stimulus, hsm.Event)
     assert stimulus.name == speech.SpeechDecoding.output_event.name
-    assert stimulus.data == b"decoded:spoken:Hello, this is Alice."
+    assert stimulus.data == b"decoded:spoken:Hello, this is Alice." + silence_sound().audio
 
 
 def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
@@ -4210,12 +4325,17 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     """
 
     async def run() -> list[processing.InputData]:
-        _, ability, _, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.6)
+        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(
+            utterance_seconds=0.6
+        )
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
-        # Mid-utterance: the mouth is still committed and the window is still open.
+        # Mid-utterance: the mouth is still committed and the sensitivity window is still open.
         await asyncio.sleep(0.15)
+        # End own-voice HearingSpeech (attenuated, no turn) before the interrupt is heard.
+        await close_hearing_speech(active_bot, environment)
         _ = await somebody_speaks(environment, "Actually, wait.", position=space.Position(x=0.0, y=1.0))
+        await close_hearing_speech(active_bot, environment)
 
         await wait_until(lambda: bool(ability.calls), timeout=5.0)
         await asyncio.sleep(0.6)
@@ -4224,7 +4344,9 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     turns = asyncio.run(run())
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
-    assert [stimulus.data for stimulus in stimuli] == [b"decoded:spoken:Actually, wait."]
+    assert [stimulus.data for stimulus in stimuli] == [
+        b"decoded:spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio
+    ]
 
 
 def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy() -> None:
@@ -4243,16 +4365,19 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
 
     async def run() -> list[processing.InputData]:
         decoder = SlowSpeechDecoder(seconds=0.5)
-        _, ability, _, voice, environment, _ = await a_bot_with_a_voice(
+        active_bot, ability, _, voice, environment, _ = await a_bot_with_a_voice(
             utterance_seconds=0.2,
             listening_ability=RecordingListening(speech_decoder=decoder),
         )
 
         _ = await somebody_speaks(environment, "Are you there?", position=space.Position(x=0.0, y=1.0))
+        # Close VAD so decoding starts; SlowSpeechDecoder holds the ear for the reply.
+        await close_hearing_speech(active_bot, environment)
         # Perception is now committed to a sentence for longer than the reply will last.
         await wait_until(lambda: bool(decoder.calls), timeout=5.0)
 
         _ = await voice.apply(speaking.InputData(text="Yes, I am here."), ctx=environment)
+        await close_hearing_speech(active_bot, environment)
 
         # Long enough for the backlog to drain and for anything it produced to become a turn.
         await asyncio.sleep(2.0)
@@ -4261,14 +4386,16 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
     turns = asyncio.run(run())
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
-    assert [stimulus.data for stimulus in stimuli] == [b"decoded:spoken:Are you there?"]
+    assert [stimulus.data for stimulus in stimuli] == [
+        b"decoded:spoken:Are you there?" + silence_sound().audio
+    ]
 
 
-def test_the_body_fans_the_copy_of_its_own_command_to_its_senses() -> None:
-    """A nerve from mouth to ears, over the same fan-out the environment's own stimuli use.
+def test_speaking_delivers_the_copy_of_its_own_command_to_linked_listening() -> None:
+    """A nerve from Speaking to Listening peers — not body fan-out, not environment broadcast.
 
-    Pins the route rather than the consequence: the copy reaches the input abilities, and the
-    body neither reads it nor decides anything with it.
+    Pins the route rather than the consequence: the copy reaches the linked Listening ability
+    with speaking as source and listening as target.
     """
 
     async def run() -> list[hsm.Event[typing.Any]]:
@@ -4276,15 +4403,16 @@ def test_the_body_fans_the_copy_of_its_own_command_to_its_senses() -> None:
 
         _ = await voice.apply(speaking.InputData(text="Hello."), ctx=environment)
         await wait_until(
-            lambda: any(isinstance(event.data, speaking.EfferenceData) for event in listening_ability.received),
+            lambda: any(isinstance(event.data, EfferenceData) for event in listening_ability.received),
             timeout=5.0,
         )
-        return [event for event in listening_ability.received if isinstance(event.data, speaking.EfferenceData)]
+        return [event for event in listening_ability.received if isinstance(event.data, EfferenceData)]
 
     copies = asyncio.run(run())
 
     assert len(copies) == 1
-    assert copies[0].name == speaking.EfferenceEvent.name
+    assert copies[0].name == EfferenceEvent.name
+    assert copies[0].name == "bot.ability.speaking.efference"
 
 
 def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what() -> None:

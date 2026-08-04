@@ -15,7 +15,7 @@ class SpeechDecoder(decoding.Decoder[bytes, bytes], abc.ABC):
 _SpeechDecodingApplyCompletedEvent = hsm.Event[bytes](
     name="bot.ability.hearing.speech.decoding.apply.completed",
     kind=hsm.CompletionEventKind,
-    schema=ability.ability_output_event("bot.ability.hearing.speech.decoding.output", bytes).schema,
+    schema=bytes,
 )
 _SpeechDecodingApplyFailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.hearing.speech.decoding.apply.failed",
@@ -60,17 +60,15 @@ class SpeechDecoding(decoding.Decoding[bytes, bytes]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
-    input_event: typing.ClassVar[hsm.Event[bytes]] = ability.ability_input_event(
-        "bot.ability.hearing.speech.decoding.input",
-        bytes,
-        description="Provider-specific encoded speech bytes to decode.",
-        examples=["encoded speech bytes"],
+    input_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
+    name="bot.ability.hearing.speech.decoding.input",
+    schema=bytes,
+
     )
-    output_event: typing.ClassVar[hsm.Event[bytes]] = ability.ability_output_event(
-        "bot.ability.hearing.speech.decoding.output",
-        bytes,
-        description="Normalized speech bytes produced by the decoder.",
-        examples=["normalized speech bytes"],
+    output_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
+    name="bot.ability.hearing.speech.decoding.output",
+    schema=bytes,
+
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _SpeechDecodingApplyCompletedEvent

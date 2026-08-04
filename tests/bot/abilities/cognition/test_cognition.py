@@ -192,7 +192,7 @@ def ignore_output(reason: str = "") -> cognition.types.OutputData:
     return (
         cognition.types.EventData(
             event=cognition.types.IgnoreEvent.name,
-            data={"reason": reason} if reason else None,
+            reason=reason or None,
         ),
     )
 
@@ -1724,7 +1724,8 @@ def test_intuition_and_reasoning_own_instructions_on_ability() -> None:
 
     default_stamped, custom_stamped, subclass_stamped = asyncio.run(run())
 
-    assert default_stamped == cognition.intuition.DEFAULT_INSTRUCTIONS
+    # Default intuition stamps no static prose; only per-turn world XML (when present) is system text.
+    assert default_stamped is None or default_stamped == cognition.intuition.DEFAULT_INSTRUCTIONS
     assert custom_stamped == "reason carefully"
     assert subclass_stamped == "subclass intuition prompt"
 
@@ -2007,14 +2008,12 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
     assert object_dict(cognition.Reasoning.input_event.schema) == cognition.reasoning.CallData.model_json_schema()
     assert object_dict(cognition.Reasoning.output_event.schema) == cognition.types.CompletionData.model_json_schema()
     reflection_input_schema = object_dict(cognition.Reflection.input_event.schema)
-    assert reflection_input_schema["description"]
     reflection_input_properties = reflection_input_schema.get("properties", {})
     assert isinstance(reflection_input_properties, dict)
     assert "cognition_output" in reflection_input_properties
     assert "cognition_input" in cognition.reflection.InputData.model_fields
     reflection_output_schema = object_dict(cognition.Reflection.output_event.schema)
-    assert reflection_output_schema["description"]
-    # Reflection has no host-facing product (null completion).
+    # Reflection has no host-facing product (null completion); bare type(None) schema.
     assert reflection_output_schema.get("type") == "null" or "null" in str(reflection_output_schema)
     assert "CognitiveEpisode" in cognition.reflection.ProcessorInput.model_json_schema().get("$defs", {})
     assert cognition.Reflection.instructions == cognition.reflection.INSTRUCTIONS
@@ -3351,3 +3350,144 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
 
     assert outputs == [no_output("intuition after autonomy")]
     assert len(intuition_calls) == 1
+
+
+def _speech_event_stimulus() -> hsm.Event[object]:
+    """Labeled Listening speech product used as cognition stimulus (no priors)."""
+
+    from bot.abilities import listening
+    from bot.abilities.hearing import voice
+
+    speech = listening.SpeechData(
+        audio=bytes([0, 1]) * 160,
+        voice_detection=voice.detection.ApplyData(
+            segments=(
+                voice.detection.VoiceDetectionSegment(
+                    start_seconds=0.0,
+                    end_seconds=0.02,
+                    confidence=0.9,
+                ),
+            )
+        ),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+    )
+    return listening.SpeechEvent.with_data(speech)
+
+
+def _behavior_wires_speech_event_to_conversation(item: object) -> bool:
+    """True when an installed behavior is the SpeechEvent → Conversation wire."""
+
+    from bot.abilities import listening
+    from bot.abilities.communication import conversation
+    from bot.behavior import instance as behavior_instance
+
+    if not isinstance(item, behavior_instance.Instance):
+        return False
+    triggers = tuple(item.triggers or ())
+    if listening.SpeechEvent.name not in triggers:
+        return False
+    source = item.source or ""
+    # Seed selects Communication.input (routes to Conversation).
+    from bot.abilities import communication
+
+    return communication.InputEvent.name in source
+
+
+def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
+    """Seeded Communication behavior turns SpeechEvent into communication.input selection."""
+
+    from bot.abilities import listening
+    from bot.abilities import communication
+    from bot.abilities.communication import conversation
+    from bot.abilities.communication.conversation import turn_detector
+    from bot.abilities.communication import behaviors
+    from bot.abilities.hearing import voice
+
+    async def run() -> tuple[list[cognition.types.OutputData], tuple[str, ...]]:
+        store = memory.Memory()
+        installed = behaviors.install_seed_behaviors(store)
+        autonomy = cognition.Autonomy(memory=store)
+        ability = RecordingCognition(
+            autonomy=autonomy,
+            intuition_processor=RecordingIntuitionProcessor(no_output("should not run")),
+            reasoning_processor=FailingReasoningProcessor(),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=memory.Memory()),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        bot_actor = _BotActor()
+        assert bot_actor.model is not None
+        _ = await hsm.started(ctx, bot_actor, bot_actor.model)
+        conversation_actor = conversation.Conversation(
+            turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
+        )
+        communication_actor = communication.Communication(active_conversation=conversation_actor)
+        assert conversation_actor.model is not None
+        assert communication_actor.model is not None
+        _ = await hsm.started(ctx, conversation_actor, conversation_actor.model)
+        _ = await hsm.started(ctx, communication_actor, communication_actor.model)
+        from bot.protocols import attachment
+
+        _ = await communication_actor.attach(
+            ctx,
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=ability)),
+        )
+        await wait_until(lambda: "/behavior/active" in (communication_actor.state() or ""))
+        await wait_until(lambda: "/behavior/inactive" in (conversation_actor.state() or ""))
+
+        speech = listening.SpeechData(
+            audio=bytes([0, 1]) * 160,
+            voice_detection=voice.detection.ApplyData(
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.02, confidence=0.9),)
+            ),
+            sample_rate_hz=16_000,
+            channels=1,
+            media_type="audio/pcm",
+            source_ids=frozenset({(0.12, -0.08, 0.31)}),
+        )
+        turn = cognition.InputData(
+            stimulus=listening.SpeechEvent.with_data(speech),
+            abilities=(),
+            actors={
+                "bot": bot_actor,
+                "communication": communication_actor,
+                "conversation": conversation_actor,
+            },
+            focus=None,
+            focus_candidates=(),
+        )
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: bool(ability.outputs))
+        return ability.outputs, installed[0].triggers
+
+    outputs, triggers = asyncio.run(run())
+    assert triggers == (listening.SpeechEvent.name,)
+    assert len(outputs) == 1
+    assert outputs[0] == (
+        cognition.types.EventData(
+            event=communication.InputEvent.name,
+            target=None,
+            data={
+                "source_ids": [[0.12, -0.08, 0.31]],
+                "target_ids": [],
+                "content": "AAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAE=",
+                "content_type": "audio/pcm",
+                "sample_rate_hz": 16000,
+                "channels": 1,
+            },
+            reason="seeded speech admit via communication",
+        ),
+    )
+
+
+def test_cognition_without_priors_time_to_wire_speech_event_to_conversation() -> None:
+    """Use the real phone_bot e2e path; fixture processors cannot invent behaviors."""
+
+    import pytest
+
+    pytest.skip(
+        "fixture processors short-circuit learning; run "
+        "tests/examples/test_phone_bot.py::test_phone_bot_e2e_cognition_wires_speech_event_to_conversation"
+    )

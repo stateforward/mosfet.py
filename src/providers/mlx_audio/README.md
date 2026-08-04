@@ -2,8 +2,7 @@
 
 MLX Audio voice provider package for `bot`. This package owns the `mlx-audio`
 dependency for local Apple Silicon text-to-speech, speech-to-text, voice
-activity detection, speaker diarization, and speaker-embedding based voice
-identification.
+activity detection, and speaker diarization.
 
 Run its tests from the workspace root:
 
@@ -38,12 +37,13 @@ PY
 
 The package exposes voice conversation adapters, an encoder for the existing
 vocal speech ability, a decoder for the existing hearing speech ability, and
-voice classifiers for the existing hearing voice abilities:
+voice detection and diarization adapters for the existing hearing voice
+abilities:
 
 ```python
 from bot.abilities.vocal.speech import SpeechEncoding
 from bot.abilities.hearing.speech import SpeechDecoding
-from bot.abilities.hearing.voice import VoiceDetection, VoiceDiarization, VoiceIdentification
+from bot.abilities.hearing.voice import VoiceDetection, VoiceDiarization
 from bot.providers.mlx_audio import (
     VoiceDecoder,
     VoiceEncoder,
@@ -51,7 +51,6 @@ from bot.providers.mlx_audio import (
     SpeechEncoder,
     VoiceDetector,
     VoiceDiarizer,
-    VoiceIdentifier,
 )
 
 voice_decoder = VoiceDecoder()
@@ -60,5 +59,4 @@ speech = SpeechEncoding(encoder=SpeechEncoder())
 transcription = SpeechDecoding(decoder=SpeechDecoder())
 detection = VoiceDetection(classifier=VoiceDetector())
 diarization = VoiceDiarization(classifier=VoiceDiarizer())
-identification = VoiceIdentification(classifier=VoiceIdentifier())
 ```

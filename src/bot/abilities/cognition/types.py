@@ -9,6 +9,18 @@ import hsm
 from bot import event_schema
 import pydantic
 
+# Model-facing deliberate (System-2) handoff event name. Reasoning owns the event; intuition
+# detects cascade handoff via this constant and/or ``processing.is_deliberative_handoff_schema``
+# so stages never import each other for the check.
+DELIBERATIVE_HANDOFF_EVENT_NAME: typing.Final[str] = "bot.ability.reasoning.input"
+
+
+def is_deliberative_handoff_event_name(event_name: str) -> bool:
+    """True when ``event_name`` is the shared deliberate handoff event."""
+
+    return event_name == DELIBERATIVE_HANDOFF_EVENT_NAME
+
+
 _Reference = typing.Annotated[
     str,
     pydantic.Field(
@@ -30,7 +42,8 @@ class EventData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "One selected modeled HSM event. Processing dispatches it to the resolved target "
-                "fire-and-forget; hosts do not re-apply OutputData."
+                "fire-and-forget; hosts do not re-apply OutputData. Put selection rationale on "
+                "reason here — not on the event payload."
             ),
             "examples": [
                 {
@@ -59,7 +72,8 @@ class EventData(pydantic.BaseModel):
         default=None,
         description=(
             "Optional JSON-serializable event data for the selected event. Do not include raw audio, message text, "
-            "credentials, provider-specific objects, or high-cardinality diagnostics."
+            "credentials, provider-specific objects, or high-cardinality diagnostics. Do not put selection "
+            "rationale here — use reason on this envelope."
         ),
         examples=[{"device": "device-a"}],
     )
@@ -81,7 +95,8 @@ class IgnoreData(pydantic.BaseModel):
     Prefer selecting this event over an empty ``events`` array so models have a named
     branch under required tool-calling. Host treats ignore-only as handled (no cascade
     to deliberation solely because nothing else was selected) and does not dispatch it
-    to devices or the bot body.
+    to devices or the bot body. Selection rationale belongs on the selection envelope
+    (``EventData.reason`` / dispatch item ``reason``), not on this payload.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -91,20 +106,11 @@ class IgnoreData(pydantic.BaseModel):
             "description": (
                 "Deliberately ignore this stimulus: no device command, no focus change, no "
                 "speech. Required when no other offered event should run. Do not use a device "
-                "command, focus, or clear_focus as a stand-in for ignore."
+                "command, focus, or clear_focus as a stand-in for ignore. Put why on the "
+                "selection envelope reason field, not on this empty payload."
             ),
-            "examples": [
-                {"reason": "Ambient sound with nothing to act on."},
-                {"reason": "Stimulus is incomplete; no safe action."},
-            ],
+            "examples": [{}],
         },
-    )
-
-    reason: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description="Optional short reason this turn is intentionally ignored.",
-        examples=["Ambient noise only.", "Nothing offered fits this stimulus."],
     )
 
 
@@ -245,6 +251,7 @@ async def dispatch_selected_events(
 
 
 __all__ = [
+    "DELIBERATIVE_HANDOFF_EVENT_NAME",
     "OUTPUT_SCHEMA",
     "OUTPUT_SCHEMA_CONTRACT",
     "CompletionData",
@@ -258,6 +265,7 @@ __all__ = [
     "OPTIONAL_OUTPUT_SCHEMA",
     "OPTIONAL_OUTPUT_SCHEMA_CONTRACT",
     "dispatch_selected_events",
+    "is_deliberative_handoff_event_name",
     "is_ignore_event",
     "is_output",
     "without_ignore_selections",

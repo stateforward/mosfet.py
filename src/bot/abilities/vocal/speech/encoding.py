@@ -11,13 +11,14 @@ from bot.telemetry import observer
 _SpeechEncodingApplyCompletedEvent = hsm.Event[bytes](
     name="bot.ability.vocal.speech.encoding.apply.completed",
     kind=hsm.CompletionEventKind,
-    schema=ability.ability_output_event("bot.ability.vocal.speech.encoding.output", bytes).schema,
+    schema=bytes,
 )
 _SpeechEncodingApplyFailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.vocal.speech.encoding.apply.failed",
     kind=hsm.ErrorEventKind,
     schema=ability.FailureData,
 )
+
 
 def _has_speech_encoding_input(
     ctx: hsm.Context,
@@ -27,6 +28,7 @@ def _has_speech_encoding_input(
     del ctx, instance
     return isinstance(event.data, bytes)
 
+
 def _has_speech_encoding_output(
     ctx: hsm.Context,
     instance: "SpeechEncoding",
@@ -34,6 +36,7 @@ def _has_speech_encoding_output(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, bytes)
+
 
 def _has_invalid_speech_encoding_output(
     ctx: hsm.Context,
@@ -43,6 +46,7 @@ def _has_invalid_speech_encoding_output(
     del ctx, instance
     return not isinstance(event.data, bytes)
 
+
 def _has_speech_encoding_failure(
     ctx: hsm.Context,
     instance: "SpeechEncoding",
@@ -51,22 +55,21 @@ def _has_speech_encoding_failure(
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
 
+
 class SpeechEncoding(encoding.Encoding[bytes, bytes]):
     """Ability to encode bytes to verbal speech output."""
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
-    input_event: typing.ClassVar[hsm.Event[bytes]] = ability.ability_input_event(
-        "bot.ability.vocal.speech.encoding.input",
-        bytes,
-        description="Normalized speech bytes to encode for vocal output.",
-        examples=["normalized speech bytes"],
+    input_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
+    name="bot.ability.vocal.speech.encoding.input",
+    schema=bytes,
+
     )
-    output_event: typing.ClassVar[hsm.Event[bytes]] = ability.ability_output_event(
-        "bot.ability.vocal.speech.encoding.output",
-        bytes,
-        description="Encoded vocal speech bytes produced by the encoder.",
-        examples=["encoded vocal speech bytes"],
+    output_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
+    name="bot.ability.vocal.speech.encoding.output",
+    schema=bytes,
+
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _SpeechEncodingApplyCompletedEvent

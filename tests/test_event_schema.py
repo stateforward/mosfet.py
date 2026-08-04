@@ -1,4 +1,4 @@
-from bot.abilities import ability
+import hsm
 from bot.devices import phone
 
 import typing
@@ -53,11 +53,17 @@ def test_event_schema_matches_supported_json_schema_subset() -> None:
     assert not matches_json_schema({"call_id": "call-123", "extra": True}, schema)
 
 def test_event_schema_preserves_type_adapter_metadata_projection() -> None:
-    event = ability.ability_output_event(
-        "bot.ability.test.output",
-        str,
-        description="Text produced by the test ability.",
-        examples=["hello"],
+    event = hsm.Event[str](
+        name="bot.ability.test.output",
+        schema=pydantic.TypeAdapter(
+            typing.Annotated[
+                str,
+                pydantic.Field(
+                    description="Text produced by the test ability.",
+                    examples=["hello"],
+                ),
+            ]
+        ),
     )
 
     schema = event_schema_json_schema(event.schema)
@@ -66,6 +72,8 @@ def test_event_schema_preserves_type_adapter_metadata_projection() -> None:
     assert schema["description"] == "Text produced by the test ability."
     assert schema["examples"] == ["hello"]
     assert "$ref" not in schema
+
+
 
 def test_event_schema_preserves_defs_needed_after_root_ref_projection() -> None:
     adapter = typing.cast(

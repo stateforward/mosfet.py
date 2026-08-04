@@ -10,12 +10,12 @@ import uuid
 import hsm
 
 from bot.abilities import cognition
-from bot.abilities import conversation
-from bot.abilities.conversation import voice as conversation_voice
+from bot.abilities import communication
+from bot.abilities.communication import conversation
 from bot.abilities import decoding
 from bot.abilities import encoding
 from bot.abilities import listening
-from bot.abilities import participating
+from bot.abilities.communication.conversation import turn_detector
 from bot.abilities import processing
 from bot.abilities import speaking
 from bot.abilities.hearing import speech
@@ -23,7 +23,7 @@ from bot.abilities.hearing import voice as hearing_voice
 from bot.bot import Bot
 from bot.device import Device
 from bot.environment import SoundData, SoundEvent, Environment
-from tests.bot.test_bot import as_cognition
+from tests.bot.test_bot import CapturingCognition, as_cognition
 
 
 class RecordingEncoder(encoding.Encoder[bytes, bytes]):
@@ -37,12 +37,12 @@ class RecordingEncoder(encoding.Encoder[bytes, bytes]):
         return self._audio
 
 
-class IdentityTextDecoder(decoding.Decoder[participating.ParticipationStimulus, str]):
+class IdentityTextDecoder(decoding.Decoder[typing.Any, str]):
     @typing.override
-    async def decode(self, input: participating.ParticipationStimulus) -> str:
-        if isinstance(input, participating.TextStimulus):
+    async def decode(self, input: typing.Any) -> str:
+        if isinstance(input, turn_detector.TextStimulus):
             return input.content
-        if isinstance(input, participating.EventStimulus):
+        if isinstance(input, turn_detector.EventStimulus):
             text = input.payload.get("text")
             assert isinstance(text, str)
             return text
@@ -50,7 +50,7 @@ class IdentityTextDecoder(decoding.Decoder[participating.ParticipationStimulus, 
 
 
 class SpeakFromContributionProcessor(processing.Processor):
-    """Select speaking.input using contribution decoded_text from conversation terminal stimulus."""
+    """Select speaking.input using contribution text product from conversation terminal stimulus."""
 
     inputs: list[processing.InputData]
     require_conversation_actor: bool
@@ -72,12 +72,12 @@ class SpeakFromContributionProcessor(processing.Processor):
         assert stimulus.name == conversation.OutputEvent.name
         response = stimulus.data
         assert isinstance(response, conversation.Response)
-        assert response.content is None
-        assert response.decoded_text
+        assert isinstance(response.content, str) and response.content
+        assert response.content_type.lower().startswith("text/")
         return (
             processing.SelectedEvent(
                 event="bot.ability.speaking.input",
-                data={"text": f"Heard: {response.decoded_text}"},
+                data={"text": f"Heard: {response.content}"},
                 target="speaking",
                 reason="reply to conversation contribution",
             ),
@@ -107,20 +107,33 @@ async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 
     raise AssertionError("condition not met")
 
 
-def _text_conversation() -> conversation.TextConversation:
-    return conversation.TextConversation(
-        decoding=decoding.Decoding(decoder=IdentityTextDecoder()),
-        participating=participating.Participating(),
+def _text_conversation() -> conversation.Conversation:
+    return conversation.Conversation(
+        turn_detector=turn_detector.TurnDetector(decoder=IdentityTextDecoder()),
     )
 
 
-def test_text_turn_builder_defaults() -> None:
-    message = conversation.text_turn("hello there")
-    assert message.conversation_ref == "conversation"
-    assert message.self_participant_ref == "bot"
-    assert message.content.kind == "text"
-    assert message.content.content == "hello there"
-    assert {p.ref for p in message.participants} == {"bot", "caller"}
+def _text_communication(
+    conversation_ability: conversation.Conversation | None = None,
+) -> tuple[communication.Communication, conversation.Conversation]:
+    conversation_ability = conversation_ability if conversation_ability is not None else _text_conversation()
+    return (
+        communication.Communication(active_conversation=conversation_ability),
+        conversation_ability,
+    )
+
+
+def test_conversation_input_uses_identity_sets_and_content() -> None:
+    message = conversation.ConversationInputData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content="hello there",
+        content_type="text/plain",
+    )
+    assert message.source_ids == frozenset({"caller"})
+    assert message.target_ids == frozenset({"bot"})
+    assert message.content == "hello there"
+    assert message.content_type == "text/plain"
 
 
 def test_bot_conversation_contribution_selects_speaking() -> None:
@@ -129,7 +142,7 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
     async def run() -> tuple[list[bytes], list[processing.InputData], conversation.Response | None]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
+        communication_ability, conversation_ability = _text_communication()
         processor = SpeakFromContributionProcessor()
 
         class Probe(Bot):
@@ -138,19 +151,21 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
                     devices={"phone": Device()},
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
+                    acquired_abilities=(communication_ability,),
                 )
 
         probe = Probe()
         environment = Environment()
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
 
         operation_id = uuid.uuid4().hex
-        message = conversation.text_turn(
-            "hello from the room",
-            conversation_ref="support-call",
+        message = conversation.ConversationInputData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="hello from the room",
+            content_type="text/plain",
         )
         _ = await hsm.dispatch(
             environment,
@@ -171,9 +186,10 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
     assert calls == [b"Heard: hello from the room"]
     assert len(inputs) == 1
     assert response is not None
-    assert response.decoded_text == "hello from the room"
-    assert response.content is None
-    assert response.conversation_ref == "support-call"
+    assert response.content == "hello from the room"
+    assert response.source_ids == frozenset({"caller"})
+    assert response.target_ids == frozenset({"bot"})
+    assert response.content_type == "text/plain"
 
 
 def test_bot_ignores_host_encoded_conversation_response() -> None:
@@ -195,11 +211,11 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         encoded = conversation.Response(
-            conversation_ref="support-call",
-            self_participant_ref="bot",
-            participants=conversation.default_pair_participants(),
+            source_ids=frozenset({"bot"}),
+            target_ids=frozenset({"caller"}),
             content=b"already encoded",
-            decoded_text=None,
+            content_type="audio/raw",
+            session_ref="support-call",
         )
         # Address this Bot by id (dispatch_to / envelope target) — still fail closed on payload shape.
         terminal = dataclasses.replace(
@@ -216,8 +232,8 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
     assert state.endswith("/unfocused")
 
 
-def test_bot_ignores_contribution_with_null_decoded_text() -> None:
-    """Contribution-shaped Response with decoded_text=None must not re-enter cognition."""
+def test_bot_ignores_response_without_text_product() -> None:
+    """Response with no text product (content is not text) must not re-enter cognition."""
 
     async def run() -> list[processing.InputData]:
         processor = CountingProcessor()
@@ -235,11 +251,11 @@ def test_bot_ignores_contribution_with_null_decoded_text() -> None:
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         bare = conversation.Response(
-            conversation_ref="support-call",
-            self_participant_ref="bot",
-            participants=conversation.default_pair_participants(),
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
             content=None,
-            decoded_text=None,
+            content_type="text/plain",
+            session_ref="support-call",
         )
         terminal = dataclasses.replace(
             conversation.OutputEvent.with_data(bare),
@@ -253,10 +269,10 @@ def test_bot_ignores_contribution_with_null_decoded_text() -> None:
     assert asyncio.run(run()) == []
 
 
-def test_bot_accepts_contribution_with_empty_decoded_text() -> None:
-    """Empty decoded_text (silence/partial) is still a contribution and re-enters cognition."""
+def test_bot_accepts_contribution_with_empty_text_product() -> None:
+    """Empty string text product (silence/partial) is still a contribution and re-enters cognition."""
 
-    async def run() -> list[str | None]:
+    async def run() -> list[object]:
         processor = CountingProcessor()
 
         class Probe(Bot):
@@ -272,31 +288,32 @@ def test_bot_accepts_contribution_with_empty_decoded_text() -> None:
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         silence = conversation.Response(
-            conversation_ref="support-call",
-            self_participant_ref="bot",
-            participants=conversation.default_pair_participants(),
-            content=None,
-            decoded_text="",
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="",
+            content_type="text/plain",
+            session_ref="support-call",
         )
-        terminal = dataclasses.replace(
-            conversation.OutputEvent.with_data(silence),
+        response_event = conversation.OutputEvent.with_data(silence)
+        handoff = dataclasses.replace(
+            cognition.InputEvent.with_data(cognition.InputData(stimulus=response_event)),
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, handoff, hsm.id(probe))
         await _wait_until(lambda: len(processor.inputs) == 1, timeout=2.0)
-        texts: list[str | None] = []
+        texts: list[object] = []
         for item in processor.inputs:
             stimulus = item.input
             if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Response):
-                texts.append(stimulus.data.decoded_text)
+                texts.append(stimulus.data.content)
         return texts
 
     assert asyncio.run(run()) == [""]
 
 
 def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
-    """Contribution terminal addressed to this Bot by id enters body cognition (no source-id walk)."""
+    """Contribution handoff addressed to this Bot by id enters body cognition (no source-id walk)."""
 
     async def run() -> list[bytes]:
         encoder = RecordingEncoder()
@@ -318,19 +335,20 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
         contribution = conversation.Response(
-            conversation_ref="support-call",
-            self_participant_ref="bot",
-            participants=conversation.default_pair_participants(),
-            content=None,
-            decoded_text="addressed by id",
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="addressed by id",
+            content_type="text/plain",
+            session_ref="support-call",
         )
-        terminal = dataclasses.replace(
-            conversation.OutputEvent.with_data(contribution),
+        response_event = conversation.OutputEvent.with_data(contribution)
+        handoff = dataclasses.replace(
+            cognition.InputEvent.with_data(cognition.InputData(stimulus=response_event)),
             source="conversation-actor-id",
             target=hsm.id(probe),
             id=uuid.uuid4().hex,
         )
-        _ = await hsm.dispatch_to(environment, terminal, hsm.id(probe))
+        _ = await hsm.dispatch_to(environment, handoff, hsm.id(probe))
         await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
         return encoder.calls
 
@@ -343,7 +361,7 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
     async def run() -> int:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
+        communication_ability, conversation_ability = _text_communication()
         processor = SpeakFromContributionProcessor()
 
         class Probe(Bot):
@@ -352,19 +370,24 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
                     devices={"phone": Device()},
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
+                    acquired_abilities=(communication_ability,),
                 )
 
         probe = Probe()
         environment = Environment()
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
         _ = await hsm.dispatch(
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.text_turn("only body path"),
+                conversation.ConversationInputData(
+                    source_ids=frozenset({"caller"}),
+                    target_ids=frozenset({"bot"}),
+                    content="only body path",
+                    content_type="text/plain",
+                ),
                 uuid.uuid4().hex,
             ),
         )
@@ -380,7 +403,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
     async def run() -> list[str]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
+        communication_ability, conversation_ability = _text_communication()
         # Gate first process until second message is queued.
         first_started = asyncio.Event()
         release_first = asyncio.Event()
@@ -401,11 +424,11 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 assert isinstance(stimulus, hsm.Event)
                 response = stimulus.data
                 assert isinstance(response, conversation.Response)
-                assert response.decoded_text
+                assert isinstance(response.content, str) and response.content
                 return (
                     processing.SelectedEvent(
                         event="bot.ability.speaking.input",
-                        data={"text": response.decoded_text},
+                        data={"text": response.content},
                         target="speaking",
                         reason="deferred turn proof",
                     ),
@@ -419,21 +442,26 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                     devices={"phone": Device()},
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
+                    acquired_abilities=(communication_ability,),
                 )
 
         probe = Probe()
         environment = Environment()
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
 
         first_id = uuid.uuid4().hex
         _ = await hsm.dispatch(
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.text_turn("first", conversation_ref="call-a"),
+                conversation.ConversationInputData(
+                    source_ids=frozenset({"caller-a"}),
+                    target_ids=frozenset({"bot"}),
+                    content="first",
+                    content_type="text/plain",
+                ),
                 first_id,
             ),
         )
@@ -441,13 +469,18 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
         await _wait_until(lambda: (probe.state() or "").endswith("/processing"))
 
         second_id = uuid.uuid4().hex
-        # Conversation is single-flight; wait for it to return to silent before second Message.
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
+        # Relationship stays active; wait for turn idle (active/waiting) before second input.
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/active/waiting"))
         _ = await hsm.dispatch(
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.text_turn("second", conversation_ref="call-b"),
+                conversation.ConversationInputData(
+                    source_ids=frozenset({"caller-b"}),
+                    target_ids=frozenset({"bot"}),
+                    content="second",
+                    content_type="text/plain",
+                ),
                 second_id,
             ),
         )
@@ -464,271 +497,159 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
     assert texts == ["first", "second"]
 
 
-def test_bot_bridges_listening_speech_to_conversation_then_speaking() -> None:
-    """Listening speech product → Conversation Message → contribution → cognition → Speaking."""
+def test_listening_speech_reaches_cognition_without_conversation_dispatch() -> None:
+    """Listening keeps its cognition.InputEvent/SpeechEvent contract through the Bot body."""
 
-    from bot.abilities.hearing import speech
-
-    async def run() -> list[bytes]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
-        processor = SpeakFromContributionProcessor()
-
-        class Probe(Bot):
-            def __init__(self) -> None:
-                super().__init__(
-                    devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
-                )
-
-        probe = Probe()
-        environment = Environment()
-        await probe.attach(environment)
-        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
-
-        # Simulate Listening speech-decoding terminal: cognition.InputEvent with speech product bytes.
-        speech_product = speech.SpeechDecoding.output_event.with_data("hello from listening".encode("utf-8"))
-        handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=speech_product))
-        handoff = dataclasses.replace(
-            handoff,
-            id=uuid.uuid4().hex,
-            source="listening-ability",
-            target=hsm.id(probe),
-        )
-        _ = await hsm.dispatch(environment, probe, handoff)
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
-        # Speech must not enter deliberative cognition as raw sensory stimulus when Conversation is acquired.
-        for item in processor.inputs:
-            stimulus = item.input
-            assert isinstance(stimulus, hsm.Event)
-            assert stimulus.name == conversation.OutputEvent.name
-        return encoder.calls
-
-    assert asyncio.run(run()) == [b"Heard: hello from listening"]
-
-
-def test_bot_text_conversation_rejects_non_utf8_speech_product() -> None:
-    """TextConversation bridge drops non-UTF-8 speech product; Bot stays live for a good turn."""
-
-    from bot.abilities.hearing import speech
-
-    async def run() -> list[bytes]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
-        processor = SpeakFromContributionProcessor()
-
-        class Probe(Bot):
-            def __init__(self) -> None:
-                super().__init__(
-                    devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
-                )
-
-        probe = Probe()
-        environment = Environment()
-        await probe.attach(environment)
-        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
-
-        bad_product = speech.SpeechDecoding.output_event.with_data(b"\xff\xfe not utf-8")
-        bad_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=bad_product))
-        bad_handoff = dataclasses.replace(bad_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, bad_handoff)
-        # Fail closed: no Conversation turn, no deliberative cognition, Bot remains active.
-        await asyncio.sleep(0.05)
-        assert len(processor.inputs) == 0
-        assert (probe.state() or "").endswith("/unfocused")
-        assert (conversation_ability.state() or "").endswith("/behavior/silent")
-
-        # Recovery: valid UTF-8 STT product still completes Listening → Conversation → Speaking.
-        good_product = speech.SpeechDecoding.output_event.with_data("hello after refuse".encode("utf-8"))
-        good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
-        good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, good_handoff)
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
-        return encoder.calls
-
-    assert asyncio.run(run()) == [b"Heard: hello after refuse"]
-
-
-def test_bot_text_conversation_drops_empty_stt_without_bricking() -> None:
-    """Empty UTF-8 STT product must drop without ValidationError and leave Bot live for recovery."""
-
-    from bot.abilities.hearing import speech
-
-    async def run() -> list[bytes]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
-        processor = SpeakFromContributionProcessor()
-
-        class Probe(Bot):
-            def __init__(self) -> None:
-                super().__init__(
-                    devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
-                )
-
-        probe = Probe()
-        environment = Environment()
-        await probe.attach(environment)
-        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
-
-        empty_product = speech.SpeechDecoding.output_event.with_data(b"")
-        empty_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=empty_product))
-        empty_handoff = dataclasses.replace(empty_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, empty_handoff)
-        await asyncio.sleep(0.05)
-        assert len(processor.inputs) == 0
-        assert (probe.state() or "").endswith("/unfocused")
-        assert (conversation_ability.state() or "").endswith("/behavior/silent")
-
-        good_product = speech.SpeechDecoding.output_event.with_data("after empty".encode("utf-8"))
-        good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
-        good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, good_handoff)
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
-        return encoder.calls
-
-    assert asyncio.run(run()) == [b"Heard: after empty"]
-
-
-def test_voice_conversation_refuses_utf8_stt_transcript_as_audio() -> None:
-    """VoiceConversation drops UTF-8 STT text; Bot stays live for a following acoustic turn."""
-
-    from bot.abilities.hearing import speech
-
-    async def run() -> tuple[int, str, int]:
-        conversation_ability = conversation_voice.VoiceConversation(
-            participating=participating.Participating(),
-            decoder=_VoiceIdentityDecoder(),
-            encoder=_VoiceStubEncoder(),
-        )
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData], str, str, str]:
+        communication_ability, conversation_ability = _text_communication()
         processor = CountingProcessor()
+        cognitive = CapturingCognition(processor)
+        listening_ability = listening.Listening(
+            voice_detector=_VoiceThenSilence(),
+            speech_decoder=None,
+        )
 
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
                     devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    acquired_abilities=(conversation_ability,),
+                    cognition=cognitive,
+                    input=(listening_ability,),
+                    acquired_abilities=(communication_ability,),
                 )
 
         probe = Probe()
         environment = Environment()
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
+        await hsm.dispatch(
+            environment,
+            probe,
+            SoundEvent.with_data(
+                SoundData(audio=b"pcm-chunk", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            ),
+        )
+        await _wait_until(lambda: len(cognitive.input_events) == 1)
+        return (
+            cognitive.input_events,
+            processor.inputs,
+            conversation_ability.state() or "",
+            hsm.id(probe),
+            hsm.id(cognitive),
+        )
 
-        bad_product = speech.SpeechDecoding.output_event.with_data("hello transcript".encode("utf-8"))
-        bad_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=bad_product))
-        bad_handoff = dataclasses.replace(bad_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, bad_handoff)
-        await asyncio.sleep(0.05)
-        assert len(processor.inputs) == 0
-        assert (conversation_ability.state() or "").endswith("/behavior/silent")
-        assert (probe.state() or "").endswith("/unfocused")
+    cognition_events, processing_inputs, conversation_state, probe_id, cognition_id = asyncio.run(run())
 
-        # Recovery: non-UTF-8 acoustic product is a valid VoiceMessage; actor still accepts dispatch.
-        acoustic = bytes([0xFF, 0xFE, 0x00, 0x01, 0x80])
-        good_product = speech.SpeechDecoding.output_event.with_data(acoustic)
-        good_handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=good_product))
-        good_handoff = dataclasses.replace(good_handoff, id=uuid.uuid4().hex, target=hsm.id(probe))
-        _ = await hsm.dispatch(environment, probe, good_handoff)
-        await _wait_until(lambda: len(processor.inputs) >= 1, timeout=10.0)
-        bot_state = probe.state() or ""
-        return len(processor.inputs), bot_state, int(bool(processor.inputs))
-
-    cognition_count, bot_state, recovered = asyncio.run(run())
-    assert cognition_count >= 1
-    assert recovered == 1
-    assert "/active/" in bot_state
-
-
-class _VoiceIdentityDecoder(conversation_voice.VoiceDecoder):
-    @typing.override
-    async def decode(self, input: participating.AudioStimulus) -> str:
-        return "decoded"
-
-
-class _VoiceStubEncoder(conversation_voice.VoiceEncoder):
-    @typing.override
-    async def encode(self, input: conversation_voice.EncodeData) -> bytes:
-        del input
-        return b"enc"
+    assert len(cognition_events) == 1
+    assert len(processing_inputs) == 1
+    cognition_event = cognition_events[0]
+    assert cognition_event.source == probe_id
+    cognition_input = cognition_event.data
+    assert isinstance(cognition_input, cognition.InputData)
+    assert cognition_event.target == cognition_id
+    assert isinstance(cognition_input.stimulus, hsm.Event)
+    assert cognition_input.stimulus.name == listening.SpeechEvent.name
+    assert isinstance(cognition_input.stimulus.data, listening.SpeechData)
+    assert isinstance(processing_inputs[0].input, hsm.Event)
+    assert processing_inputs[0].input.name == listening.SpeechEvent.name
+    assert conversation_state.endswith("/behavior/inactive")
 
 
-class _AlwaysVoice(hearing_voice.detection.VoiceDetector):
-    @typing.override
-    async def classify(self, input: bytes) -> hearing_voice.detection.OutputData:
-        del input
-        return hearing_voice.detection.OutputData(is_voice=True, confidence=1.0)
+def test_listening_stt_product_reaches_cognition_without_conversation_dispatch() -> None:
+    """The former STT bridge also remains inside Cognition when Communication holds Conversation."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData], list[bytes], str, str, str]:
+        communication_ability, conversation_ability = _text_communication()
+        processor = CountingProcessor()
+        cognitive = CapturingCognition(processor)
+        speech_decoder = _RecordingSpeechDecoder()
+        listening_ability = listening.Listening(
+            voice_detector=_VoiceThenSilence(),
+            speech_decoder=speech_decoder,
+        )
+
+        class Probe(Bot):
+            def __init__(self) -> None:
+                super().__init__(
+                    devices={"phone": Device()},
+                    cognition=cognitive,
+                    input=(listening_ability,),
+                    acquired_abilities=(communication_ability,),
+                )
+
+        probe = Probe()
+        environment = Environment()
+        await probe.attach(environment)
+        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
+
+        await hsm.dispatch(
+            environment,
+            probe,
+            SoundEvent.with_data(
+                SoundData(audio=b"pcm-chunk", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            ),
+        )
+        await hsm.dispatch(
+            environment,
+            probe,
+            SoundEvent.with_data(
+                SoundData(audio=b"silence", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+            ),
+        )
+        await _wait_until(lambda: len(cognitive.input_events) == 1)
+        return (
+            cognitive.input_events,
+            processor.inputs,
+            speech_decoder.calls,
+            conversation_ability.state() or "",
+            hsm.id(probe),
+            hsm.id(cognitive),
+        )
+
+    cognition_events, processing_inputs, decoder_calls, conversation_state, probe_id, cognition_id = asyncio.run(run())
+
+    assert len(cognition_events) == 1
+    assert len(processing_inputs) == 1
+    assert decoder_calls == [b"pcm-chunksilence"]
+    cognition_event = cognition_events[0]
+    assert cognition_event.source == probe_id
+    assert cognition_event.target == cognition_id
+    cognition_input = cognition_event.data
+    assert isinstance(cognition_input, cognition.InputData)
+    assert isinstance(cognition_input.stimulus, hsm.Event)
+    assert cognition_input.stimulus.name == speech.SpeechDecoding.output_event.name
+    assert cognition_input.stimulus.data == b"decoded:pcm-chunksilence"
+    assert conversation_state.endswith("/behavior/inactive")
 
 
-class _FixedTranscriptSpeechDecoder(speech.SpeechDecoder):
-    """Decode any acoustic chunk to a fixed UTF-8 STT transcript product."""
-
-    def __init__(self, transcript: str = "hello from listening machine") -> None:
-        self.transcript = transcript
+class _RecordingSpeechDecoder(speech.SpeechDecoder):
+    def __init__(self) -> None:
         self.calls: list[bytes] = []
 
     @typing.override
     async def decode(self, input: bytes) -> bytes:
         self.calls.append(input)
-        return self.transcript.encode("utf-8")
+        return b"decoded:" + input
 
 
-def test_environment_sound_through_listening_bridges_to_conversation_then_speaking() -> None:
-    """Real Listening machine: environment.sound → STT product → Bot bridge → Conversation → Speaking."""
+class _VoiceThenSilence(hearing_voice.detection.VoiceDetector):
+    def __init__(self) -> None:
+        self.calls = 0
 
-    async def run() -> list[bytes]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        conversation_ability = _text_conversation()
-        speech_decoder = _FixedTranscriptSpeechDecoder("hello from listening machine")
-        listening_ability = listening.Listening(
-            voice_detector=_AlwaysVoice(),
-            speech_decoder=speech_decoder,
-        )
-        processor = SpeakFromContributionProcessor()
-
-        class Probe(Bot):
-            def __init__(self) -> None:
-                super().__init__(
-                    devices={"phone": Device()},
-                    cognition=as_cognition(processor),
-                    input=(listening_ability,),
-                    output=(speaking_ability,),
-                    acquired_abilities=(conversation_ability,),
+    @typing.override
+    async def classify(self, input: bytes) -> hearing_voice.detection.ApplyData:
+        del input
+        self.calls += 1
+        if self.calls == 1:
+            return hearing_voice.detection.ApplyData(
+                segments=(
+                    hearing_voice.detection.VoiceDetectionSegment(
+                        start_seconds=0.0,
+                        end_seconds=0.05,
+                        confidence=1.0,
+                    ),
                 )
-
-        probe = Probe()
-        environment = Environment()
-        await probe.attach(environment)
-        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/silent"))
-
-        sound = SoundEvent.with_data(
-            SoundData(audio=b"pcm-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
-        )
-        _ = await hsm.dispatch(environment, probe, sound)
-        await _wait_until(lambda: bool(speech_decoder.calls), timeout=10.0)
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
-        # Deliberative cognition must only see Conversation contribution, not raw speech product.
-        for item in processor.inputs:
-            stimulus = item.input
-            assert isinstance(stimulus, hsm.Event)
-            assert stimulus.name == conversation.OutputEvent.name
-        return encoder.calls
-
-    assert asyncio.run(run()) == [b"Heard: hello from listening machine"]
+            )
+        return hearing_voice.detection.ApplyData(segments=())

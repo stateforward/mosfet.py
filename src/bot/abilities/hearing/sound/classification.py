@@ -96,17 +96,15 @@ class SoundClassification(classifying.Classifying[SoundData, OutputData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = SoundData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[SoundData]] = ability.ability_input_event(
-        "bot.ability.hearing.sound.classification.input",
-        SoundData,
-        description="Environment sound (audio plus optional kind/media provenance) to label as non-speech.",
-        examples=[{"audio": "YXVkaW8=", "kind": "phone.ringing"}],
+    input_event: typing.ClassVar[hsm.Event[SoundData]] = hsm.Event[SoundData](
+    name="bot.ability.hearing.sound.classification.input",
+    schema=SoundData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.hearing.sound.classification.output",
-        OutputData,
-        description="Acoustic labels produced for non-speech hearing input.",
-        examples=[{"labels": ["alarm"], "confidence": 0.88}, {"labels": ["phone.ringing"], "confidence": 1.0}],
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.hearing.sound.classification.output",
+    schema=OutputData,
+
     )
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _SoundClassificationApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _SoundClassificationApplyFailedEvent

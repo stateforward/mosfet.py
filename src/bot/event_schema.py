@@ -1,6 +1,8 @@
 """Utilities for typed HSM event payload contracts."""
 
+import base64
 import collections.abc
+import dataclasses
 import re
 import typing
 
@@ -96,6 +98,65 @@ def validate_event_schema_data(schema: object | None, data: object) -> object:
     if schema is None or isinstance(schema, dict | bool):
         return data
     return _event_schema_adapter(schema).validate_python(data)
+
+
+def project_json_value(value: object) -> object:
+    """Project a value into a JSON-compatible tree for Starlark / selection envelopes.
+
+    Contract (agnostic for every event payload):
+
+    - ``bytes`` / ``bytearray`` become **URL-safe base64 ASCII text** — the same wire form
+      pydantic uses for ``ser_json_bytes="base64"`` (``-``/``_``, not ``+``/``/``).
+    - Never ``str(bytes)`` (``"b'\\x00…'"``), which cannot rehydrate.
+    - Pydantic models use ``model_dump(mode="json")`` so their own byte fields match.
+    - Typed rehydration is the receiving event schema's job (``bytes_from_base64`` /
+      ``val_json_bytes`` / model validators), not this projector.
+    """
+
+    if isinstance(value, pydantic.BaseModel):
+        return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return project_json_value(dataclasses.asdict(value))
+    if isinstance(value, collections.abc.Mapping):
+        mapping = typing.cast(collections.abc.Mapping[object, object], value)
+        return {str(key): project_json_value(item) for key, item in mapping.items()}
+    if isinstance(value, tuple | list):
+        sequence = typing.cast(collections.abc.Sequence[object], value)
+        return [project_json_value(item) for item in sequence]
+    if isinstance(value, memoryview):
+        return base64.urlsafe_b64encode(value.tobytes()).decode("ascii")
+    if isinstance(value, (bytes, bytearray)):
+        return base64.urlsafe_b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    return str(value)
+
+
+def bytes_from_base64(value: object) -> bytes:
+    """Rehydrate media from a JSON hop: ``bytes`` as-is, or base64 text only.
+
+    Uses **URL-safe** decoding so values match pydantic ``ser_json_bytes="base64"``
+    (``-``/``_``). Python's urlsafe decoder also accepts the standard ``+``/``/`` alphabet.
+    """
+
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    if not isinstance(value, str):
+        raise ValueError(
+            f"audio content must be bytes or base64 text, got {type(value).__name__}"
+        )
+    text = value.strip()
+    if not text:
+        return b""
+    pad = (-len(text)) % 4
+    if pad:
+        text = text + ("=" * pad)
+    try:
+        return base64.urlsafe_b64decode(text)
+    except Exception as error:
+        raise ValueError("audio content must be bytes or base64 text") from error
 
 
 def validate_supported_json_schema(schema: JsonSchema, *, path: str = "$") -> None:
@@ -613,11 +674,13 @@ def json_schema_is_embeddable(schema: collections.abc.Mapping[str, object]) -> b
 
 __all__ = [
     "JsonSchema",
+    "bytes_from_base64",
     "embeddable_json_schema",
     "event_json_schema",
     "event_schema_json_schema",
     "json_schema_is_embeddable",
     "matches_json_schema",
+    "project_json_value",
     "validate_event_data",
     "validate_event_schema_data",
     "validate_supported_json_schema",

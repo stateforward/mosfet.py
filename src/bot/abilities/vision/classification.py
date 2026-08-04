@@ -152,13 +152,15 @@ class VisualClassification(classifying.Classifying[InputData, OutputData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.vision.classification.input",
-        InputData,
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.vision.classification.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.vision.classification.output",
-        OutputData,
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.vision.classification.output",
+    schema=OutputData,
+
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _VisualClassificationApplyCompletedEvent

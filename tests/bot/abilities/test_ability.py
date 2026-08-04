@@ -323,12 +323,9 @@ def test_ability() -> None:
     assert "ability_operation_model" not in ability_module.__all__
     assert "ABILITY_APPLY_ACTIVITY" not in ability_module.__all__
     assert abilities.InputEvent.name == "bot.ability.input"
-    assert input_schema["description"]
-    assert input_schema["examples"] == ["Summarize this note."]
+    # Generic base events are bare object schemas — concrete abilities replace them.
     assert "input" not in object_dict(input_schema.get("properties", {}))
     assert abilities.OutputEvent.name == "bot.ability.output"
-    assert output_schema["description"]
-    assert output_schema["examples"] == ["Summary text."]
     assert "output" not in object_dict(output_schema.get("properties", {}))
 
 

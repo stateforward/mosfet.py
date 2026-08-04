@@ -81,7 +81,7 @@ async def _main() -> int:
     _ = parser.add_argument("--identity", default="caller-agent")
     _ = parser.add_argument(
         "--dial",
-        default=os.environ.get("BOT_LIVEKIT_IDENTITY", "bot-phone-bot"),
+        default=os.environ.get("BOT_LIVEKIT_IDENTITY", "5550141"),
         help="Agent A participant identity that agent B places the call to.",
     )
     _ = parser.add_argument("--phone-bot-log", type=pathlib.Path, default=pathlib.Path("/tmp/phone-bot-live.log"))
@@ -337,7 +337,7 @@ async def _main() -> int:
         return 0
     if detecting > 0:
         print(
-            "[blackbox] PARTIAL media+VAD active but DecodingSpeech=0 (is_voice false or STT not reached)",
+            "[blackbox] PARTIAL media+VAD active but DecodingSpeech=0 (no voice segments or STT not reached)",
             flush=True,
         )
         return 4

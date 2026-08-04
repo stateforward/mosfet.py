@@ -172,17 +172,17 @@ def event_for_data(data: CreateData | ChangeData | BreakData) -> Event:
 def data_from_event(event: hsm.Event[typing.Any]) -> CreateData | ChangeData | BreakData | None:
     """Extract create/change/break payload from a behavior inventory event; else None."""
 
-    if event.name == CreateEvent.name and isinstance(event.data, CreateData):
+    if isinstance(event.data, CreateData):
         return event.data
-    if event.name == ChangeEvent.name and isinstance(event.data, ChangeData):
+    if isinstance(event.data, ChangeData):
         return event.data
-    if event.name == BreakEvent.name and isinstance(event.data, BreakData):
+    if isinstance(event.data, BreakData):
         return event.data
     return None
 
 
 def is_inventory_event(event: hsm.Event[typing.Any]) -> bool:
-    return event.name in {CreateEvent.name, ChangeEvent.name, BreakEvent.name}
+    return isinstance(event.data, (CreateData, ChangeData, BreakData))
 
 
 __all__ = [

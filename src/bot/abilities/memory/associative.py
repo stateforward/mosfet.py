@@ -678,13 +678,15 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
     _subordinate_abilities: tuple[ability.Ability[typing.Any, typing.Any], ...]
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
-    input_event: typing.ClassVar[hsm.Event[InputData]] = ability.ability_input_event(
-        "bot.ability.memory.associative.input",
-        InputData,
+    input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
+    name="bot.ability.memory.associative.input",
+    schema=InputData,
+
     )
-    output_event: typing.ClassVar[hsm.Event[OutputData]] = ability.ability_output_event(
-        "bot.ability.memory.associative.output",
-        OutputData,
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
+    name="bot.ability.memory.associative.output",
+    schema=OutputData,
+
     )
 
     @staticmethod
@@ -710,7 +712,8 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
         instance: "AssociativeMemory",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if event.name != attachment.DetachEvent.name:
+        # Shared exit fires on every exit; cascade only for typed DetachEvent payloads.
+        if not isinstance(event.data, attachment.DetachData):
             return
         for child in instance._subordinate_abilities:
             _ = child.detach(
