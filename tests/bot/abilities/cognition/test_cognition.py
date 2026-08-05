@@ -3381,7 +3381,6 @@ def _behavior_wires_speech_event_to_conversation(item: object) -> bool:
     """True when an installed behavior is the SpeechEvent → Conversation wire."""
 
     from bot.abilities import listening
-    from bot.abilities.communication import conversation
     from bot.behavior import instance as behavior_instance
 
     if not isinstance(item, behavior_instance.Instance):
