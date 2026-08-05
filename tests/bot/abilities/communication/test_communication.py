@@ -211,8 +211,8 @@ def test_communication_seed_behavior_builds_and_triggers_on_speech_event() -> No
     from bot.abilities import listening
     from bot.abilities.communication import behaviors
 
-    instance = behaviors.speech_to_conversation_instance()
-    assert instance.name == behaviors.SPEECH_TO_CONVERSATION_NAME
+    instance = behaviors.speech_heard_instance()
+    assert instance.name == behaviors.SPEECH_HEARD_NAME
     assert instance.triggers == (listening.SpeechEvent.name,)
     assert instance.status == "ACTIVE"
     assert "bot.ability.communication.input" in instance.source
@@ -234,4 +234,4 @@ def test_communication_seed_installs_into_memory_for_autonomy() -> None:
         tuple(row.as_mapping() for row in out.results[0].rows),
         tuple(row.as_mapping() for row in out.results[1].rows),
     )
-    assert any(item.name == behaviors.SPEECH_TO_CONVERSATION_NAME for item in inventory)
+    assert any(item.name == behaviors.SPEECH_HEARD_NAME for item in inventory)

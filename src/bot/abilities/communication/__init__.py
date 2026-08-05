@@ -1,7 +1,7 @@
 """Communication ability: engage Conversations; ships speech-admit behaviors."""
 
 from . import behaviors, communication, conversation
-from .behaviors import install_seed_behaviors, speech_to_conversation_instance
+from .behaviors import install_seed_behaviors, speech_heard_instance
 from .communication import (
     ActivateData,
     ActivateEvent,
@@ -18,5 +18,5 @@ __all__ = [
     "communication",
     "conversation",
     "install_seed_behaviors",
-    "speech_to_conversation_instance",
+    "speech_heard_instance",
 ]

@@ -15,15 +15,15 @@ from bot.behavior import storage as behavior_storage
 
 from . import communication as communication_module
 
-SPEECH_TO_CONVERSATION_NAME = "AdmitListeningSpeech"
-SPEECH_TO_CONVERSATION_TRIGGERS: tuple[str, ...] = (listening.SpeechEvent.name,)
+SPEECH_HEARD_NAME = "SpeechHeard"
+SPEECH_HEARD_TRIGGERS: tuple[str, ...] = (listening.SpeechEvent.name,)
 
 _SPEECH_EVENT = listening.SpeechEvent.name
 _COMMUNICATION_INPUT = communication_module.InputEvent.name
 
-SPEECH_TO_CONVERSATION_SOURCE = f"""
+SPEECH_HEARD_SOURCE = f"""
 input_event = hsm.event(
-    name = "bot.behavior.admit_listening_speech.input",
+    name = "bot.behavior.speech_heard.input",
     schema = {{
         "type": "object",
         "properties": {{
@@ -39,7 +39,7 @@ input_event = hsm.event(
     }},
 )
 output_event = hsm.event(
-    name = "bot.behavior.admit_listening_speech.output",
+    name = "bot.behavior.speech_heard.output",
     schema = {{
         "type": "object",
         "properties": {{
@@ -78,8 +78,8 @@ def admit_speech(event):
     }})
 
 behavior = hsm.define(
-    "{SPEECH_TO_CONVERSATION_NAME}",
-    hsm.initial(hsm.target("/{SPEECH_TO_CONVERSATION_NAME}/idle")),
+    "{SPEECH_HEARD_NAME}",
+    hsm.initial(hsm.target("/{SPEECH_HEARD_NAME}/idle")),
     hsm.state(
         "idle",
         hsm.transition(
@@ -92,13 +92,13 @@ behavior = hsm.define(
 """.strip()
 
 
-def speech_to_conversation_instance() -> behavior_instance.Instance:
+def speech_heard_instance() -> behavior_instance.Instance:
     """Build the ACTIVE inventory instance for SpeechEvent → Communication.input."""
 
     return behavior_instance.start(
-        SPEECH_TO_CONVERSATION_SOURCE,
-        name=SPEECH_TO_CONVERSATION_NAME,
-        triggers=SPEECH_TO_CONVERSATION_TRIGGERS,
+        SPEECH_HEARD_SOURCE,
+        name=SPEECH_HEARD_NAME,
+        triggers=SPEECH_HEARD_TRIGGERS,
         description=(
             "Communication: admit labeled Listening speech; Communication routes to the active Conversation."
         ),
@@ -108,7 +108,7 @@ def speech_to_conversation_instance() -> behavior_instance.Instance:
 def install_seed_behaviors(store: memory.Memory) -> tuple[behavior_instance.Instance, ...]:
     """Insert Communication seed behaviors into ``store`` for Autonomy to load on attach."""
 
-    installed = speech_to_conversation_instance()
+    installed = speech_heard_instance()
     _ = store.execute(
         memory.InputData(
             statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
@@ -118,9 +118,9 @@ def install_seed_behaviors(store: memory.Memory) -> tuple[behavior_instance.Inst
 
 
 __all__ = [
-    "SPEECH_TO_CONVERSATION_NAME",
-    "SPEECH_TO_CONVERSATION_SOURCE",
-    "SPEECH_TO_CONVERSATION_TRIGGERS",
+    "SPEECH_HEARD_NAME",
+    "SPEECH_HEARD_SOURCE",
+    "SPEECH_HEARD_TRIGGERS",
     "install_seed_behaviors",
-    "speech_to_conversation_instance",
+    "speech_heard_instance",
 ]

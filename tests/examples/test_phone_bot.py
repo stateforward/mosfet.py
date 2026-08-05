@@ -1017,7 +1017,7 @@ asyncio.run(main())
             "True",
             "[0.12, -0.08, 0.31]",
             "True",
-            "AdmitListeningSpeech",
+            "SpeechHeard",
         ]
     )
 
@@ -1050,7 +1050,7 @@ TURN_TIMEOUT_S = 180.0
 OVERALL_TIMEOUT_S = 900.0
 
 
-def _wires_speech_to_conversation(item) -> bool:
+def _wires_speech_heard(item) -> bool:
     triggers = tuple(item.triggers or ())
     if SPEECH_EVENT not in triggers:
         return False
@@ -1122,7 +1122,7 @@ async def main() -> None:
                 timeout_s=TURN_TIMEOUT_S,
             )
             for item in _inventory(store):
-                if _wires_speech_to_conversation(item):
+                if _wires_speech_heard(item):
                     found = item
                     break
             if found is not None:

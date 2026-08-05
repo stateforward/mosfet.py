@@ -23,7 +23,7 @@
 environment.sound
   → Listening (VAD only; speech_decoder=None — no Listening STT)
   → cognition (SpeechEvent / speech.output)
-  → AdmitListeningSpeech (Communication behavior seed)
+  → SpeechHeard (Communication behavior seed)
   → communication.input → Communication routes to active Conversation
   → TurnDetector normalize → GeminiVoiceDecoder (AudioStimulus only)
   → contribution (text product on Response.content) → cognition
