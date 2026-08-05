@@ -1,7 +1,6 @@
 from bot import abilities
 from bot.abilities import cognition
 from bot.abilities import listening
-from bot.abilities import speaking
 from bot.abilities.hearing import sound as sound_hearing
 from bot.abilities.hearing import speech
 from bot.abilities.hearing import voice
@@ -10,13 +9,16 @@ from bot.protocols import attachment
 import asyncio
 import collections.abc
 import dataclasses
+import io
 import typing
+import wave
 from typing import override
 
 import hsm
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
+from bot.abilities.speaking import EfferenceData, EfferenceEvent
 from bot.environment import SoundData, SoundEvent
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
@@ -31,6 +33,30 @@ def sound(audio: bytes, *, received_level_db: float | None = None) -> SoundData:
         media_type="audio/pcm",
         sample_rate_hz=48_000,
         channels=1,
+        received_level_db=received_level_db,
+    )
+
+
+def wav_sound(
+    pcm: bytes,
+    *,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    received_level_db: float | None = None,
+) -> SoundData:
+    """Ambient person speech as phone_bot Person/SayEncoder emits it: RIFF/WAVE container."""
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as stream:
+        stream.setnchannels(channels)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate_hz)
+        stream.writeframes(pcm)
+    return SoundData(
+        audio=buffer.getvalue(),
+        media_type="audio/wav",
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
         received_level_db=received_level_db,
     )
 
@@ -456,6 +482,59 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
         embedding=(0.1, 0.2), model="fixture", confidence=0.95
     )
     assert stimulus.data.source_ids == frozenset({(0.1, 0.2)})
+
+
+def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None:
+    """Person/SayEncoder ambient speech is audio/wav; identity still labels SpeechData."""
+
+    pcm_voice = b"\x01\x00" * 240
+    pcm_silence = b"\x00\x00" * 240
+    sample_rate_hz = 16_000
+
+    async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData], list[listening.FailedEventData]]:
+        identifier = FixedVoiceClassifier(
+            voice.identification.VoiceEmbedding(embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94),
+        )
+        listening_ability = RecordingListening(
+            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_classifier=identifier,
+            speech_decoder=None,
+        )
+        await start_ability_tree(None, listening_ability)
+        _ = await listening_ability.apply(wav_sound(pcm_voice, sample_rate_hz=sample_rate_hz))
+        _ = await listening_ability.apply(wav_sound(pcm_silence, sample_rate_hz=sample_rate_hz))
+        await wait_until(lambda: len(listening_ability.handoffs) >= 1 or bool(listening_ability.failures))
+        return listening_ability.handoffs, identifier.calls, listening_ability.failures
+
+    handoffs, identifier_inputs, failures = asyncio.run(run())
+    assert failures == []
+    assert len(identifier_inputs) == 1
+    segment = identifier_inputs[0].segments[0]
+    assert type(segment) is voice.VoiceSegment
+    assert segment.media_type == "audio/pcm"
+    assert segment.sample_rate_hz == sample_rate_hz
+    assert segment.channels == 1
+    assert segment.audio == pcm_voice
+    assert segment.end_seconds == pytest.approx(len(pcm_voice) / (2 * sample_rate_hz))
+
+    speech_observations: list[listening.SpeechData] = []
+    for handoff in handoffs:
+        stimulus = _stimulus(handoff)
+        if stimulus.name != listening.SpeechEvent.name:
+            continue
+        data = stimulus.data
+        if isinstance(data, listening.SpeechData) and data.voice_detection.segments:
+            speech_observations.append(data)
+    assert speech_observations
+    observation = speech_observations[0]
+    assert observation.media_type == "audio/pcm"
+    assert observation.sample_rate_hz == sample_rate_hz
+    assert observation.channels == 1
+    assert observation.audio == pcm_voice
+    assert observation.source_ids == frozenset({(0.11, -0.07, 0.33)})
+    assert observation.voice_embedding == voice.identification.VoiceEmbedding(
+        embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94
+    )
 
 
 def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_product() -> None:
@@ -1011,8 +1090,8 @@ async def start_producing(listening_ability: listening.Listening, *, duration: f
     await hsm.dispatch(
         hsm.Context(),
         listening_ability,
-        speaking.EfferenceEvent.with_data(
-            speaking.EfferenceData(mouth=MOUTH, duration=duration, media_type="audio/pcm", sample_rate_hz=16_000)
+        EfferenceEvent.with_data(
+            EfferenceData(mouth=MOUTH, duration=duration, media_type="audio/pcm", sample_rate_hz=16_000)
         ),
     )
 
@@ -1403,3 +1482,89 @@ def test_listening_failure_payload_reuses_ability_failure_message_shape() -> Non
     )
 
     assert failure == listening.FailedEventData(stage="speech_decoding", message="decoder timed out")
+
+def test_interpretation_wav_helpers_detect_containers() -> None:
+    from bot.abilities.listening import interpretation as interpretation_module
+    from bot.environment import SoundData
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x10" * 100)
+    wav = buf.getvalue()
+    assert interpretation_module._is_wav_container_bytes(wav)
+    assert interpretation_module._is_wav_sound(SoundData(audio=wav, media_type="audio/wav", sample_rate_hz=16000, channels=1))
+    assert not interpretation_module._is_wav_container_bytes(b"\x00\x01" * 50)
+    assert not interpretation_module._is_wav_sound(
+        SoundData(audio=b"\x00\x01" * 50, media_type="audio/pcm", sample_rate_hz=16000, channels=1)
+    )
+
+
+def test_interpretation_vad_receives_original_wav_not_decoded_pcm() -> None:
+    """Regression: 16 kHz Person WAV must not be rewrapped as 48 kHz PCM for Silero."""
+
+    import asyncio
+    import io
+    import wave
+
+    from bot.abilities.hearing import voice
+    from bot.abilities.listening import interpretation as interpretation_module
+    from bot.abilities.listening import sensitivity
+    from bot.environment import SoundData
+
+    def make_wav(sample_rate_hz: int = 16000, frames: int = 1600) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(sample_rate_hz)
+            handle.writeframes(bytes((0, 64)) * frames)
+        return buf.getvalue()
+
+    class SpyDetector(voice.detection.VoiceDetector):
+        def __init__(self) -> None:
+            self.inputs: list[bytes] = []
+
+        async def classify(self, input: bytes) -> voice.detection.ApplyData:  # type: ignore[override]
+            self.inputs.append(input)
+            return voice.detection.ApplyData(
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1),)
+            )
+
+    async def run() -> bytes:
+        spy = SpyDetector()
+        instance = interpretation_module.Interpretation(voice_detector=spy)
+        instance._active_operation_id = "op-1"
+        wav = make_wav()
+        sensed = sensitivity.OutputData(
+            sound=SoundData(audio=wav, media_type="audio/wav", sample_rate_hz=16000, channels=1),
+            perceived_level_db=60.0,
+        )
+
+        class Event:
+            data = sensed
+            id = "op-1"
+            metadata = {}
+            source = None
+
+        # Route child apply straight to spy.classify
+        async def fake_await(ctx, owner_instance, event, *, child, child_input, stage):
+            del ctx, owner_instance, event, child, stage
+            return await spy.classify(child_input)
+
+        original = interpretation_module.Interpretation._await_child_output
+        interpretation_module.Interpretation._await_child_output = staticmethod(fake_await)
+        try:
+            await interpretation_module.Interpretation._run_voice_detection(None, instance, Event())  # type: ignore[arg-type]
+        finally:
+            interpretation_module.Interpretation._await_child_output = original  # type: ignore[method-assign]
+        assert len(spy.inputs) == 1
+        return spy.inputs[0]
+
+    got = asyncio.run(run())
+    assert got.startswith(b"RIFF") and got[8:12] == b"WAVE"
+    assert got == make_wav()

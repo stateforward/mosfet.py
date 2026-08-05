@@ -30,9 +30,11 @@ from ..identity import value
 
 import asyncio
 import dataclasses
+import io
 import math
 import typing
 import uuid
+import wave
 
 import hsm
 
@@ -40,7 +42,7 @@ from bot.protocols import attachment
 import pydantic
 
 from bot.abilities import cognition
-from bot.environment import SoundEvent
+from bot.environment import SoundData, SoundEvent
 from bot.telemetry import observer
 
 DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
@@ -422,6 +424,77 @@ def _dispatch_stage_failure_with_operation(
             operation_id=operation_id or source.id or uuid.uuid4().hex,
         ),
     )
+
+
+
+def _is_wav_container_bytes(audio: bytes) -> bool:
+    """True when bytes look like a RIFF/WAVE container."""
+
+    return len(audio) >= 12 and audio.startswith(b"RIFF") and audio[8:12] == b"WAVE"
+
+
+def _is_wav_sound(sound: SoundData) -> bool:
+    """True when sound is labeled or containerized as WAV."""
+
+    media = (sound.media_type or "").lower()
+    if media in {"audio/wav", "audio/wave", "audio/x-wav"}:
+        return True
+    return _is_wav_container_bytes(sound.audio)
+
+def _pcm_sound_data(sound: SoundData) -> SoundData:
+    """Normalize environment sound to signed 16-bit PCM for identity and speech products.
+
+    Ambient emitters (for example phone_bot Person/SayEncoder) may deliver RIFF/WAVE containers
+    as ``audio/wav``. Voice identification and SpeechData require raw ``audio/pcm`` with sample
+    rate and channels. Decode with the stdlib ``wave`` module; leave non-WAV media unchanged so
+    kind-labeled non-speech paths keep their original bytes when the payload is not a real WAV.
+    """
+
+    media_type = (sound.media_type or "").strip().lower()
+    if media_type in {"", "audio/pcm", "audio/l16", "audio/raw"}:
+        if media_type in {"", "audio/l16", "audio/raw"} and sound.sample_rate_hz is not None and sound.channels is not None:
+            return sound.model_copy(update={"media_type": "audio/pcm"})
+        return sound
+    if media_type not in {"audio/wav", "audio/wave", "audio/x-wav"}:
+        return sound
+    try:
+        with wave.open(io.BytesIO(sound.audio), "rb") as stream:
+            channels = stream.getnchannels()
+            sample_width = stream.getsampwidth()
+            sample_rate_hz = stream.getframerate()
+            frames = stream.readframes(stream.getnframes())
+    except wave.Error as error:
+        raise ValueError(f"invalid audio/wav container: {error}") from error
+    if channels < 1:
+        raise ValueError("audio/wav must include at least one channel.")
+    if sample_rate_hz < 1:
+        raise ValueError("audio/wav must include a positive sample rate.")
+    if sample_width != 2:
+        raise ValueError("audio/wav must be signed 16-bit PCM (sample width 2).")
+    if not frames:
+        raise ValueError("audio/wav contains no PCM frames.")
+    return sound.model_copy(
+        update={
+            "audio": frames,
+            "media_type": "audio/pcm",
+            "sample_rate_hz": sample_rate_hz,
+            "channels": channels,
+        }
+    )
+
+
+def _sensed_with_pcm_sound(sensed: sensitivity.OutputData) -> sensitivity.OutputData:
+    """Carry PCM bytes on the scored sound when the environment delivered a WAV container."""
+
+    try:
+        pcm_sound = _pcm_sound_data(sensed.sound)
+    except ValueError:
+        # Non-speech kind labels may use media_type audio/wav without a real container; leave
+        # those bytes alone and let PCM-only stages fail closed if they later require PCM.
+        return sensed
+    if pcm_sound is sensed.sound:
+        return sensed
+    return sensed.model_copy(update={"sound": pcm_sound})
 
 
 def _speech_from_sensed(
@@ -1195,12 +1268,18 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="listening input is missing sound data.",
             )
             return
+        # Normalize to PCM for clipping/identity products. For VAD, prefer the original WAV
+        # container when present so file-oriented detectors (Silero) keep the true sample rate.
+        # Raw PCM is only passed through when ingress is already PCM; wrappers that re-encode PCM
+        # as WAV must not invent a different rate than SoundData.sample_rate_hz.
+        pcm_sensed = _sensed_with_pcm_sound(sensed)
+        vad_input = sensed.sound.audio if _is_wav_sound(sensed.sound) else pcm_sensed.sound.audio
         output = await Interpretation._await_child_output(
             ctx,
             instance,
             event,
             child=instance._voice_detection,
-            child_input=sensed.sound.audio,
+            child_input=vad_input,
             stage="voice_detection",
         )
         if output is None:
@@ -1214,7 +1293,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="Voice detection child produced a non-ApplyData terminal.",
             )
             return
-        completion = _VoiceDetectionCompletedEventData(sensed=sensed, voice_detection=output)
+        completion = _VoiceDetectionCompletedEventData(sensed=pcm_sensed, voice_detection=output)
         _ = hsm.dispatch(
             ctx,
             instance,
