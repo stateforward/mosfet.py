@@ -42,17 +42,24 @@ class VoiceDetector(voice.VoiceDetector):
     """Voice detector backed by MLX Audio's streaming Silero VAD.
 
     The model is a streaming one: it consumes fixed 16 kHz frames and reports where speech
-    begins and ends against its own continuous clock. This detector holds one session for its
-    lifetime and feeds every chunk through it, so a talkspurt that straddles a chunk boundary
-    stays open across the seam instead of being judged as an isolated fragment. That is the
-    whole reason to prefer the streaming API: with it, how the caller happens to slice the
-    audio stops being able to change what is heard.
+    begins and ends against its own continuous clock. Headerless PCM is fed through one
+    long-lived session, so a talkspurt that straddles a chunk boundary stays open across the
+    seam instead of being judged as an isolated fragment. That is the whole reason to prefer
+    the streaming API: how the caller happens to slice the stream stops being able to change
+    what is heard.
 
-    ``classify`` still answers per chunk with chunk-local spans, which is what the core
+    A self-describing container is **not** part of that stream. It is a complete recording --
+    a phone's ring sample, a stored clip -- that merely happens to arrive through the same ear,
+    and it gets its own throwaway session. Splicing one into the live stream would carry speech
+    state across audio that never adjoined it: a ring landing while the room is mid-talkspurt
+    would inherit that speech and be heard as a voice, which costs the phone its ring. One
+    session means one continuous stream, and unrelated audio is not that stream.
+
+    ``classify`` answers per chunk with chunk-local spans, which is what the core
     ``VoiceDetection`` ability turns into sticky Start/End presence boundaries.
 
-    ``sample_rate_hz`` and ``channels`` describe the raw PCM this detector is fed. A WAV
-    container is self-describing and overrides both.
+    ``sample_rate_hz`` and ``channels`` describe the raw PCM stream. A container declares its
+    own and overrides both.
     """
 
     model_id: str
@@ -60,7 +67,7 @@ class VoiceDetector(voice.VoiceDetector):
     channels: int
     load_session: StreamingVoiceDetectionSessionLoader
 
-    _session: StreamingVoiceDetectionSession | None
+    _stream_session: StreamingVoiceDetectionSession | None
     _worker: concurrent.futures.ThreadPoolExecutor | None
     _elapsed_ms: float
     _in_speech: bool
@@ -82,7 +89,7 @@ class VoiceDetector(voice.VoiceDetector):
         self.sample_rate_hz = sample_rate_hz
         self.channels = channels
         self.load_session = load_session
-        self._session = session
+        self._stream_session = session
         self._worker = None
         self._elapsed_ms = 0.0
         self._in_speech = False
@@ -103,43 +110,71 @@ class VoiceDetector(voice.VoiceDetector):
         return worker
 
     def _classify_blocking(self, audio: bytes) -> voice.detection.ApplyData:
+        # Runs on the detector's single worker thread, so the stream state below is touched by
+        # one thread at a time without further locking.
         if _is_wav_container(audio):
             pcm, sample_rate_hz, channels = _unwrap_wav(audio)
-        else:
-            pcm, sample_rate_hz, channels = audio, self.sample_rate_hz, self.channels
-        frame_width = 2 * channels
-        if len(pcm) % frame_width:
-            message = "MLX Audio voice detection requires PCM aligned to the channel count."
-            raise VoiceDetectionError(message)
-        chunk_ms = 1000.0 * (len(pcm) // frame_width) / sample_rate_hz
+            return self._classify_clip(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+        return self._classify_stream_chunk(audio)
 
-        # Runs on the detector's single worker thread, so the session state below is touched by
-        # one thread at a time without further locking.
-        session = self._resolve_session()
+    def _classify_clip(self, pcm: bytes, *, sample_rate_hz: int, channels: int) -> voice.detection.ApplyData:
+        """Judge one self-contained recording on its own, leaving the live stream untouched."""
+
+        chunk_ms = _chunk_ms(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+        session = self.load_session(self.model_id)
+        events = _process(session, pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+        return voice.detection.ApplyData(
+            segments=_segments_from_events(
+                events,
+                chunk_start_ms=0.0,
+                chunk_ms=chunk_ms,
+                open_at_chunk_start=False,
+            )
+        )
+
+    def _classify_stream_chunk(self, pcm: bytes) -> voice.detection.ApplyData:
+        """Advance the one continuous stream by this chunk, carrying speech across the seam."""
+
+        chunk_ms = _chunk_ms(pcm, sample_rate_hz=self.sample_rate_hz, channels=self.channels)
+        session = self._stream_session
+        if session is None:
+            session = self.load_session(self.model_id)
+            self._stream_session = session
         chunk_start_ms = self._elapsed_ms
-        try:
-            events = session.process_pcm(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
-        except Exception as error:
-            message = "MLX Audio voice detection failed."
-            raise VoiceDetectionError(message) from error
+        events = _process(session, pcm, sample_rate_hz=self.sample_rate_hz, channels=self.channels)
         open_at_chunk_start = self._in_speech
         self._elapsed_ms = chunk_start_ms + chunk_ms
         self._in_speech = session.in_speech()
-
-        segments = _segments_from_events(
-            events,
-            chunk_start_ms=chunk_start_ms,
-            chunk_ms=chunk_ms,
-            open_at_chunk_start=open_at_chunk_start,
+        return voice.detection.ApplyData(
+            segments=_segments_from_events(
+                events,
+                chunk_start_ms=chunk_start_ms,
+                chunk_ms=chunk_ms,
+                open_at_chunk_start=open_at_chunk_start,
+            )
         )
-        return voice.detection.ApplyData(segments=segments)
 
-    def _resolve_session(self) -> StreamingVoiceDetectionSession:
-        session = self._session
-        if session is None:
-            session = self.load_session(self.model_id)
-            self._session = session
-        return session
+
+def _chunk_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
+    frame_width = 2 * channels
+    if len(pcm) % frame_width:
+        message = "MLX Audio voice detection requires PCM aligned to the channel count."
+        raise VoiceDetectionError(message)
+    return 1000.0 * (len(pcm) // frame_width) / sample_rate_hz
+
+
+def _process(
+    session: StreamingVoiceDetectionSession,
+    pcm: bytes,
+    *,
+    sample_rate_hz: int,
+    channels: int,
+) -> tuple[VoiceActivityEvent, ...]:
+    try:
+        return session.process_pcm(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+    except Exception as error:
+        message = "MLX Audio voice detection failed."
+        raise VoiceDetectionError(message) from error
 
 
 def _segments_from_events(

@@ -123,17 +123,34 @@ def _resample_to_mono_float32(
     return resampled.astype(numpy_module.float32)
 
 
+_VOICE_DETECTION_MODEL_CACHE: dict[str, object] = {}
+"""Process-local warm cache of loaded VAD weights.
+
+Sessions are cheap and deliberately short-lived -- a self-contained clip gets its own -- but
+the weights behind them are not. Loading per session would put a model load on the audio path.
+"""
+
+
+def _cached_voice_detection_model(model_id: str) -> object:
+    cached = _VOICE_DETECTION_MODEL_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    vad_module = importlib.import_module("mlx_audio.vad")
+    load = typing.cast(collections.abc.Callable[[str], object], getattr(vad_module, "load"))
+    loaded = load(model_id)
+    _VOICE_DETECTION_MODEL_CACHE[model_id] = loaded
+    return loaded
+
+
 class _StreamingVoiceDetectionSession:
     """Adapter from ``mlx_audio.realtime_vad.StreamingVad`` to PCM chunks."""
 
     def __init__(self, model_id: str) -> None:
-        vad_module = importlib.import_module("mlx_audio.vad")
         realtime_module = importlib.import_module("mlx_audio.realtime_vad")
         self._numpy = importlib.import_module("numpy")
-        load = typing.cast(collections.abc.Callable[[str], object], getattr(vad_module, "load"))
         streaming_vad = typing.cast(collections.abc.Callable[..., object], getattr(realtime_module, "StreamingVad"))
         config = typing.cast(collections.abc.Callable[[], object], getattr(realtime_module, "ServerVadConfig"))
-        self._streaming = streaming_vad(load(model_id), config())
+        self._streaming = streaming_vad(_cached_voice_detection_model(model_id), config())
 
     def process_pcm(
         self,

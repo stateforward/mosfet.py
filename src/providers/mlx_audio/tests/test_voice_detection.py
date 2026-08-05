@@ -173,13 +173,79 @@ def test_voice_detector_feeds_raw_pcm_at_its_configured_rate() -> None:
 def test_voice_detector_prefers_the_rate_declared_by_a_wav_container() -> None:
     """A container is self-describing, so it overrides the configured raw-PCM rate."""
 
-    session = FakeStreamingSession(events=iter(((),)))
-    detector = VoiceDetector(session=session, sample_rate_hz=48_000)
+    sessions: list[FakeStreamingSession] = []
+
+    def load_session(model_id: str) -> FakeStreamingSession:
+        del model_id
+        session = FakeStreamingSession(events=iter(((),)))
+        sessions.append(session)
+        return session
+
+    detector = VoiceDetector(load_session=load_session, sample_rate_hz=48_000)
     pcm = silence_pcm(100, sample_rate_hz=8_000)
 
     _ = classify(detector, wav_container(pcm, sample_rate_hz=8_000))
 
-    assert session.chunks == [(len(pcm), 8_000, 1)]
+    assert sessions[0].chunks == [(len(pcm), 8_000, 1)]
+
+
+def test_voice_detector_judges_a_container_apart_from_the_live_stream() -> None:
+    """A self-contained recording must not inherit speech state from the room around it.
+
+    This is the regression that cost the phone its ring. One detector serves one ear, and both
+    the room stream and the phone's own ring sample arrive through it. When the container was
+    fed into the same continuous session, a ring that landed while the room was mid-talkspurt
+    inherited that open speech and came back as *voice* -- which routes it to speech-to-text
+    instead of sound classification, so the bot never perceives a ring and never answers.
+    """
+
+    stream_session = FakeStreamingSession(
+        # The stream opens a talkspurt and stays inside it.
+        events=iter(((VoiceActivityEvent(started=True, audio_ms=100),), ()))
+    )
+    clip_sessions: list[FakeStreamingSession] = []
+
+    def load_session(model_id: str) -> FakeStreamingSession:
+        del model_id
+        session = FakeStreamingSession(events=iter(((),)))
+        clip_sessions.append(session)
+        return session
+
+    detector = VoiceDetector(session=stream_session, load_session=load_session, sample_rate_hz=16_000)
+
+    assert classify(detector, silence_pcm(1000)).segments, "stream is mid-talkspurt"
+    ring = classify(detector, wav_container(silence_pcm(1500), sample_rate_hz=16_000))
+
+    assert ring.segments == (), "a container must be judged on its own, not on the room's speech"
+    # The container went to its own session and never touched the stream's.
+    assert len(clip_sessions) == 1
+    assert len(stream_session.chunks) == 1
+
+
+def test_voice_detector_keeps_the_stream_clock_across_an_interleaved_container() -> None:
+    """A clip passing through must not advance or disturb the stream it interrupts."""
+
+    stream_session = FakeStreamingSession(
+        events=iter(
+            (
+                (),
+                (VoiceActivityEvent(started=True, audio_ms=1200),),
+            )
+        )
+    )
+    detector = VoiceDetector(
+        session=stream_session,
+        load_session=lambda model_id: FakeStreamingSession(events=iter(((),))),
+        sample_rate_hz=16_000,
+    )
+
+    _ = classify(detector, silence_pcm(1000))
+    _ = classify(detector, wav_container(silence_pcm(5000), sample_rate_hz=16_000))
+    resumed = classify(detector, silence_pcm(1000))
+
+    # The clip's 5000 ms must not have moved the stream clock: 1200 ms is still 200 ms into
+    # the second stream chunk. If the clip had advanced it, this span would be clamped to 0.
+    assert resumed.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.2, end_seconds=1.0),)
 
 
 def test_voice_detector_loads_one_session_and_reuses_it_across_chunks() -> None:
@@ -289,3 +355,23 @@ def test_real_detector_hears_the_same_speech_however_the_stream_is_chunked() -> 
 
     assert whole.segments
     assert heard, "speech split into 100 ms chunks must still be heard"
+
+
+@pytest.mark.live
+def test_real_detector_still_hears_no_voice_in_a_ring_that_lands_mid_talkspurt() -> None:
+    """The live shape of the ring regression, against the real model.
+
+    One ear, two sources: the room stream and the phone's own ring sample. The ring has to read
+    as not-voice even when it arrives while someone in the room is mid-sentence. When both went
+    through one continuous session this returned a voice span covering the ring, the ring was
+    routed to speech instead of sound classification, and the bot never answered its phone.
+    """
+
+    with wave.open(io.BytesIO(SPEECH_WAV), "rb") as stream:
+        rate = stream.getframerate()
+        speech = stream.readframes(stream.getnframes())
+
+    detector = VoiceDetector(sample_rate_hz=rate)
+
+    assert classify(detector, speech).segments, "the room stream is mid-talkspurt"
+    assert classify(detector, phone.RING_SOUND_WAV).segments == ()
