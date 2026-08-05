@@ -31,6 +31,9 @@ stateforward-bot = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# test_phone and test_room_audio import the shared root `tests` package (room fakes,
+# HSM state helpers), so the repo root has to be importable from this rootdir.
+pythonpath = ["../../.."]
 
 [tool.ruff]
 line-length = 120
