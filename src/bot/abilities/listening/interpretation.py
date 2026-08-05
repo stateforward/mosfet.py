@@ -160,10 +160,16 @@ class _SoundClassificationCompletedEventData(pydantic.BaseModel):
 
 
 class SpeechData(pydantic.BaseModel):
-    """PCM speech observation for conversation turn assembly (no STT).
+    """One speech observation, before or after decode.
 
     Listening VAD classifies one admission of sound. Sticky conversational turns assemble these
-    speech observations under Conversation turn Start/End; speech decoding belongs there.
+    speech observations under Conversation turn Start/End.
+
+    ``content`` / ``content_type`` carry what the observation *is* to whoever perceives it:
+    ``audio/pcm`` bytes while the observation is still acoustic, rewritten in place to
+    ``text/plain`` words once speech decoding resolves it. Decode rewrites this same
+    observation — it never mints a separate product envelope — so the stimulus a bot
+    perceives keeps one identity from admission through transcription.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -172,13 +178,27 @@ class SpeechData(pydantic.BaseModel):
         val_json_bytes="base64",
         json_schema_extra={
             "description": (
-                "One Listening speech observation after voice detection: raw audio plus relative voice "
-                "spans. Empty segments means no voice in this observation (including silence used to "
-                "close a turn)."
+                "One Listening speech observation after voice detection: content plus relative voice "
+                "spans. content_type is audio/pcm while the observation is acoustic and text/plain "
+                "once speech decoding has rewritten it into words. Empty segments means no voice in "
+                "this observation (including silence used to close a turn)."
             ),
             "examples": [
                 {
                     "audio": "AAAA",
+                    "content": "AAAA",
+                    "content_type": "audio/pcm",
+                    "voice_detection": {
+                        "segments": [{"start_seconds": 0.0, "end_seconds": 0.4, "confidence": 0.9}],
+                    },
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 48000,
+                    "channels": 1,
+                },
+                {
+                    "audio": "",
+                    "content": "what is the weather like?",
+                    "content_type": "text/plain",
                     "voice_detection": {
                         "segments": [{"start_seconds": 0.0, "end_seconds": 0.4, "confidence": 0.9}],
                     },
@@ -188,6 +208,8 @@ class SpeechData(pydantic.BaseModel):
                 },
                 {
                     "audio": "AAAA",
+                    "content": "AAAA",
+                    "content_type": "audio/pcm",
                     "voice_detection": {"segments": []},
                     "media_type": "audio/pcm",
                     "sample_rate_hz": 48000,
@@ -198,11 +220,28 @@ class SpeechData(pydantic.BaseModel):
     )
 
     audio: bytes = pydantic.Field(
-        min_length=1,
         description=(
             "PCM audio for this observation. Homogeneous with other observations on the same conversation "
-            "stream so turn assembly can concatenate bytes."
+            "stream so turn assembly can concatenate bytes. Empty once speech decoding has rewritten this "
+            "observation into text/plain content."
         ),
+    )
+    content: str | bytes = pydantic.Field(
+        default=b"",
+        description=(
+            "What this observation is to whoever perceives it: the PCM bytes while content_type is "
+            "audio/pcm, the decoded words once content_type is text/plain. Defaults to audio."
+        ),
+        examples=["what is the weather like?"],
+    )
+    content_type: str = pydantic.Field(
+        default="audio/pcm",
+        min_length=1,
+        description=(
+            "Media type of content. audio/pcm before speech decoding, text/plain after it rewrites "
+            "this observation into words."
+        ),
+        examples=["audio/pcm", "text/plain"],
     )
     start_seconds: float | None = pydantic.Field(
         default=None,
@@ -260,6 +299,15 @@ class SpeechData(pydantic.BaseModel):
 
         frame_bytes = 2 * self.channels
         return (len(self.audio) // frame_bytes) / float(self.sample_rate_hz) if frame_bytes > 0 else 0.0
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def default_content_to_audio(cls, raw_value: object) -> object:
+        """An acoustic observation *is* its audio; decode later rewrites content in place."""
+
+        if not isinstance(raw_value, dict) or raw_value.get("content") is not None:
+            return raw_value
+        return {**typing.cast(dict[str, object], raw_value), "content": raw_value.get("audio", b"")}
 
     @pydantic.model_validator(mode="after")
     def validate_segment_timing(self) -> typing.Self:
@@ -620,7 +668,7 @@ def _dispatch_product_cognition_input_with_operation(
 ) -> None:
     """Hand off whatever product this pipeline arrived at, whichever route it came by.
 
-    - STT configured and completed: UTF-8 speech-decoding product for Conversation bridge.
+    - STT configured and completed: the same ``SpeechEvent``, rewritten to ``text/plain`` words.
     - No STT (acoustic path): ``SpeechEvent`` with VAD spans + audio for Conversation /
       conversation turn End (including empty-segment silence observations that close a sticky turn).
     - Labeled non-speech (ring, busy, …): original ``environment.sound``.
@@ -628,11 +676,35 @@ def _dispatch_product_cognition_input_with_operation(
 
     completion = event.data
     if isinstance(completion, _SpeechDecodingCompletedEventData):
+        sound = completion.sensed.sound
+        if sound.sample_rate_hz is None:
+            _dispatch_listening_terminal_failure_with_operation(
+                ctx,
+                instance,
+                event,
+                FailedEventData(
+                    stage="speech_decoding",
+                    message="Speech decoding completed on sound with no sample rate to place it on a timeline.",
+                ),
+                operation_id=operation_id,
+            )
+            return
+        # Decode rewrites this observation: it becomes words. The audio it was is dropped.
         _dispatch_listening_cognition_input_with_operation(
             ctx,
             instance,
             event,
-            speech.SpeechDecoding.output_event.with_data(completion.speech),
+            SpeechEvent.with_data(
+                SpeechData(
+                    audio=b"",
+                    content=completion.speech.decode("utf-8", errors="replace"),
+                    content_type="text/plain",
+                    voice_detection=completion.voice_detection,
+                    sample_rate_hz=sound.sample_rate_hz,
+                    channels=sound.channels if sound.channels is not None else 1,
+                    media_type="audio/pcm",
+                )
+            ),
             operation_id=operation_id,
         )
         return

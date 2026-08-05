@@ -355,6 +355,17 @@ def _is_silent_speech_handoff(handoff: cognition.InputData) -> bool:
     )
 
 
+def _is_decoded_speech_handoff(handoff: cognition.InputData) -> bool:
+    """Decode rewrites the same SpeechEvent into words rather than minting a new envelope."""
+
+    stimulus = _stimulus(handoff)
+    return (
+        stimulus.name == listening.SpeechEvent.name
+        and isinstance(stimulus.data, listening.SpeechData)
+        and stimulus.data.content_type == "text/plain"
+    )
+
+
 def test_listening_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(listening.Listening.input_event.schema)
     failed_schema = object_dict(listening.Listening.failed_event.schema)
@@ -861,17 +872,18 @@ def test_listening_apply_runs_voice_diarization_and_speech_decoding_pipeline() -
         await start_ability_tree(None, listening)
 
         await _apply_utterance(listening, b"voice")
-        await wait_until(
-            lambda: any(_stimulus(h).name == speech.SpeechDecoding.output_event.name for h in listening.handoffs)
-        )
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening.handoffs))
         assert decoder is not None
         return list(listening.handoffs), diarizer.calls, decoder.calls
 
     handoffs, diarization_calls, decoder_calls = asyncio.run(run())
-    stt = next(h for h in handoffs if _stimulus(h).name == speech.SpeechDecoding.output_event.name)
+    stt = next(h for h in handoffs if _is_decoded_speech_handoff(h))
     stimulus = _stimulus(stt)
 
-    assert stimulus.data == b"decoded:voicesilence"
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content == "decoded:voicesilence"
+    assert stimulus.data.content_type == "text/plain"
+    assert stimulus.data.audio == b""
     assert [call.audio for call in diarization_calls] == [b"voicesilence"]
     assert [(call.media_type, call.sample_rate_hz, call.channels) for call in diarization_calls] == [
         ("audio/pcm", 48_000, 1)
@@ -1373,18 +1385,19 @@ def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> 
         await start_ability_tree(None, listening)
 
         await _apply_utterance(listening, b"voice")
-        await wait_until(
-            lambda: any(_stimulus(h).name == speech.SpeechDecoding.output_event.name for h in listening.handoffs)
-        )
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening.handoffs))
 
         assert decoder is not None
         return listening.handoffs, decoder.calls, listening.state()
 
     handoffs, decoder_calls, active_state = asyncio.run(run())
-    stt = next(h for h in handoffs if _stimulus(h).name == speech.SpeechDecoding.output_event.name)
+    stt = next(h for h in handoffs if _is_decoded_speech_handoff(h))
     stimulus = _stimulus(stt)
 
-    assert stimulus.data == b"decoded:voicesilence"
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content == "decoded:voicesilence"
+    assert stimulus.data.content_type == "text/plain"
+    assert stimulus.data.audio == b""
     assert decoder_calls == [b"voicesilence"]
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
@@ -1400,18 +1413,19 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
         await start_ability_tree(None, listening)
 
         await _apply_utterance(listening, b"voice")
-        await wait_until(
-            lambda: any(_stimulus(h).name == speech.SpeechDecoding.output_event.name for h in listening.handoffs)
-        )
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening.handoffs))
 
         assert decoder is not None
         return listening.handoffs, diarizer.calls, decoder.calls
 
     handoffs, diarizer_calls, decoder_calls = asyncio.run(run())
-    stt = next(h for h in handoffs if _stimulus(h).name == speech.SpeechDecoding.output_event.name)
+    stt = next(h for h in handoffs if _is_decoded_speech_handoff(h))
     stimulus = _stimulus(stt)
 
-    assert stimulus.data == b"decoded:voicesilence"
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content == "decoded:voicesilence"
+    assert stimulus.data.content_type == "text/plain"
+    assert stimulus.data.audio == b""
     assert [call.audio for call in diarizer_calls] == [b"voicesilence"]
     assert [(call.media_type, call.sample_rate_hz, call.channels) for call in diarizer_calls] == [
         ("audio/pcm", 48_000, 1)

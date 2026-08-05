@@ -2004,8 +2004,12 @@ def test_bot_fans_out_sound_event_to_input_listening() -> None:
 
     assert len(calls) == 1
     assert isinstance(calls[0].input, hsm.Event)
-    assert calls[0].input.name == speech.SpeechDecoding.output_event.name
-    assert calls[0].input.data == b"decoded:heard-chunk" + silence_sound(sample_rate_hz=48_000).audio
+    assert calls[0].input.name == listening.SpeechEvent.name
+    assert isinstance(calls[0].input.data, listening.SpeechData)
+    assert calls[0].input.data.content_type == "text/plain"
+    assert calls[0].input.data.content == (b"decoded:heard-chunk" + silence_sound(sample_rate_hz=48_000).audio).decode(
+        "utf-8", errors="replace"
+    )
     assert decoder_calls == [b"heard-chunk" + silence_sound(sample_rate_hz=48_000).audio]
     assert (
         state.endswith("/active/focused") or state.endswith("/active/processing") or state.endswith("/active/unfocused")
@@ -4059,8 +4063,12 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
 
     stimuli = asyncio.run(run())
 
-    assert [stimulus.name for stimulus in stimuli] == [speech.SpeechDecoding.output_event.name]
-    assert stimuli[0].data == b"decoded:spoken:Call Bob at 555-0142." + silence_sound().audio
+    assert [stimulus.name for stimulus in stimuli] == [listening.SpeechEvent.name]
+    assert isinstance(stimuli[0].data, listening.SpeechData)
+    assert stimuli[0].data.content_type == "text/plain"
+    assert stimuli[0].data.content == (b"decoded:spoken:Call Bob at 555-0142." + silence_sound().audio).decode(
+        "utf-8", errors="replace"
+    )
 
 
 def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
@@ -4312,8 +4320,12 @@ def test_a_bot_hears_its_own_voice_coming_back_late() -> None:
     assert len(after) == 1
     stimulus = after[0].input
     assert isinstance(stimulus, hsm.Event)
-    assert stimulus.name == speech.SpeechDecoding.output_event.name
-    assert stimulus.data == b"decoded:spoken:Hello, this is Alice." + silence_sound().audio
+    assert stimulus.name == listening.SpeechEvent.name
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content_type == "text/plain"
+    assert stimulus.data.content == (b"decoded:spoken:Hello, this is Alice." + silence_sound().audio).decode(
+        "utf-8", errors="replace"
+    )
 
 
 def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
@@ -4344,8 +4356,10 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     turns = asyncio.run(run())
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
-    assert [stimulus.data for stimulus in stimuli] == [
-        b"decoded:spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio
+    assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
+        (b"decoded:spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio).decode(
+            "utf-8", errors="replace"
+        )
     ]
 
 
@@ -4386,8 +4400,8 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
     turns = asyncio.run(run())
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
-    assert [stimulus.data for stimulus in stimuli] == [
-        b"decoded:spoken:Are you there?" + silence_sound().audio
+    assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
+        (b"decoded:spoken:Are you there?" + silence_sound().audio).decode("utf-8", errors="replace")
     ]
 
 

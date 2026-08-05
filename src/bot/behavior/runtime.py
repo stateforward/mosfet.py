@@ -17,7 +17,6 @@ import dataclasses
 import typing
 
 import hsm
-import pydantic
 from starlark_go import Starlark
 from starlark_go.errors import StarlarkError
 
