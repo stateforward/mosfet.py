@@ -478,9 +478,7 @@ class GeminiVoiceDecoder(abilities.VoiceDecoder):
     async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
         # Decoding may hand any ParticipationStimulus; only audio has PCM packaging metadata.
         if not isinstance(input, turn_detector.AudioStimulus):
-            raise TypeError(
-                f"GeminiVoiceDecoder requires AudioStimulus, got {type(input).__name__}."
-            )
+            raise TypeError(f"GeminiVoiceDecoder requires AudioStimulus, got {type(input).__name__}.")
         audio = input.content
         if _is_wav_container(audio):
             wav = audio
@@ -564,19 +562,6 @@ def _is_wav_container(audio: bytes) -> bool:
     return len(audio) >= 12 and audio.startswith(b"RIFF") and audio[8:12] == b"WAVE"
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class PcmAwareVoiceDetector(voice.detection.VoiceDetector):
-    """Silero VAD with PCM→WAV wrap for LiveKit chunks; pass through real WAV (ring)."""
-
-    pcm_decoder: PcmWavDecoder
-    voice_detector: voice.detection.VoiceDetector
-
-    @typing.override
-    async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        wav = input if _is_wav_container(input) else await self.pcm_decoder.decode(input)
-        return await self.voice_detector.classify(wav)
-
-
 def _gemini_speech_client(config: SpeechConfig) -> GeminiChatClient:
     return GeminiChatClient(api_key=config.api_key, model=config.stt_model)
 
@@ -602,9 +587,17 @@ def _gemini_speech_encoder(config: SpeechConfig) -> GeminiSpeechEncoder:
 
 
 def _silero_voice_detector(config: SpeechConfig) -> SileroVoiceDetector:
-    """Cheap local Silero VAD (MLX Audio). STT/TTS remain off-device Gemini."""
+    """Cheap local Silero VAD (MLX Audio), streaming. STT/TTS remain off-device Gemini.
 
-    return SileroVoiceDetector(model_id=config.vad_model_id)
+    The detector is told the shape of the raw PCM the room delivers so it can feed the model
+    its own 16 kHz frames; a WAV container (the ring) describes itself and overrides this.
+    """
+
+    return SileroVoiceDetector(
+        model_id=config.vad_model_id,
+        sample_rate_hz=config.input_sample_rate_hz,
+        channels=config.input_channels,
+    )
 
 
 def _pyannote_voice_classifier(
@@ -661,15 +654,7 @@ def _listening(
     """Ear: Silero VAD + pyannote voice identity (+ ring classifier). STT stays on Conversation."""
 
     config = speech_config or SpeechConfig()
-    pcm_decoder = PcmWavDecoder(sample_rate_hz=config.input_sample_rate_hz, channels=config.input_channels)
-    detector = (
-        voice_detector
-        if voice_detector is not None
-        else PcmAwareVoiceDetector(
-            pcm_decoder=pcm_decoder,
-            voice_detector=_silero_voice_detector(config),
-        )
-    )
+    detector = voice_detector if voice_detector is not None else _silero_voice_detector(config)
     classifier = voice_classifier if voice_classifier is not None else _pyannote_voice_classifier(config)
     return listening.Listening(
         voice_detector=detector,

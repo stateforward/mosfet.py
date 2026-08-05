@@ -29,8 +29,12 @@ path = "src/bot/providers/mlx_audio/__init__.py"
 [tool.uv.sources]
 stateforward-bot = { workspace = true }
 
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# test_speech_decoder and test_speech_encoder import the shared root `tests` package
+# (HSM state helpers), so the repo root has to be importable from this rootdir.
+pythonpath = ["../../.."]
 markers = [
   "live: runs the real MLX Audio model (downloads weights on first use; skipped by default in CI)",
 ]

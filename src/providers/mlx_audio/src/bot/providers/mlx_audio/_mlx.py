@@ -23,9 +23,37 @@ class SpeechDecodingModel(typing.Protocol):
         ...
 
 
-class VoiceDetectionModel(typing.Protocol):
-    def get_speech_timestamps(self, audio: str, *, return_seconds: bool) -> object:
-        """Return speech timestamp records for the supplied audio file."""
+VAD_TARGET_SAMPLE_RATE = 16_000
+"""Sample rate MLX Audio's streaming VAD consumes (``realtime_vad.VAD_SAMPLE_RATE``)."""
+
+
+class VoiceActivityEvent(typing.NamedTuple):
+    """One streaming VAD boundary, timed from the start of the session."""
+
+    started: bool
+    audio_ms: int
+
+
+class StreamingVoiceDetectionSession(typing.Protocol):
+    """Stateful streaming VAD session that spans many audio chunks.
+
+    The session is what makes chunk boundaries irrelevant: speech that begins in one chunk and
+    continues into the next stays open across the seam, so a caller never has to guess where an
+    utterance starts in order to be able to hear it.
+    """
+
+    def process_pcm(
+        self,
+        pcm: bytes,
+        *,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> tuple[VoiceActivityEvent, ...]:
+        """Feed one chunk of signed 16-bit PCM and return the boundaries it crossed."""
+        ...
+
+    def in_speech(self) -> bool:
+        """True when the session is inside a talkspurt at the end of the last fed chunk."""
         ...
 
 
@@ -38,7 +66,7 @@ class VoiceDiarizationModel(typing.Protocol):
 SpeechEncodingModelLoader = collections.abc.Callable[[str], SpeechEncodingModel]
 SpeechDecodingModelLoader = collections.abc.Callable[[str], SpeechDecodingModel]
 SpeechAudioWriter = collections.abc.Callable[[object, int, str], bytes]
-VoiceDetectionModelLoader = collections.abc.Callable[[str], VoiceDetectionModel]
+StreamingVoiceDetectionSessionLoader = collections.abc.Callable[[str], StreamingVoiceDetectionSession]
 VoiceDiarizationModelLoader = collections.abc.Callable[[str], VoiceDiarizationModel]
 
 
@@ -62,10 +90,78 @@ def load_speech_decoding_model(model_id: str) -> SpeechDecodingModel:
     return load(model_id)
 
 
-def load_voice_detection_model(model_id: str) -> VoiceDetectionModel:
-    module = importlib.import_module("mlx_audio.vad")
-    load = typing.cast(collections.abc.Callable[[str], VoiceDetectionModel], getattr(module, "load"))
-    return load(model_id)
+def _resample_to_mono_float32(
+    numpy_module: typing.Any,
+    pcm: bytes,
+    *,
+    sample_rate_hz: int,
+    channels: int,
+) -> typing.Any:
+    """Adapt signed 16-bit PCM to the mono 16 kHz float32 the streaming VAD consumes.
+
+    This is the SDK's frame format, not a stateforward.bot audio contract: the model reads
+    fixed 512-sample windows at 16 kHz and nothing else. The offline file API used to do this
+    conversion invisibly inside its audio loader; driving the model directly makes it ours.
+
+    Resampling is linear interpolation, which is adequate for a voice/no-voice decision and
+    keeps the provider free of a signal-processing dependency. Chunks are resampled
+    independently, so a chunk seam can land up to one output sample away from where a
+    continuous resampler would put it; that is far below the model's 32 ms frame.
+    """
+
+    samples = numpy_module.frombuffer(pcm, dtype="<i2").astype(numpy_module.float32) / 32768.0
+    if channels > 1:
+        usable = samples.size - (samples.size % channels)
+        samples = samples[:usable].reshape(-1, channels).mean(axis=1)
+    if sample_rate_hz == VAD_TARGET_SAMPLE_RATE or samples.size == 0:
+        return samples
+    target_size = int(round(samples.size * VAD_TARGET_SAMPLE_RATE / sample_rate_hz))
+    if target_size <= 0:
+        return samples[:0]
+    source_positions = numpy_module.linspace(0.0, samples.size - 1, target_size)
+    resampled = numpy_module.interp(source_positions, numpy_module.arange(samples.size), samples)
+    return resampled.astype(numpy_module.float32)
+
+
+class _StreamingVoiceDetectionSession:
+    """Adapter from ``mlx_audio.realtime_vad.StreamingVad`` to PCM chunks."""
+
+    def __init__(self, model_id: str) -> None:
+        vad_module = importlib.import_module("mlx_audio.vad")
+        realtime_module = importlib.import_module("mlx_audio.realtime_vad")
+        self._numpy = importlib.import_module("numpy")
+        load = typing.cast(collections.abc.Callable[[str], object], getattr(vad_module, "load"))
+        streaming_vad = typing.cast(collections.abc.Callable[..., object], getattr(realtime_module, "StreamingVad"))
+        config = typing.cast(collections.abc.Callable[[], object], getattr(realtime_module, "ServerVadConfig"))
+        self._streaming = streaming_vad(load(model_id), config())
+
+    def process_pcm(
+        self,
+        pcm: bytes,
+        *,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> tuple[VoiceActivityEvent, ...]:
+        samples = _resample_to_mono_float32(self._numpy, pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+        process = typing.cast(collections.abc.Callable[[object], object], getattr(self._streaming, "process"))
+        raw = coerce_iterable(process(samples), description="voice activity events")
+        events: list[VoiceActivityEvent] = []
+        for item in raw:
+            kind = get_member(item, "kind")
+            audio_ms = get_member(item, "audio_ms")
+            value = typing.cast(object, getattr(kind, "value", kind))
+            if not isinstance(audio_ms, int) or isinstance(audio_ms, bool):
+                message = "MLX Audio streaming VAD event is missing an integer audio_ms."
+                raise TypeError(message)
+            events.append(VoiceActivityEvent(started=value == "speech_started", audio_ms=audio_ms))
+        return tuple(events)
+
+    def in_speech(self) -> bool:
+        return bool(typing.cast(object, getattr(self._streaming, "in_speech")))
+
+
+def load_streaming_voice_detection_session(model_id: str) -> StreamingVoiceDetectionSession:
+    return _StreamingVoiceDetectionSession(model_id)
 
 
 def load_voice_diarization_model(model_id: str) -> VoiceDiarizationModel:

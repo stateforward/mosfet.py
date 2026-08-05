@@ -1,15 +1,19 @@
-"""Batch remote LiveKit PCM frames into Listening-sized utterances.
+"""Accumulate remote LiveKit PCM frames into chunks worth elevating as environment sound.
 
-LiveKit delivers ~10 ms frames. Silero/Whisper need longer windows; elevating each
-frame as ``environment.sound`` never reaches speech decoding. This assembler is an
-ingress-only batcher at the provider boundary (no shared Environment / direct wiring).
+LiveKit delivers ~10 ms frames. Running the whole perception pipeline once per frame is the
+cost this exists to avoid; it is a transport-shaped concern, which is why it lives at the
+provider boundary (ingress-only, no shared Environment / direct wiring).
+
+Chunk boundaries are deliberately *not* meaningful. Voice detection streams, so it carries
+speech state across whichever seams this assembler happens to produce, and a talkspurt split
+between two chunks stays audible in both. Nothing downstream may go back to treating a chunk
+as a self-contained clip to be judged on its own.
 """
 
 from __future__ import annotations
 
 from bot.devices import audio
 
-import array
 import asyncio
 import logging
 import typing
@@ -25,17 +29,6 @@ def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
         return 0.0
     samples = len(pcm) // (2 * channels)
     return 1000.0 * samples / float(sample_rate_hz)
-
-
-def pcm_peak_abs(pcm: bytes) -> int:
-    if len(pcm) < 2:
-        return 0
-    usable = pcm if len(pcm) % 2 == 0 else pcm[:-1]
-    if not usable:
-        return 0
-    samples = array.array("h")
-    samples.frombytes(usable)
-    return max((abs(sample) for sample in samples), default=0)
 
 
 @dataclasses.dataclass(slots=True)
@@ -163,5 +156,4 @@ class RemotePcmBatcher:
 __all__ = [
     "RemotePcmBatcher",
     "pcm_duration_ms",
-    "pcm_peak_abs",
 ]

@@ -90,8 +90,11 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "from bot.providers.openai_compat import Processor as OpenAIProcessor" in source
     assert "AlwaysVoiceDetector" not in source
     assert "PeakEnergyVoiceDetector" not in source
-    assert "PcmAwareVoiceDetector" in source
+    # The streaming detector consumes raw PCM directly, so no PCM->WAV wrapper stands in front
+    # of it any more; it is told the room's audio shape instead.
+    assert "PcmAwareVoiceDetector" not in source
     assert "_silero_voice_detector" in source
+    assert "sample_rate_hz=config.input_sample_rate_hz" in source
     assert "_pyannote_voice_classifier" in source
     assert "voice_classifier=classifier" in source
     assert "KindSoundClassifier" in source
@@ -1022,7 +1025,6 @@ asyncio.run(main())
     )
 
 
-
 def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
     """Real PhoneBot + live cognition: time until SpeechEvent→Conversation behavior appears.
 
@@ -1172,4 +1174,3 @@ asyncio.run(main())
         pytest.skip("cognition credentials unavailable for live e2e")
     assert proc.returncode == 0, out
     assert "WIRED" in out, out
-

@@ -115,37 +115,6 @@ def test_livekit_pcm_batch_duration_ms_guards_empty_pcm() -> None:
     assert pcm_batch.pcm_duration_ms(b"", sample_rate_hz=8000, channels=1) == 0.0
 
 
-# -- pcm_peak_abs ----------------------------------------------------------------------
-
-
-def test_livekit_pcm_batch_peak_abs_finds_maximum_magnitude_sample() -> None:
-    pcm = pcm_16bit_le(100, -200, 300, -400)
-
-    assert pcm_batch.pcm_peak_abs(pcm) == 400
-
-
-def test_livekit_pcm_batch_peak_abs_handles_minimum_int16_without_overflow() -> None:
-    # abs(-32768) is 32768, one past int16's positive max (32767). Python ints don't wrap,
-    # so this only fails if the implementation clamped/overflowed through a fixed-width type.
-    pcm = pcm_16bit_le(-32768, 100)
-
-    assert pcm_batch.pcm_peak_abs(pcm) == 32768
-
-
-def test_livekit_pcm_batch_peak_abs_truncates_trailing_odd_byte() -> None:
-    # Two full samples (10, -20) plus one dangling byte that cannot form a third sample.
-    # If the trailing byte were folded in some way the result would necessarily change since
-    # it is not a valid, independently-decodable 16-bit sample.
-    pcm = pcm_16bit_le(10, -20) + b"\xff"
-
-    assert pcm_batch.pcm_peak_abs(pcm) == 20
-
-
-@pytest.mark.parametrize("pcm", [b"", b"\x01"], ids=["empty", "single-byte"])
-def test_livekit_pcm_batch_peak_abs_returns_zero_for_sub_sample_input(pcm: bytes) -> None:
-    assert pcm_batch.pcm_peak_abs(pcm) == 0
-
-
 # -- RemotePcmBatcher --------------------------------------------------------------------
 
 
@@ -325,3 +294,38 @@ def test_livekit_pcm_batch_batcher_flushes_buffered_audio_when_format_changes_be
     assert len(emit.chunks) == 1
     assert emit.chunks[0].audio == pcm_16bit_le(*range(10))
     assert emit.chunks[0].channels == 1
+
+
+def test_livekit_pcm_batch_batcher_forwards_every_sample_in_order_across_chunk_seams() -> None:
+    """Chunk boundaries may fall anywhere, but no audio may be lost or reordered at one.
+
+    Where the seams land stopped mattering once voice detection became streaming: the detector
+    carries speech state across them, so a talkspurt split between two chunks is still heard in
+    both. What still matters -- and is this assembler's whole remaining job -- is that the
+    stream it hands on is the stream it was given. A dropped or reordered sample at a seam is
+    audio the detector never gets to carry anything across.
+    """
+
+    async def scenario() -> RecordingEmit:
+        emit = RecordingEmit()
+        loop = manual_loop()
+        # 1000 Hz mono => 1 sample == 1 ms, so the default cap flushes every 1200 samples.
+        # Frames arrive back to back as LiveKit delivers them, so the idle flush never fires.
+        batcher = pcm_batch.RemotePcmBatcher(emit=emit, loop=as_loop(loop))
+        for start in range(0, 3000, 10):
+            await batcher.push(
+                audio_device.AudioInputData(
+                    audio=pcm_16bit_le(*range(start, start + 10)),
+                    sample_rate_hz=1000,
+                    channels=1,
+                )
+            )
+        await batcher.flush()
+        return emit
+
+    emit = asyncio.run(scenario())
+
+    forwarded = b"".join(chunk.audio for chunk in emit.chunks)
+    assert forwarded == pcm_16bit_le(*range(3000))
+    # More than one chunk, so the concatenation above actually crossed seams.
+    assert len(emit.chunks) > 1
