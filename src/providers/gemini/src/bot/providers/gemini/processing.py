@@ -636,7 +636,7 @@ class Processor(processing.Processor):
                 text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
-                    content=json.dumps(input.model_facing_payload(), separators=(",", ":")),
+                    content=input.model_facing_payload(),
                 ),
             ),
             tools=operation_tools,

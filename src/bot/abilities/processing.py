@@ -32,7 +32,7 @@ from bot.event_schema import (
     embeddable_json_schema,
     event_json_schema,
     event_schema_json_schema,
-    model_facing_json_value,
+    model_facing_xml,
     validate_event_data,
 )
 from bot.telemetry import observer
@@ -1021,28 +1021,27 @@ class InputData(pydantic.BaseModel):
         ),
     )
 
-    def model_facing_payload(self) -> dict[str, object]:
-        """Project this turn exactly as a model may see it: stimulus plus offered tools.
+    def model_facing_payload(self) -> str:
+        """Project this turn exactly as a model may see it: the stimulus, as one XML element.
 
         This is the single model-facing projection of a processing input. Every processor that
         renders a prompt goes through it, so "the model never receives raw media" is one
         guarantee here rather than a promise repeated in each provider: the stimulus is projected
-        with ``event_schema.model_facing_json_value``, which replaces bytes with a size
-        descriptor. Instructions are system policy for the provider, not part of this content.
+        with ``event_schema.model_facing_xml``, which replaces bytes with a size descriptor and
+        escapes every value it renders. Instructions are system policy for the provider, not part
+        of this content.
+
+        ``schemas`` are deliberately absent. The offered events of a turn reach the model through
+        the provider's own tool API — ``dispatch_tool`` projects exactly these schemas as the
+        ``dispatch`` function — so repeating them in the prompt body was a second copy of the tool
+        menu, competing with the authoritative one for the same context window. The stimulus is
+        what this content is for; the tool menu is what the tool channel is for.
         """
 
-        projected: list[dict[str, object]] = []
-        for event in self.schemas:
-            schema = model_facing_event_json_schema(event, patch=self.patch)
-            item: dict[str, object] = {"event": event.name, "schema": schema}
-            description = schema.get("description")
-            if isinstance(description, str) and description:
-                item["description"] = description
-            projected.append(item)
-        return {"input": model_facing_json_value(self.input), "schemas": projected}
+        return model_facing_xml(self.input, tag="input")
 
     @pydantic.model_serializer(mode="wrap")
-    def _serialize_model(self, serializer: typing.Callable[[typing.Any], dict[str, object]]) -> dict[str, object]:
+    def _serialize_model(self, serializer: typing.Callable[[typing.Any], str]) -> str:
         del serializer
         return self.model_facing_payload()
 

@@ -3,7 +3,6 @@ from bot.abilities import processing
 from bot.devices import audio
 
 import importlib
-import json
 
 from tests.type_helpers import object_dict
 
@@ -33,10 +32,11 @@ def test_observed_bot_event_serializes_binary_payload_as_type_only() -> None:
         )
     )
 
-    # Custom wrap serializer projects stimulus + schemas only (not full Event schema adapters).
-    dumped = object_dict(payload.model_dump(mode="python"))
-    event_dump = object_dict(dumped["input"])
-    assert event_dump["name"] == audio.OutputEvent.name or event_dump.get("event") == audio.OutputEvent.name
-    # Audio bytes must not appear as raw content in JSON projections of the processing input.
-    serialized = json.dumps(dumped, default=lambda o: getattr(o, "__name__", type(o).__name__))
-    assert "playback-audio" not in serialized
+    # Custom wrap serializer projects the stimulus only (not full Event schema adapters).
+    dumped = payload.model_dump(mode="python")
+
+    assert isinstance(dumped, str)
+    assert f'event="{audio.OutputEvent.name}"' in dumped
+    # Audio bytes must not appear as raw content in any projection of the processing input.
+    assert "playback-audio" not in dumped
+    assert 'audio="bytes:14"' in dumped

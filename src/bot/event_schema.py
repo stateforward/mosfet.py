@@ -6,6 +6,7 @@ import dataclasses
 import enum
 import re
 import typing
+import xml.etree.ElementTree as ElementTree
 
 import hsm
 import pydantic
@@ -188,6 +189,183 @@ def model_facing_json_value(value: object) -> object:
         sequence = typing.cast(collections.abc.Sequence[object], value)
         return [model_facing_json_value(item) for item in sequence]
     return str(value)
+
+
+# Source-tree layer packages. These name where a domain *lives*, never the domain itself, so a
+# tag derived from a payload type's module skips them (``bot.abilities.listening…`` is the
+# ``listening`` domain, not the ``abilities`` one). Kept here rather than as a per-payload tag
+# table: nothing registers a name, the module path already carries it.
+_LAYER_PACKAGES: typing.Final = frozenset({"abilities", "devices", "providers"})
+_MEDIA_DESCRIPTOR_PREFIX: typing.Final = "bytes:"
+_TAG_NAMESPACE_PREFIX: typing.Final = "urn:stateforward.bot:"
+
+
+def _snake_case(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _payload_tag(payload_type: type) -> str:
+    """Derive one XML tag from a payload type: ``<domain>:<local>``.
+
+    Nothing is registered — both halves come from what the type already carries:
+
+    - **domain** is the first module segment after the ``bot`` root and any layer package, so
+      ``bot.environment.events`` → ``environment`` and ``bot.abilities.listening.interpretation``
+      → ``listening``.
+    - **local** is the class name minus its ``Data`` suffix, snake-cased, minus a leading
+      repetition of the domain (``PhoneSoundData`` in ``bot.devices.phone`` → ``sound``).
+
+    The result matches the owning event name where one exists (``SoundData`` → ``environment:sound``
+    for ``environment.sound``) without reading the event: ancestry levels and contained payloads
+    have no event of their own, so the type is the only source that works everywhere.
+    """
+
+    segments = [segment for segment in (getattr(payload_type, "__module__", "") or "").split(".") if segment]
+    if segments and segments[0] == "bot":
+        segments = segments[1:]
+    while segments and segments[0] in _LAYER_PACKAGES:
+        segments = segments[1:]
+    domain = segments[0] if segments else ""
+    local = _snake_case(payload_type.__name__.removesuffix("Data") or payload_type.__name__)
+    if domain and local.startswith(f"{domain}_"):
+        local = local.removeprefix(f"{domain}_")
+    return f"{domain}:{local}" if domain else local
+
+
+def _payload_ancestry(payload_type: type[pydantic.BaseModel]) -> tuple[type[pydantic.BaseModel], ...]:
+    """Model levels of ``payload_type``, most general first (``BaseModel`` itself excluded)."""
+
+    return tuple(
+        level
+        for level in reversed(payload_type.__mro__)
+        if issubclass(level, pydantic.BaseModel) and level is not pydantic.BaseModel
+    )
+
+
+def _model_element(model: pydantic.BaseModel) -> ElementTree.Element:
+    """Render one payload as its inheritance chain: ancestors outside, concrete type inside.
+
+    Each level carries only the fields it declares, so nothing is repeated between levels and a
+    subclass never re-states what it inherited. Containment nests the same way (a field holding a
+    payload becomes a child element), which is why a deeper hierarchy or a payload that carries
+    another payload needs no change here.
+    """
+
+    fields = type(model).model_fields
+    root: ElementTree.Element | None = None
+    current: ElementTree.Element | None = None
+    rendered: set[str] = set()
+    for level in _payload_ancestry(type(model)):
+        element = ElementTree.Element(_payload_tag(level))
+        if current is None:
+            root = element
+        else:
+            current.append(element)
+        current = element
+        declared = getattr(level, "__annotations__", {})
+        for name in fields:
+            if name in rendered or name not in declared:
+                continue
+            rendered.add(name)
+            _fill_field(element, name, getattr(model, name, None))
+    if root is None:
+        root = ElementTree.Element(_payload_tag(type(model)))
+    return root
+
+
+def _fill_field(element: ElementTree.Element, name: str, value: object) -> None:
+    """Place one field on ``element``: scalars as attributes, structure as child elements."""
+
+    if value is None:
+        return
+    if isinstance(value, bytes | bytearray):
+        # Media descriptor, never the media: how much there was, never what it contained.
+        element.set(name, f"{_MEDIA_DESCRIPTOR_PREFIX}{len(value)}")
+        return
+    if isinstance(value, memoryview):
+        element.set(name, f"{_MEDIA_DESCRIPTOR_PREFIX}{value.nbytes}")
+        return
+    if isinstance(value, enum.Enum):
+        member: object = value.value
+        _fill_field(element, name, member)
+        return
+    if isinstance(value, bool):
+        element.set(name, "true" if value else "false")
+        return
+    if isinstance(value, str | int | float):
+        element.set(name, str(value))
+        return
+    if isinstance(value, pydantic.BaseModel):
+        child = ElementTree.SubElement(element, name)
+        child.append(_model_element(value))
+        return
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        _fill_field(element, name, dataclasses.asdict(value))
+        return
+    if isinstance(value, collections.abc.Mapping):
+        child = ElementTree.SubElement(element, name)
+        mapping = typing.cast(collections.abc.Mapping[object, object], value)
+        for key, item in mapping.items():
+            _fill_field(child, str(key), item)
+        return
+    if isinstance(value, collections.abc.Set | collections.abc.Sequence):
+        items = tuple(typing.cast(collections.abc.Collection[object], value))
+        child = ElementTree.SubElement(element, name)
+        child.set("count", str(len(items)))
+        for item in items:
+            if isinstance(item, pydantic.BaseModel):
+                child.append(_model_element(item))
+            elif isinstance(item, str):
+                ElementTree.SubElement(child, "item").text = item
+        # Numeric members (voice embeddings, raw sample runs) stay a count for the same reason
+        # media does: a model reasons about how many there were, never about the values.
+        return
+    element.set(name, str(value))
+
+
+def model_facing_xml(value: object, *, tag: str) -> str:
+    """Project a stimulus as one XML element, with raw media replaced by a descriptor.
+
+    This is the model-facing sibling of ``model_facing_json_value`` and carries the same absolute
+    guarantee: ``bytes`` never reach a prompt in any encoding. Where the JSON projection writes
+    ``{"media": "bytes", "bytes": 115200}``, this writes ``content="bytes:115200"`` — equally
+    non-reversible, and equally legible as "there was 115200 bytes of it".
+
+    Structure:
+
+    - An ``hsm.Event`` stimulus keeps its identity on the wrapper (``event``/``id``/``source``/
+      ``target``) and its payload as the child element. ``metadata`` is telemetry propagation and
+      is never domain content, so it is not projected.
+    - A payload renders as its inheritance chain (see ``_model_element``).
+
+    Escaping is ``ElementTree``'s, so transcripts, caller IDs, and any other remote- or
+    model-authored text cannot close an element or inject markup.
+    """
+
+    root = ElementTree.Element(tag)
+    payload: object = value
+    if isinstance(value, hsm.Event):
+        event: hsm.Event[object] = value
+        root.set("event", event.name)
+        for attribute, carried in (("id", event.id), ("source", event.source), ("target", event.target)):
+            if carried:
+                root.set(attribute, carried)
+        payload = event.data
+    if payload is None:
+        pass
+    elif isinstance(payload, pydantic.BaseModel):
+        root.append(_model_element(payload))
+    elif isinstance(payload, str):
+        root.text = payload
+    else:
+        _fill_field(root, "content", payload)
+    # Every domain prefix a tag used is declared on the root, so the result is namespace-well-formed
+    # XML rather than tags that merely contain a colon. The URI is derived from the prefix; nothing
+    # registers one.
+    for prefix in sorted({element.tag.split(":", 1)[0] for element in root.iter() if ":" in element.tag}):
+        root.set(f"xmlns:{prefix}", f"{_TAG_NAMESPACE_PREFIX}{prefix}")
+    ElementTree.indent(root, space="  ")
+    return ElementTree.tostring(root, encoding="unicode")
 
 
 def bytes_from_base64(value: object) -> bytes:
@@ -739,6 +917,7 @@ __all__ = [
     "json_schema_is_embeddable",
     "matches_json_schema",
     "model_facing_json_value",
+    "model_facing_xml",
     "project_json_value",
     "validate_event_data",
     "validate_event_schema_data",

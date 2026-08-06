@@ -114,15 +114,16 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
         kind=hsm.CompletionEventKind,
     )
     input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
-    content = json.dumps(input.model_facing_payload(), separators=(",", ":"))
+    content = input.model_facing_payload()
     # Raw media never reaches the prompt, in any encoding; the model gets a size descriptor.
     assert "Hey I'm Gabe how are you" not in content
     assert base64.b64encode(b"Hey I'm Gabe how are you").decode("ascii") not in content
-    assert '"media":"bytes"' in content
-    assert '"bytes":24' in content
-    assert "bot.ability.hearing.speech.decoding.output" in content
-    assert "phone.answer_call" in content
+    assert 'content="bytes:24"' in content
+    assert 'event="bot.ability.hearing.speech.decoding.output"' in content
     assert "TypeAdapter" not in content
+    # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
+    assert "phone.answer_call" not in content
+    assert "phone.answer_call" in json.dumps(processing.dispatch_tool(input.schemas))
 
 
 def test_processor_returns_empty_events_without_schemas() -> None:
