@@ -353,7 +353,7 @@ def test_processing_input_models_host_decision_input() -> None:
     assert input.input == "incoming phone speech"
     assert input.schemas == (event,)
     # One model-facing projection: the stimulus as XML. Offered events reach the model as tools.
-    assert input.model_dump(mode="json") == "<input>incoming phone speech</input>"
+    assert input.model_dump(mode="json") == "<str>incoming phone speech</str>"
     assert event.name in json.dumps(processing.dispatch_tool(input.schemas))
     assert "operation_sources" not in processing.InputData.model_json_schema()["properties"]
     assert processing.Event is hsm.Event
@@ -1021,7 +1021,7 @@ def test_processor_receives_static_policy_composed_with_live_instructions() -> N
 
 
 def _tag(prefix: str, local: str) -> str:
-    """Resolved tag for a rendered stimulus element (the projection declares its prefixes)."""
+    """Resolved name for a rendered stimulus tag or attribute (the projection declares prefixes)."""
 
     return f"{{urn:stateforward.bot:{prefix}}}{local}"
 
@@ -1050,12 +1050,10 @@ def test_model_facing_payload_describes_audio_instead_of_carrying_it() -> None:
     assert base64.urlsafe_b64encode(audio).decode("ascii") not in rendered
     assert len(rendered) < 4_000
 
-    # The stimulus is an XML element: the event identifies the wrapper, the payload type the tag.
-    element = ElementTree.fromstring(rendered)
-    assert element.tag == "input"
-    assert element.get("event") == listening.SpeechEvent.name
-    speech = element[0]
+    # The stimulus is the root element itself; nothing wraps it.
+    speech = ElementTree.fromstring(rendered)
     assert speech.tag == _tag("listening", "speech")
+    assert speech.get(_tag("stimulus", "event")) == listening.SpeechEvent.name
     # What the model can reason about survives: how much audio, of what kind, at what rate.
     assert speech.get("content") == f"bytes:{len(audio)}"
     assert speech.get("content_type") == "audio/pcm"
@@ -1079,8 +1077,7 @@ def test_model_facing_payload_nests_payload_inheritance_outermost_ancestor_first
         schemas=(),
     )
 
-    element = ElementTree.fromstring(input.model_facing_payload())
-    sound = element[0]
+    sound = ElementTree.fromstring(input.model_facing_payload())
     assert sound.tag == _tag("environment", "sound")
     # The general level carries only what it declares…
     assert sound.get("kind") == "phone.ringing"
@@ -1109,7 +1106,7 @@ def test_model_facing_payload_escapes_hostile_values() -> None:
     assert "<dispatch" not in rendered
     element = ElementTree.fromstring(rendered)
     # The hostile text survives intact as data, and only as data.
-    assert element[0][0].get("caller") == hostile
+    assert element[0].get("caller") == hostile
     assert element.findall(".//dispatch") == []
 
 

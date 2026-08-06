@@ -36,7 +36,9 @@ def test_observed_bot_event_serializes_binary_payload_as_type_only() -> None:
     dumped = payload.model_dump(mode="python")
 
     assert isinstance(dumped, str)
-    assert f'event="{audio.OutputEvent.name}"' in dumped
+    # The stimulus is the root element; its envelope rides on it, nothing wraps it.
+    assert dumped.startswith("<audio:frame ")
+    assert f'stimulus:event="{audio.OutputEvent.name}"' in dumped
     # Audio bytes must not appear as raw content in any projection of the processing input.
     assert "playback-audio" not in dumped
     assert 'audio="bytes:14"' in dumped

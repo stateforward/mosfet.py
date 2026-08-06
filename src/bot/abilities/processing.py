@@ -1024,6 +1024,10 @@ class InputData(pydantic.BaseModel):
     def model_facing_payload(self) -> str:
         """Project this turn exactly as a model may see it: the stimulus, as one XML element.
 
+        The stimulus is the root element — nothing wraps it. Its envelope (event name, and the
+        ``id`` / ``source`` / ``target`` it was stamped with) rides on that same root under the
+        ``stimulus:`` prefix.
+
         This is the single model-facing projection of a processing input. Every processor that
         renders a prompt goes through it, so "the model never receives raw media" is one
         guarantee here rather than a promise repeated in each provider: the stimulus is projected
@@ -1038,7 +1042,7 @@ class InputData(pydantic.BaseModel):
         what this content is for; the tool menu is what the tool channel is for.
         """
 
-        return model_facing_xml(self.input, tag="input")
+        return model_facing_xml(self.input)
 
     @pydantic.model_serializer(mode="wrap")
     def _serialize_model(self, serializer: typing.Callable[[typing.Any], str]) -> str:

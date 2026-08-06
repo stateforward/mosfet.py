@@ -145,7 +145,7 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     assert "Hey I'm Gabe how are you" not in content
     assert base64.b64encode(b"Hey I'm Gabe how are you").decode("ascii") not in content
     assert 'content="bytes:24"' in content
-    assert 'event="bot.ability.hearing.speech.decoding.output"' in content
+    assert 'stimulus:event="bot.ability.hearing.speech.decoding.output"' in content
     assert "TypeAdapter" not in content
     # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
     assert "phone.answer_call" not in content

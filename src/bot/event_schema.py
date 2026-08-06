@@ -198,6 +198,8 @@ def model_facing_json_value(value: object) -> object:
 _LAYER_PACKAGES: typing.Final = frozenset({"abilities", "devices", "providers"})
 _MEDIA_DESCRIPTOR_PREFIX: typing.Final = "bytes:"
 _TAG_NAMESPACE_PREFIX: typing.Final = "urn:stateforward.bot:"
+# Envelope attributes live under their own prefix so they can never collide with a payload field.
+_STIMULUS_PREFIX: typing.Final = "stimulus"
 
 
 def _snake_case(name: str) -> str:
@@ -223,8 +225,12 @@ def _payload_tag(payload_type: type) -> str:
     segments = [segment for segment in (getattr(payload_type, "__module__", "") or "").split(".") if segment]
     if segments and segments[0] == "bot":
         segments = segments[1:]
-    while segments and segments[0] in _LAYER_PACKAGES:
-        segments = segments[1:]
+        while segments and segments[0] in _LAYER_PACKAGES:
+            segments = segments[1:]
+    else:
+        # Not a domain payload at all (``bytes``, ``str``, a test-local model): there is no domain
+        # to qualify it with, so the local name stands alone rather than inventing one.
+        segments = []
     domain = segments[0] if segments else ""
     local = _snake_case(payload_type.__name__.removesuffix("Data") or payload_type.__name__)
     if domain and local.startswith(f"{domain}_"):
@@ -323,7 +329,7 @@ def _fill_field(element: ElementTree.Element, name: str, value: object) -> None:
     element.set(name, str(value))
 
 
-def model_facing_xml(value: object, *, tag: str) -> str:
+def model_facing_xml(value: object) -> str:
     """Project a stimulus as one XML element, with raw media replaced by a descriptor.
 
     This is the model-facing sibling of ``model_facing_json_value`` and carries the same absolute
@@ -331,38 +337,42 @@ def model_facing_xml(value: object, *, tag: str) -> str:
     ``{"media": "bytes", "bytes": 115200}``, this writes ``content="bytes:115200"`` — equally
     non-reversible, and equally legible as "there was 115200 bytes of it".
 
-    Structure:
+    The stimulus *is* the root element — there is no envelope around it. A payload renders as its
+    inheritance chain (see ``_model_element``), so the root is the most general model level and the
+    concrete type nests inside it; a payload with no model of its own (raw media, plain text) is
+    tagged by its type.
 
-    - An ``hsm.Event`` stimulus keeps its identity on the wrapper (``event``/``id``/``source``/
-      ``target``) and its payload as the child element. ``metadata`` is telemetry propagation and
-      is never domain content, so it is not projected.
-    - A payload renders as its inheritance chain (see ``_model_element``).
+    An ``hsm.Event`` stimulus carries its envelope as ``stimulus:``-prefixed attributes on that same
+    root: ``event`` plus whichever of ``id`` / ``source`` / ``target`` it was stamped with. The
+    prefix is what keeps the envelope from colliding with a payload field that happens to be called
+    ``source`` or ``id``. ``metadata`` is telemetry propagation and never domain content, so it is
+    not projected.
 
     Escaping is ``ElementTree``'s, so transcripts, caller IDs, and any other remote- or
     model-authored text cannot close an element or inject markup.
     """
 
-    root = ElementTree.Element(tag)
-    payload: object = value
-    if isinstance(value, hsm.Event):
-        event: hsm.Event[object] = value
-        root.set("event", event.name)
+    event: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
+    payload: object = event.data if event is not None else value
+    if isinstance(payload, pydantic.BaseModel):
+        root = _model_element(payload)
+    else:
+        root = ElementTree.Element(_payload_tag(type(payload)))
+        if isinstance(payload, str):
+            root.text = payload
+        elif payload is not None:
+            _fill_field(root, "content", payload)
+    if event is not None:
+        root.set(f"{_STIMULUS_PREFIX}:event", event.name)
         for attribute, carried in (("id", event.id), ("source", event.source), ("target", event.target)):
             if carried:
-                root.set(attribute, carried)
-        payload = event.data
-    if payload is None:
-        pass
-    elif isinstance(payload, pydantic.BaseModel):
-        root.append(_model_element(payload))
-    elif isinstance(payload, str):
-        root.text = payload
-    else:
-        _fill_field(root, "content", payload)
-    # Every domain prefix a tag used is declared on the root, so the result is namespace-well-formed
-    # XML rather than tags that merely contain a colon. The URI is derived from the prefix; nothing
-    # registers one.
-    for prefix in sorted({element.tag.split(":", 1)[0] for element in root.iter() if ":" in element.tag}):
+                root.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
+    # Every prefix a tag or attribute used is declared on the root, so the result is
+    # namespace-well-formed XML rather than names that merely contain a colon. The URI is derived
+    # from the prefix; nothing registers one.
+    prefixes = {element.tag.split(":", 1)[0] for element in root.iter() if ":" in element.tag}
+    prefixes.update(name.split(":", 1)[0] for name in root.keys() if ":" in name)
+    for prefix in sorted(prefixes):
         root.set(f"xmlns:{prefix}", f"{_TAG_NAMESPACE_PREFIX}{prefix}")
     ElementTree.indent(root, space="  ")
     return ElementTree.tostring(root, encoding="unicode")
