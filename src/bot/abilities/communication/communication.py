@@ -205,9 +205,7 @@ class Communication(ability.Ability[ConversationInputData, object]):
             active.set_attribute("bot.identity.target.count", len(data.target_ids))
             active.set_attribute("bot.content.type", data.content_type or "")
             routed = dataclasses.replace(
-                conversation_module.RoutedInputEvent.with_data(
-                    conversation_module.RoutedInputData(input=data, parent=parent)
-                ),
+                conversation_module.RoutedInputEvent.with_data(conversation_module.RoutedInputData(parent=parent)),
                 id=event.id or None,
                 source=hsm.id(instance),
                 target=hsm.id(target),

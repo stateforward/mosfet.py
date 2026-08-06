@@ -3,6 +3,7 @@ from bot import event_schema
 from bot.abilities import cognition, listening, processing
 from bot.abilities.communication import communication, conversation
 from bot.devices import audio
+from bot.devices.phone import events as phone_events
 from bot.environment import SoundData, SoundEvent
 from bot.abilities.hearing import voice
 
@@ -191,3 +192,35 @@ def test_model_facing_xml_renders_noncausal_parent_fields_normally() -> None:
         parent: str
 
     assert 'parent="ordinary"' in event_schema.model_facing_xml(Payload(parent="ordinary"))
+
+
+def test_inherited_phone_sound_stamps_event_envelope_on_outer_root() -> None:
+    """An inherited payload keeps the environment event envelope on its outer root element."""
+
+    sound = phone_events.PhoneSoundData(
+        audio=b"ring-audio",
+        media_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+        kind="phone.ringing",
+        caller="Front desk",
+    )
+    event = dataclasses.replace(
+        SoundEvent.with_data_and_id(sound, "sound-1"),
+        source="phone-1",
+        target="listening-1",
+    )
+
+    root = ElementTree.fromstring(event_schema.model_facing_xml(event))
+    event_key = "{urn:stateforward.bot:stimulus}event"
+    id_key = "{urn:stateforward.bot:stimulus}id"
+    source_key = "{urn:stateforward.bot:stimulus}source"
+    target_key = "{urn:stateforward.bot:stimulus}target"
+
+    assert root.tag == "{urn:stateforward.bot:environment}sound"
+    assert root.attrib[event_key] == SoundEvent.name
+    assert root.attrib[id_key] == "sound-1"
+    assert root.attrib[source_key] == "phone-1"
+    assert root.attrib[target_key] == "listening-1"
+    phone_element = next(element for element in root.iter() if element.tag == "{urn:stateforward.bot:phone}sound")
+    assert event_key not in phone_element.attrib

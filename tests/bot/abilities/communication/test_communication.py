@@ -332,10 +332,7 @@ def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
         parent=StimulusData.from_event(listening.SpeechEvent.with_data_and_id(speech, "speech-1")),
     )
     communication_event = communication.InputEvent.with_data_and_id(input_data, "communication-1")
-    routed = conversation.RoutedInputData(
-        input=input_data,
-        parent=StimulusData.from_event(communication_event),
-    )
+    routed = conversation.RoutedInputData(parent=StimulusData.from_event(communication_event))
     routed_event = conversation.RoutedInputEvent.with_data_and_id(routed, "route-1")
     restored = typing.cast(
         conversation.RoutedInputData, event_schema.validate_event_data(routed_event, routed.model_dump(mode="json"))

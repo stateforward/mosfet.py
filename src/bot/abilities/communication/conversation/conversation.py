@@ -25,6 +25,7 @@ import uuid
 import hsm
 import pydantic
 from pydantic.config import JsonDict, JsonValue
+from pydantic.json_schema import SkipJsonSchema
 
 from bot import event_schema
 from bot import events
@@ -95,7 +96,7 @@ class ConversationInputData(pydantic.BaseModel):
         ),
     )
 
-    parent: events.StimulusData[interpretation.SpeechData] | None = pydantic.Field(
+    parent: SkipJsonSchema[events.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
         default=None,
         description=(
             "The exact Listening speech event and typed payload admitted by SpeechHeard. "
@@ -370,7 +371,6 @@ class RoutedInputData(pydantic.BaseModel):
 
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    input: pydantic.SkipValidation[ConversationInputData]
     parent: events.StimulusData[ConversationInputData]
 
 
@@ -1126,7 +1126,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
             ctx,
             instance,
             dataclasses.replace(
-                _InputWorkEvent.with_data(_InputWorkData(input=routed.input, input_parent=routed.parent)),
+                _InputWorkEvent.with_data(_InputWorkData(input=routed.parent.data, input_parent=routed.parent)),
                 id=operation_id,
                 source=event.source or hsm.id(instance),
                 target=hsm.id(instance),

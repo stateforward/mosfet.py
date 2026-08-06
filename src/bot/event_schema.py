@@ -322,8 +322,8 @@ def _model_element(
             _fill_field(element, name, value)
     if root is None:
         root = ElementTree.Element(_payload_tag(type(model)))
-    if envelope is not None and current is not None:
-        _set_event_attributes(current, envelope)
+    if envelope is not None:
+        _set_event_attributes(root, envelope)
     if child is not None and current is not None:
         current.append(child)
     if parent is not None:

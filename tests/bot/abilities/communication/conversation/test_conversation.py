@@ -1,5 +1,8 @@
 from bot.abilities.communication import conversation
 from bot.abilities import decoding
+from bot.abilities.hearing import voice
+from bot.abilities.listening import interpretation
+from bot import events
 from bot.abilities.communication.conversation import turn_detector
 from bot.abilities.communication.conversation import memory as conversation_memory
 from bot.abilities.identity import value
@@ -78,6 +81,51 @@ def test_input_contract_has_identity_content_and_audio_packaging_fields() -> Non
         )
     schema = typing.cast(type[pydantic.BaseModel], conversation.InputEvent.schema)
     assert tuple(schema.model_fields) == tuple(conversation.ConversationInputData.model_fields)
+
+
+def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provenance() -> None:
+    """Model selections cannot forge causal ancestry, while runtime input validation retains it."""
+
+    schema = conversation.ConversationInputData.model_json_schema()
+    assert "parent" not in schema["properties"]
+
+    speech = interpretation.SpeechData(
+        content="hello",
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({"caller"}),
+    )
+    parent = events.StimulusData[interpretation.SpeechData](
+        event="bot.ability.listening.speech.output",
+        data=speech,
+    )
+    validated = conversation.ConversationInputData.model_validate(
+        {
+            "parent": parent,
+            "source_ids": ["caller"],
+            "target_ids": [],
+            "content": "hello",
+            "content_type": "text/plain",
+        }
+    )
+    assert validated.parent == parent
+
+    with pytest.raises(pydantic.ValidationError):
+        conversation.ConversationInputData.model_validate(
+            {
+                "parent": {
+                    "event": "bot.ability.listening.speech.output",
+                    "data": {"content": "forged"},
+                },
+                "source_ids": ["caller"],
+                "target_ids": [],
+                "content": "hello",
+                "content_type": "text/plain",
+            }
+        )
 
 
 def test_zero_vector_is_rejected_at_the_input_boundary() -> None:
