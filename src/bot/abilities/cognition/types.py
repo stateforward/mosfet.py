@@ -200,6 +200,7 @@ async def dispatch_selected_events(
     focus_candidates: tuple[str, ...],
     focused_device: str | None = None,
     metadata: collections.abc.Mapping[str, object] | None = None,
+    dispatch_trust: processing.DispatchTrust = processing.DispatchTrust.MODEL,
 ) -> None:
     """Validate body-action constraints, then dispatch selected modeled events.
 
@@ -247,6 +248,7 @@ async def dispatch_selected_events(
         operation_id=operation_id,
         source=source,
         metadata=event_metadata,
+        dispatch_trust=dispatch_trust,
     )
 
 

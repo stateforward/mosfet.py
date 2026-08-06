@@ -96,6 +96,8 @@ class ConversationInputData(pydantic.BaseModel):
         ),
     )
 
+    __producer_stamped_fields__: typ.ClassVar[frozenset[str]] = frozenset({"parent"})
+
     parent: SkipJsonSchema[events.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
         default=None,
         description=(

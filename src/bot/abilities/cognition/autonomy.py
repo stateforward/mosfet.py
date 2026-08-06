@@ -387,7 +387,9 @@ class _CandidateRun(hsm.Instance):
             del event
             result = candidate_result(
                 "attach_timeout",
-                message=(f"Autonomy behavior attach timed out after {_BEHAVIOR_ATTACH_TIMEOUT.total_seconds():g} seconds."),
+                message=(
+                    f"Autonomy behavior attach timed out after {_BEHAVIOR_ATTACH_TIMEOUT.total_seconds():g} seconds."
+                ),
             )
             _ = behavior.detach(
                 instance.context(),
@@ -821,14 +823,12 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.TurnData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
     input_event: typing.ClassVar[hsm.Event[types.TurnData]] = hsm.Event[types.TurnData](
-    name="bot.ability.autonomy.input",
-    schema=types.TurnData,
-
+        name="bot.ability.autonomy.input",
+        schema=types.TurnData,
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
-    name="bot.ability.autonomy.output",
-    schema=types.CompletionData,
-
+        name="bot.ability.autonomy.output",
+        schema=types.CompletionData,
     )
     failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
         name=ability.FailedEvent.name,
@@ -1346,6 +1346,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     focus_candidates=result.turn.input.focus_candidates,
                     focused_device=result.turn.input.focus,
                     metadata=public_metadata,
+                    dispatch_trust=processing.DispatchTrust.TRUSTED_BEHAVIOR,
                 )
         except Exception as error:
             if compiled is not None:

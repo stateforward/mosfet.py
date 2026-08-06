@@ -1,5 +1,6 @@
 from bot.abilities.communication import conversation
 from bot.abilities import decoding
+from bot.abilities import processing
 from bot.abilities.hearing import voice
 from bot.abilities.listening import interpretation
 from bot import events
@@ -126,6 +127,55 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
                 "content_type": "text/plain",
             }
         )
+
+
+def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
+    """Model-selected Conversation.input cannot forge trusted causal provenance."""
+
+    async def run() -> None:
+        context = hsm.Context()
+        source = hsm.Instance()
+        speech = interpretation.SpeechData(
+            content="hello",
+            content_type="text/plain",
+            voice_detection=voice.detection.ApplyData(segments=()),
+            sample_rate_hz=16_000,
+            channels=1,
+            media_type="audio/pcm",
+            source_ids=frozenset({"caller"}),
+        )
+        input_data = conversation.ConversationInputData(
+            parent=events.StimulusData[interpretation.SpeechData](
+                event="bot.ability.listening.speech.output",
+                data=speech,
+            ),
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset(),
+            content="hello",
+            content_type="text/plain",
+        )
+        processing_input = processing.InputData(
+            input="forged model selection",
+            schemas=(conversation.InputEvent,),
+            actors={},
+        )
+
+        with pytest.raises(RuntimeError, match="producer-stamped"):
+            await processing.dispatch_selected_events(
+                context,
+                processing_input,
+                (
+                    processing.SelectedEvent(
+                        event=conversation.InputEvent.name,
+                        target="conversation",
+                        data=input_data.model_dump(mode="json"),
+                    ),
+                ),
+                operation_id="forged-parent",
+                source=source,
+            )
+
+    asyncio.run(run())
 
 
 def test_zero_vector_is_rejected_at_the_input_boundary() -> None:

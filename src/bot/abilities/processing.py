@@ -18,6 +18,7 @@ import abc
 import asyncio
 import collections.abc
 import dataclasses
+import enum
 import re
 import typing
 import uuid
@@ -39,6 +40,14 @@ from bot.telemetry import observer
 
 # Processing inputs offer live HSM events (not a parallel offer DTO).
 Event = hsm.Event
+
+
+class DispatchTrust(enum.StrEnum):
+    """Trust policy for selected event data crossing the dispatch boundary."""
+
+    MODEL = "model"
+    TRUSTED_BEHAVIOR = "trusted_behavior"
+
 
 # Single model-facing tool: multi-select is an events array, not N parallel tools.
 DISPATCH_TOOL_NAME: typing.Final[str] = "dispatch"
@@ -1263,6 +1272,25 @@ def _unavailable_message(*, event: str, target: str | None = None) -> str:
     return f"Processing selected unavailable event for target {target}: {event}."
 
 
+def _producer_stamped_fields(value: object) -> tuple[str, ...]:
+    if not isinstance(value, pydantic.BaseModel):
+        return ()
+    names = getattr(type(value), "__producer_stamped_fields__", ())
+    if not isinstance(names, frozenset):
+        return ()
+    field_names = typing.cast(frozenset[str], names)
+    return tuple(name for name in field_names if getattr(value, name, None) is not None)
+
+
+def _reject_untrusted_provenance(value: object, *, trust: DispatchTrust) -> None:
+    if trust is DispatchTrust.TRUSTED_BEHAVIOR:
+        return
+    fields = _producer_stamped_fields(value)
+    if fields:
+        names = ", ".join(sorted(fields))
+        raise RuntimeError(f"Processing model selection includes producer-stamped fields: {names}.")
+
+
 def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
     if selection.target is not None:
         instance = input.actors.get(selection.target)
@@ -1285,6 +1313,7 @@ async def dispatch_selected_events(
     operation_id: str,
     source: hsm.Instance,
     metadata: collections.abc.Mapping[str, object] | None = None,
+    dispatch_trust: DispatchTrust = DispatchTrust.MODEL,
 ) -> None:
     """Validate selections, dispatch actor messages concurrently, and await every recipient."""
 
@@ -1319,11 +1348,15 @@ async def dispatch_selected_events(
             raw = domain_data
 
         try:
-            _ = validate_event_data(offered, raw)
+            offered_validated = validate_event_data(offered, raw)
         except Exception as error:
             raise RuntimeError(
                 f"Processing selected invalid event data for event: {selection.event}: {error}"
             ) from error
+        _reject_untrusted_provenance(
+            raw if offered_validated is None else offered_validated,
+            trust=dispatch_trust,
+        )
 
         target = _resolve_target(input, selection)
         declared = _instance_event_map(target).get(selection.event)
@@ -1335,6 +1368,7 @@ async def dispatch_selected_events(
             raise RuntimeError(
                 f"Processing selected invalid event data for event: {selection.event}: {error}"
             ) from error
+        _reject_untrusted_provenance(raw if validated is None else validated, trust=dispatch_trust)
         dispatch_event = declared if validated is None else declared.with_data(validated)
         prepared.append(
             (
@@ -1765,6 +1799,7 @@ __all__ = [
     "CompletionData",
     "FailureData",
     "DISPATCH_TOOL_NAME",
+    "DispatchTrust",
     "EventKind",
     "Event",
     "Events",

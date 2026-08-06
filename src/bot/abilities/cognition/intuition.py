@@ -470,6 +470,7 @@ class Intuition(processing.Processing):
                         focus_candidates=data.turn.input.focus_candidates,
                         focused_device=data.turn.input.focus,
                         metadata=metadata,
+                        dispatch_trust=processing.DispatchTrust.MODEL,
                     )
                 except Exception as error:
                     _ = hsm.dispatch(
