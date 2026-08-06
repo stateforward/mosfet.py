@@ -27,7 +27,9 @@ import pydantic
 from pydantic.config import JsonDict, JsonValue
 
 from bot import event_schema
+from bot import events
 from bot.abilities import cognition
+from bot.abilities.listening import interpretation
 from bot import telemetry
 from bot.telemetry import observer
 from bot.telemetry import span
@@ -47,6 +49,8 @@ def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detect
         participant_ref=track_ref,
         conversation_ref=session_ref,
     )
+
+
 MAX_IDENTITY_SET_SIZE = value.MAX_IDENTITY_SET_SIZE
 """Maximum source or target identities accepted by Conversation input."""
 MAX_EMBEDDING_DIMENSION = value.MAX_EMBEDDING_DIMENSION
@@ -91,6 +95,13 @@ class ConversationInputData(pydantic.BaseModel):
         ),
     )
 
+    parent: events.StimulusData[interpretation.SpeechData] | None = pydantic.Field(
+        default=None,
+        description=(
+            "The exact Listening speech event and typed payload admitted by SpeechHeard. "
+            "Host-created Conversation inputs may omit this parent."
+        ),
+    )
     source_ids: IdentitySet = pydantic.Field(
         min_length=1,
         description="One or more opaque identities that produced this content.",
@@ -190,6 +201,10 @@ class Response(pydantic.BaseModel):
         val_json_bytes="base64",
     )
 
+    parent: events.StimulusData[ConversationInputData] | None = pydantic.Field(
+        default=None,
+        description="The exact Conversation or Communication input event that admitted the turn that produced this response.",
+    )
     source_ids: IdentitySet = pydantic.Field(description="Source identities for the completed turn.")
     target_ids: IdentitySet = pydantic.Field(
         description="Zero or more target identities for the completed turn; an empty set means no addressee is known.",
@@ -348,6 +363,21 @@ InputEvent = hsm.Event[ConversationInputData](
     kind=event_schema.EventKind,
     schema=ConversationInputData,
 )
+
+
+class RoutedInputData(pydantic.BaseModel):
+    """Internal typed handoff preserving Communication's original input event envelope."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    input: pydantic.SkipValidation[ConversationInputData]
+    parent: events.StimulusData[ConversationInputData]
+
+
+RoutedInputEvent = hsm.Event[RoutedInputData](
+    name="bot.ability.conversation.routed_input",
+    schema=RoutedInputData,
+)
 OutputEvent = hsm.Event[Response](
     name="bot.ability.conversation.output",
     schema=Response,
@@ -370,6 +400,7 @@ class _InputWorkData(pydantic.BaseModel):
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[ConversationInputData]
+    input_parent: events.StimulusData[ConversationInputData] | None = None
 
 
 class _InputCancelledData(pydantic.BaseModel):
@@ -409,6 +440,7 @@ class _TurnOperationCompletedData(pydantic.BaseModel):
     )
 
     input: pydantic.SkipValidation[ConversationInputData]
+    input_parent: events.StimulusData[ConversationInputData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     turns: tuple[turn_detector.TurnCompleteData, ...] = pydantic.Field(min_length=1)
@@ -421,6 +453,7 @@ class _TurnFailedData(pydantic.BaseModel):
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[ConversationInputData]
+    input_parent: events.StimulusData[ConversationInputData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     failure: FailureData
@@ -1035,6 +1068,11 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
         return isinstance(event.data, ConversationInputData)
 
     @staticmethod
+    def _has_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, RoutedInputData)
+
+    @staticmethod
     def _has_snapshot_request(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, SnapshotRequest)
@@ -1069,13 +1107,32 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _InputWorkEvent.with_data(_InputWorkData(input=data)),
+                    _InputWorkEvent.with_data(
+                        _InputWorkData(input=data, input_parent=events.StimulusData.from_event(event))
+                    ),
                     id=operation_id,
                     source=event.source or hsm.id(instance),
                     target=hsm.id(instance),
                     metadata=dict(event.metadata),
                 ),
             )
+
+    @staticmethod
+    def _queue_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+        routed = event.data
+        assert isinstance(routed, RoutedInputData)
+        operation_id = _operation_id(event)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _InputWorkEvent.with_data(_InputWorkData(input=routed.input, input_parent=routed.parent)),
+                id=operation_id,
+                source=event.source or hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     async def _run_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
@@ -1399,6 +1456,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     _TurnOperationCompletedEvent.with_data(
                         _TurnOperationCompletedData(
                             input=data,
+                            input_parent=work.input_parent,
                             operation_id=operation_id,
                             provenance=provenance,
                             turns=tuple(terminals),
@@ -1449,6 +1507,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                         _TurnFailedEvent.with_data(
                             _TurnFailedData(
                                 input=data,
+                                input_parent=work.input_parent,
                                 operation_id=operation_id,
                                 provenance=failure_provenance,
                                 failure=FailureData(
@@ -1605,6 +1664,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
             instance,
             event,
             Response(
+                parent=data.input_parent,
                 source_ids=input_data.source_ids,
                 target_ids=input_data.target_ids,
                 content=product_content,
@@ -1651,6 +1711,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
         # *not* deferred: it stays tool-offerable via an explicit active transition (RC-1).
         deferred = (
             _InputWorkEvent,
+            RoutedInputEvent,
             _TurnOperationCompletedEvent,
             _TurnFailedEvent,
         )
@@ -1670,6 +1731,12 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     hsm.effect(cls._queue_input),
                     hsm.target(f"{root}/active"),
                 ),
+                hsm.transition(
+                    hsm.on(RoutedInputEvent),
+                    hsm.guard(cls._has_routed_input),
+                    hsm.effect(cls._queue_routed_input),
+                    hsm.target(f"{root}/active"),
+                ),
             ),
             hsm.state(
                 "active",
@@ -1680,6 +1747,11 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     hsm.on(InputEvent),
                     hsm.guard(cls._has_input),
                     hsm.effect(cls._queue_input),
+                ),
+                hsm.transition(
+                    hsm.on(RoutedInputEvent),
+                    hsm.guard(cls._has_routed_input),
+                    hsm.effect(cls._queue_routed_input),
                 ),
                 hsm.transition(
                     hsm.on(_InputCancelledEvent),
@@ -1784,6 +1856,8 @@ __all__ = [
     "ParticipatedTurn",
     "participated_turn_from_response",
     "Response",
+    "RoutedInputData",
+    "RoutedInputEvent",
     "Snapshot",
     "SnapshotOutputEvent",
     "SnapshotRequest",

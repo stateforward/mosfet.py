@@ -15,6 +15,7 @@ import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
 from bot import event_schema
+from bot import events
 from bot.abilities import ability
 from bot.abilities import cognition
 from .conversation import conversation as conversation_module
@@ -65,9 +66,7 @@ def _has_conversation_product(
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx, instance
-    return isinstance(event.data, cognition.InputData) or isinstance(
-        event.data, conversation_module.Response
-    )
+    return isinstance(event.data, cognition.InputData) or isinstance(event.data, conversation_module.Response)
 
 
 def _has_conversation_failure(
@@ -116,9 +115,7 @@ def _normalize_catalog(
     if chosen is None and catalog:
         chosen = catalog[0]
     if chosen is None:
-        raise ValueError(
-            "Communication requires active_conversation= or a non-empty conversations= catalog."
-        )
+        raise ValueError("Communication requires active_conversation= or a non-empty conversations= catalog.")
     if chosen not in catalog:
         catalog.insert(0, chosen)
     return catalog, chosen
@@ -195,13 +192,22 @@ class Communication(ability.Ability[ConversationInputData, object]):
             data = event.data
             assert isinstance(data, ConversationInputData)
             target = instance._active_conversation
+            parent = events.StimulusData[ConversationInputData](
+                event=event.name,
+                data=data,
+                id=event.id,
+                source=event.source,
+                target=event.target,
+            )
             # Speaker identity is what a conversation turns into participants; whether the product
             # arrived carrying any is the difference between a routed turn and a dropped one.
             active.set_attribute("bot.identity.source.count", len(data.source_ids))
             active.set_attribute("bot.identity.target.count", len(data.target_ids))
             active.set_attribute("bot.content.type", data.content_type or "")
             routed = dataclasses.replace(
-                conversation_module.InputEvent.with_data(data),
+                conversation_module.RoutedInputEvent.with_data(
+                    conversation_module.RoutedInputData(input=data, parent=parent)
+                ),
                 id=event.id or None,
                 source=hsm.id(instance),
                 target=hsm.id(target),

@@ -12,6 +12,8 @@ from bot.abilities.communication import conversation
 from bot.abilities import decoding
 from bot.abilities import processing
 from bot.abilities.communication.conversation import turn_detector
+from bot import event_schema
+from bot import StimulusData
 from bot.bot import Bot
 from bot.device import Device
 from bot.environment import Environment
@@ -301,3 +303,49 @@ def test_speech_heard_seed_admits_decoded_words_as_text_plain() -> None:
     data = typing.cast(dict[str, object], output["data"])
     assert data["content"] == "what is the weather like?"
     assert data["content_type"] == "text/plain"
+
+
+def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
+    """Communication's typed routed event keeps env → Listening → admit ancestry across JSON hops."""
+
+    from bot.abilities import listening
+    from bot.abilities.hearing import voice
+    from bot.environment import SoundData, SoundEvent
+
+    sound = SoundData(audio=b"sound", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+    speech = listening.SpeechData(
+        content=b"speech",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({"caller"}),
+        parent=StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
+    )
+    input_data = conversation.ConversationInputData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset(),
+        content=b"speech",
+        content_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+        parent=StimulusData.from_event(listening.SpeechEvent.with_data_and_id(speech, "speech-1")),
+    )
+    communication_event = communication.InputEvent.with_data_and_id(input_data, "communication-1")
+    routed = conversation.RoutedInputData(
+        input=input_data,
+        parent=StimulusData.from_event(communication_event),
+    )
+    routed_event = conversation.RoutedInputEvent.with_data_and_id(routed, "route-1")
+    restored = typing.cast(
+        conversation.RoutedInputData, event_schema.validate_event_data(routed_event, routed.model_dump(mode="json"))
+    )
+
+    assert restored.parent.event == communication.InputEvent.name
+    assert restored.parent.id == "communication-1"
+    assert restored.parent.data.parent is not None
+    assert restored.parent.data.parent.event == listening.SpeechEvent.name
+    assert restored.parent.data.parent.id == "speech-1"
+    assert restored.parent.data.parent.data.parent is not None
+    assert restored.parent.data.parent.data.parent.event == "environment.sound"
+    assert restored.parent.data.parent.data.parent.id == "sound-1"

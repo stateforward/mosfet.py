@@ -55,6 +55,7 @@ def started_conversation(
 
 def test_input_contract_has_identity_content_and_audio_packaging_fields() -> None:
     assert tuple(conversation.ConversationInputData.model_fields) == (
+        "parent",
         "source_ids",
         "target_ids",
         "content",
@@ -801,6 +802,7 @@ def test_failed_detector_readiness_stops_and_does_not_cache_detector(
         event: hsm.Event[typing.Any],
     ) -> typing.Awaitable[None]:
         if event.name == turn_detector.TurnDetectorReadyRequestEvent.name:
+
             async def fail() -> None:
                 raise RuntimeError("detector readiness dispatch failed")
 
@@ -1204,7 +1206,7 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
         while loop.time() < deadline and "/active/" not in (conv.state() or ""):
             await asyncio.sleep(0)
         # Peek queued relationship via forcing a second of processing - instead inspect via contribute path
-        # The input is on the machine; pull from last internal by dispatching snapshot? 
+        # The input is on the machine; pull from last internal by dispatching snapshot?
         # Simpler: validate_event_data already tested; here assert active state means typed input accepted.
         assert "/active/" in (conv.state() or ""), conv.state()
         return audio
@@ -1225,9 +1227,7 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
             raise AssertionError(input)
 
     async def run() -> tuple[str, tuple[str, ...], str]:
-        ability = conversation.Conversation(
-            turn_detector=turn_detector.TurnDetector(decoder=IdentityDecoder())
-        )
+        ability = conversation.Conversation(turn_detector=turn_detector.TurnDetector(decoder=IdentityDecoder()))
         context = hsm.Context()
         await start_ability_tree(context, ability)
         _ = await conversation.contribute_conversation_input(

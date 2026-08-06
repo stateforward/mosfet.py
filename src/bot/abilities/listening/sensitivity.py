@@ -34,6 +34,7 @@ import hsm
 import pydantic
 
 from bot.environment import SoundData, SoundEvent
+from bot import events
 from bot.telemetry import observer
 from ..speaking import EfferenceData, EfferenceEvent
 
@@ -58,6 +59,13 @@ class OutputData(pydantic.BaseModel):
     )
 
     sound: SoundData = pydantic.Field(description="The sound exactly as it was received. Never altered here.")
+    parent: events.StimulusData[SoundData] | None = pydantic.Field(
+        default=None,
+        description=(
+            "The exact environment.sound event and payload that produced this scored sound. "
+            "This is domain provenance, not telemetry metadata or an actor lookup."
+        ),
+    )
     perceived_level_db: float | None = pydantic.Field(
         default=None,
         description=(
@@ -156,6 +164,8 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         event: hsm.Event[typing.Any],
         product: OutputData,
     ) -> None:
+        if isinstance(event.data, SoundData) and product.parent is None:
+            product = product.model_copy(update={"parent": events.StimulusData.from_event(event)})
         terminal = dataclasses.replace(
             instance.output_event.with_data(product),
             id=event.id or None,

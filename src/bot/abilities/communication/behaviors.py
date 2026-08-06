@@ -33,6 +33,7 @@ input_event = hsm.event(
             "sample_rate_hz": {{"type": "integer"}},
             "channels": {{"type": "integer"}},
             "media_type": {{"type": "string"}},
+            "parent": {{}},
             "focus": {{"type": "string"}},
             "focus_candidates": {{"type": "array"}},
         }},
@@ -64,6 +65,15 @@ def admit_speech(event):
     # Select Communication.input; processing resolves the communication actor.
     # Communication routes to _active_conversation (future: lookup then route).
     content_type = data.get("content_type") or "audio/pcm"
+    # Preserve the triggering Listening event as typed product data. The behavior runtime exposes
+    # the live event envelope on the same input mapping, so no metadata or actor lookup is needed.
+    parent = {{
+        "event": "{_SPEECH_EVENT}",
+        "data": data,
+        "id": event["id"],
+        "source": event["source"],
+        "target": event["target"],
+    }}
     hsm.dispatch(output_event, {{
         "event": "{_COMMUNICATION_INPUT}",
         "data": {{
@@ -73,6 +83,7 @@ def admit_speech(event):
             "content_type": content_type,
             "sample_rate_hz": data.get("sample_rate_hz"),
             "channels": data.get("channels"),
+            "parent": parent,
         }},
         "reason": "seeded speech admit via communication",
     }})
@@ -99,9 +110,7 @@ def speech_heard_instance() -> behavior_instance.Instance:
         SPEECH_HEARD_SOURCE,
         name=SPEECH_HEARD_NAME,
         triggers=SPEECH_HEARD_TRIGGERS,
-        description=(
-            "Communication: admit labeled Listening speech; Communication routes to the active Conversation."
-        ),
+        description=("Communication: admit labeled Listening speech; Communication routes to the active Conversation."),
     )
 
 
@@ -110,9 +119,7 @@ def install_seed_behaviors(store: memory.Memory) -> tuple[behavior_instance.Inst
 
     installed = speech_heard_instance()
     _ = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
-        )
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
     )
     return (installed,)
 

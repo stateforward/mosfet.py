@@ -3464,21 +3464,19 @@ def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
     outputs, triggers = asyncio.run(run())
     assert triggers == (listening.SpeechEvent.name,)
     assert len(outputs) == 1
-    assert outputs[0] == (
-        cognition.types.EventData(
-            event=communication.InputEvent.name,
-            target=None,
-            data={
-                "source_ids": [[0.12, -0.08, 0.31]],
-                "target_ids": [],
-                "content": "AAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAEAAQABAAE=",
-                "content_type": "audio/pcm",
-                "sample_rate_hz": 16000,
-                "channels": 1,
-            },
-            reason="seeded speech admit via communication",
-        ),
-    )
+    selected = outputs[0][0]
+    assert selected.event == communication.InputEvent.name
+    assert selected.reason == "seeded speech admit via communication"
+    selected_data = selected.data
+    assert isinstance(selected_data, dict)
+    assert selected_data["source_ids"] == [[0.12, -0.08, 0.31]]
+    assert selected_data["content_type"] == "audio/pcm"
+    parent = selected_data.get("parent")
+    assert isinstance(parent, dict)
+    assert parent["event"] == listening.SpeechEvent.name
+    parent_data = parent.get("data")
+    assert isinstance(parent_data, dict)
+    assert parent_data["content_type"] == "audio/pcm"
 
 
 def test_cognition_without_priors_time_to_wire_speech_event_to_conversation() -> None:

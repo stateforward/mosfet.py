@@ -50,6 +50,7 @@ from bot.events import (
     RebootEvent,
     RebootEventData,
     RebootReason,
+    StimulusData,
 )
 from bot import abilities, behavior, skills
 
@@ -91,6 +92,7 @@ __all__ = [
     "RebootEvent",
     "RebootEventData",
     "RebootReason",
+    "StimulusData",
     "abilities",
     "behavior",
     "skills",

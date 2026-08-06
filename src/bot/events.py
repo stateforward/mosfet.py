@@ -6,6 +6,62 @@ from bot import event_schema
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import PlainSerializer
 
+T = typing.TypeVar("T")
+
+
+class StimulusData(pydantic.BaseModel, typing.Generic[T]):
+    """Typed causal parent for a product emitted from another HSM event.
+
+    ``data`` is the complete upstream payload and the envelope fields preserve the upstream event's
+    identity without using HSM metadata or looking up an actor graph. Products may nest another
+    ``StimulusData`` in ``data`` through their own typed ``parent`` field.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+    __model_facing_event_data__: typing.ClassVar[bool] = True
+
+    event: str = pydantic.Field(
+        min_length=1,
+        description="Canonical HSM event name that emitted this upstream payload.",
+        examples=["environment.sound", "bot.ability.listening.speech.output"],
+    )
+    data: T = pydantic.Field(description="Complete typed payload emitted by the upstream event.")
+    id: str | None = pydantic.Field(
+        default=None,
+        description="Upstream HSM event correlation id, when the emitter stamped one.",
+        examples=["turn-123"],
+    )
+    source: str | None = pydantic.Field(
+        default=None,
+        description="Upstream HSM event source identity, when stamped by its producer.",
+        examples=["phone-1"],
+    )
+    target: str | None = pydantic.Field(
+        default=None,
+        description="Upstream HSM event target identity, when stamped for delivery.",
+        examples=["listening-1"],
+    )
+
+    @classmethod
+    def from_event(cls, event: hsm.Event[T]) -> typing.Self:
+        """Capture an event's typed envelope and payload at emission time."""
+
+        data = event.data
+        if data is None:
+            raise ValueError(f"Cannot capture event {event.name!r} without typed payload data.")
+        return cls(
+            event=event.name,
+            data=data,
+            id=event.id,
+            source=event.source,
+            target=event.target,
+        )
+
+
 DeviceReference = typing.Annotated[
     str,
     pydantic.Field(

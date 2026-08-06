@@ -248,16 +248,53 @@ def _payload_ancestry(payload_type: type[pydantic.BaseModel]) -> tuple[type[pyda
     )
 
 
-def _model_element(model: pydantic.BaseModel) -> ElementTree.Element:
-    """Render one payload as its inheritance chain: ancestors outside, concrete type inside.
+def _set_event_attributes(element: ElementTree.Element, event: object) -> None:
+    """Stamp modeled event identity on the payload element, never on telemetry metadata."""
 
-    Each level carries only the fields it declares, so nothing is repeated between levels and a
-    subclass never re-states what it inherited. Containment nests the same way (a field holding a
-    payload becomes a child element), which is why a deeper hierarchy or a payload that carries
-    another payload needs no change here.
+    if getattr(type(event), "__model_facing_event_data__", False):
+        event_name = getattr(event, "event", None)
+        if isinstance(event_name, str) and event_name:
+            element.set(f"{_STIMULUS_PREFIX}:event", event_name)
+        for attribute in ("id", "source", "target"):
+            carried = getattr(event, attribute, None)
+            if carried:
+                element.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
+        return
+    if isinstance(event, hsm.Event):
+        element.set(f"{_STIMULUS_PREFIX}:event", event.name)
+        for attribute, carried in (("id", event.id), ("source", event.source), ("target", event.target)):
+            if carried:
+                element.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
+
+
+def _model_element(
+    model: pydantic.BaseModel,
+    *,
+    child: ElementTree.Element | None = None,
+    envelope: object | None = None,
+) -> ElementTree.Element:
+    """Render one payload, with causal parents outside and the concrete product inside.
+
+    Each inheritance level carries only the fields it declares. A field named ``parent`` is a
+    typed causal ``StimulusData`` wrapper: its payload is rendered outside this model and its
+    event identity is stamped on that parent's own element. This differs from ordinary contained
+    payload fields, which remain nested under their field name.
     """
 
+    if getattr(type(model), "__model_facing_event_data__", False):
+        payload = getattr(model, "data", None)
+        if isinstance(payload, pydantic.BaseModel):
+            return _model_element(payload, child=child, envelope=model)
+        root = ElementTree.Element(_payload_tag(type(payload)))
+        if payload is not None:
+            _fill_field(root, "content", payload)
+        if child is not None:
+            root.append(child)
+        _set_event_attributes(root, model)
+        return root
+
     fields = type(model).model_fields
+    parent: object | None = None
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None
     rendered: set[str] = set()
@@ -273,9 +310,34 @@ def _model_element(model: pydantic.BaseModel) -> ElementTree.Element:
             if name in rendered or name not in declared:
                 continue
             rendered.add(name)
-            _fill_field(element, name, getattr(model, name, None))
+            value = getattr(model, name, None)
+            if name == "parent" and (
+                value is None
+                or (
+                    isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_event_data__", False)
+                )
+            ):
+                parent = value
+                continue
+            _fill_field(element, name, value)
     if root is None:
         root = ElementTree.Element(_payload_tag(type(model)))
+    if envelope is not None and current is not None:
+        _set_event_attributes(current, envelope)
+    if child is not None and current is not None:
+        current.append(child)
+    if parent is not None:
+        if isinstance(parent, pydantic.BaseModel) and getattr(type(parent), "__model_facing_event_data__", False):
+            parent_payload = getattr(parent, "data", None)
+            if isinstance(parent_payload, pydantic.BaseModel):
+                return _model_element(parent_payload, child=root, envelope=parent)
+            parent_root = ElementTree.Element(_payload_tag(type(parent_payload)))
+            if parent_payload is not None:
+                _fill_field(parent_root, "content", parent_payload)
+            parent_root.append(root)
+            _set_event_attributes(parent_root, parent)
+            return parent_root
+        raise TypeError("causal parent must be a typed StimulusData payload")
     return root
 
 
@@ -300,6 +362,16 @@ def _fill_field(element: ElementTree.Element, name: str, value: object) -> None:
         return
     if isinstance(value, str | int | float):
         element.set(name, str(value))
+        return
+    if isinstance(value, hsm.Event):
+        child = ElementTree.SubElement(element, name)
+        payload = value.data
+        if isinstance(payload, pydantic.BaseModel):
+            child.append(_model_element(payload, envelope=value))
+        else:
+            if payload is not None:
+                _fill_field(child, "content", payload)
+            _set_event_attributes(child, value)
         return
     if isinstance(value, pydantic.BaseModel):
         child = ElementTree.SubElement(element, name)
@@ -355,23 +427,20 @@ def model_facing_xml(value: object) -> str:
     event: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
     payload: object = event.data if event is not None else value
     if isinstance(payload, pydantic.BaseModel):
-        root = _model_element(payload)
+        root = _model_element(payload, envelope=event)
     else:
         root = ElementTree.Element(_payload_tag(type(payload)))
         if isinstance(payload, str):
             root.text = payload
         elif payload is not None:
             _fill_field(root, "content", payload)
-    if event is not None:
-        root.set(f"{_STIMULUS_PREFIX}:event", event.name)
-        for attribute, carried in (("id", event.id), ("source", event.source), ("target", event.target)):
-            if carried:
-                root.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
+        if event is not None:
+            _set_event_attributes(root, event)
     # Every prefix a tag or attribute used is declared on the root, so the result is
     # namespace-well-formed XML rather than names that merely contain a colon. The URI is derived
     # from the prefix; nothing registers one.
     prefixes = {element.tag.split(":", 1)[0] for element in root.iter() if ":" in element.tag}
-    prefixes.update(name.split(":", 1)[0] for name in root.keys() if ":" in name)
+    prefixes.update(name.split(":", 1)[0] for element in root.iter() for name in element.keys() if ":" in name)
     for prefix in sorted(prefixes):
         root.set(f"xmlns:{prefix}", f"{_TAG_NAMESPACE_PREFIX}{prefix}")
     ElementTree.indent(root, space="  ")
@@ -390,9 +459,7 @@ def bytes_from_base64(value: object) -> bytes:
     if isinstance(value, memoryview):
         return value.tobytes()
     if not isinstance(value, str):
-        raise ValueError(
-            f"audio content must be bytes or base64 text, got {type(value).__name__}"
-        )
+        raise ValueError(f"audio content must be bytes or base64 text, got {type(value).__name__}")
     text = value.strip()
     if not text:
         return b""

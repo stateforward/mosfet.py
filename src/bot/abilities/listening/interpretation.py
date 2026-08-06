@@ -43,6 +43,7 @@ import pydantic
 
 from bot.abilities import cognition
 from bot.environment import SoundData, SoundEvent
+from bot import events
 from bot import telemetry
 from bot.telemetry import observer
 from bot.telemetry import span
@@ -221,6 +222,13 @@ class SpeechData(pydantic.BaseModel):
         },
     )
 
+    parent: events.StimulusData[SoundData] | None = pydantic.Field(
+        default=None,
+        description=(
+            "The exact environment.sound event and typed payload that produced this speech "
+            "observation. This causal parent is carried in domain data, not event metadata."
+        ),
+    )
     content: str | bytes = pydantic.Field(
         description=(
             "The one payload this observation carries: signed 16-bit PCM bytes while content_type is "
@@ -486,7 +494,6 @@ def _dispatch_stage_failure_with_operation(
     )
 
 
-
 def _is_wav_container_bytes(audio: bytes) -> bool:
     """True when bytes look like a RIFF/WAVE container."""
 
@@ -501,6 +508,7 @@ def _is_wav_sound(sound: SoundData) -> bool:
         return True
     return _is_wav_container_bytes(sound.audio)
 
+
 def _pcm_sound_data(sound: SoundData) -> SoundData:
     """Normalize environment sound to signed 16-bit PCM for identity and speech products.
 
@@ -512,7 +520,11 @@ def _pcm_sound_data(sound: SoundData) -> SoundData:
 
     media_type = (sound.media_type or "").strip().lower()
     if media_type in {"", "audio/pcm", "audio/l16", "audio/raw"}:
-        if media_type in {"", "audio/l16", "audio/raw"} and sound.sample_rate_hz is not None and sound.channels is not None:
+        if (
+            media_type in {"", "audio/l16", "audio/raw"}
+            and sound.sample_rate_hz is not None
+            and sound.channels is not None
+        ):
             return sound.model_copy(update={"media_type": "audio/pcm"})
         return sound
     if media_type not in {"audio/wav", "audio/wave", "audio/x-wav"}:
@@ -579,6 +591,7 @@ def _speech_from_sensed(
         media_type="audio/pcm",
         source_ids=source_ids,
         voice_embedding=voice_embedding,
+        parent=sensed.parent,
     )
     return speech
 
@@ -636,6 +649,7 @@ def _speech_from_voice_segment(
         confidence=diarization_confidence,
         source_ids=source_ids,
         voice_embedding=voice_embedding,
+        parent=sensed.parent,
     )
 
 
@@ -714,6 +728,7 @@ def _dispatch_product_cognition_input_with_operation(
                     sample_rate_hz=sound.sample_rate_hz,
                     channels=sound.channels if sound.channels is not None else 1,
                     media_type="audio/pcm",
+                    parent=completion.sensed.parent,
                 )
             ),
             operation_id=operation_id,
@@ -1249,10 +1264,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             # An acoustic product that is never emitted is the ordinary case here, not a failure —
             # but which of the three reasons stopped it is exactly what a silent bot's trace has to
             # say. Closed vocabulary; nothing from the payload.
-            if (
-                instance._speech_decoding is not None
-                or instance._voice_diarization is not None
-            ):
+            if instance._speech_decoding is not None or instance._voice_diarization is not None:
                 active.set_attribute("bot.product.withheld.reason", "decoder_owns_product")
                 return
 
