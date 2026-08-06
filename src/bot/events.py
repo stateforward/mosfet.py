@@ -1,4 +1,3 @@
-import collections.abc
 import typing
 
 import pydantic
@@ -121,41 +120,12 @@ class InputEventData(pydantic.BaseModel):
     )
 
 
-def _event_data_contains_binary(value: object) -> bool:
-    if isinstance(value, bytes | bytearray | memoryview):
-        return True
-    if isinstance(value, pydantic.BaseModel):
-        return _event_data_contains_binary(value.model_dump(mode="python"))
-    if isinstance(value, collections.abc.Mapping):
-        return any(_event_data_contains_binary(item) for item in value.values())
-    if isinstance(value, collections.abc.Sequence) and not isinstance(value, str):
-        return any(_event_data_contains_binary(item) for item in value)
-    return False
-
-
-def _jsonable_event_data(value: object) -> object:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if isinstance(value, bytes | bytearray):
-        return {"type": "bytes"}
-    if isinstance(value, memoryview):
-        return {"type": "bytes"}
-    if isinstance(value, pydantic.BaseModel):
-        if _event_data_contains_binary(value):
-            return {"type": type(value).__qualname__}
-        return typing.cast(object, value.model_dump(mode="json"))
-    if isinstance(value, collections.abc.Mapping):
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): _jsonable_event_data(item) for key, item in mapping.items()}
-    if isinstance(value, collections.abc.Sequence) and not isinstance(value, bytes | bytearray | str):
-        return [_jsonable_event_data(item) for item in value]
-    return {"type": type(value).__qualname__}
-
-
 def _jsonable_bot_observed_event(event: hsm.Event[typing.Any]) -> dict[str, object]:
+    # An observed event is only ever serialized toward a model, so it carries the model-facing
+    # projection: media is described by size, never rendered as base64 the model cannot use.
     return {
         "event": event.name,
-        "data": _jsonable_event_data(event.data),
+        "data": event_schema.model_facing_json_value(event.data),
     }
 
 

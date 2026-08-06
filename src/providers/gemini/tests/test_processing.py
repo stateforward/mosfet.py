@@ -6,7 +6,9 @@ from bot.protocols import attachment
 from bot.providers.gemini.processing import Processor, ProcessingError
 
 import asyncio
+import base64
 import dataclasses
+import json
 import typing
 import uuid
 import weakref
@@ -105,15 +107,19 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     return completion.output.events
 
 
-def test_processor_user_content_serializes_speech_event_stimulus() -> None:
+def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> None:
     stimulus = hsm.Event[bytes](
         name="bot.ability.hearing.speech.decoding.output",
         data=b"Hey I'm Gabe how are you",
         kind=hsm.CompletionEventKind,
     )
     input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
-    content = Processor._user_content(input)
-    assert "Hey I'm Gabe how are you" in content
+    content = json.dumps(input.model_facing_payload(), separators=(",", ":"))
+    # Raw media never reaches the prompt, in any encoding; the model gets a size descriptor.
+    assert "Hey I'm Gabe how are you" not in content
+    assert base64.b64encode(b"Hey I'm Gabe how are you").decode("ascii") not in content
+    assert '"media":"bytes"' in content
+    assert '"bytes":24' in content
     assert "bot.ability.hearing.speech.decoding.output" in content
     assert "phone.answer_call" in content
     assert "TypeAdapter" not in content

@@ -12,7 +12,7 @@ import typing
 import pydantic
 
 
-from .client import ChatCompletionClient, jsonable
+from .client import ChatCompletionClient
 from .text_generator import TextGenerator as ProviderTextGenerator
 
 
@@ -613,21 +613,6 @@ class Processor(processing.Processor):
             )
         self._generator = generator
 
-    @staticmethod
-    def _user_content(input: processing.InputData) -> str:
-        """Project a processing input for the model without dumping HSM schema adapters."""
-
-        projected: list[dict[str, object]] = []
-        for event in input.schemas:
-            schema = processing.model_facing_event_json_schema(event, patch=input.patch)
-            item: dict[str, object] = {"event": event.name, "schema": schema}
-            description = schema.get("description")
-            if isinstance(description, str) and description:
-                item["description"] = description
-            projected.append(item)
-        payload = {"input": jsonable(input.input), "schemas": projected}
-        return json.dumps(payload, separators=(",", ":"))
-
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
         instructions = (input.instructions or "").strip()
@@ -647,7 +632,7 @@ class Processor(processing.Processor):
                 text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
-                    content=self._user_content(input),
+                    content=json.dumps(input.model_facing_payload(), separators=(",", ":")),
                 ),
             ),
             tools=operation_tools,

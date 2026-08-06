@@ -1,12 +1,16 @@
 import bot
 from bot import abilities
 from bot.abilities import ability
+from bot.abilities import listening
 from bot.abilities import processing
+from bot.abilities.hearing import voice
 from bot.protocols import attachment
 
 import asyncio
+import base64
 import collections.abc
 import dataclasses
+import json
 import typing
 
 import hsm
@@ -1016,3 +1020,68 @@ def test_processor_receives_static_policy_composed_with_live_instructions() -> N
         "Static policy.",
         '<environment id="env-1">\n  <self state="/Bot/active"/>\n</environment>',
     ]
+
+
+def _speech_stimulus(audio: bytes) -> hsm.Event[listening.SpeechData]:
+    return listening.SpeechEvent.with_data(
+        listening.SpeechData(
+            audio=audio,
+            content=audio,
+            content_type="audio/pcm",
+            voice_detection=voice.detection.ApplyData(segments=()),
+            sample_rate_hz=48000,
+            media_type="audio/pcm",
+            channels=1,
+        )
+    )
+
+
+def test_model_facing_payload_describes_audio_instead_of_carrying_it() -> None:
+    audio = bytes(range(256)) * 450  # 115_200 bytes of PCM: one real ~1.2s observation
+    input = processing.InputData(input=_speech_stimulus(audio), schemas=())
+
+    payload = input.model_facing_payload()
+    rendered = json.dumps(payload)
+
+    # The waveform itself never reaches the prompt, in any encoding.
+    assert base64.b64encode(audio).decode("ascii") not in rendered
+    assert base64.urlsafe_b64encode(audio).decode("ascii") not in rendered
+    assert len(rendered) < 4_000
+
+    stimulus = object_dict(payload["input"])
+    data = object_dict(stimulus["data"])
+    # What the model can reason about survives: how much audio, of what kind, at what rate.
+    assert data["audio"] == {"media": "bytes", "bytes": len(audio)}
+    assert data["content"] == {"media": "bytes", "bytes": len(audio)}
+    assert data["content_type"] == "audio/pcm"
+    assert data["sample_rate_hz"] == 48000
+    assert stimulus["name"] == listening.SpeechEvent.name
+
+
+def test_model_facing_payload_keeps_decoded_speech_text() -> None:
+    """Redaction is about media, not about words: a decoded observation still reads."""
+
+    input = processing.InputData(
+        input=listening.SpeechEvent.with_data(
+            listening.SpeechData(
+                audio=b"",
+                content="what is the weather like?",
+                content_type="text/plain",
+                voice_detection=voice.detection.ApplyData(segments=()),
+                sample_rate_hz=48000,
+                media_type="audio/pcm",
+                channels=1,
+            )
+        ),
+        schemas=(),
+    )
+
+    assert "what is the weather like?" in json.dumps(input.model_facing_payload())
+
+
+def test_serialized_input_matches_model_facing_payload() -> None:
+    """``InputData`` has one model-facing projection; JSON serialization is that projection."""
+
+    input = processing.InputData(input=_speech_stimulus(b"\x00" * 4096), schemas=())
+
+    assert json.loads(input.model_dump_json()) == json.loads(json.dumps(input.model_facing_payload()))

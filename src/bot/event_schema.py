@@ -3,6 +3,7 @@
 import base64
 import collections.abc
 import dataclasses
+import enum
 import re
 import typing
 
@@ -129,6 +130,63 @@ def project_json_value(value: object) -> object:
         return base64.urlsafe_b64encode(bytes(value)).decode("ascii")
     if isinstance(value, str | int | float | bool) or value is None:
         return value
+    return str(value)
+
+
+def model_facing_json_value(value: object) -> object:
+    """Project a value for a model prompt, with raw media replaced by a descriptor.
+
+    ``project_json_value`` is the *wire* projection: it keeps media as base64 so a peer can
+    rehydrate it. A model cannot rehydrate anything. Handing it base64 spends the context window
+    on a waveform it can only describe back ("your audio appears to be garbled"), so this
+    projection is the one every model-facing surface uses instead.
+
+    Contract:
+
+    - ``bytes`` / ``bytearray`` / ``memoryview`` become ``{"media": "bytes", "bytes": <length>}``.
+      The descriptor is non-reversible on purpose; it says how much media there was, never what
+      it contained.
+    - Everything the model can actually reason about survives: sibling scalars such as
+      ``content_type``, ``sample_rate_hz``, ``channels``, and voice spans are ordinary fields and
+      stay, so "1.2s of undecoded audio/pcm" is still legible without the samples.
+    - Pydantic models are dumped in ``python`` mode and re-projected here, so nested media is
+      described rather than base64-encoded by the model's own ``ser_json_bytes`` config.
+    """
+
+    if isinstance(value, bytes | bytearray):
+        return {"media": "bytes", "bytes": len(value)}
+    if isinstance(value, memoryview):
+        return {"media": "bytes", "bytes": value.nbytes}
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    if isinstance(value, enum.Enum):
+        return model_facing_json_value(value.value)
+    if isinstance(value, hsm.Event):
+        event = typing.cast(hsm.Event[object], value)
+        return {
+            "name": event.name,
+            "data": model_facing_json_value(event.data),
+            "kind": model_facing_json_value(event.kind),
+            "id": event.id or "",
+            "source": event.source or "",
+            "target": event.target or "",
+            "metadata": model_facing_json_value(dict(event.metadata)) if event.metadata else {},
+        }
+    if isinstance(value, pydantic.BaseModel):
+        return model_facing_json_value(value.model_dump(mode="python"))
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return model_facing_json_value(dataclasses.asdict(value))
+    if isinstance(value, collections.abc.Mapping):
+        mapping = typing.cast(collections.abc.Mapping[object, object], value)
+        return {str(key): model_facing_json_value(item) for key, item in mapping.items()}
+    if isinstance(value, collections.abc.Set):
+        members = typing.cast(collections.abc.Set[object], value)
+        # Sets have no inherent order; sort the projected members so one stimulus always
+        # renders one prompt.
+        return sorted((model_facing_json_value(item) for item in members), key=repr)
+    if isinstance(value, collections.abc.Sequence):
+        sequence = typing.cast(collections.abc.Sequence[object], value)
+        return [model_facing_json_value(item) for item in sequence]
     return str(value)
 
 
@@ -680,6 +738,7 @@ __all__ = [
     "event_schema_json_schema",
     "json_schema_is_embeddable",
     "matches_json_schema",
+    "model_facing_json_value",
     "project_json_value",
     "validate_event_data",
     "validate_event_schema_data",

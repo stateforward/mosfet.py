@@ -32,6 +32,7 @@ from bot.event_schema import (
     embeddable_json_schema,
     event_json_schema,
     event_schema_json_schema,
+    model_facing_json_value,
     validate_event_data,
 )
 from bot.telemetry import observer
@@ -1020,9 +1021,16 @@ class InputData(pydantic.BaseModel):
         ),
     )
 
-    @pydantic.model_serializer(mode="wrap")
-    def _serialize_model(self, serializer: typing.Callable[[typing.Any], dict[str, object]]) -> dict[str, object]:
-        del serializer
+    def model_facing_payload(self) -> dict[str, object]:
+        """Project this turn exactly as a model may see it: stimulus plus offered tools.
+
+        This is the single model-facing projection of a processing input. Every processor that
+        renders a prompt goes through it, so "the model never receives raw media" is one
+        guarantee here rather than a promise repeated in each provider: the stimulus is projected
+        with ``event_schema.model_facing_json_value``, which replaces bytes with a size
+        descriptor. Instructions are system policy for the provider, not part of this content.
+        """
+
         projected: list[dict[str, object]] = []
         for event in self.schemas:
             schema = model_facing_event_json_schema(event, patch=self.patch)
@@ -1031,8 +1039,12 @@ class InputData(pydantic.BaseModel):
             if isinstance(description, str) and description:
                 item["description"] = description
             projected.append(item)
-        # Stimulus + tools only; instructions are system policy for the provider, not user content.
-        return {"input": self.input, "schemas": projected}
+        return {"input": model_facing_json_value(self.input), "schemas": projected}
+
+    @pydantic.model_serializer(mode="wrap")
+    def _serialize_model(self, serializer: typing.Callable[[typing.Any], dict[str, object]]) -> dict[str, object]:
+        del serializer
+        return self.model_facing_payload()
 
 
 class CompletionData(pydantic.BaseModel):
