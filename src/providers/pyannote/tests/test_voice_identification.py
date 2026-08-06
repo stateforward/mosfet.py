@@ -13,6 +13,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import importlib
+import os
 import pathlib
 import types
 import wave
@@ -173,6 +174,41 @@ def test_default_loader_matches_pyannote_model_and_inference_api(monkeypatch: py
         ("pyannote/wespeaker-voxceleb-resnet34-LM", loaded_model),
         ("Inference", loaded_model, "whole"),
     ]
+
+
+@pytest.mark.parametrize("inherited_backend", [None, "module://matplotlib_inline.backend_inline"])
+def test_default_loader_selects_headless_matplotlib_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    inherited_backend: str | None,
+) -> None:
+    if inherited_backend is None:
+        monkeypatch.delenv("MPLBACKEND", raising=False)
+    else:
+        monkeypatch.setenv("MPLBACKEND", inherited_backend)
+    calls: list[tuple[object, ...]] = []
+    loaded_model = object()
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, model_id: str) -> object:
+            del cls
+            calls.append((model_id, loaded_model))
+            return loaded_model
+
+    class FakeInferenceLoader:
+        def __init__(self, model: object, *, window: str) -> None:
+            calls.append(("Inference", model, window))
+
+    module = types.SimpleNamespace(Model=FakeModel, Inference=FakeInferenceLoader)
+
+    def import_module(name: str) -> types.SimpleNamespace:
+        assert name == "pyannote.audio"
+        assert os.environ["MPLBACKEND"] == "Agg"
+        return module
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+
+    _ = load_speaker_embedding_inference("pyannote/wespeaker-voxceleb-resnet34-LM")
 
 
 def test_classifier_defaults_to_pyannote_wespeaker_model() -> None:

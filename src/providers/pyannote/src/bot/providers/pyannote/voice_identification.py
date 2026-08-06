@@ -13,7 +13,7 @@ import typing
 
 from bot.telemetry import span
 
-from ._audio import temporary_audio_file
+from ._audio import configure_headless_matplotlib, temporary_audio_file
 
 _SCOPE = "bot.providers.pyannote"
 _COMPONENT = "pyannote.voice_identification"
@@ -47,6 +47,7 @@ def load_speaker_embedding_inference(model_id: str) -> SpeakerEmbeddingInference
     that need explicit token handling can inject a loader instead.
     """
 
+    configure_headless_matplotlib()
     module = importlib.import_module("pyannote.audio")
     model_type = typing.cast(object, getattr(module, "Model"))
     load_model = typing.cast(collections.abc.Callable[[str], object], getattr(model_type, "from_pretrained"))

@@ -14,7 +14,7 @@ import wave
 
 from bot.telemetry import span
 
-from ._audio import temporary_audio_file
+from ._audio import configure_headless_matplotlib, temporary_audio_file
 
 _SCOPE = "bot.providers.pyannote"
 _COMPONENT = "pyannote.voice_diarization"
@@ -43,6 +43,7 @@ def load_voice_diarization_pipeline(model_id: str) -> VoiceDiarizationPipeline:
     that need explicit token handling can inject a loader instead.
     """
 
+    configure_headless_matplotlib()
     module = importlib.import_module("pyannote.audio")
     pipeline_type = typing.cast(object, getattr(module, "Pipeline"))
     from_pretrained = typing.cast(collections.abc.Callable[[str], object], getattr(pipeline_type, "from_pretrained"))
