@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import collections.abc
 import json
 import logging
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import types
 import typing
 
 from . import AppConfig, load_env, mint_livekit_access_token, run
@@ -33,6 +36,35 @@ def _configure_logging(*, verbose: bool) -> None:
     # Machines that already opt into hsm.observe(observer) (phone, livekit, bot body).
     logging.getLogger("bot.telemetry.hsm").setLevel(logging.DEBUG if verbose else logging.INFO)
     logging.getLogger("phone_bot_example.hsm").setLevel(logging.INFO)
+
+
+def _export_telemetry_on_exit() -> None:
+    """Arrange for buffered telemetry to reach disk however this process ends.
+
+    Spans are batch-exported, so they sit in memory until a flush. A bot that is stopped the way
+    the harness stops it — SIGTERM — dies with its buffer, and the run leaves no span file at all:
+    the one artifact that says what happened to a sound is missing precisely when a live run is
+    over and there is something to explain.
+
+    This belongs to the application boundary that called `configure()`. A library must never
+    install a signal handler on whatever embeds it, so `bot.telemetry` cannot do this itself.
+
+    Shutting a provider down flushes its batch processor, which is what `reset()` does for both.
+    The signal handler then re-raises the signal against the default disposition, so the process
+    still dies *of SIGTERM* and a parent waiting on it sees exactly the exit it saw before.
+    """
+
+    import bot.telemetry
+
+    atexit.register(bot.telemetry.reset)
+
+    def on_terminate(signum: int, frame: types.FrameType | None) -> None:
+        del frame
+        bot.telemetry.reset()
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    _ = signal.signal(signal.SIGTERM, on_terminate)
 
 
 def _human_join_instructions(*, url: str, room: str, api_key: str, api_secret: str) -> str:
@@ -245,10 +277,12 @@ def main(argv: list[str] | None = None) -> None:
     env_path = _ensure_env_file(pathlib.Path(str(args.env)).expanduser())
     # Surface OTEL knobs from the env file into the process env before configure (file does not win over shell).
     for key, value in load_env(env_path).items():
-        if key in {"BOT_OTEL_DISABLED", "BOT_OTEL_LOG_FILE"} and key not in os.environ:
+        if key in {"BOT_OTEL_DISABLED", "BOT_OTEL_LOG_FILE", "BOT_OTEL_SPAN_FILE"} and key not in os.environ:
             os.environ[key] = value
-    # Opt-out local OTEL JSONL export for generator request bodies (BOT_OTEL_DISABLED / BOT_OTEL_LOG_FILE).
+    # Opt-out local OTEL JSONL export for generator request bodies and spans
+    # (BOT_OTEL_DISABLED / BOT_OTEL_LOG_FILE / BOT_OTEL_SPAN_FILE).
     _ = bot.telemetry.configure()
+    _export_telemetry_on_exit()
     if not bool(args.skip_livekit_start):
         _ensure_livekit()
 
