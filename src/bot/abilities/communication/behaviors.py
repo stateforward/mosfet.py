@@ -27,7 +27,7 @@ input_event = hsm.event(
     schema = {{
         "type": "object",
         "properties": {{
-            "audio": {{"type": "string"}},
+            "content": {{"type": "string"}},
             "source_ids": {{"type": "array"}},
             "content_type": {{"type": "string"}},
             "sample_rate_hz": {{"type": "integer"}},
@@ -63,14 +63,14 @@ def admit_speech(event):
     data = event["data"] or {{}}
     # Select Communication.input; processing resolves the communication actor.
     # Communication routes to _active_conversation (future: lookup then route).
-    media_type = data.get("media_type") or "audio/pcm"
+    content_type = data.get("content_type") or "audio/pcm"
     hsm.dispatch(output_event, {{
         "event": "{_COMMUNICATION_INPUT}",
         "data": {{
             "source_ids": data.get("source_ids") or [],
             "target_ids": [],
-            "content": data.get("audio"),
-            "content_type": media_type,
+            "content": data.get("content"),
+            "content_type": content_type,
             "sample_rate_hz": data.get("sample_rate_hz"),
             "channels": data.get("channels"),
         }},

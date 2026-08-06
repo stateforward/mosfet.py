@@ -235,3 +235,69 @@ def test_communication_seed_installs_into_memory_for_autonomy() -> None:
         tuple(row.as_mapping() for row in out.results[1].rows),
     )
     assert any(item.name == behaviors.SPEECH_HEARD_NAME for item in inventory)
+
+
+def _speech_heard_admit(speech_payload: dict[str, object]) -> dict[str, object]:
+    """Run the shipped SpeechHeard Starlark seed over one serialized SpeechData payload."""
+
+    from bot import behavior
+    from bot.abilities.communication import behaviors
+    from tests.bot.abilities.support import dispatch_ability_for_test
+    from tests.hsm_instance_state import start_ability_tree
+
+    async def run() -> dict[str, object]:
+        compiled = behavior.build(behaviors.SPEECH_HEARD_SOURCE)
+        await start_ability_tree(None, compiled)
+        return typing.cast(dict[str, object], await dispatch_ability_for_test(compiled, hsm.Context(), speech_payload))
+
+    return asyncio.run(run())
+
+
+def test_speech_heard_seed_admits_acoustic_content_from_speech_data() -> None:
+    """The seed reads SpeechData.content — the one payload field — not a removed audio field."""
+
+    from bot.abilities import listening
+    from bot.abilities.hearing import voice
+
+    speech = listening.SpeechData(
+        content=bytes([0, 1]) * 160,
+        voice_detection=voice.detection.ApplyData(
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.02, confidence=0.9),)
+        ),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+    )
+    dumped = speech.model_dump(mode="json")
+    output = _speech_heard_admit(dumped)
+
+    assert output["event"] == communication.InputEvent.name
+    data = typing.cast(dict[str, object], output["data"])
+    assert data["content"] == dumped["content"]
+    assert data["content_type"] == "audio/pcm"
+    assert data["sample_rate_hz"] == 16_000
+
+
+def test_speech_heard_seed_admits_decoded_words_as_text_plain() -> None:
+    """A decoded observation carries words in the same field, labelled text/plain."""
+
+    from bot.abilities import listening
+    from bot.abilities.hearing import voice
+
+    speech = listening.SpeechData(
+        content="what is the weather like?",
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.02, confidence=0.9),)
+        ),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+    )
+    output = _speech_heard_admit(speech.model_dump(mode="json"))
+
+    data = typing.cast(dict[str, object], output["data"])
+    assert data["content"] == "what is the weather like?"
+    assert data["content_type"] == "text/plain"

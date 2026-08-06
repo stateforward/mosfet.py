@@ -3359,7 +3359,7 @@ def _speech_event_stimulus() -> hsm.Event[object]:
     from bot.abilities.hearing import voice
 
     speech = listening.SpeechData(
-        audio=bytes([0, 1]) * 160,
+        content=bytes([0, 1]) * 160,
         voice_detection=voice.detection.ApplyData(
             segments=(
                 voice.detection.VoiceDetectionSegment(
@@ -3437,7 +3437,7 @@ def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
         await wait_until(lambda: "/behavior/inactive" in (conversation_actor.state() or ""))
 
         speech = listening.SpeechData(
-            audio=bytes([0, 1]) * 160,
+            content=bytes([0, 1]) * 160,
             voice_detection=voice.detection.ApplyData(
                 segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.02, confidence=0.9),)
             ),

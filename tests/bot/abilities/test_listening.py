@@ -486,7 +486,7 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
     stimulus = _stimulus(handoffs[0])
     assert stimulus.name == listening.SpeechEvent.name
     assert isinstance(stimulus.data, listening.SpeechData)
-    assert stimulus.data.audio == segment.audio
+    assert stimulus.data.content == segment.audio
     assert stimulus.data.confidence is None
     assert stimulus.data.voice_detection.segments[0].confidence == 0.91
     assert stimulus.data.voice_embedding == voice.identification.VoiceEmbedding(
@@ -541,7 +541,7 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
     assert observation.media_type == "audio/pcm"
     assert observation.sample_rate_hz == sample_rate_hz
     assert observation.channels == 1
-    assert observation.audio == pcm_voice
+    assert observation.content == pcm_voice
     assert observation.source_ids == frozenset({(0.11, -0.07, 0.33)})
     assert observation.voice_embedding == voice.identification.VoiceEmbedding(
         embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94
@@ -883,7 +883,6 @@ def test_listening_apply_runs_voice_diarization_and_speech_decoding_pipeline() -
     assert isinstance(stimulus.data, listening.SpeechData)
     assert stimulus.data.content == "decoded:voicesilence"
     assert stimulus.data.content_type == "text/plain"
-    assert stimulus.data.audio == b""
     assert [call.audio for call in diarization_calls] == [b"voicesilence"]
     assert [(call.media_type, call.sample_rate_hz, call.channels) for call in diarization_calls] == [
         ("audio/pcm", 48_000, 1)
@@ -1050,7 +1049,7 @@ def test_listening_publishes_silence_observation_when_classifier_finds_no_labels
 
     assert stimulus.name == listening.SpeechEvent.name
     assert isinstance(stimulus.data, listening.SpeechData)
-    assert stimulus.data.audio == b"ambient"
+    assert stimulus.data.content == b"ambient"
     assert stimulus.data.voice_detection.segments == ()
     assert len(classifier_calls) == 1
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
@@ -1255,7 +1254,7 @@ def test_listening_publishes_speech_when_speech_decoding_is_absent() -> None:
     handoffs, active_state = asyncio.run(run())
     observations = [_stimulus(h).data for h in handoffs if _stimulus(h).name == listening.SpeechEvent.name]
     assert isinstance(observations[0], listening.SpeechData)
-    assert observations[0].audio == b"voice"
+    assert observations[0].content == b"voice"
     assert len(observations[0].voice_detection.segments) == 1
     assert observations[0].sample_rate_hz == 48_000
     assert observations[0].media_type == "audio/pcm"
@@ -1281,7 +1280,7 @@ def test_listening_publishes_speech_after_diarization_when_speech_decoding_is_ab
     handoffs, diarizer_calls, active_state = asyncio.run(run())
     observations = [_stimulus(h).data for h in handoffs if _stimulus(h).name == listening.SpeechEvent.name]
     assert isinstance(observations[0], listening.SpeechData)
-    assert observations[0].audio == DIARIZED_AUDIO
+    assert observations[0].content == DIARIZED_AUDIO
     assert observations[0].start_seconds == 0.0
     assert observations[0].end_seconds == 1.25
     assert observations[0].confidence == 0.87
@@ -1320,7 +1319,7 @@ def test_listening_preserves_non_zero_clipped_diarization_timing_relative_to_voi
     assert len(observations) == 1
     observation = observations[0]
     assert isinstance(observation, listening.SpeechData)
-    assert observation.audio == clipped_audio
+    assert observation.content == clipped_audio
     assert observation.start_seconds == 0.25
     assert observation.end_seconds == 0.75
     assert observation.voice_detection.segments[0].start_seconds == 0.0
@@ -1375,7 +1374,7 @@ def test_listening_publishes_silence_speech_when_speech_decoding_is_absent() -> 
     stimulus = _stimulus(handoffs[0])
     assert stimulus.name == listening.SpeechEvent.name
     assert isinstance(stimulus.data, listening.SpeechData)
-    assert stimulus.data.audio == b"quiet"
+    assert stimulus.data.content == b"quiet"
     assert stimulus.data.voice_detection.segments == ()
 
 
@@ -1397,7 +1396,6 @@ def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> 
     assert isinstance(stimulus.data, listening.SpeechData)
     assert stimulus.data.content == "decoded:voicesilence"
     assert stimulus.data.content_type == "text/plain"
-    assert stimulus.data.audio == b""
     assert decoder_calls == [b"voicesilence"]
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
@@ -1425,7 +1423,6 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
     assert isinstance(stimulus.data, listening.SpeechData)
     assert stimulus.data.content == "decoded:voicesilence"
     assert stimulus.data.content_type == "text/plain"
-    assert stimulus.data.audio == b""
     assert [call.audio for call in diarizer_calls] == [b"voicesilence"]
     assert [(call.media_type, call.sample_rate_hz, call.channels) for call in diarizer_calls] == [
         ("audio/pcm", 48_000, 1)

@@ -2073,7 +2073,7 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
     assert isinstance(stimulus, hsm.Event)
     assert stimulus.name == listening.SpeechEvent.name
     assert isinstance(stimulus.data, listening.SpeechData)
-    assert stimulus.data.audio == b"playback-audio"
+    assert stimulus.data.content == b"playback-audio"
     assert stimulus.data.voice_detection.segments == ()
     # Silence observation is still a turn (sticky-turn close); IgnoreAbility yields empty output.
     assert actions == [()]

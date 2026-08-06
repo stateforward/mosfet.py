@@ -1040,7 +1040,7 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
 
     audio = bytes((i % 256 for i in range(115_202)))
     speech = listening.SpeechData(
-        audio=audio,
+        content=audio,
         voice_detection=voice.detection.ApplyData(
             segments=(
                 voice.detection.VoiceDetectionSegment(
@@ -1056,13 +1056,13 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
         source_ids=frozenset({tuple(-0.03482 + i * 0.001 for i in range(16))}),
     )
     dumped = speech.model_dump(mode="json")
-    # Real admit path: selection carries SpeechData audio + packaging metadata.
+    # Real admit path: selection carries SpeechData content + packaging metadata.
     validated = validate_event_data(
         conversation.InputEvent,
         {
             "source_ids": dumped["source_ids"],
             "target_ids": [],
-            "content": dumped["audio"],
+            "content": dumped["content"],
             "content_type": dumped["media_type"],
             "sample_rate_hz": dumped["sample_rate_hz"],
             "channels": dumped["channels"],

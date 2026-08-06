@@ -1051,7 +1051,6 @@ def test_model_facing_payload_describes_audio_instead_of_carrying_it() -> None:
     stimulus = object_dict(payload["input"])
     data = object_dict(stimulus["data"])
     # What the model can reason about survives: how much audio, of what kind, at what rate.
-    assert data["audio"] == {"media": "bytes", "bytes": len(audio)}
     assert data["content"] == {"media": "bytes", "bytes": len(audio)}
     assert data["content_type"] == "audio/pcm"
     assert data["sample_rate_hz"] == 48000

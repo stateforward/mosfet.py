@@ -623,7 +623,6 @@ def test_listening_stt_product_reaches_cognition_without_conversation_dispatch()
     assert isinstance(cognition_input.stimulus.data, listening.SpeechData)
     assert cognition_input.stimulus.data.content_type == "text/plain"
     assert cognition_input.stimulus.data.content == "decoded:pcm-chunksilence"
-    assert cognition_input.stimulus.data.audio == b""
     assert conversation_state.endswith("/behavior/inactive")
 
 

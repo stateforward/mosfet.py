@@ -170,9 +170,9 @@ class SpeechData(pydantic.BaseModel):
     Listening VAD classifies one admission of sound. Sticky conversational turns assemble these
     speech observations under Conversation turn Start/End.
 
-    ``content`` / ``content_type`` carry what the observation *is* to whoever perceives it:
-    ``audio/pcm`` bytes while the observation is still acoustic, rewritten in place to
-    ``text/plain`` words once speech decoding resolves it. Decode rewrites this same
+    ``content`` / ``content_type`` are the whole payload: one field carrying what the
+    observation *is* to whoever perceives it — ``audio/pcm`` bytes while the observation is
+    still acoustic, rewritten in place to ``text/plain`` words once speech decoding resolves it. Decode rewrites this same
     observation — it never mints a separate product envelope — so the stimulus a bot
     perceives keeps one identity from admission through transcription.
     """
@@ -190,7 +190,6 @@ class SpeechData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "audio": "AAAA",
                     "content": "AAAA",
                     "content_type": "audio/pcm",
                     "voice_detection": {
@@ -201,7 +200,6 @@ class SpeechData(pydantic.BaseModel):
                     "channels": 1,
                 },
                 {
-                    "audio": "",
                     "content": "what is the weather like?",
                     "content_type": "text/plain",
                     "voice_detection": {
@@ -212,7 +210,6 @@ class SpeechData(pydantic.BaseModel):
                     "channels": 1,
                 },
                 {
-                    "audio": "AAAA",
                     "content": "AAAA",
                     "content_type": "audio/pcm",
                     "voice_detection": {"segments": []},
@@ -224,18 +221,11 @@ class SpeechData(pydantic.BaseModel):
         },
     )
 
-    audio: bytes = pydantic.Field(
-        description=(
-            "PCM audio for this observation. Homogeneous with other observations on the same conversation "
-            "stream so turn assembly can concatenate bytes. Empty once speech decoding has rewritten this "
-            "observation into text/plain content."
-        ),
-    )
     content: str | bytes = pydantic.Field(
-        default=b"",
         description=(
-            "What this observation is to whoever perceives it: the PCM bytes while content_type is "
-            "audio/pcm, the decoded words once content_type is text/plain. Defaults to audio."
+            "The one payload this observation carries: signed 16-bit PCM bytes while content_type is "
+            "audio/pcm, the decoded words once content_type is text/plain. PCM observations on the same "
+            "conversation stream are homogeneous so turn assembly can concatenate their bytes."
         ),
         examples=["what is the weather like?"],
     )
@@ -300,19 +290,15 @@ class SpeechData(pydantic.BaseModel):
 
     @property
     def duration_seconds(self) -> float:
-        """Duration of PCM audio using the stream's signed 16-bit sample convention, in seconds."""
+        """Duration of PCM content using the stream's signed 16-bit sample convention, in seconds.
+
+        Zero once decode has rewritten this observation into words: text has no frames.
+        """
 
         frame_bytes = 2 * self.channels
-        return (len(self.audio) // frame_bytes) / float(self.sample_rate_hz) if frame_bytes > 0 else 0.0
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def default_content_to_audio(cls, raw_value: object) -> object:
-        """An acoustic observation *is* its audio; decode later rewrites content in place."""
-
-        if not isinstance(raw_value, dict) or raw_value.get("content") is not None:
-            return raw_value
-        return {**typing.cast(dict[str, object], raw_value), "content": raw_value.get("audio", b"")}
+        if frame_bytes <= 0 or not isinstance(self.content, bytes):
+            return 0.0
+        return (len(self.content) // frame_bytes) / float(self.sample_rate_hz)
 
     @pydantic.model_validator(mode="after")
     def validate_segment_timing(self) -> typing.Self:
@@ -586,7 +572,7 @@ def _speech_from_sensed(
     if sound.media_type != "audio/pcm" or sample_rate_hz is None or not sound.audio:
         return None
     speech = SpeechData(
-        audio=sound.audio,
+        content=sound.audio,
         voice_detection=voice_detection,
         sample_rate_hz=sample_rate_hz,
         channels=channels,
@@ -640,7 +626,7 @@ def _speech_from_voice_segment(
         else voice_detection or voice.detection.ApplyData(segments=())
     )
     return SpeechData(
-        audio=segment.audio,
+        content=segment.audio,
         voice_detection=segment_voice_detection,
         sample_rate_hz=segment.sample_rate_hz,
         media_type="audio/pcm",
@@ -722,7 +708,6 @@ def _dispatch_product_cognition_input_with_operation(
             event,
             SpeechEvent.with_data(
                 SpeechData(
-                    audio=b"",
                     content=completion.speech.decode("utf-8", errors="replace"),
                     content_type="text/plain",
                     voice_detection=completion.voice_detection,

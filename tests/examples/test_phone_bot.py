@@ -959,7 +959,7 @@ async def main() -> None:
     assert installed[0].triggers == (listening.SpeechEvent.name,)
 
     speech = listening.SpeechData(
-        audio=bytes([0, 1]) * 160,
+        content=bytes([0, 1]) * 160,
         voice_detection=voice.detection.ApplyData(
             segments=(
                 voice.detection.VoiceDetectionSegment(
@@ -999,7 +999,7 @@ async def main() -> None:
             conversation.ConversationInputData(
                 source_ids=speech.source_ids,
                 target_ids=frozenset(),
-                content=speech.audio,
+                content=speech.content,
                 content_type="audio/raw",
             ),
             operation_id,

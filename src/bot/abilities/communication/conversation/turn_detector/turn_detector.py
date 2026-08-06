@@ -562,15 +562,17 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             assert isinstance(data, listening.SpeechData)
             # A voiced chunk arriving with no turn open opens one; that is the moment a turn
             # begins, and the only place it is visible.
+            # Acoustic observations carry PCM; a decoded one carries words and no frames.
+            acoustic = data.content if isinstance(data.content, bytes) else b""
             active.set_attribute("bot.turn.opened", instance._turn_ref is None)
-            active.set_attribute("bot.audio.byte.count", len(data.audio))
+            active.set_attribute("bot.audio.byte.count", len(acoustic))
             if instance._turn_ref is None:
                 instance._turn_ref = uuid.uuid4().hex
                 instance._active_conversation_ref = instance.conversation_ref
             instance._ingest_content(
                 AudioStimulus(
                     source_participant_ref=instance._source_participant_ref,
-                    content=data.audio,
+                    content=acoustic,
                     sample_rate_hz=data.sample_rate_hz,
                     channels=data.channels,
                 )
