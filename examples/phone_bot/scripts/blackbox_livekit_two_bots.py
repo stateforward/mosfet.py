@@ -127,6 +127,9 @@ def _bot_env_file(
     # collide when both processes export. Path must stay under the phone_bot cwd (OTEL confine).
     otel_path = target.with_name(f"{identity}-otel-logs.jsonl").resolve()
     values["BOT_OTEL_LOG_FILE"] = str(otel_path)
+    # Spans go beside them, one file per bot. This is the artifact that answers what happened to
+    # a sound between the wire and cognition, so a run that does not leave one is not diagnosable.
+    values["BOT_OTEL_SPAN_FILE"] = str(target.with_name(f"{identity}-otel-spans.jsonl").resolve())
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")

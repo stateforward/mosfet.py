@@ -26,7 +26,9 @@ import pydantic
 from bot import behavior
 from bot.behavior.instance import Instance
 from bot.behavior import storage as behavior_storage
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from . import episodes
 from . import input
@@ -988,26 +990,38 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, types.TurnData)
-        if processing.active_operation(instance, event.id) is None:
-            await processing.start_operation(instance, event.id)
-        cognition_input = data.input
-        stimulus = episodes.stimulus_name(cognition_input.stimulus)
-        candidates = tuple(item for item in instance._behaviors if _matches_trigger(item, stimulus))
-        matched = _MatchedEventData(
-            turn=data,
-            candidates=candidates,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _MatchedEvent.with_data(matched),
-                id=event.id,
-                metadata=dict(event.metadata),
-            ),
-        )
+        with span.operation(
+            "bot.autonomy.match",
+            scope="bot.abilities.cognition",
+            component="cognition.autonomy",
+            stage="behavior_match",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, types.TurnData)
+            if processing.active_operation(instance, event.id) is None:
+                await processing.start_operation(instance, event.id)
+            cognition_input = data.input
+            stimulus = episodes.stimulus_name(cognition_input.stimulus)
+            candidates = tuple(item for item in instance._behaviors if _matches_trigger(item, stimulus))
+            # Zero candidates from a non-empty inventory is a trigger mismatch, not a missing
+            # behavior — the two look identical downstream, where the turn is simply unhandled.
+            active.set_attribute("bot.stimulus.name", stimulus or "")
+            active.set_attribute("bot.behavior.installed.count", len(instance._behaviors))
+            active.set_attribute("bot.behavior.candidate.count", len(candidates))
+            matched = _MatchedEventData(
+                turn=data,
+                candidates=candidates,
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _MatchedEvent.with_data(matched),
+                    id=event.id,
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _dispatch_terminal(

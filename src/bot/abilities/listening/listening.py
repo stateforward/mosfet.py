@@ -31,7 +31,9 @@ import hsm
 from bot.protocols import attachment
 
 from bot.abilities import cognition
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 from bot.environment import SoundData, SoundEvent
 from ..speaking import EfferenceData, EfferenceEvent
 
@@ -146,45 +148,58 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
 
         sound = event.data
         assert isinstance(sound, SoundData)
-        operation_id = event.id if event.id else uuid.uuid4().hex
-        stage = instance._sensitivity
-        # Owner-local waiter: Future on Listening, not a peer Future on Sensitivity.
-        waiter = ability.Ability.prepare_child_terminal_wait(instance, stage, operation_id)
-        try:
-            # Dispatched by hand rather than through the shared child-terminal helper for one
-            # reason: that helper stamps the envelope source with whoever asked, and here the
-            # source is which transducer made the sound. That is the field the body's own
-            # command is correlated against, and overwriting it with "Listening asked" would
-            # leave nothing to correlate.
-            await hsm.dispatch(
+        with span.operation(
+            "bot.listening.sense",
+            scope="bot.abilities.listening",
+            component="listening",
+            stage="sensitivity",
+            context=telemetry.event_context(event),
+        ) as active:
+            # The first span an arriving sound gets: a trace that has this and nothing after it
+            # says the sound reached the ear and stopped there.
+            active.set_attribute("bot.audio.byte.count", len(sound.audio))
+            operation_id = event.id if event.id else uuid.uuid4().hex
+            stage = instance._sensitivity
+            # Owner-local waiter: Future on Listening, not a peer Future on Sensitivity.
+            waiter = ability.Ability.prepare_child_terminal_wait(instance, stage, operation_id)
+            try:
+                # Dispatched by hand rather than through the shared child-terminal helper for one
+                # reason: that helper stamps the envelope source with whoever asked, and here the
+                # source is which transducer made the sound. That is the field the body's own
+                # command is correlated against, and overwriting it with "Listening asked" would
+                # leave nothing to correlate.
+                await hsm.dispatch(
+                    ctx,
+                    stage,
+                    dataclasses.replace(
+                        stage.input_event.with_data_and_id(sound, operation_id),
+                        source=event.source,
+                        target=hsm.id(stage),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+                terminal = await waiter
+            except asyncio.CancelledError:
+                if not waiter.done():
+                    _ = waiter.cancel()
+                raise
+            finally:
+                ability.Ability.clear_child_terminal_wait(instance, stage, operation_id)
+            sensed = terminal.data
+            if not isinstance(sensed, sensitivity.OutputData):
+                raise AssertionError("listening sensitivity must always return a scored sound.")
+            active.set_attribute("bot.sound.level.scored", sensed.perceived_level_db is not None)
+            _ = hsm.dispatch(
                 ctx,
-                stage,
-                dataclasses.replace(
-                    stage.input_event.with_data_and_id(sound, operation_id),
-                    source=event.source,
-                    target=hsm.id(stage),
-                    metadata=dict(event.metadata),
+                instance,
+                telemetry.inject_context(
+                    dataclasses.replace(
+                        _SensitivityCompletedEvent.with_data_and_id(sensed, operation_id),
+                        source=event.source,
+                        metadata=dict(event.metadata),
+                    )
                 ),
             )
-            terminal = await waiter
-        except asyncio.CancelledError:
-            if not waiter.done():
-                _ = waiter.cancel()
-            raise
-        finally:
-            ability.Ability.clear_child_terminal_wait(instance, stage, operation_id)
-        sensed = terminal.data
-        if not isinstance(sensed, sensitivity.OutputData):
-            raise AssertionError("listening sensitivity must always return a scored sound.")
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _SensitivityCompletedEvent.with_data_and_id(sensed, operation_id),
-                source=event.source,
-                metadata=dict(event.metadata),
-            ),
-        )
 
     @staticmethod
     def _hand_to_interpretation(

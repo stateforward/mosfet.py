@@ -11,7 +11,12 @@ import math
 import pathlib
 import typing
 
+from bot.telemetry import span
+
 from ._audio import temporary_audio_file
+
+_SCOPE = "bot.providers.pyannote"
+_COMPONENT = "pyannote.voice_identification"
 
 
 class VoiceIdentificationError(RuntimeError):
@@ -80,22 +85,35 @@ class Classifier(classifying.Classifier[voice.identification.InputData, voice.id
         return await asyncio.to_thread(self._classify_blocking, input)
 
     def _classify_blocking(self, input: voice.identification.InputData) -> voice.identification.OutputData:
-        try:
-            inference = self.inference if self.inference is not None else self.load_inference(self.model_id)
-            embeddings: list[voice.VoiceEmbedding] = []
-            for segment in input.segments:
-                with temporary_audio_file(_wav_container(segment), suffix=self.audio_file_suffix) as audio_path:
-                    embedding = inference(audio_path)
-                embeddings.append(
-                    voice.VoiceEmbedding(
-                        embedding=_embedding_values(embedding),
-                        model=self.model_id,
-                        confidence=None,
+        # Counts only: how many segments went in and how many embeddings came back. An embedding
+        # is the voiceprint itself and never becomes an attribute, and neither does any identity
+        # resolved from one downstream. `asyncio.to_thread` copies the caller's context, so this
+        # span keeps the trace of the audio that produced the segments.
+        with span.operation(
+            "bot.provider.pyannote.voice_identification.classify",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="identify",
+        ) as active:
+            active.set_attribute("bot.voice.segments.count", len(input.segments))
+            try:
+                inference = self.inference if self.inference is not None else self.load_inference(self.model_id)
+                embeddings: list[voice.VoiceEmbedding] = []
+                for segment in input.segments:
+                    with temporary_audio_file(_wav_container(segment), suffix=self.audio_file_suffix) as audio_path:
+                        embedding = inference(audio_path)
+                    embeddings.append(
+                        voice.VoiceEmbedding(
+                            embedding=_embedding_values(embedding),
+                            model=self.model_id,
+                            confidence=None,
+                        )
                     )
-                )
-            return voice.identification.OutputData(embeddings=tuple(embeddings))
-        except Exception as error:
-            raise VoiceIdentificationError("pyannote voice identification failed.") from error
+                output = voice.identification.OutputData(embeddings=tuple(embeddings))
+            except Exception as error:
+                raise VoiceIdentificationError("pyannote voice identification failed.") from error
+            active.set_attribute("bot.voice.embeddings.count", len(output.embeddings))
+            return output
 
 
 def _embedding_values(value: object) -> tuple[float, ...]:

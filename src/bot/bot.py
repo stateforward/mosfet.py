@@ -18,7 +18,9 @@ from bot.protocols import attachment
 from . import events
 
 from bot.device import Device
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
@@ -592,12 +594,27 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _fan_out_input(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        for ability in instance._input:
-            _ = hsm.dispatch(
-                ctx,
-                ability,
-                dataclasses.replace(event, target=hsm.id(ability), metadata=dict(event.metadata)),
-            )
+        with span.operation(
+            "bot.body.fan_out_stimulus",
+            scope="bot.body",
+            component="body",
+            stage="stimulus_fan_out",
+            context=telemetry.event_context(event),
+        ) as active:
+            # A body with no input abilities attached hears nothing, and looks exactly like a body
+            # whose abilities dropped everything. The count is the difference.
+            active.set_attribute("bot.stimulus.name", event.name)
+            active.set_attribute("bot.ability.input.count", len(instance._input))
+            for ability in instance._input:
+                # Stamped on the way out: the ability handles this on its own task, where the
+                # ambient context is bring-up's, not this stimulus's.
+                _ = hsm.dispatch(
+                    ctx,
+                    ability,
+                    telemetry.inject_context(
+                        dataclasses.replace(event, target=hsm.id(ability), metadata=dict(event.metadata))
+                    ),
+                )
 
     @staticmethod
     def _has_focused_device(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
@@ -795,23 +812,37 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        if isinstance(event.data, events.InputEventData):
-            stimulus = event.data
-        elif isinstance(event.data, cognition.InputData):
-            # Sensory / contribution products hand cognition.InputEvent (Listening pattern).
-            # Body admits the handoff; it does not inspect conversation or other product domains.
-            stimulus = event.data.stimulus
-        else:
-            raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
-        focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
-        instance._processing_focus_candidates = focus_candidates
-        cognition_input = cognition.InputData(
-            stimulus=stimulus,
-            abilities=Bot._lifecycle_abilities(instance),
-            actors=Bot._dispatch_actors(instance),
-            focus=instance._focused_device if instance._focused_device in instance._devices else None,
-            focus_candidates=focus_candidates,
-        )
+        # The span covers admitting the stimulus and handing it to cognition, and stops there:
+        # the wait below ends by cancellation on every ordinary turn, which is not a failure of
+        # the handoff.
+        with span.operation(
+            "bot.body.cognition_handoff",
+            scope="bot.body",
+            component="body",
+            stage="cognition_handoff",
+            context=telemetry.event_context(event),
+        ) as active:
+            if isinstance(event.data, events.InputEventData):
+                stimulus = event.data
+                active.set_attribute("bot.handoff.kind", "device_stimulus")
+            elif isinstance(event.data, cognition.InputData):
+                # Sensory / contribution products hand cognition.InputEvent (Listening pattern).
+                # Body admits the handoff; it does not inspect conversation or other product domains.
+                stimulus = event.data.stimulus
+                active.set_attribute("bot.handoff.kind", "ability_product")
+            else:
+                raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
+            focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
+            instance._processing_focus_candidates = focus_candidates
+            active.set_attribute("bot.device.focus_candidate.count", len(focus_candidates))
+            active.set_attribute("bot.ability.count", len(Bot._lifecycle_abilities(instance)))
+            cognition_input = cognition.InputData(
+                stimulus=stimulus,
+                abilities=Bot._lifecycle_abilities(instance),
+                actors=Bot._dispatch_actors(instance),
+                focus=instance._focused_device if instance._focused_device in instance._devices else None,
+                focus_candidates=focus_candidates,
+            )
         # Live turn capability + activity-owned timer. The cancel-token capability is minted with
         # the timer id so a cancelled confirmation can match immediately (before the cancelling
         # activity runs). Successful terminals retire both; timeout keeps only the cancel token.
@@ -830,13 +861,22 @@ class Bot(hsm.Instance, abc.ABC):
         cancel_id = _bot_cancel_operation_id(request_id, hsm.id(timer), instance)
         _ = await processing.start_operation(instance, cancel_id)
         try:
-            input_event = dataclasses.replace(
-                cognition.InputEvent.with_data_and_id(cognition_input, request_id),
-                source=hsm.id(instance),
-                target=hsm.id(instance._cognition),
-                metadata=dict(event.metadata),
-            )
-            _ = hsm.dispatch(ctx, instance._cognition, input_event)
+            with span.operation(
+                "bot.body.cognition_dispatch",
+                scope="bot.body",
+                component="body",
+                stage="cognition_dispatch",
+                context=telemetry.event_context(event),
+            ):
+                input_event = telemetry.inject_context(
+                    dataclasses.replace(
+                        cognition.InputEvent.with_data_and_id(cognition_input, request_id),
+                        source=hsm.id(instance),
+                        target=hsm.id(instance._cognition),
+                        metadata=dict(event.metadata),
+                    )
+                )
+                _ = hsm.dispatch(ctx, instance._cognition, input_event)
             await asyncio.wrap_future(ctx.Done())
         finally:
             await hsm.stop(timer, hsm.Context())

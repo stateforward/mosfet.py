@@ -18,7 +18,9 @@ import hsm
 import pydantic
 
 from bot.protocols import attachment
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 ParticipantKind: typing.TypeAlias = typing.Literal["bot", "human", "service", "runtime"]
 ParticipantPresence: typing.TypeAlias = typing.Literal["absent", "joining", "present", "leaving", "left"]
@@ -549,107 +551,145 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
 
     @staticmethod
     def _on_voice(ctx: hsm.Context, instance: "TurnDetector", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, listening.SpeechData)
-        if instance._turn_ref is None:
-            instance._turn_ref = uuid.uuid4().hex
-            instance._active_conversation_ref = instance.conversation_ref
-        instance._ingest_content(
-            AudioStimulus(
-                source_participant_ref=instance._source_participant_ref,
-                content=data.audio,
-                sample_rate_hz=data.sample_rate_hz,
-                channels=data.channels,
+        with span.operation(
+            "bot.turn.voice",
+            scope="bot.abilities.communication",
+            component="communication.turn_detector",
+            stage="turn_voice",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, listening.SpeechData)
+            # A voiced chunk arriving with no turn open opens one; that is the moment a turn
+            # begins, and the only place it is visible.
+            active.set_attribute("bot.turn.opened", instance._turn_ref is None)
+            active.set_attribute("bot.audio.byte.count", len(data.audio))
+            if instance._turn_ref is None:
+                instance._turn_ref = uuid.uuid4().hex
+                instance._active_conversation_ref = instance.conversation_ref
+            instance._ingest_content(
+                AudioStimulus(
+                    source_participant_ref=instance._source_participant_ref,
+                    content=data.audio,
+                    sample_rate_hz=data.sample_rate_hz,
+                    channels=data.channels,
+                )
             )
-        )
-        del ctx
+            del ctx
 
     @staticmethod
     def _on_start(ctx: hsm.Context, instance: "TurnDetector", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, turn.TurnStartData)
-        if instance._turn_ref is None:
-            instance._turn_ref = data.turn_ref
-            instance._active_conversation_ref = data.conversation_ref
-            instance.conversation_ref = data.conversation_ref
-            instance._source_participant_ref = data.source_participant_ref
-        instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
-        del ctx
+        with span.operation(
+            "bot.turn.start",
+            scope="bot.abilities.communication",
+            component="communication.turn_detector",
+            stage="turn_start",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, turn.TurnStartData)
+            active.set_attribute("bot.turn.opened", instance._turn_ref is None)
+            if instance._turn_ref is None:
+                instance._turn_ref = data.turn_ref
+                instance._active_conversation_ref = data.conversation_ref
+                instance.conversation_ref = data.conversation_ref
+                instance._source_participant_ref = data.source_participant_ref
+            instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
+            del ctx
 
     @staticmethod
     def _on_update(ctx: hsm.Context, instance: "TurnDetector", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, turn.TurnUpdateData)
-        instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
-        del ctx
+        with span.operation(
+            "bot.turn.update",
+            scope="bot.abilities.communication",
+            component="communication.turn_detector",
+            stage="turn_update",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, turn.TurnUpdateData)
+            instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
+            del ctx
 
     @staticmethod
     def _on_end(ctx: hsm.Context, instance: "TurnDetector", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        if isinstance(data, turn.TurnEndData):
-            instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
-        try:
-            if instance._turn_ref is None or instance._active_conversation_ref is None:
-                raise ValueError("Turn closed without an active turn reference.")
-            text = " ".join(instance._text_parts).strip()
-            audio = bytes(instance._audio)
-            if not text and not audio and instance._content is None:
-                raise ValueError("Turn closed with neither text, audio, nor modality-neutral content.")
-            output = TurnCompleteData(
-                conversation_ref=instance._active_conversation_ref,
-                turn_ref=instance._turn_ref,
-                participant_ref=instance.participant_ref,
-                self_participant_ref=instance.participant_ref,
-                source_participant_ref=instance._source_participant_ref,
-                text=text,
-                audio=audio,
-                content=(text if text else audio if audio else instance._content),
-                content_type=(
-                    "text/plain"
-                    if text
-                    else "audio/pcm"
-                    if audio
-                    else instance._content_type
-                ),
-                sample_rate_hz=instance._audio_sample_rate_hz if audio else None,
-                channels=instance._audio_channels if audio else None,
-            )
-        except Exception as error:
-            instance._clear_open()
-            failure = TurnDetectorFailedEvent.with_data(
-                FailedEventData(
-                    message=str(error),
+        with span.operation(
+            "bot.turn.end",
+            scope="bot.abilities.communication",
+            component="communication.turn_detector",
+            stage="turn_end",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            if isinstance(data, turn.TurnEndData):
+                instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
+            try:
+                if instance._turn_ref is None or instance._active_conversation_ref is None:
+                    raise ValueError("Turn closed without an active turn reference.")
+                text = " ".join(instance._text_parts).strip()
+                audio = bytes(instance._audio)
+                if not text and not audio and instance._content is None:
+                    raise ValueError("Turn closed with neither text, audio, nor modality-neutral content.")
+                output = TurnCompleteData(
+                    conversation_ref=instance._active_conversation_ref,
+                    turn_ref=instance._turn_ref,
                     participant_ref=instance.participant_ref,
-                    conversation_ref=instance._active_conversation_ref or instance.conversation_ref,
-                    turn_ref=instance._turn_ref or "turn",
+                    self_participant_ref=instance.participant_ref,
                     source_participant_ref=instance._source_participant_ref,
+                    text=text,
+                    audio=audio,
+                    content=(text if text else audio if audio else instance._content),
+                    content_type=(
+                        "text/plain"
+                        if text
+                        else "audio/pcm"
+                        if audio
+                        else instance._content_type
+                    ),
+                    sample_rate_hz=instance._audio_sample_rate_hz if audio else None,
+                    channels=instance._audio_channels if audio else None,
                 )
-            )
+            except Exception as error:
+                # Closing with nothing to show is a real end-of-turn failure, not a quiet drop.
+                span.record_current_failure("turn_closed_empty")
+                instance._clear_open()
+                failure = TurnDetectorFailedEvent.with_data(
+                    FailedEventData(
+                        message=str(error),
+                        participant_ref=instance.participant_ref,
+                        conversation_ref=instance._active_conversation_ref or instance.conversation_ref,
+                        turn_ref=instance._turn_ref or "turn",
+                        source_participant_ref=instance._source_participant_ref,
+                    )
+                )
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    ability.TerminalErrorEvent.with_data(
+                        dataclasses.replace(
+                            failure, id=event.id or None, source=hsm.id(instance), metadata=dict(event.metadata)
+                        )
+                    ),
+                )
+                return
+            active.set_attribute("bot.turn.content.type", output.content_type or "")
+            active.set_attribute("bot.turn.text.present", bool(output.text))
+            active.set_attribute("bot.audio.byte.count", len(output.audio))
+            instance._clear_content()
+            operation_id = event.id or uuid.uuid4().hex
             _ = hsm.dispatch(
                 ctx,
                 instance,
-                ability.TerminalErrorEvent.with_data(
-                    dataclasses.replace(
-                        failure, id=event.id or None, source=hsm.id(instance), metadata=dict(event.metadata)
-                    )
+                dataclasses.replace(
+                    _TurnNormalizationRequestEvent.with_data(
+                        _TurnNormalizationRequestData(operation_id=operation_id, turn=output)
+                    ),
+                    id=operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
                 ),
             )
-            return
-        instance._clear_content()
-        operation_id = event.id or uuid.uuid4().hex
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _TurnNormalizationRequestEvent.with_data(
-                    _TurnNormalizationRequestData(operation_id=operation_id, turn=output)
-                ),
-                id=operation_id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
 
     @staticmethod
     def _has_normalization_request(
@@ -805,18 +845,108 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         instance: "TurnDetector",
         event: hsm.Event[typing.Any],
     ) -> None:
-        request = event.data
-        assert isinstance(request, _TurnNormalizationRequestData)
-        output = request.turn
-        if instance._decoding is None:
+        with span.operation(
+            "bot.turn.normalize",
+            scope="bot.abilities.communication",
+            component="communication.turn_detector",
+            stage="turn_normalization",
+            context=telemetry.event_context(event),
+        ) as active:
+            request = event.data
+            assert isinstance(request, _TurnNormalizationRequestData)
+            output = request.turn
+            active.set_attribute("bot.turn.decoder.present", instance._decoding is not None)
+            if instance._decoding is None:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _TurnNormalizationCompletedEvent.with_data(
+                            _TurnNormalizationCompletedData(
+                                provenance=TurnDetector._normalization_provenance(request.operation_id, output),
+                                turn=output,
+                            )
+                        ),
+                        id=request.operation_id,
+                        source=hsm.id(instance),
+                        target=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+                return
+            try:
+                stimulus: ParticipationStimulus
+                if output.audio:
+                    stimulus = AudioStimulus(
+                        source_participant_ref=output.source_participant_ref,
+                        content=output.audio,
+                        sample_rate_hz=output.sample_rate_hz,
+                        channels=output.channels,
+                    )
+                elif output.text:
+                    stimulus = TextStimulus(
+                        source_participant_ref=output.source_participant_ref,
+                        content=output.text,
+                    )
+                elif isinstance(output.content, object) and output.content_type is not None:
+                    stimulus = ContentStimulus(
+                        source_participant_ref=output.source_participant_ref,
+                        content=output.content,
+                        content_type=output.content_type,
+                    )
+                else:
+                    raise ValueError("Participant normalization has no decodable content.")
+                terminal = await ability.Ability.await_child_terminal(
+                    ctx,
+                    owner=instance,
+                    child=instance._decoding,
+                    operation_id=request.operation_id,
+                    input=stimulus,
+                    metadata=event.metadata,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                span.record_current_failure("normalize_failed")
+                TurnDetector._queue_normalization_failure(
+                    ctx,
+                    instance,
+                    event,
+                    output,
+                    FailedEventData(message=f"Participant normalization failed: {error}"),
+                )
+                return
+            if terminal.name == instance._decoding.failed_event.name:
+                span.record_current_failure("decode_failed")
+                message = getattr(terminal.data, "message", "Participant normalization failed.")
+                TurnDetector._queue_normalization_failure(
+                    ctx,
+                    instance,
+                    event,
+                    output,
+                    FailedEventData(message=str(message)),
+                )
+                return
+            if not isinstance(terminal.data, str) or not terminal.data.strip():
+                # A decoder that returned nothing ends the turn here; nothing reaches cognition.
+                span.record_current_failure("empty_normalization")
+                TurnDetector._queue_normalization_failure(
+                    ctx,
+                    instance,
+                    event,
+                    output,
+                    FailedEventData(message="Participant normalization produced no text."),
+                )
+                return
+            normalized = output.model_copy(update={"text": terminal.data.strip(), "audio": b""})
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
                     _TurnNormalizationCompletedEvent.with_data(
                         _TurnNormalizationCompletedData(
-                            provenance=TurnDetector._normalization_provenance(request.operation_id, output),
-                            turn=output,
+                            provenance=TurnDetector._normalization_provenance(request.operation_id, normalized),
+                            turn=normalized,
                         )
                     ),
                     id=request.operation_id,
@@ -825,84 +955,6 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     metadata=dict(event.metadata),
                 ),
             )
-            return
-        try:
-            stimulus: ParticipationStimulus
-            if output.audio:
-                stimulus = AudioStimulus(
-                    source_participant_ref=output.source_participant_ref,
-                    content=output.audio,
-                    sample_rate_hz=output.sample_rate_hz,
-                    channels=output.channels,
-                )
-            elif output.text:
-                stimulus = TextStimulus(
-                    source_participant_ref=output.source_participant_ref,
-                    content=output.text,
-                )
-            elif isinstance(output.content, object) and output.content_type is not None:
-                stimulus = ContentStimulus(
-                    source_participant_ref=output.source_participant_ref,
-                    content=output.content,
-                    content_type=output.content_type,
-                )
-            else:
-                raise ValueError("Participant normalization has no decodable content.")
-            terminal = await ability.Ability.await_child_terminal(
-                ctx,
-                owner=instance,
-                child=instance._decoding,
-                operation_id=request.operation_id,
-                input=stimulus,
-                metadata=event.metadata,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            TurnDetector._queue_normalization_failure(
-                ctx,
-                instance,
-                event,
-                output,
-                FailedEventData(message=f"Participant normalization failed: {error}"),
-            )
-            return
-        if terminal.name == instance._decoding.failed_event.name:
-            message = getattr(terminal.data, "message", "Participant normalization failed.")
-            TurnDetector._queue_normalization_failure(
-                ctx,
-                instance,
-                event,
-                output,
-                FailedEventData(message=str(message)),
-            )
-            return
-        if not isinstance(terminal.data, str) or not terminal.data.strip():
-            TurnDetector._queue_normalization_failure(
-                ctx,
-                instance,
-                event,
-                output,
-                FailedEventData(message="Participant normalization produced no text."),
-            )
-            return
-        normalized = output.model_copy(update={"text": terminal.data.strip(), "audio": b""})
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _TurnNormalizationCompletedEvent.with_data(
-                    _TurnNormalizationCompletedData(
-                        provenance=TurnDetector._normalization_provenance(request.operation_id, normalized),
-                        turn=normalized,
-                    )
-                ),
-                id=request.operation_id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
 
     @staticmethod
     def _emit_normalized_output(

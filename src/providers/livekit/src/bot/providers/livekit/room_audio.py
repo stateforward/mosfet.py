@@ -12,11 +12,13 @@ import hsm
 import pydantic
 from livekit import rtc
 
-from bot.telemetry import observer
+from bot.telemetry import observer, span
 
 from .audio import AudioBridge, AudioFrame
 
 _DEFAULT_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+_SCOPE = "bot.providers.livekit"
+_COMPONENT = "livekit.room_audio"
 
 
 class RoomAudioError(RuntimeError):
@@ -393,10 +395,20 @@ class RoomAudioTrackPath(hsm.Instance):
         return instance._operation_timeout
 
     async def _connect_room_audio(self, data: RoomAudioConnectData) -> RoomAudioConnectedData:
-        await self._room.connect(data.url, data.token)
-        track = self._local_track_factory(data.track_name, self._bridge.source_writer.source)
-        publication = await self._room.local_participant.publish_track(track)
-        return RoomAudioConnectedData(local_track_sid=publication.sid)
+        # Two SDK round trips under one span: joining the room and publishing the local track.
+        # Neither the URL, the token, nor the assigned SID may become an attribute.
+        with span.operation(
+            "bot.provider.livekit.room_audio.connect",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="connect",
+        ) as active:
+            await self._room.connect(data.url, data.token)
+            active.set_attribute("bot.room.joined", True)
+            track = self._local_track_factory(data.track_name, self._bridge.source_writer.source)
+            publication = await self._room.local_participant.publish_track(track)
+            active.set_attribute("bot.local_track.published", True)
+            return RoomAudioConnectedData(local_track_sid=publication.sid)
 
     async def _unpublish_local_track(self) -> None:
         track_sid = self._local_track_sid
@@ -455,10 +467,28 @@ class RoomAudioTrackPath(hsm.Instance):
             instance._connection_sink(RoomAudioConnectedData(local_track_sid=None))
 
     async def _forward_remote_audio(self, track: object) -> None:
-        async for item in self._stream_factory(track):
-            frame = _stream_item_frame(item)
-            audio = await self._bridge.receive_frame(frame)
-            await self._remote_audio_sink(audio)
+        # One span for the whole subscription (it ends when the remote track does, carrying the
+        # frame total), and one per frame so a single sound off the wire has a trace of its own
+        # from decode through the sink that batches it. Never the track SID or the frame bytes.
+        with span.operation(
+            "bot.provider.livekit.room_audio.remote_audio",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="receive",
+        ) as subscription:
+            frames = 0
+            async for item in self._stream_factory(track):
+                with span.operation(
+                    "bot.provider.livekit.room_audio.frame",
+                    scope=_SCOPE,
+                    component=_COMPONENT,
+                    stage="decode",
+                ):
+                    frame = _stream_item_frame(item)
+                    audio = await self._bridge.receive_frame(frame)
+                    await self._remote_audio_sink(audio)
+                frames += 1
+                subscription.set_attribute("bot.frames.count", frames)
 
     @staticmethod
     async def _run_connect_room_audio(

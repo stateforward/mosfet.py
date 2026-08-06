@@ -275,3 +275,26 @@ def test_observer_stays_quiet_for_ordinary_events(caplog: pytest.LogCaptureFixtu
         telemetry.observer(hsm.Context(), _DemoInstance(), _observation_for(ordinary))
 
     assert [record for record in caplog.records if "hsm failure" in record.getMessage()] == []
+
+
+def test_observer_keeps_an_unstamped_event_in_the_caller_trace() -> None:
+    """An in-process observation nests under the span that is running, not a new root trace.
+
+    Almost no event in this codebase is stamped with `inject_context` — stamping is for crossing a
+    process or transport. If an unstamped event reparented to nothing, every observation along a
+    stimulus path would land in its own trace and the path could not be read end to end.
+    """
+
+    from opentelemetry.sdk.trace import TracerProvider
+
+    provider = TracerProvider()
+    tracer = provider.get_tracer("bot.telemetry.test")
+    event = hsm.Event[None](name="bot.test.in_process")
+    assert event.metadata == {}
+
+    with tracer.start_as_current_span("caller") as caller:
+        with tracer.start_as_current_span(
+            "observed",
+            context=telemetry.event_context(event),
+        ) as observed:
+            assert observed.get_span_context().trace_id == caller.get_span_context().trace_id

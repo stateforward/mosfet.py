@@ -7,6 +7,7 @@ import logging
 import typing
 
 import hsm
+from opentelemetry import context as otel_context
 from opentelemetry import metrics, propagate, trace
 from opentelemetry.context import Context as OtelContext
 from opentelemetry.trace import Span, Status, StatusCode
@@ -52,9 +53,20 @@ def _carrier_from_metadata(metadata: collections.abc.Mapping[str, object]) -> di
 
 
 def event_context(event: hsm.Event[object]) -> OtelContext:
-    """Extract an OpenTelemetry context from string-valued event metadata."""
+    """Return the trace context an observed event belongs to.
 
-    return propagate.extract(carrier=_carrier_from_metadata(event.metadata))
+    An event stamped by `inject_context` carries its origin's context in metadata and reparents
+    there — that is the point of stamping, and it is how a bot-to-bot or transport hop stays one
+    trace. An event minted in-process carries nothing, and `propagate.extract` on an empty carrier
+    yields an *empty* context, not the ambient one: starting a span in it detaches the event into
+    a brand-new root trace at exactly the moment the caller's span is the answer. So an unstamped
+    event stays where it already is.
+    """
+
+    carrier = _carrier_from_metadata(event.metadata)
+    if not carrier:
+        return otel_context.get_current()
+    return propagate.extract(carrier=carrier)
 
 
 def inject_context[TEventData](event: hsm.Event[TEventData]) -> hsm.Event[TEventData]:

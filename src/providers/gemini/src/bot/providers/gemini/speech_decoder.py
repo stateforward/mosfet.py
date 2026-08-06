@@ -8,9 +8,13 @@ import collections.abc
 import dataclasses
 import typing
 
+from bot.telemetry import span
+
 from .client import ContentClient, error_detail
 
 
+_SCOPE = "bot.providers.gemini"
+_COMPONENT = "gemini.speech.decoding"
 _DEFAULT_STT_MODEL = "gemini-3.5-flash"
 _DEFAULT_PROMPT = "Generate a transcript of the speech. Return only the spoken words as plain text."
 
@@ -92,31 +96,43 @@ class SpeechDecoder(speech.SpeechDecoder):
         return await asyncio.to_thread(self._decode_blocking, input)
 
     def _decode_blocking(self, audio: bytes) -> bytes:
-        if not audio:
-            raise SpeechDecodingError("Gemini speech decoding requires non-empty audio bytes.")
+        # The one boundary where a piece of heard audio becomes words. How much audio went out
+        # and how long the answer was is what tells silence apart from a failed call; the audio,
+        # the prompt, the transcript, and the credentials all stay off the span.
+        # `asyncio.to_thread` copies the caller's context, so this stays on the sound's trace.
+        with span.operation(
+            "bot.provider.gemini.speech.decode",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="decode",
+        ) as active:
+            active.set_attribute("bot.audio.bytes", len(audio))
+            if not audio:
+                raise SpeechDecodingError("Gemini speech decoding requires non-empty audio bytes.")
 
-        audio_b64 = base64.b64encode(audio).decode("ascii")
-        interaction_input: list[dict[str, object]] = [
-            {"type": "text", "text": self.prompt},
-            {
-                "type": "audio",
-                "data": audio_b64,
-                "mime_type": self.mime_type,
-            },
-        ]
-        try:
-            response = self.client.create_interaction(
-                model=self.model,
-                input=interaction_input,
-                generation_config=dict(self.generation_config) or None,
-                store=self.store,
-            )
-            transcript = transcript_from_interaction_response(response)
-        except SpeechDecodingError:
-            raise
-        except Exception as error:
-            raise SpeechDecodingError(f"Gemini speech decoding failed: {error_detail(error)}") from error
-        return transcript.encode("utf-8")
+            audio_b64 = base64.b64encode(audio).decode("ascii")
+            interaction_input: list[dict[str, object]] = [
+                {"type": "text", "text": self.prompt},
+                {
+                    "type": "audio",
+                    "data": audio_b64,
+                    "mime_type": self.mime_type,
+                },
+            ]
+            try:
+                response = self.client.create_interaction(
+                    model=self.model,
+                    input=interaction_input,
+                    generation_config=dict(self.generation_config) or None,
+                    store=self.store,
+                )
+                transcript = transcript_from_interaction_response(response)
+            except SpeechDecodingError:
+                raise
+            except Exception as error:
+                raise SpeechDecodingError(f"Gemini speech decoding failed: {error_detail(error)}") from error
+            active.set_attribute("bot.transcript.chars", len(transcript))
+            return transcript.encode("utf-8")
 
 
 __all__ = [

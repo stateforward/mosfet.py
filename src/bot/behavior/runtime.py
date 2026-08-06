@@ -22,6 +22,8 @@ from starlark_go.errors import StarlarkError
 
 from bot import abilities
 from bot import lifecycle
+from bot import telemetry
+from bot.telemetry import span
 
 
 class CallbackError(RuntimeError):
@@ -269,19 +271,31 @@ class CallbackRuntime:
     ) -> bool:
         """Run a named Starlark guard and require a boolean result."""
 
-        result, dispatches, _ = self._call(
-            name,
-            ctx,
-            instance,
-            event,
-            dispatch_allowed=False,
-            queue_dispatches=False,
-        )
-        if dispatches:
-            raise CallbackError("guards cannot dispatch.")
-        if not isinstance(result, bool):
-            raise CallbackError(f"behavior guard {name!r} must return a bool.")
-        return result
+        with span.operation(
+            "bot.behavior.guard",
+            scope="bot.behavior",
+            component="behavior.callback",
+            stage="guard",
+            context=telemetry.event_context(event),
+        ) as active:
+            # A guard that says no is how a behavior declines a product, and declining leaves no
+            # other trace: no dispatch, no failure, nothing downstream. The callback name is
+            # fixed by the installed behavior source, so it is a dimension, not a label.
+            active.set_attribute("bot.behavior.callback", name)
+            result, dispatches, _ = self._call(
+                name,
+                ctx,
+                instance,
+                event,
+                dispatch_allowed=False,
+                queue_dispatches=False,
+            )
+            if dispatches:
+                raise CallbackError("guards cannot dispatch.")
+            if not isinstance(result, bool):
+                raise CallbackError(f"behavior guard {name!r} must return a bool.")
+            active.set_attribute("bot.guard.admitted", result)
+            return result
 
     def effect(
         self,
@@ -292,7 +306,15 @@ class CallbackRuntime:
     ) -> None:
         """Run a named Starlark effect (immediate event dispatch only)."""
 
-        _ = self._call_behavior(name, ctx, instance, event, queue_dispatches=False)
+        with span.operation(
+            "bot.behavior.effect",
+            scope="bot.behavior",
+            component="behavior.callback",
+            stage="effect",
+            context=telemetry.event_context(event),
+        ) as active:
+            active.set_attribute("bot.behavior.callback", name)
+            _ = self._call_behavior(name, ctx, instance, event, queue_dispatches=False)
 
     async def activity(
         self,

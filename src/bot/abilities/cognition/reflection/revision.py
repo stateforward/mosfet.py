@@ -25,7 +25,9 @@ from bot.behavior.instance import STATUS_REASON_VALIDATION
 from bot.behavior.instance import Instance
 from bot.behavior.source import STARLARK_API
 from bot.protocols import attachment
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from .. import episodes
 from .. import input
@@ -521,72 +523,79 @@ class Revision(processing.Processing):
 
     @staticmethod
     async def _prepare(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, InputData)
-        operation_id = data.parent_operation_id
-        operation = await processing.start_operation(instance, operation_id)
-        try:
-            if isinstance(data.intent, CreateData):
-                create_intent = data.intent
-                existing = _load_behavior(instance._memory, create_intent.name)
-                if existing is None:
-                    existing = _draft(create_intent)
-                    _store_behavior(instance._memory, existing)
-                intent = ChangeData(
-                    name=create_intent.name,
-                    triggers=create_intent.triggers,
-                    description=create_intent.description,
-                    reason=create_intent.reason,
+        with span.operation(
+            "bot.revision.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.revision",
+            stage="revision_prepare",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, InputData)
+            operation_id = data.parent_operation_id
+            operation = await processing.start_operation(instance, operation_id)
+            try:
+                if isinstance(data.intent, CreateData):
+                    create_intent = data.intent
+                    existing = _load_behavior(instance._memory, create_intent.name)
+                    if existing is None:
+                        existing = _draft(create_intent)
+                        _store_behavior(instance._memory, existing)
+                    intent = ChangeData(
+                        name=create_intent.name,
+                        triggers=create_intent.triggers,
+                        description=create_intent.description,
+                        reason=create_intent.reason,
+                    )
+                else:
+                    create_intent = None
+                    intent = data.intent
+                    existing = _load_behavior(instance._memory, intent.name)
+                    if existing is None:
+                        raise ValueError(f"Revision selected unknown behavior: {intent.name}.")
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _FailedEvent.with_data(
+                            _FailedData(
+                                input=data,
+                                operation_id=operation_id,
+                                generation=hsm.id(operation),
+                                message=str(error),
+                            )
+                        ),
+                        id=operation_id,
+                        source=hsm.id(instance),
+                        target=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
                 )
-            else:
-                create_intent = None
-                intent = data.intent
-                existing = _load_behavior(instance._memory, intent.name)
-                if existing is None:
-                    raise ValueError(f"Revision selected unknown behavior: {intent.name}.")
-        except Exception as error:
+                return
+            write = ChangeWriteInput(
+                cognition_input=data.cognition_input,
+                cognition_output=data.cognition_output,
+                instruction=data.instruction,
+                prior_episodes=data.prior_episodes,
+                intent=intent,
+                existing_behavior=existing,
+                operation_id=operation_id,
+                generation=data.parent_generation,
+                attempt=0,
+                create_intent=create_intent,
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _FailedEvent.with_data(
-                        _FailedData(
-                            input=data,
-                            operation_id=operation_id,
-                            generation=hsm.id(operation),
-                            message=str(error),
-                        )
-                    ),
+                    _RequestedEvent.with_data(_RequestedData(write=write, generation=hsm.id(operation))),
                     id=operation_id,
                     source=hsm.id(instance),
                     target=hsm.id(instance),
                     metadata=dict(event.metadata),
                 ),
             )
-            return
-        write = ChangeWriteInput(
-            cognition_input=data.cognition_input,
-            cognition_output=data.cognition_output,
-            instruction=data.instruction,
-            prior_episodes=data.prior_episodes,
-            intent=intent,
-            existing_behavior=existing,
-            operation_id=operation_id,
-            generation=data.parent_generation,
-            attempt=0,
-            create_intent=create_intent,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _RequestedEvent.with_data(_RequestedData(write=write, generation=hsm.id(operation))),
-                id=operation_id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
 
     @staticmethod
     def _has_requested(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
@@ -595,41 +604,48 @@ class Revision(processing.Processing):
 
     @staticmethod
     async def _dispatch_change(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _RequestedData)
-        write = data.write
-        # Correlation uses free-running attempt index (no fixed attempt substates / budget).
-        instance._active_attempt = write.attempt
-        request = processing.InputData(
-            input=write,
-            schemas=(ChangeEvent,),
-            actors={},
-        )
-        await hsm.dispatch(
-            ctx,
-            instance._change_processing,
-            dataclasses.replace(
-                instance._change_processing.input_event.with_data_and_id(
-                    request,
-                    Revision._child_id(write.operation_id, write.attempt, data.generation),
+        with span.operation(
+            "bot.revision.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.revision",
+            stage="revision_change",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, _RequestedData)
+            write = data.write
+            # Correlation uses free-running attempt index (no fixed attempt substates / budget).
+            instance._active_attempt = write.attempt
+            request = processing.InputData(
+                input=write,
+                schemas=(ChangeEvent,),
+                actors={},
+            )
+            await hsm.dispatch(
+                ctx,
+                instance._change_processing,
+                dataclasses.replace(
+                    instance._change_processing.input_event.with_data_and_id(
+                        request,
+                        Revision._child_id(write.operation_id, write.attempt, data.generation),
+                    ),
+                    metadata=dict(event.metadata),
                 ),
-                metadata=dict(event.metadata),
-            ),
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Revision._private_event(
+            )
+            _ = hsm.dispatch(
+                ctx,
                 instance,
-                event,
-                _StartedEvent,
-                _StartedData(
-                    operation_id=write.operation_id,
-                    generation=data.generation,
-                    attempt=write.attempt,
+                Revision._private_event(
+                    instance,
+                    event,
+                    _StartedEvent,
+                    _StartedData(
+                        operation_id=write.operation_id,
+                        generation=data.generation,
+                        attempt=write.attempt,
+                    ),
                 ),
-            ),
-        )
+            )
 
     @staticmethod
     def _has_started(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:

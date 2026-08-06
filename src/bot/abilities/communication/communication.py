@@ -19,7 +19,9 @@ from bot.abilities import ability
 from bot.abilities import cognition
 from .conversation import conversation as conversation_module
 from bot.protocols import attachment
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 Conversation = conversation_module.Conversation
 ConversationInputData = conversation_module.ConversationInputData
@@ -183,17 +185,29 @@ class Communication(ability.Ability[ConversationInputData, object]):
     ) -> None:
         """Route admit/input to the active Conversation (lookup/swap later)."""
 
-        data = event.data
-        assert isinstance(data, ConversationInputData)
-        target = instance._active_conversation
-        routed = dataclasses.replace(
-            conversation_module.InputEvent.with_data(data),
-            id=event.id or None,
-            source=hsm.id(instance),
-            target=hsm.id(target),
-            metadata=dict(event.metadata),
-        )
-        _ = hsm.dispatch(ctx, target, routed)
+        with span.operation(
+            "bot.communication.route",
+            scope="bot.abilities.communication",
+            component="communication",
+            stage="conversation_route",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, ConversationInputData)
+            target = instance._active_conversation
+            # Speaker identity is what a conversation turns into participants; whether the product
+            # arrived carrying any is the difference between a routed turn and a dropped one.
+            active.set_attribute("bot.identity.source.count", len(data.source_ids))
+            active.set_attribute("bot.identity.target.count", len(data.target_ids))
+            active.set_attribute("bot.content.type", data.content_type or "")
+            routed = dataclasses.replace(
+                conversation_module.InputEvent.with_data(data),
+                id=event.id or None,
+                source=hsm.id(instance),
+                target=hsm.id(target),
+                metadata=dict(event.metadata),
+            )
+            _ = hsm.dispatch(ctx, target, routed)
 
     @staticmethod
     def _forward_conversation_product(

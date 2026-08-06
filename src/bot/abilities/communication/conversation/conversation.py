@@ -28,7 +28,9 @@ from pydantic.config import JsonDict, JsonValue
 
 from bot import event_schema
 from bot.abilities import cognition
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 Stage: typ.TypeAlias = typ.Literal["memory", "turn_detector", "voice_routing"]
 Content: typ.TypeAlias = object
@@ -1050,20 +1052,30 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
 
     @staticmethod
     def _queue_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
-        data = event.data
-        assert isinstance(data, ConversationInputData)
-        operation_id = _operation_id(event)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _InputWorkEvent.with_data(_InputWorkData(input=data)),
-                id=operation_id,
-                source=event.source or hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
+        with span.operation(
+            "bot.conversation.ingress",
+            scope="bot.abilities.communication",
+            component="communication.conversation",
+            stage="conversation_ingress",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, ConversationInputData)
+            active.set_attribute("bot.identity.source.count", len(data.source_ids))
+            active.set_attribute("bot.identity.target.count", len(data.target_ids))
+            active.set_attribute("bot.content.type", data.content_type or "")
+            operation_id = _operation_id(event)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _InputWorkEvent.with_data(_InputWorkData(input=data)),
+                    id=operation_id,
+                    source=event.source or hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     async def _run_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
@@ -1262,77 +1274,86 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     content=content,
                 )
                 active_turn_detector_keys.add(detector_key)
-                waiter = ability.Ability.prepare_child_terminal_wait(instance, detector, operation_id)
-                try:
-                    await hsm.dispatch(
-                        ctx,
-                        detector,
-                        dataclasses.replace(
-                            turn_detector.TurnStartEvent.with_data(start),
-                            id=operation_id,
-                            source=hsm.id(instance),
-                            target=hsm.id(detector),
-                            metadata=dict(event.metadata),
-                        ),
-                    )
-                    await hsm.dispatch(
-                        ctx,
-                        detector,
-                        dataclasses.replace(
-                            turn_detector.TurnEndEvent.with_data(
-                                turn_detector.TurnEndData(
-                                    conversation_ref=relationship_ref,
-                                    turn_ref=turn_ref,
-                                    source_participant_ref=source_id,
-                                )
+                with span.operation(
+                    "bot.conversation.turn_exchange",
+                    scope="bot.abilities.communication",
+                    component="communication.conversation",
+                    stage="turn_detector",
+                    context=telemetry.event_context(event),
+                ):
+                    # One start/end exchange with one detector. A trace that stops here says the
+                    # product reached the detector and no turn ever came back.
+                    waiter = ability.Ability.prepare_child_terminal_wait(instance, detector, operation_id)
+                    try:
+                        await hsm.dispatch(
+                            ctx,
+                            detector,
+                            dataclasses.replace(
+                                turn_detector.TurnStartEvent.with_data(start),
+                                id=operation_id,
+                                source=hsm.id(instance),
+                                target=hsm.id(detector),
+                                metadata=dict(event.metadata),
                             ),
-                            id=operation_id,
-                            source=hsm.id(instance),
-                            target=hsm.id(detector),
-                            metadata=dict(event.metadata),
-                        ),
-                    )
-                    terminal = await asyncio.wait_for(waiter, timeout=_TURN_TIMEOUT_SECONDS)
-                except asyncio.TimeoutError as error:
-                    ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
-                    provenance = provenance.model_copy(
-                        update={
-                            "detector_ids": provenance.detector_ids - frozenset({participant.track_ref}),
-                            "failure_track_ref": participant.track_ref,
-                        }
-                    )
-                    raise RuntimeError(
-                        f"Turn detector turn timed out after {_TURN_TIMEOUT_SECONDS:g} seconds."
-                    ) from error
-                finally:
-                    ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
-                correlated_envelope = terminal.id == operation_id and terminal.source == hsm.id(detector)
-                if not correlated_envelope:
-                    raise RuntimeError(
-                        "Turn detector returned an unrelated terminal: "
-                        f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
-                        f"expected_id={operation_id!r} expected_source={hsm.id(detector)!r} "
-                        f"data={terminal.data!r}"
-                    )
-                if terminal.name == detector.failed_event.name and isinstance(
-                    terminal.data, turn_detector.FailedEventData
-                ):
-                    raise RuntimeError(terminal.data.message)
-                if (
-                    terminal.name != detector.output_event.name
-                    or not isinstance(terminal.data, turn_detector.TurnCompleteData)
-                    or terminal.data.conversation_ref != relationship_ref
-                    or terminal.data.turn_ref != turn_ref
-                    or terminal.data.source_participant_ref != source_id
-                    or terminal.data.participant_ref != participant.track_ref
-                ):
-                    raise RuntimeError(
-                        "Turn detector returned an unrelated completion: "
-                        f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
-                        f"expected_name={detector.output_event.name!r} data={terminal.data!r}"
-                    )
-                terminals.append(terminal.data)
-                active_turn_detector_keys.discard(detector_key)
+                        )
+                        await hsm.dispatch(
+                            ctx,
+                            detector,
+                            dataclasses.replace(
+                                turn_detector.TurnEndEvent.with_data(
+                                    turn_detector.TurnEndData(
+                                        conversation_ref=relationship_ref,
+                                        turn_ref=turn_ref,
+                                        source_participant_ref=source_id,
+                                    )
+                                ),
+                                id=operation_id,
+                                source=hsm.id(instance),
+                                target=hsm.id(detector),
+                                metadata=dict(event.metadata),
+                            ),
+                        )
+                        terminal = await asyncio.wait_for(waiter, timeout=_TURN_TIMEOUT_SECONDS)
+                    except asyncio.TimeoutError as error:
+                        ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
+                        provenance = provenance.model_copy(
+                            update={
+                                "detector_ids": provenance.detector_ids - frozenset({participant.track_ref}),
+                                "failure_track_ref": participant.track_ref,
+                            }
+                        )
+                        raise RuntimeError(
+                            f"Turn detector turn timed out after {_TURN_TIMEOUT_SECONDS:g} seconds."
+                        ) from error
+                    finally:
+                        ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
+                    correlated_envelope = terminal.id == operation_id and terminal.source == hsm.id(detector)
+                    if not correlated_envelope:
+                        raise RuntimeError(
+                            "Turn detector returned an unrelated terminal: "
+                            f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
+                            f"expected_id={operation_id!r} expected_source={hsm.id(detector)!r} "
+                            f"data={terminal.data!r}"
+                        )
+                    if terminal.name == detector.failed_event.name and isinstance(
+                        terminal.data, turn_detector.FailedEventData
+                    ):
+                        raise RuntimeError(terminal.data.message)
+                    if (
+                        terminal.name != detector.output_event.name
+                        or not isinstance(terminal.data, turn_detector.TurnCompleteData)
+                        or terminal.data.conversation_ref != relationship_ref
+                        or terminal.data.turn_ref != turn_ref
+                        or terminal.data.source_participant_ref != source_id
+                        or terminal.data.participant_ref != participant.track_ref
+                    ):
+                        raise RuntimeError(
+                            "Turn detector returned an unrelated completion: "
+                            f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
+                            f"expected_name={detector.output_event.name!r} data={terminal.data!r}"
+                        )
+                    terminals.append(terminal.data)
+                    active_turn_detector_keys.discard(detector_key)
 
             staged_profiles = tuple(
                 (participant, instance._profile_update(participant, source_id)) for source_id, participant in detectors

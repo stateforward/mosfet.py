@@ -12,7 +12,9 @@ import bot
 from bot.protocols import attachment
 import pydantic
 
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from .input import InputData, is_input
 from . import autonomy
@@ -265,23 +267,30 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert is_input(data)
-        autonomy_ability = instance._autonomy
-        assert autonomy_ability is not None
-        operation_id = event.id or uuid.uuid4().hex
-        if processing.active_operation(instance, operation_id) is None:
-            _ = await processing.start_operation(instance, operation_id)
-        instance._active_child_suffix = _AUTONOMY_ID_SUFFIX
-        turn = Cognition._turn(instance, data, operation_id)
-        input_event = dataclasses.replace(
-            autonomy_ability.input_event.with_data_and_id(
-                turn,
-                f"{operation_id}{_AUTONOMY_ID_SUFFIX}",
-            ),
-            metadata=dict(event.metadata),
-        )
-        await hsm.dispatch(ctx, autonomy_ability, input_event)
+        with span.operation(
+            "bot.cognition.stage",
+            scope="bot.abilities.cognition",
+            component="cognition",
+            stage="autonomy",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert is_input(data)
+            autonomy_ability = instance._autonomy
+            assert autonomy_ability is not None
+            operation_id = event.id or uuid.uuid4().hex
+            if processing.active_operation(instance, operation_id) is None:
+                _ = await processing.start_operation(instance, operation_id)
+            instance._active_child_suffix = _AUTONOMY_ID_SUFFIX
+            turn = Cognition._turn(instance, data, operation_id)
+            input_event = dataclasses.replace(
+                autonomy_ability.input_event.with_data_and_id(
+                    turn,
+                    f"{operation_id}{_AUTONOMY_ID_SUFFIX}",
+                ),
+                metadata=dict(event.metadata),
+            )
+            await hsm.dispatch(ctx, autonomy_ability, input_event)
 
     @staticmethod
     async def _start_intuition_from_input(
@@ -483,12 +492,22 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        # Prefer full unhandled-autonomy match (envelope id, generation, live op, suffix).
-        # Suffix is still set when this activity starts from the autonomy→intuition transition.
-        if Cognition._autonomy_is_unhandled(ctx, instance, event):
-            await Cognition._start_intuition(ctx, instance, event)
-            return
-        await Cognition._start_intuition_from_input(ctx, instance, event)
+        with span.operation(
+            "bot.cognition.stage",
+            scope="bot.abilities.cognition",
+            component="cognition",
+            stage="intuition",
+            context=telemetry.event_context(event),
+        ) as active:
+            # Prefer full unhandled-autonomy match (envelope id, generation, live op, suffix).
+            # Suffix is still set when this activity starts from the autonomy→intuition transition.
+            if Cognition._autonomy_is_unhandled(ctx, instance, event):
+                # Entered from an unhandled autonomy turn rather than straight from input.
+                active.set_attribute("bot.cognition.entered_from", "autonomy")
+                await Cognition._start_intuition(ctx, instance, event)
+                return
+            active.set_attribute("bot.cognition.entered_from", "input")
+            await Cognition._start_intuition_from_input(ctx, instance, event)
 
     @staticmethod
     def _matches_intuition_output(
@@ -553,49 +572,56 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        completion = event.data
-        cognition_input = completion.turn.input if isinstance(completion, types.CompletionData) else None
-        operation_id = completion.turn.operation_id if isinstance(completion, types.CompletionData) else None
-        public_metadata = _public_metadata(dict(event.metadata))
-        if cognition_input is None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(
-                        _failure(operation_id, "Cognition reasoning start is missing turn correlation.")
+        with span.operation(
+            "bot.cognition.stage",
+            scope="bot.abilities.cognition",
+            component="cognition",
+            stage="reasoning",
+            context=telemetry.event_context(event),
+        ):
+            completion = event.data
+            cognition_input = completion.turn.input if isinstance(completion, types.CompletionData) else None
+            operation_id = completion.turn.operation_id if isinstance(completion, types.CompletionData) else None
+            public_metadata = _public_metadata(dict(event.metadata))
+            if cognition_input is None:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _ApplyFailedEvent.with_data(
+                            _failure(operation_id, "Cognition reasoning start is missing turn correlation.")
+                        ),
+                        id=operation_id,
+                        metadata=public_metadata,
                     ),
-                    id=operation_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
-        try:
-            input = Cognition._build_processing_input(instance, cognition_input)
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
-                    id=operation_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
-        from . import reasoning as reasoning_ability
+                )
+                return
+            try:
+                input = Cognition._build_processing_input(instance, cognition_input)
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
+                        id=operation_id,
+                        metadata=public_metadata,
+                    ),
+                )
+                return
+            from . import reasoning as reasoning_ability
 
-        base = operation_id if operation_id else uuid.uuid4().hex
-        instance._active_child_suffix = _REASONING_ID_SUFFIX
-        turn = Cognition._turn(instance, cognition_input, base)
-        input_event = dataclasses.replace(
-            instance._reasoning.input_event.with_data_and_id(
-                reasoning_ability.InputData(turn=turn, processing_input=input),
-                f"{base}{_REASONING_ID_SUFFIX}",
-            ),
-            metadata=public_metadata,
-        )
-        await hsm.dispatch(ctx, instance._reasoning, input_event)
+            base = operation_id if operation_id else uuid.uuid4().hex
+            instance._active_child_suffix = _REASONING_ID_SUFFIX
+            turn = Cognition._turn(instance, cognition_input, base)
+            input_event = dataclasses.replace(
+                instance._reasoning.input_event.with_data_and_id(
+                    reasoning_ability.InputData(turn=turn, processing_input=input),
+                    f"{base}{_REASONING_ID_SUFFIX}",
+                ),
+                metadata=public_metadata,
+            )
+            await hsm.dispatch(ctx, instance._reasoning, input_event)
 
     @staticmethod
     def _matches_reasoning_output(

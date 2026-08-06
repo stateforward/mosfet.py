@@ -20,8 +20,12 @@ import typing
 import collections.abc
 import dataclasses
 
+from bot.telemetry import span
+
 
 _LOG = logging.getLogger(__name__)
+_SCOPE = "bot.providers.livekit"
+_COMPONENT = "livekit.pcm_batch"
 
 
 def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
@@ -53,10 +57,35 @@ class RemotePcmBatcher:
     _lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = dataclasses.field(default=False, init=False)
 
+    async def _emit_traced(self, chunk: audio.AudioInputData, reason: str) -> None:
+        """Emit one assembled chunk under a span naming why the seam fell here.
+
+        This is the unit that reaches perception, so it is the span a sound is followed by:
+        how long it was, how many samples, and which flush rule cut it. Never the PCM.
+        ``reason`` is a closed vocabulary chosen by the call sites below.
+        """
+
+        with span.operation(
+            "bot.provider.livekit.pcm_batch.flush",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="flush",
+            attributes={"bot.pcm_batch.reason": reason},
+        ) as active:
+            sample_rate_hz = chunk.sample_rate_hz
+            channels = chunk.channels
+            if sample_rate_hz is not None and channels is not None:
+                active.set_attribute("bot.audio.samples", len(chunk.audio) // (2 * channels))
+                active.set_attribute(
+                    "bot.audio.duration_ms",
+                    round(pcm_duration_ms(chunk.audio, sample_rate_hz=sample_rate_hz, channels=channels)),
+                )
+            await self.emit(chunk)
+
     async def push(self, data: audio.AudioInputData) -> None:
         if self._closed or not data.audio:
             return
-        to_emit: list[audio.AudioInputData] = []
+        to_emit: list[tuple[audio.AudioInputData, str]] = []
         async with self._lock:
             if self._closed:
                 return
@@ -66,7 +95,7 @@ class RemotePcmBatcher:
                 or data.media_type != self._media_type
             )
             if format_changed and self._buffer:
-                to_emit.append(self._snapshot_unlocked())
+                to_emit.append((self._snapshot_unlocked(), "format_changed"))
                 self._clear_unlocked()
             self._sample_rate_hz = data.sample_rate_hz
             self._channels = data.channels
@@ -80,13 +109,13 @@ class RemotePcmBatcher:
                 channels=typing.cast(int, data.channels),
             )
             if duration_ms >= self.max_utterance_ms:
-                to_emit.append(self._snapshot_unlocked())
+                to_emit.append((self._snapshot_unlocked(), "max_utterance"))
                 self._clear_unlocked()
                 self._cancel_idle_unlocked()
             else:
                 self._reschedule_idle_unlocked()
-        for chunk in to_emit:
-            await self.emit(chunk)
+        for chunk, reason in to_emit:
+            await self._emit_traced(chunk, reason)
 
     async def flush(self) -> None:
         async with self._lock:
@@ -94,7 +123,7 @@ class RemotePcmBatcher:
             self._clear_unlocked()
             self._cancel_idle_unlocked()
         if pending is not None:
-            await self.emit(pending)
+            await self._emit_traced(pending, "flush")
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -103,7 +132,7 @@ class RemotePcmBatcher:
             self._clear_unlocked()
             self._cancel_idle_unlocked()
         if pending is not None:
-            await self.emit(pending)
+            await self._emit_traced(pending, "closed")
 
     def _snapshot_unlocked(self) -> audio.AudioInputData:
         assert self._sample_rate_hz is not None
@@ -150,7 +179,7 @@ class RemotePcmBatcher:
                 return
             pending = self._snapshot_unlocked()
             self._clear_unlocked()
-        await self.emit(pending)
+        await self._emit_traced(pending, "idle")
 
 
 __all__ = [

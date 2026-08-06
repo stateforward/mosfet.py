@@ -18,7 +18,7 @@ import bot.device
 from livekit import rtc
 
 import bot.lifecycle
-from bot.telemetry import observer
+from bot.telemetry import inject_context, observer, span
 from bot.environment import Environment, require_environment_scope
 
 from . import signaling
@@ -66,6 +66,8 @@ _PhoneServiceTarget = typing.Annotated[
 
 
 _LOG = logging.getLogger(__name__)
+_SCOPE = "bot.providers.livekit"
+_COMPONENT = "livekit.phone"
 
 
 class _PhoneServiceAttachmentData(pydantic.BaseModel):
@@ -1049,7 +1051,19 @@ class PhoneService(hsm.Instance):
                 # Answer the wire now, and let the phone ring on its own time. Awaiting the
                 # dispatch would hold the caller's setup transaction open across a ring, a sound
                 # stimulus, and possibly a whole cognition turn — long past any RPC deadline.
-                _ = live_service.dispatch(live_service.context(), build(caller_identity, message))
+                # The message arrived off the wire, so the event minted from it is stamped with
+                # this arrival's context; without it every observation of an inbound call starts
+                # its own trace. Caller identity and call id stay out of the attributes.
+                with span.operation(
+                    "bot.provider.livekit.phone.signaling.receive",
+                    scope=_SCOPE,
+                    component=_COMPONENT,
+                    stage="signal_in",
+                ):
+                    _ = live_service.dispatch(
+                        live_service.context(),
+                        inject_context(build(caller_identity, message)),
+                    )
                 return message.model_dump_json()
 
             return handle
@@ -1109,15 +1123,24 @@ class PhoneService(hsm.Instance):
         peer_identity = self._call_peer_identity
         if participant is None or peer_identity is None:
             return
-        try:
-            _ = await participant.perform_rpc(
-                destination_identity=peer_identity,
-                method=method,
-                payload=signaling.MessageData(call_id=call_id).model_dump_json(),
-                response_timeout=self._setup_timeout.total_seconds(),
-            )
-        except rtc.RpcError as error:
-            raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
+        # `method` is one of the four call-setup constants, so it is a dimension, not a label.
+        # The peer identity (a phone number here) and the call id never become attributes.
+        with span.operation(
+            "bot.provider.livekit.phone.signaling.send",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="signal_out",
+            attributes={"bot.signaling.method": method},
+        ):
+            try:
+                _ = await participant.perform_rpc(
+                    destination_identity=peer_identity,
+                    method=method,
+                    payload=signaling.MessageData(call_id=call_id).model_dump_json(),
+                    response_timeout=self._setup_timeout.total_seconds(),
+                )
+            except rtc.RpcError as error:
+                raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
 
     def _ensure_media(self) -> tuple[AudioBridge[typing.Any], RoomAudioTrackPath]:
         if self._bridge is not None and self._track_path is not None:
@@ -1540,23 +1563,30 @@ class PhoneService(hsm.Instance):
         instance._remote_audio_bytes += len(data.audio)
         instance._delivering_remote_audio = True
         try:
-            _ = phone_event_target.dispatch(
-                ctx,
-                dataclasses.replace(
-                    phone.ServiceAudioReceivedEvent.with_data(
-                        phone.ServiceAudioData(
-                            call_id=call_id,
-                            audio=data.audio,
-                            media_type=data.media_type,
-                            sample_rate_hz=data.sample_rate_hz,
-                            channels=data.channels,
-                        )
+            with span.operation(
+                "bot.provider.livekit.phone.remote_audio.deliver",
+                scope=_SCOPE,
+                component=_COMPONENT,
+                stage="deliver",
+            ) as active:
+                active.set_attribute("bot.audio.bytes", len(data.audio))
+                _ = phone_event_target.dispatch(
+                    ctx,
+                    dataclasses.replace(
+                        phone.ServiceAudioReceivedEvent.with_data(
+                            phone.ServiceAudioData(
+                                call_id=call_id,
+                                audio=data.audio,
+                                media_type=data.media_type,
+                                sample_rate_hz=data.sample_rate_hz,
+                                channels=data.channels,
+                            )
+                        ),
+                        source=hsm.id(instance),
+                        target=hsm.id(phone_event_target),
+                        metadata=dict(event.metadata),
                     ),
-                    source=hsm.id(instance),
-                    target=hsm.id(phone_event_target),
-                    metadata=dict(event.metadata),
-                ),
-            )
+                )
         finally:
             instance._delivering_remote_audio = False
 
@@ -1588,6 +1618,24 @@ class PhoneService(hsm.Instance):
         assert isinstance(data, audio.AudioInputData)
         instance._remote_audio_dropped_chunks += 1
         instance._remote_audio_dropped_bytes += len(data.audio)
+        # Refusing delivery is decisive and was previously invisible: the counters said how much
+        # was dropped, nothing said why. Same order the guard checks in, so the kind names the
+        # first condition that failed.
+        # The kind is a closed vocabulary, not an error: dropping is the modelled outcome of a
+        # guard, so the span is `ok` and the reason is the attribute that answers "why".
+        kind = "media_call_inactive" if instance._media_call_id is None else "phone_not_attached"
+        with span.operation(
+            "bot.provider.livekit.phone.remote_audio.drop",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="deliver",
+            attributes={"bot.remote_audio.drop_reason": kind},
+        ) as active:
+            active.set_attribute("bot.audio.bytes", len(data.audio))
+        if instance._remote_audio_dropped_chunks == 1:
+            # Once per call: a phone that drops the first chunk drops every chunk after it for the
+            # same reason, and the difference between a deaf bot and a working one is this line.
+            _LOG.warning("livekit remote audio dropped reason=%s", kind)
 
     @staticmethod
     def _dispatch_attachment_rejected(
@@ -2004,9 +2052,14 @@ class PhoneService(hsm.Instance):
         Remote audio is delivered to phone firmware as `ServiceAudioReceived` only when a media
         call id is active and a phone event target is attached; otherwise it is dropped and
         counted on `media_snapshot().remote_audio_dropped_*`.
+
+        The chunk arrives from the transport plane, so the trace context of the frames it was
+        assembled from is stamped onto the event here: everything downstream (the delivery to
+        firmware, and every HSM observation of it) reads that stamp rather than starting a new
+        trace, which is what makes one sound followable from the wire to perception.
         """
 
-        return self.dispatch(ctx, _RemoteAudioReceivedEvent.with_data(data))
+        return self.dispatch(ctx, inject_context(_RemoteAudioReceivedEvent.with_data(data)))
 
     def media_ready(self, ctx: hsm.Context, data: phone.MediaReadyData) -> collections.abc.Awaitable[None]:
         """Report that LiveKit media is ready for the active call."""

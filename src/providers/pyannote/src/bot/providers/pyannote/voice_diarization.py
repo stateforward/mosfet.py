@@ -12,7 +12,12 @@ import pathlib
 import typing
 import wave
 
+from bot.telemetry import span
+
 from ._audio import temporary_audio_file
+
+_SCOPE = "bot.providers.pyannote"
+_COMPONENT = "pyannote.voice_diarization"
 
 
 class VoiceDiarizationError(RuntimeError):
@@ -115,27 +120,37 @@ class VoiceDiarizer(voice.VoiceDiarizer):
         return await asyncio.to_thread(self._classify_blocking, input)
 
     def _classify_blocking(self, input: voice.diarization.InputData) -> voice.diarization.OutputData:
-        try:
-            pipeline = self.pipeline if self.pipeline is not None else self.load_pipeline(self.model_id)
-            with temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path:
-                result = pipeline(audio_path)
-            raw_segments = tuple(_segment_from_pyannote(turn, label) for turn, label in _turns_from_result(result))
-            ordered_segments = tuple(sorted(raw_segments, key=lambda segment: segment.start_seconds))
-            segments = tuple(
-                voice.VoiceDiarizationSegment(
-                    audio=self.clip_audio(input, segment.start_seconds, segment.end_seconds),
-                    media_type=input.media_type,
-                    sample_rate_hz=input.sample_rate_hz,
-                    channels=input.channels,
-                    start_seconds=segment.start_seconds,
-                    end_seconds=segment.end_seconds,
-                    confidence=segment.confidence,
+        # How many turns the pipeline found, never who took them: raw pyannote speaker labels do
+        # not leave this call, and the clipped audio never becomes an attribute.
+        with span.operation(
+            "bot.provider.pyannote.voice_diarization.classify",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="diarize",
+        ) as active:
+            try:
+                pipeline = self.pipeline if self.pipeline is not None else self.load_pipeline(self.model_id)
+                with temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path:
+                    result = pipeline(audio_path)
+                raw_segments = tuple(_segment_from_pyannote(turn, label) for turn, label in _turns_from_result(result))
+                ordered_segments = tuple(sorted(raw_segments, key=lambda segment: segment.start_seconds))
+                segments = tuple(
+                    voice.VoiceDiarizationSegment(
+                        audio=self.clip_audio(input, segment.start_seconds, segment.end_seconds),
+                        media_type=input.media_type,
+                        sample_rate_hz=input.sample_rate_hz,
+                        channels=input.channels,
+                        start_seconds=segment.start_seconds,
+                        end_seconds=segment.end_seconds,
+                        confidence=segment.confidence,
+                    )
+                    for segment in ordered_segments
                 )
-                for segment in ordered_segments
-            )
-            return voice.diarization.OutputData(segments=segments)
-        except Exception as error:
-            raise VoiceDiarizationError("pyannote voice diarization failed.") from error
+                output = voice.diarization.OutputData(segments=segments)
+            except Exception as error:
+                raise VoiceDiarizationError("pyannote voice diarization failed.") from error
+            active.set_attribute("bot.voice.segments.count", len(output.segments))
+            return output
 
 
 def _turns_from_result(result: object) -> collections.abc.Iterable[tuple[object, object]]:

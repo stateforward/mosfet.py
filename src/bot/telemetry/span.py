@@ -93,6 +93,19 @@ def record_failure(span: Span, kind: str) -> None:
     span.set_status(Status(StatusCode.ERROR, stable))
 
 
+def record_current_failure(kind: str) -> None:
+    """Mark the innermost active span failed with a normalized failure kind.
+
+    For code that reports a failure by dispatching a typed failure event instead
+    of raising: the enclosing ``operation()`` would otherwise close ``ok`` and the
+    trace would show a stage that finished when it did not. Call it from the one
+    place that converts a stage error into its typed failure event, with the same
+    kind that goes on the event.
+    """
+
+    record_failure(trace.get_current_span(), kind)
+
+
 @contextlib.contextmanager
 def operation(
     name: str,
@@ -144,7 +157,18 @@ def operation(
         except Exception as error:
             record_failure(active, failure_kind(error, type(error).__name__))
             raise
+        except BaseException:
+            # Cancellation is not an Exception and is not a fault, but a stage that leaves no
+            # outcome at all is indistinguishable from one still running.
+            record_failure(active, "cancelled")
+            raise
         else:
+            # Not every failure raises. A guard that declines, a chunk that is dropped, a stage
+            # that reports by dispatching a typed failure event all leave the block cleanly after
+            # calling record_failure; overwriting the outcome here would report them as successes.
+            recorded = getattr(active, "attributes", None)
+            if isinstance(recorded, collections.abc.Mapping) and recorded.get(_OUTCOME_ATTR) == Failed:
+                return
             active.set_attribute(_OUTCOME_ATTR, Ok)
 
 
@@ -189,6 +213,7 @@ __all__ = [
     "failure_kind",
     "normalized_kind",
     "operation",
+    "record_current_failure",
     "record_failure",
     "tracer",
 ]

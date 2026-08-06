@@ -43,7 +43,12 @@ import pydantic
 
 from bot.abilities import cognition
 from bot.environment import SoundData, SoundEvent
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
+
+_SCOPE = "bot.abilities.listening"
+_COMPONENT = "listening.interpretation"
 
 DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
 """How loud what is left of an arrival must be, in dB, to be worth handing on.
@@ -401,10 +406,15 @@ def _listening_event_with_context(
     if resolved_operation_id is None:
         resolved_operation_id = uuid.uuid4().hex
     event = event.with_data_and_id(event.data, resolved_operation_id)
-    return dataclasses.replace(
-        event,
-        source=source.source or event.source,
-        metadata=dict(source.metadata),
+    # The completion chain crosses one HSM activity per stage, and each activity runs in its own
+    # task: the ambient trace context does not survive the hop. Stamping the emitting span here is
+    # what keeps one arriving sound one trace instead of one trace per stage.
+    return telemetry.inject_context(
+        dataclasses.replace(
+            event,
+            source=source.source or event.source,
+            metadata=dict(source.metadata),
+        )
     )
 
 
@@ -424,17 +434,30 @@ def _dispatch_listening_cognition_input_with_operation(
     resolves which of its devices a sensory product belongs to.
     """
 
-    resolved_operation_id = operation_id or event.id or uuid.uuid4().hex
-    stimulus = _listening_event_with_context(stimulus, event, operation_id=resolved_operation_id)
-    stimulus = dataclasses.replace(
-        stimulus,
-        source=event.source or stimulus.source,
-        metadata=dict(event.metadata),
-    )
-    handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus))
-    handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
-    handoff = dataclasses.replace(handoff, source=hsm.id(instance), metadata=dict(stimulus.metadata))
-    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
+    with span.operation(
+        "bot.listening.handoff",
+        scope=_SCOPE,
+        component=_COMPONENT,
+        stage="cognition_handoff",
+        context=telemetry.event_context(event),
+    ) as active:
+        resolved_operation_id = operation_id or event.id or uuid.uuid4().hex
+        stimulus = _listening_event_with_context(stimulus, event, operation_id=resolved_operation_id)
+        stimulus = dataclasses.replace(
+            stimulus,
+            source=event.source or stimulus.source,
+            metadata=dict(event.metadata),
+        )
+        # Whether the product carries any speaker identity at all is the difference between a
+        # product downstream can admit and one it silently rejects; the ids themselves never
+        # leave the payload.
+        source_ids = getattr(stimulus.data, "source_ids", None)
+        active.set_attribute("bot.stimulus.name", stimulus.name)
+        active.set_attribute("bot.identity.source.count", len(source_ids) if source_ids is not None else 0)
+        handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus))
+        handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
+        handoff = dataclasses.replace(handoff, source=hsm.id(instance), metadata=dict(stimulus.metadata))
+        _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
 
 
 def _dispatch_listening_terminal_failure_with_operation(
@@ -463,6 +486,9 @@ def _dispatch_stage_failure_with_operation(
     operation_id: str | None,
 ) -> None:
     failure = FailedEventData(stage=stage, message=message)
+    # The stage reports by dispatching, not raising, so its span has to be told it failed or the
+    # trace would show a stage that completed. `stage` is a closed Literal, so the kind is too.
+    span.record_current_failure(f"{stage}_failed")
     _ = hsm.dispatch(
         ctx,
         instance,
@@ -1228,29 +1254,44 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     ) -> None:
         """Stream one acoustic Speech cognition product when Listening owns no STT decoder."""
 
-        if (
-            instance._speech_decoding is not None
-            or instance._voice_diarization is not None
-        ):
-            return
+        with span.operation(
+            "bot.listening.speech_product",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="acoustic_product",
+            context=telemetry.event_context(event),
+        ) as active:
+            # An acoustic product that is never emitted is the ordinary case here, not a failure —
+            # but which of the three reasons stopped it is exactly what a silent bot's trace has to
+            # say. Closed vocabulary; nothing from the payload.
+            if (
+                instance._speech_decoding is not None
+                or instance._voice_diarization is not None
+            ):
+                active.set_attribute("bot.product.withheld.reason", "decoder_owns_product")
+                return
 
-        sensed = completion.sensed
-        if sensed.perceived_level_db is not None and sensed.perceived_level_db < instance._product_threshold_db:
-            return
-        speech = _speech_from_sensed(
-            sensed=sensed,
-            voice_detection=completion.voice_detection,
-            source_ids=instance._active_source_ids,
-            voice_embedding=instance._active_voice_embedding,
-        )
-        if speech is None:
-            return
-        Interpretation._dispatch_listening_cognition_input(
-            ctx,
-            instance,
-            event,
-            SpeechEvent.with_data(speech),
-        )
+            sensed = completion.sensed
+            if sensed.perceived_level_db is not None and sensed.perceived_level_db < instance._product_threshold_db:
+                active.set_attribute("bot.product.withheld.reason", "below_threshold")
+                return
+            speech = _speech_from_sensed(
+                sensed=sensed,
+                voice_detection=completion.voice_detection,
+                source_ids=instance._active_source_ids,
+                voice_embedding=instance._active_voice_embedding,
+            )
+            if speech is None:
+                active.set_attribute("bot.product.withheld.reason", "no_speech_content")
+                return
+            active.set_attribute("bot.product.withheld.reason", "")
+            active.set_attribute("bot.identity.source.count", len(speech.source_ids))
+            Interpretation._dispatch_listening_cognition_input(
+                ctx,
+                instance,
+                event,
+                SpeechEvent.with_data(speech),
+            )
 
     @staticmethod
     def _enter_hearing_speech(
@@ -1330,51 +1371,62 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        sensed = _listening_sensed(event)
-        if sensed is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_detection",
-                message="listening input is missing sound data.",
-            )
-            return
-        # Normalize to PCM for clipping/identity products. For VAD, prefer the original WAV
-        # container when present so file-oriented detectors (Silero) keep the true sample rate.
-        # Raw PCM is only passed through when ingress is already PCM; wrappers that re-encode PCM
-        # as WAV must not invent a different rate than SoundData.sample_rate_hz.
-        pcm_sensed = _sensed_with_pcm_sound(sensed)
-        vad_input = sensed.sound.audio if _is_wav_sound(sensed.sound) else pcm_sensed.sound.audio
-        output = await Interpretation._await_child_output(
-            ctx,
-            instance,
-            event,
-            child=instance._voice_detection,
-            child_input=vad_input,
+        with span.operation(
+            "bot.listening.detect_voice",
+            scope=_SCOPE,
+            component=_COMPONENT,
             stage="voice_detection",
-        )
-        if output is None:
-            return
-        if not isinstance(output, voice.detection.ApplyData):
-            Interpretation._dispatch_stage_failure(
+            context=telemetry.event_context(event),
+        ) as active:
+            sensed = _listening_sensed(event)
+            if sensed is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_detection",
+                    message="listening input is missing sound data.",
+                )
+                return
+            # Normalize to PCM for clipping/identity products. For VAD, prefer the original WAV
+            # container when present so file-oriented detectors (Silero) keep the true sample rate.
+            # Raw PCM is only passed through when ingress is already PCM; wrappers that re-encode PCM
+            # as WAV must not invent a different rate than SoundData.sample_rate_hz.
+            pcm_sensed = _sensed_with_pcm_sound(sensed)
+            vad_input = sensed.sound.audio if _is_wav_sound(sensed.sound) else pcm_sensed.sound.audio
+            active.set_attribute("bot.audio.byte.count", len(vad_input))
+            output = await Interpretation._await_child_output(
                 ctx,
                 instance,
                 event,
+                child=instance._voice_detection,
+                child_input=vad_input,
                 stage="voice_detection",
-                message="Voice detection child produced a non-ApplyData terminal.",
             )
-            return
-        completion = _VoiceDetectionCompletedEventData(sensed=pcm_sensed, voice_detection=output)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _listening_event_with_context(
-                _VoiceDetectionCompletedEvent.with_data(completion),
-                event,
-                operation_id=instance._active_operation_id,
-            ),
-        )
+            if output is None:
+                return
+            if not isinstance(output, voice.detection.ApplyData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_detection",
+                    message="Voice detection child produced a non-ApplyData terminal.",
+                )
+                return
+            # Whether this chunk was voiced at all, and how much of it — the one thing that
+            # decides which way the whole rest of interpretation goes.
+            active.set_attribute("bot.voice.segment.count", len(output.segments))
+            completion = _VoiceDetectionCompletedEventData(sensed=pcm_sensed, voice_detection=output)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _listening_event_with_context(
+                    _VoiceDetectionCompletedEvent.with_data(completion),
+                    event,
+                    operation_id=instance._active_operation_id,
+                ),
+            )
 
     @staticmethod
     async def _run_sound_classification(
@@ -1382,60 +1434,68 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        detection = event.data
-        if not isinstance(detection, _VoiceDetectionCompletedEventData):
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="sound_classification",
-                message="sound classification requires a voice-detection completion.",
-            )
-            return
-        sound_classification = instance._sound_classification
-        if sound_classification is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="sound_classification",
-                message="sound classification is not configured.",
-            )
-            return
-        # Full SoundData (kind/media provenance) is the child's typed input contract.
-        output = await Interpretation._await_child_output(
-            ctx,
-            instance,
-            event,
-            child=sound_classification,
-            child_input=detection.sensed.sound,
+        with span.operation(
+            "bot.listening.classify_sound",
+            scope=_SCOPE,
+            component=_COMPONENT,
             stage="sound_classification",
-        )
-        if output is None:
-            return
-        if not isinstance(output, sound.classification.OutputData):
-            Interpretation._dispatch_stage_failure(
+            context=telemetry.event_context(event),
+        ) as active:
+            detection = event.data
+            if not isinstance(detection, _VoiceDetectionCompletedEventData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="sound_classification",
+                    message="sound classification requires a voice-detection completion.",
+                )
+                return
+            sound_classification = instance._sound_classification
+            if sound_classification is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="sound_classification",
+                    message="sound classification is not configured.",
+                )
+                return
+            # Full SoundData (kind/media provenance) is the child's typed input contract.
+            output = await Interpretation._await_child_output(
                 ctx,
                 instance,
                 event,
+                child=sound_classification,
+                child_input=detection.sensed.sound,
                 stage="sound_classification",
-                message="Sound classification child produced invalid output.",
             )
-            return
-        completion = _SoundClassificationCompletedEventData(
-            sensed=detection.sensed,
-            voice_detection=detection.voice_detection,
-            classification=output,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _listening_event_with_context(
-                _SoundClassificationCompletedEvent.with_data(completion),
-                event,
-                operation_id=instance._active_operation_id,
-            ),
-        )
+            if output is None:
+                return
+            if not isinstance(output, sound.classification.OutputData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="sound_classification",
+                    message="Sound classification child produced invalid output.",
+                )
+                return
+            active.set_attribute("bot.sound.label.count", len(output.labels))
+            completion = _SoundClassificationCompletedEventData(
+                sensed=detection.sensed,
+                voice_detection=detection.voice_detection,
+                classification=output,
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _listening_event_with_context(
+                    _SoundClassificationCompletedEvent.with_data(completion),
+                    event,
+                    operation_id=instance._active_operation_id,
+                ),
+            )
 
     @staticmethod
     async def _run_voice_diarization(
@@ -1443,91 +1503,99 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        detection = event.data
-        if not isinstance(detection, _VoiceDetectionCompletedEventData):
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_diarization",
-                message="voice diarization requires a voice-detection completion.",
-            )
-            return
-        voice_diarization = instance._voice_diarization
-        if voice_diarization is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_diarization",
-                message="voice diarization ability is not configured.",
-            )
-            return
-        utterance = Interpretation._open_speech_bytes(instance)
-        diarize_audio = utterance if utterance else detection.sensed.sound.audio
-        sound = detection.sensed.sound
-        sample_rate_hz = instance._open_speech_sample_rate_hz or sound.sample_rate_hz
-        channels = (
-            instance._open_speech_channels if instance._open_speech_sample_rate_hz is not None else sound.channels
-        )
-        if sound.media_type != "audio/pcm" or sample_rate_hz is None or channels is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_diarization",
-                message="voice diarization requires raw audio/pcm with sample rate and channels.",
-            )
-            return
-        try:
-            diarize_input = voice.diarization.InputData(
-                audio=diarize_audio,
-                media_type="audio/pcm",
-                sample_rate_hz=sample_rate_hz,
-                channels=channels,
-            )
-        except Exception as error:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_diarization",
-                message=f"Voice diarization input conversion failed: {error}",
-            )
-            return
-        output = await Interpretation._await_child_output(
-            ctx,
-            instance,
-            event,
-            child=voice_diarization,
-            child_input=diarize_input,
+        with span.operation(
+            "bot.listening.diarize_voice",
+            scope=_SCOPE,
+            component=_COMPONENT,
             stage="voice_diarization",
-        )
-        if output is None:
-            return
-        if not isinstance(output, voice.diarization.OutputData):
-            Interpretation._dispatch_stage_failure(
+            context=telemetry.event_context(event),
+        ) as active:
+            detection = event.data
+            if not isinstance(detection, _VoiceDetectionCompletedEventData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_diarization",
+                    message="voice diarization requires a voice-detection completion.",
+                )
+                return
+            voice_diarization = instance._voice_diarization
+            if voice_diarization is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_diarization",
+                    message="voice diarization ability is not configured.",
+                )
+                return
+            utterance = Interpretation._open_speech_bytes(instance)
+            diarize_audio = utterance if utterance else detection.sensed.sound.audio
+            sound = detection.sensed.sound
+            sample_rate_hz = instance._open_speech_sample_rate_hz or sound.sample_rate_hz
+            channels = (
+                instance._open_speech_channels if instance._open_speech_sample_rate_hz is not None else sound.channels
+            )
+            if sound.media_type != "audio/pcm" or sample_rate_hz is None or channels is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_diarization",
+                    message="voice diarization requires raw audio/pcm with sample rate and channels.",
+                )
+                return
+            try:
+                diarize_input = voice.diarization.InputData(
+                    audio=diarize_audio,
+                    media_type="audio/pcm",
+                    sample_rate_hz=sample_rate_hz,
+                    channels=channels,
+                )
+            except Exception as error:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_diarization",
+                    message=f"Voice diarization input conversion failed: {error}",
+                )
+                return
+            output = await Interpretation._await_child_output(
                 ctx,
                 instance,
                 event,
+                child=voice_diarization,
+                child_input=diarize_input,
                 stage="voice_diarization",
-                message="Voice diarization child produced invalid output.",
             )
-            return
-        completion = _VoiceDiarizationCompletedEventData(
-            sensed=Interpretation._open_speech_sensed_or(instance, detection.sensed),
-            voice_detection=detection.voice_detection,
-            segments=output.segments,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _listening_event_with_context(
-                _VoiceDiarizationCompletedEvent.with_data(completion),
-                event,
-                operation_id=instance._active_operation_id,
-            ),
-        )
+            if output is None:
+                return
+            if not isinstance(output, voice.diarization.OutputData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_diarization",
+                    message="Voice diarization child produced invalid output.",
+                )
+                return
+            active.set_attribute("bot.voice.segment.count", len(output.segments))
+            completion = _VoiceDiarizationCompletedEventData(
+                sensed=Interpretation._open_speech_sensed_or(instance, detection.sensed),
+                voice_detection=detection.voice_detection,
+                segments=output.segments,
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _listening_event_with_context(
+                    _VoiceDiarizationCompletedEvent.with_data(completion),
+                    event,
+                    operation_id=instance._active_operation_id,
+                ),
+            )
 
     @staticmethod
     async def _run_voice_identification(
@@ -1535,122 +1603,131 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        completion = event.data
-        voice_detection = (
-            completion.voice_detection
-            if isinstance(
-                completion,
-                _VoiceDiarizationCompletedEventData | _VoiceDetectionCompletedEventData,
+        with span.operation(
+            "bot.listening.identify_voice",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="voice_identification",
+            context=telemetry.event_context(event),
+        ) as active:
+            completion = event.data
+            voice_detection = (
+                completion.voice_detection
+                if isinstance(
+                    completion,
+                    _VoiceDiarizationCompletedEventData | _VoiceDetectionCompletedEventData,
+                )
+                else None
             )
-            else None
-        )
-        if isinstance(completion, _VoiceDiarizationCompletedEventData):
-            segments = completion.segments
-        elif isinstance(completion, _VoiceDetectionCompletedEventData) and instance._voice_diarization is None:
-            # Direct identification owns the opening VAD span only. The resulting source id is
-            # then carried by every product until this VAD window closes.
-            if not completion.voice_detection.segments:
+            if isinstance(completion, _VoiceDiarizationCompletedEventData):
+                segments = completion.segments
+            elif isinstance(completion, _VoiceDetectionCompletedEventData) and instance._voice_diarization is None:
+                # Direct identification owns the opening VAD span only. The resulting source id is
+                # then carried by every product until this VAD window closes.
+                if not completion.voice_detection.segments:
+                    Interpretation._dispatch_stage_failure(
+                        ctx,
+                        instance,
+                        event,
+                        stage="voice_identification",
+                        message="Voice identification requires a first voiced VAD segment.",
+                    )
+                    return
+                try:
+                    segments = (
+                        _voice_segment_from_detection(
+                            sensed=completion.sensed,
+                            segment=completion.voice_detection.segments[0],
+                        ),
+                    )
+                except Exception as error:
+                    Interpretation._dispatch_stage_failure(
+                        ctx,
+                        instance,
+                        event,
+                        stage="voice_identification",
+                        message=f"Voice identification opening segment conversion failed: {error}",
+                    )
+                    return
+                voice_detection = completion.voice_detection
+            else:
                 Interpretation._dispatch_stage_failure(
                     ctx,
                     instance,
                     event,
                     stage="voice_identification",
-                    message="Voice identification requires a first voiced VAD segment.",
+                    message="voice identification requires a voice-diarization or voice-detection completion.",
+                )
+                return
+            voice_identification = instance._voice_identification
+            if voice_identification is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_identification",
+                    message="voice identification ability is not configured.",
                 )
                 return
             try:
-                segments = (
-                    _voice_segment_from_detection(
-                        sensed=completion.sensed,
-                        segment=completion.voice_detection.segments[0],
-                    ),
-                )
+                identification_input = voice.identification.InputData(segments=segments)
             except Exception as error:
                 Interpretation._dispatch_stage_failure(
                     ctx,
                     instance,
                     event,
                     stage="voice_identification",
-                    message=f"Voice identification opening segment conversion failed: {error}",
+                    message=f"Voice identification input conversion failed: {error}",
                 )
                 return
-            voice_detection = completion.voice_detection
-        else:
-            Interpretation._dispatch_stage_failure(
+            output = await Interpretation._await_child_output(
                 ctx,
                 instance,
                 event,
+                child=voice_identification,
+                child_input=identification_input,
                 stage="voice_identification",
-                message="voice identification requires a voice-diarization or voice-detection completion.",
             )
-            return
-        voice_identification = instance._voice_identification
-        if voice_identification is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_identification",
-                message="voice identification ability is not configured.",
+            if output is None:
+                return
+            if not isinstance(output, voice.identification.OutputData):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_identification",
+                    message="Voice identification child produced invalid output.",
+                )
+                return
+            if len(output.embeddings) != len(segments):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="voice_identification",
+                    message=(
+                        "Voice identification must return exactly one embedding per voice segment; "
+                        f"received {len(output.embeddings)} for {len(segments)} segments."
+                    ),
+                )
+                return
+            active.set_attribute("bot.voice.segment.count", len(segments))
+            active.set_attribute("bot.voice.embedding.count", len(output.embeddings))
+            identified = _VoiceIdentificationCompletedEventData(
+                sensed=Interpretation._open_speech_sensed_or(instance, completion.sensed),
+                voice_detection=voice_detection or voice.detection.ApplyData(),
+                segments=segments,
+                embeddings=output.embeddings,
             )
-            return
-        try:
-            identification_input = voice.identification.InputData(segments=segments)
-        except Exception as error:
-            Interpretation._dispatch_stage_failure(
+            _ = hsm.dispatch(
                 ctx,
                 instance,
-                event,
-                stage="voice_identification",
-                message=f"Voice identification input conversion failed: {error}",
-            )
-            return
-        output = await Interpretation._await_child_output(
-            ctx,
-            instance,
-            event,
-            child=voice_identification,
-            child_input=identification_input,
-            stage="voice_identification",
-        )
-        if output is None:
-            return
-        if not isinstance(output, voice.identification.OutputData):
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_identification",
-                message="Voice identification child produced invalid output.",
-            )
-            return
-        if len(output.embeddings) != len(segments):
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="voice_identification",
-                message=(
-                    "Voice identification must return exactly one embedding per voice segment; "
-                    f"received {len(output.embeddings)} for {len(segments)} segments."
+                _listening_event_with_context(
+                    _VoiceIdentificationCompletedEvent.with_data(identified),
+                    event,
+                    operation_id=instance._active_operation_id,
                 ),
             )
-            return
-        identified = _VoiceIdentificationCompletedEventData(
-            sensed=Interpretation._open_speech_sensed_or(instance, completion.sensed),
-            voice_detection=voice_detection or voice.detection.ApplyData(),
-            segments=segments,
-            embeddings=output.embeddings,
-        )
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _listening_event_with_context(
-                _VoiceIdentificationCompletedEvent.with_data(identified),
-                event,
-                operation_id=instance._active_operation_id,
-            ),
-        )
 
     @staticmethod
     async def _run_detected_speech_decoding(
@@ -1709,52 +1786,61 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         sensed: sensitivity.OutputData,
         voice_detection: voice.detection.ApplyData,
     ) -> None:
-        speech_decoding = instance._speech_decoding
-        if speech_decoding is None:
-            Interpretation._dispatch_stage_failure(
-                ctx,
-                instance,
-                event,
-                stage="speech_decoding",
-                message="speech decoding is not configured.",
-            )
-            return
-        utterance = Interpretation._open_speech_bytes(instance)
-        decode_audio = utterance if utterance else sensed.sound.audio
-        output = await Interpretation._await_child_output(
-            ctx,
-            instance,
-            event,
-            child=speech_decoding,
-            child_input=decode_audio,
+        with span.operation(
+            "bot.listening.decode_speech",
+            scope=_SCOPE,
+            component=_COMPONENT,
             stage="speech_decoding",
-        )
-        if output is None:
-            return
-        if not isinstance(output, bytes):
-            Interpretation._dispatch_stage_failure(
+            context=telemetry.event_context(event),
+        ) as active:
+            speech_decoding = instance._speech_decoding
+            if speech_decoding is None:
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="speech_decoding",
+                    message="speech decoding is not configured.",
+                )
+                return
+            utterance = Interpretation._open_speech_bytes(instance)
+            decode_audio = utterance if utterance else sensed.sound.audio
+            active.set_attribute("bot.audio.byte.count", len(decode_audio))
+            output = await Interpretation._await_child_output(
                 ctx,
                 instance,
                 event,
+                child=speech_decoding,
+                child_input=decode_audio,
                 stage="speech_decoding",
-                message="Speech decoding child produced a non-bytes terminal.",
             )
-            return
-        completion = _SpeechDecodingCompletedEventData(
-            sensed=sensed,
-            voice_detection=voice_detection,
-            speech=output,
-        )
-        Interpretation._clear_open_speech(ctx, instance, event)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            _listening_event_with_context(
-                _SpeechDecodingCompletedEvent.with_data(completion),
-                event,
-                operation_id=instance._active_operation_id,
-            ),
-        )
+            if output is None:
+                return
+            if not isinstance(output, bytes):
+                Interpretation._dispatch_stage_failure(
+                    ctx,
+                    instance,
+                    event,
+                    stage="speech_decoding",
+                    message="Speech decoding child produced a non-bytes terminal.",
+                )
+                return
+            active.set_attribute("bot.speech.decoded.byte.count", len(output))
+            completion = _SpeechDecodingCompletedEventData(
+                sensed=sensed,
+                voice_detection=voice_detection,
+                speech=output,
+            )
+            Interpretation._clear_open_speech(ctx, instance, event)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _listening_event_with_context(
+                    _SpeechDecodingCompletedEvent.with_data(completion),
+                    event,
+                    operation_id=instance._active_operation_id,
+                ),
+            )
 
     @staticmethod
     def _has_detected_no_voice_without_sound_classification(

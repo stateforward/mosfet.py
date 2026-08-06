@@ -9,7 +9,9 @@ import uuid
 import hsm
 import pydantic
 
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from . import types
 
@@ -405,61 +407,23 @@ class Intuition(processing.Processing):
 
     @staticmethod
     async def _apply_intuition_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, InputData)
-        input = Intuition._intuition_input_for_processor(instance, data.processing_input)
-        operation_id = event.id if event.id else uuid.uuid4().hex
-        if processing.active_operation(instance, operation_id) is None:
-            await processing.start_operation(instance, operation_id)
-        metadata = dict(event.metadata)
-        try:
-            raw = await instance._processor.process(input)
-            product, confidence = _product_from_processor_output(raw)
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=data.turn)),
-                    id=operation_id,
-                    metadata=metadata,
-                ),
-            )
-            return
-
-        if confidence is not None:
-            instance._confidence_tuner.observe(confidence)
-        escalate = instance._confidence_tuner.should_escalate(confidence)
-        # Tuner state drives escalate choice only; do not put it in event.metadata.
-
-        # Unhandled cascade (System 2): explicit None, empty dispatch, or low confidence.
-        # Empty events: [] is not a deliberate pass — use cognition.ignore for that.
-        # On escalate with selections: fire environment actions first, then terminal None.
-        if product is None or len(product) == 0:
-            terminal: types.OutputData | None = None
-            to_dispatch: types.OutputData = ()
-        elif escalate or any(
-            _is_deliberative_input_event(item.event, {schema.name: schema for schema in input.schemas})
-            for item in product
-        ):
-            to_dispatch = _environment_actions(product, current_input=input)
-            terminal = None
-        else:
-            to_dispatch = product
-            terminal = product
-
-        if to_dispatch and input.actors:
+        with span.operation(
+            "bot.intuition.apply",
+            scope="bot.abilities.cognition",
+            component="cognition.intuition",
+            stage="intuition_apply",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            assert isinstance(data, InputData)
+            input = Intuition._intuition_input_for_processor(instance, data.processing_input)
+            operation_id = event.id if event.id else uuid.uuid4().hex
+            if processing.active_operation(instance, operation_id) is None:
+                await processing.start_operation(instance, operation_id)
+            metadata = dict(event.metadata)
             try:
-                await types.dispatch_selected_events(
-                    ctx,
-                    input,
-                    _selections_from_output(to_dispatch),
-                    operation_id=operation_id,
-                    source=instance,
-                    focus_candidates=data.turn.input.focus_candidates,
-                    focused_device=data.turn.input.focus,
-                    metadata=metadata,
-                )
+                raw = await instance._processor.process(input)
+                product, confidence = _product_from_processor_output(raw)
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -471,15 +435,62 @@ class Intuition(processing.Processing):
                     ),
                 )
                 return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _AppliedEvent.with_data(types.CompletionData(turn=data.turn, output=terminal)),
-                id=operation_id,
-                metadata=metadata,
-            ),
-        )
+
+            if confidence is not None:
+                instance._confidence_tuner.observe(confidence)
+            escalate = instance._confidence_tuner.should_escalate(confidence)
+            # Tuner state drives escalate choice only; do not put it in event.metadata.
+
+            # Unhandled cascade (System 2): explicit None, empty dispatch, or low confidence.
+            # Empty events: [] is not a deliberate pass — use cognition.ignore for that.
+            # On escalate with selections: fire environment actions first, then terminal None.
+            if product is None or len(product) == 0:
+                terminal: types.OutputData | None = None
+                to_dispatch: types.OutputData = ()
+            elif escalate or any(
+                _is_deliberative_input_event(item.event, {schema.name: schema for schema in input.schemas})
+                for item in product
+            ):
+                to_dispatch = _environment_actions(product, current_input=input)
+                terminal = None
+            else:
+                to_dispatch = product
+                terminal = product
+
+            active.set_attribute("bot.selection.count", len(to_dispatch))
+            active.set_attribute("bot.cognition.escalated", terminal is None)
+            if to_dispatch and input.actors:
+                try:
+                    await types.dispatch_selected_events(
+                        ctx,
+                        input,
+                        _selections_from_output(to_dispatch),
+                        operation_id=operation_id,
+                        source=instance,
+                        focus_candidates=data.turn.input.focus_candidates,
+                        focused_device=data.turn.input.focus,
+                        metadata=metadata,
+                    )
+                except Exception as error:
+                    _ = hsm.dispatch(
+                        ctx,
+                        instance,
+                        dataclasses.replace(
+                            _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=data.turn)),
+                            id=operation_id,
+                            metadata=metadata,
+                        ),
+                    )
+                    return
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _AppliedEvent.with_data(types.CompletionData(turn=data.turn, output=terminal)),
+                    id=operation_id,
+                    metadata=metadata,
+                ),
+            )
 
     @staticmethod
     def _complete_apply(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:

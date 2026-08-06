@@ -47,7 +47,9 @@ from bot.behavior import (
 )
 from bot.behavior import storage as behavior_storage
 from bot.behavior.instance import Instance
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from .. import episodes
 from .. import input
@@ -636,26 +638,52 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> None:
-        turn = event.data
-        assert isinstance(turn, InputData)
-        operation_id = event.id if event.id else uuid.uuid4().hex
-        if processing.active_operation(instance, operation_id) is None:
-            _ = await processing.start_operation(instance, operation_id)
-        active = processing.active_operation(instance, operation_id)
-        assert active is not None
-        generation = hsm.id(active)
-        try:
-            select_input = episodes.episode_select_input(context_ref=turn.cognition_input.focus)
-            recalled = instance._memory.execute(select_input)
-            prior = episodes.episodes_from_output(recalled)
-        except Exception as error:
+        with span.operation(
+            "bot.reflection.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reflection",
+            stage="reflection_recall",
+            context=telemetry.event_context(event),
+        ):
+            turn = event.data
+            assert isinstance(turn, InputData)
+            operation_id = event.id if event.id else uuid.uuid4().hex
+            if processing.active_operation(instance, operation_id) is None:
+                _ = await processing.start_operation(instance, operation_id)
+            active = processing.active_operation(instance, operation_id)
+            assert active is not None
+            generation = hsm.id(active)
+            try:
+                select_input = episodes.episode_select_input(context_ref=turn.cognition_input.focus)
+                recalled = instance._memory.execute(select_input)
+                prior = episodes.episodes_from_output(recalled)
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _StageFailedEvent.with_data(
+                            _StageFailedData(
+                                failure=ability.FailureData(message=f"Reflection memory recall failed: {error}"),
+                                operation_id=operation_id,
+                                generation=generation,
+                            )
+                        ),
+                        id=operation_id,
+                        source=hsm.id(instance),
+                        target=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+                return
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _StageFailedEvent.with_data(
-                        _StageFailedData(
-                            failure=ability.FailureData(message=f"Reflection memory recall failed: {error}"),
+                    _RecalledEvent.with_data(
+                        _RecalledEventData(
+                            turn=turn,
+                            prior_episodes=prior,
                             operation_id=operation_id,
                             generation=generation,
                         )
@@ -666,25 +694,6 @@ class Reflection(processing.Processing):
                     metadata=dict(event.metadata),
                 ),
             )
-            return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _RecalledEvent.with_data(
-                    _RecalledEventData(
-                        turn=turn,
-                        prior_episodes=prior,
-                        operation_id=operation_id,
-                        generation=generation,
-                    )
-                ),
-                id=operation_id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
 
     @staticmethod
     async def _dispatch_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
@@ -1017,36 +1026,43 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, _AppliedEventData)
-        try:
-            episode = episode_from_turn(data.turn, behavior=data.behavior)
-            _store_episode(instance._memory, episode, context_ref=data.turn.cognition_input.focus)
-        except Exception as error:
+        with span.operation(
+            "bot.reflection.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reflection",
+            stage="reflection_store",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, _AppliedEventData)
+            try:
+                episode = episode_from_turn(data.turn, behavior=data.behavior)
+                _store_episode(instance._memory, episode, context_ref=data.turn.cognition_input.focus)
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    Reflection._private_event(
+                        instance,
+                        event,
+                        _StageFailedEvent,
+                        ability.FailureData(message=f"Reflection episode store failed: {error}"),
+                    ),
+                )
+                return
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 Reflection._private_event(
                     instance,
                     event,
-                    _StageFailedEvent,
-                    ability.FailureData(message=f"Reflection episode store failed: {error}"),
+                    _StoredEvent,
+                    _StoredEventData(
+                        operation_id=data.operation_id,
+                        generation=data.generation,
+                    ),
                 ),
             )
-            return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reflection._private_event(
-                instance,
-                event,
-                _StoredEvent,
-                _StoredEventData(
-                    operation_id=data.operation_id,
-                    generation=data.generation,
-                ),
-            ),
-        )
 
     @staticmethod
     def _complete_from_stored(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:

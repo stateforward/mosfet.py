@@ -376,3 +376,98 @@ def test_inject_context_without_an_active_span_is_a_noop() -> None:
     assert bot.telemetry.configure() is True
     event = hsm.Event[None](name="bot.test.crossing")
     assert bot.telemetry.inject_context(event) is event
+
+
+def test_operation_keeps_a_recorded_failure_on_clean_exit() -> None:
+    """A failure that is reported rather than raised must not close as ``ok``.
+
+    A guard that declines, a chunk that is dropped, a stage that answers with a typed failure
+    event all leave the block normally. Defaulting the outcome to ``ok`` there would make every
+    non-exception failure look like a success — which is most of them in this codebase.
+    """
+
+    assert bot.telemetry.configure() is True
+    with span.operation(
+        "bot.test.operation",
+        scope="bot.telemetry.test",
+        component="telemetry.test",
+        stage="guard",
+    ) as active:
+        span.record_failure(active, "decode_failed")
+
+    record = _spans()[0]
+    assert record["status"] == "ERROR"
+    assert record["attributes"]["bot.outcome"] == "failed"
+    assert record["attributes"]["bot.failure.kind"] == "decode_failed"
+
+
+def test_record_current_failure_marks_the_enclosing_operation() -> None:
+    assert bot.telemetry.configure() is True
+    with span.operation(
+        "bot.test.operation",
+        scope="bot.telemetry.test",
+        component="telemetry.test",
+        stage="decode",
+    ):
+        span.record_current_failure("SpeechDecodeFailed")
+
+    record = _spans()[0]
+    assert record["attributes"]["bot.outcome"] == "failed"
+    assert record["attributes"]["bot.failure.kind"] == "speech_decode_failed"
+
+
+def test_operation_still_closes_ok_without_a_recorded_failure() -> None:
+    assert bot.telemetry.configure() is True
+    with span.operation(
+        "bot.test.operation",
+        scope="bot.telemetry.test",
+        component="telemetry.test",
+        stage="decode",
+    ):
+        pass
+
+    assert _spans()[0]["attributes"]["bot.outcome"] == "ok"
+
+
+def test_unstamped_event_stays_in_the_ambient_trace() -> None:
+    """An in-process event carries no traceparent and must not start a new root trace.
+
+    ``propagate.extract`` on an empty carrier yields an empty context, not the ambient one, so
+    observing an unstamped event through it would detach the event into its own trace at exactly
+    the point the caller's span is the answer.
+    """
+
+    assert bot.telemetry.configure() is True
+    event = hsm.Event[None](name="bot.test.in_process")
+    assert event.metadata == {}
+
+    with span.operation(
+        "bot.test.parent",
+        scope="bot.telemetry.test",
+        component="telemetry.test",
+        stage="parent",
+    ) as parent:
+        with span.operation(
+            "bot.test.observed",
+            scope="bot.telemetry.test",
+            component="telemetry.test",
+            stage="observed",
+            context=bot.telemetry.event_context(event),
+        ) as observed:
+            assert observed.get_span_context().trace_id == parent.get_span_context().trace_id
+
+
+def test_operation_records_cancellation_as_its_own_outcome() -> None:
+    assert bot.telemetry.configure() is True
+    with pytest.raises(asyncio.CancelledError):
+        with span.operation(
+            "bot.test.operation",
+            scope="bot.telemetry.test",
+            component="telemetry.test",
+            stage="decode",
+        ):
+            raise asyncio.CancelledError
+
+    record = _spans()[0]
+    assert record["attributes"]["bot.outcome"] == "failed"
+    assert record["attributes"]["bot.failure.kind"] == "cancelled"

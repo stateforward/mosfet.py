@@ -12,7 +12,9 @@ from bot import event_schema
 
 import pydantic
 
+from bot import telemetry
 from bot.telemetry import observer
+from bot.telemetry import span
 
 from bot.behavior import BreakData, ChangeData, CreateData
 from . import directives
@@ -384,8 +386,15 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
-        del event
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
+        with span.operation(
+            "bot.reasoning.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reasoning",
+            stage="reasoning_initialize",
+            context=telemetry.event_context(event),
+        ):
+            del event
+            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
 
     @staticmethod
     def _input_from_event(event: hsm.Event[typing.Any]) -> InputData:
@@ -529,89 +538,96 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
-        operation_id = event.id if event.id else uuid.uuid4().hex
-        capability = await Reasoning._start_operation(instance, operation_id)
-        metadata = dict(event.metadata)
+        with span.operation(
+            "bot.reasoning.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reasoning",
+            stage="reasoning_recall",
+            context=telemetry.event_context(event),
+        ):
+            operation_id = event.id if event.id else uuid.uuid4().hex
+            capability = await Reasoning._start_operation(instance, operation_id)
+            metadata = dict(event.metadata)
 
-        def dispatch_stage(event_type: hsm.Event[typing.Any], data: object) -> None:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reasoning._stage_event(
-                    event_type,
-                    data,
-                    capability=capability,
-                    metadata=metadata,
-                    target=instance,
-                ),
-            )
+            def dispatch_stage(event_type: hsm.Event[typing.Any], data: object) -> None:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    Reasoning._stage_event(
+                        event_type,
+                        data,
+                        capability=capability,
+                        metadata=metadata,
+                        target=instance,
+                    ),
+                )
 
-        try:
-            request = Reasoning._input_from_event(event)
-            input = request.processing_input
-        except TypeError as error:
-            fallback_turn = types.TurnData(
-                input=typing.cast(InputData, event.data).turn.input,
-                operation_id=operation_id,
-                generation=typing.cast(InputData, event.data).turn.generation,
-            )
-            dispatch_stage(
-                _ReasoningStageFailedEvent,
-                _ReasoningStageFailedData(
-                    failure=ability.FailureData(message=str(error)),
-                    turn=fallback_turn,
-                    capability=capability,
-                ),
-            )
-            return
-        store = instance._memory
-        if store is None:
+            try:
+                request = Reasoning._input_from_event(event)
+                input = request.processing_input
+            except TypeError as error:
+                fallback_turn = types.TurnData(
+                    input=typing.cast(InputData, event.data).turn.input,
+                    operation_id=operation_id,
+                    generation=typing.cast(InputData, event.data).turn.generation,
+                )
+                dispatch_stage(
+                    _ReasoningStageFailedEvent,
+                    _ReasoningStageFailedData(
+                        failure=ability.FailureData(message=str(error)),
+                        turn=fallback_turn,
+                        capability=capability,
+                    ),
+                )
+                return
+            store = instance._memory
+            if store is None:
+                dispatch_stage(
+                    _RecalledEvent,
+                    _RecalledEventData(
+                        turn=request.turn,
+                        capability=capability,
+                        host_input=input,
+                        prior_episodes=(),
+                        standing_directives=(),
+                        memory_consulted=False,
+                    ),
+                )
+                return
+            try:
+                context_ref = _context_ref_from_input(input)
+                # One apply, one transaction, two statements: prior turns and standing directives
+                # are recalled together so a turn never reasons from half a memory.
+                select_input = memory.InputData(
+                    statements=(
+                        *episodes.episode_select_input(context_ref=context_ref).statements,
+                        *directives.directive_select_input(context_ref=context_ref).statements,
+                    )
+                )
+                recalled = store.execute(select_input)
+                prior = episodes.episodes_from_output(recalled, statement_index=0)
+                standing = directives.directives_from_output(recalled, statement_index=1)
+            except Exception as error:
+                dispatch_stage(
+                    _ReasoningStageFailedEvent,
+                    _ReasoningStageFailedData(
+                        failure=ability.FailureData(message=f"Reasoning memory recall failed: {error}"),
+                        turn=request.turn,
+                        capability=capability,
+                    ),
+                )
+                return
             dispatch_stage(
                 _RecalledEvent,
                 _RecalledEventData(
                     turn=request.turn,
                     capability=capability,
                     host_input=input,
-                    prior_episodes=(),
-                    standing_directives=(),
-                    memory_consulted=False,
+                    prior_episodes=prior,
+                    standing_directives=standing,
+                    memory_consulted=True,
                 ),
             )
-            return
-        try:
-            context_ref = _context_ref_from_input(input)
-            # One apply, one transaction, two statements: prior turns and standing directives
-            # are recalled together so a turn never reasons from half a memory.
-            select_input = memory.InputData(
-                statements=(
-                    *episodes.episode_select_input(context_ref=context_ref).statements,
-                    *directives.directive_select_input(context_ref=context_ref).statements,
-                )
-            )
-            recalled = store.execute(select_input)
-            prior = episodes.episodes_from_output(recalled, statement_index=0)
-            standing = directives.directives_from_output(recalled, statement_index=1)
-        except Exception as error:
-            dispatch_stage(
-                _ReasoningStageFailedEvent,
-                _ReasoningStageFailedData(
-                    failure=ability.FailureData(message=f"Reasoning memory recall failed: {error}"),
-                    turn=request.turn,
-                    capability=capability,
-                ),
-            )
-            return
-        dispatch_stage(
-            _RecalledEvent,
-            _RecalledEventData(
-                turn=request.turn,
-                capability=capability,
-                host_input=input,
-                prior_episodes=prior,
-                standing_directives=standing,
-                memory_consulted=True,
-            ),
-        )
 
     @staticmethod
     def _coerce_reasoned(value: object) -> OutputData:
@@ -640,62 +656,40 @@ class Reasoning(processing.Processing):
 
     @staticmethod
     async def _reason_activity(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _RecalledEventData)
-        capability = data.capability
-        operation_id = capability.operation_id
-        metadata = {
-            **dict(event.metadata),
-            "bot.reasoning.memory_consulted": data.memory_consulted,
-        }
-        reasoning_input = ProcessorInput(
-            host_input=data.host_input,
-            prior_episodes=data.prior_episodes,
-            standing_directives=data.standing_directives,
-        )
-        # Keep host tools/actors and the host's live instructions (device-state block); nest
-        # reasoning payload as the process input.
-        child_input = processing.Processing._input_for_processor(
-            instance,
-            processing.InputData(
-                input=reasoning_input,
-                schemas=data.host_input.schemas,
-                actors=data.host_input.actors,
-                instructions=data.host_input.instructions,
-            ),
-        )
-        try:
-            raw = await instance._processor.process(child_input)
-            reasoned = Reasoning._coerce_reasoned(raw)
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
+        with span.operation(
+            "bot.reasoning.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reasoning",
+            stage="reasoning_reason",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, _RecalledEventData)
+            capability = data.capability
+            operation_id = capability.operation_id
+            metadata = {
+                **dict(event.metadata),
+                "bot.reasoning.memory_consulted": data.memory_consulted,
+            }
+            reasoning_input = ProcessorInput(
+                host_input=data.host_input,
+                prior_episodes=data.prior_episodes,
+                standing_directives=data.standing_directives,
+            )
+            # Keep host tools/actors and the host's live instructions (device-state block); nest
+            # reasoning payload as the process input.
+            child_input = processing.Processing._input_for_processor(
                 instance,
-                Reasoning._stage_event(
-                    _ReasoningStageFailedEvent,
-                    _ReasoningStageFailedData(
-                        failure=ability.FailureData(message=str(error)),
-                        turn=data.turn,
-                        capability=capability,
-                    ),
-                    capability=capability,
-                    metadata=metadata,
-                    target=instance,
+                processing.InputData(
+                    input=reasoning_input,
+                    schemas=data.host_input.schemas,
+                    actors=data.host_input.actors,
+                    instructions=data.host_input.instructions,
                 ),
             )
-            return
-        if data.host_input.actors and reasoned.result:
             try:
-                await types.dispatch_selected_events(
-                    ctx,
-                    data.host_input,
-                    _selections_from_output(reasoned.result),
-                    operation_id=operation_id,
-                    source=instance,
-                    focus_candidates=data.turn.input.focus_candidates,
-                    focused_device=data.turn.input.focus,
-                    metadata=_public_metadata(metadata),
-                )
+                raw = await instance._processor.process(child_input)
+                reasoned = Reasoning._coerce_reasoned(raw)
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -713,23 +707,52 @@ class Reasoning(processing.Processing):
                     ),
                 )
                 return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reasoning._stage_event(
-                _ReasonedEvent,
-                _ReasonedEventData(
-                    turn=data.turn,
+            if data.host_input.actors and reasoned.result:
+                try:
+                    await types.dispatch_selected_events(
+                        ctx,
+                        data.host_input,
+                        _selections_from_output(reasoned.result),
+                        operation_id=operation_id,
+                        source=instance,
+                        focus_candidates=data.turn.input.focus_candidates,
+                        focused_device=data.turn.input.focus,
+                        metadata=_public_metadata(metadata),
+                    )
+                except Exception as error:
+                    _ = hsm.dispatch(
+                        ctx,
+                        instance,
+                        Reasoning._stage_event(
+                            _ReasoningStageFailedEvent,
+                            _ReasoningStageFailedData(
+                                failure=ability.FailureData(message=str(error)),
+                                turn=data.turn,
+                                capability=capability,
+                            ),
+                            capability=capability,
+                            metadata=metadata,
+                            target=instance,
+                        ),
+                    )
+                    return
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                Reasoning._stage_event(
+                    _ReasonedEvent,
+                    _ReasonedEventData(
+                        turn=data.turn,
+                        capability=capability,
+                        host_input=data.host_input,
+                        reasoned=reasoned,
+                        memory_consulted=data.memory_consulted,
+                    ),
                     capability=capability,
-                    host_input=data.host_input,
-                    reasoned=reasoned,
-                    memory_consulted=data.memory_consulted,
+                    metadata=metadata,
+                    target=instance,
                 ),
-                capability=capability,
-                metadata=metadata,
-                target=instance,
-            ),
-        )
+            )
 
     @staticmethod
     def _reasoned_needs_retain(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
@@ -775,12 +798,62 @@ class Reasoning(processing.Processing):
         instance: "Reasoning",
         event: hsm.Event[typing.Any],
     ) -> None:
-        data = event.data
-        assert isinstance(data, _ReasonedEventData)
-        capability = data.capability
-        metadata = dict(event.metadata)
-        store = instance._memory
-        if store is None:
+        with span.operation(
+            "bot.reasoning.stage",
+            scope="bot.abilities.cognition",
+            component="cognition.reasoning",
+            stage="reasoning_retain",
+            context=telemetry.event_context(event),
+        ):
+            data = event.data
+            assert isinstance(data, _ReasonedEventData)
+            capability = data.capability
+            metadata = dict(event.metadata)
+            store = instance._memory
+            if store is None:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    Reasoning._stage_event(
+                        _RetainedEvent,
+                        _RetainedEventData(
+                            turn=data.turn,
+                            capability=capability,
+                            result=data.reasoned.result,
+                            memory_consulted=data.memory_consulted,
+                            memory_written=False,
+                        ),
+                        capability=capability,
+                        metadata=metadata,
+                        target=instance,
+                    ),
+                )
+                return
+            try:
+                episode = _episode_from_reasoning(data.host_input, data.reasoned)
+                insert_input = episodes.episode_insert_input(
+                    episode,
+                    context_ref=_context_ref_from_input(data.host_input),
+                    scope=getattr(type(store), "default_scope", "short_term"),
+                )
+                _ = store.execute(insert_input)
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    Reasoning._stage_event(
+                        _ReasoningStageFailedEvent,
+                        _ReasoningStageFailedData(
+                            failure=ability.FailureData(message=f"Reasoning memory retain failed: {error}"),
+                            turn=data.turn,
+                            capability=capability,
+                        ),
+                        capability=capability,
+                        metadata=metadata,
+                        target=instance,
+                    ),
+                )
+                return
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -791,56 +864,13 @@ class Reasoning(processing.Processing):
                         capability=capability,
                         result=data.reasoned.result,
                         memory_consulted=data.memory_consulted,
-                        memory_written=False,
+                        memory_written=True,
                     ),
                     capability=capability,
                     metadata=metadata,
                     target=instance,
                 ),
             )
-            return
-        try:
-            episode = _episode_from_reasoning(data.host_input, data.reasoned)
-            insert_input = episodes.episode_insert_input(
-                episode,
-                context_ref=_context_ref_from_input(data.host_input),
-                scope=getattr(type(store), "default_scope", "short_term"),
-            )
-            _ = store.execute(insert_input)
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reasoning._stage_event(
-                    _ReasoningStageFailedEvent,
-                    _ReasoningStageFailedData(
-                        failure=ability.FailureData(message=f"Reasoning memory retain failed: {error}"),
-                        turn=data.turn,
-                        capability=capability,
-                    ),
-                    capability=capability,
-                    metadata=metadata,
-                    target=instance,
-                ),
-            )
-            return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            Reasoning._stage_event(
-                _RetainedEvent,
-                _RetainedEventData(
-                    turn=data.turn,
-                    capability=capability,
-                    result=data.reasoned.result,
-                    memory_consulted=data.memory_consulted,
-                    memory_written=True,
-                ),
-                capability=capability,
-                metadata=metadata,
-                target=instance,
-            ),
-        )
 
     submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
         "Reasoning",

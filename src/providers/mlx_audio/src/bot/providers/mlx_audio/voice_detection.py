@@ -8,12 +8,17 @@ import io
 import typing
 import wave
 
+from bot.telemetry import span
+
 from ._mlx import (
     StreamingVoiceDetectionSession,
     StreamingVoiceDetectionSessionLoader,
     VoiceActivityEvent,
     load_streaming_voice_detection_session,
 )
+
+_SCOPE = "bot.providers.mlx_audio"
+_COMPONENT = "mlx_audio.voice_detection"
 
 
 class VoiceDetectionError(RuntimeError):
@@ -100,7 +105,17 @@ class VoiceDetector(voice.VoiceDetector):
         # stream to the thread that created it, so a session driven from a second thread fails
         # with "no Stream(gpu) in current thread". The single worker also serializes chunks, and
         # order matters here: the session's clock only makes sense if chunks arrive in sequence.
-        return await asyncio.get_running_loop().run_in_executor(self._resolve_worker(), self._classify_blocking, input)
+        #
+        # That same long life is why the trace context is bound here, at hand-over, and not where
+        # the worker is created: the worker outlives every chunk, so a context captured at
+        # bring-up would file each chunk's span under whatever was happening when the detector
+        # first woke up. `run_in_executor` does not copy the caller's context the way
+        # `asyncio.to_thread` does, so without this bind each chunk starts its own trace.
+        return await asyncio.get_running_loop().run_in_executor(
+            self._resolve_worker(),
+            span.bind(self._classify_blocking),
+            input,
+        )
 
     def _resolve_worker(self) -> concurrent.futures.ThreadPoolExecutor:
         worker = self._worker
@@ -112,10 +127,29 @@ class VoiceDetector(voice.VoiceDetector):
     def _classify_blocking(self, audio: bytes) -> voice.detection.ApplyData:
         # Runs on the detector's single worker thread, so the stream state below is touched by
         # one thread at a time without further locking.
-        if _is_wav_container(audio):
-            pcm, sample_rate_hz, channels = _unwrap_wav(audio)
-            return self._classify_clip(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
-        return self._classify_stream_chunk(audio)
+        #
+        # `bot.audio.session` is the load-bearing dimension: a container gets a throwaway session
+        # and is judged alone, a raw chunk advances the one continuous stream. Which of the two a
+        # piece of audio got is the difference between a ring being heard as a ring and being
+        # swallowed by an open talkspurt. Segment counts only — never the audio, never spans of
+        # what was said.
+        with span.operation(
+            "bot.provider.mlx_audio.voice_detection.classify",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="classify",
+        ) as active:
+            if _is_wav_container(audio):
+                active.set_attribute("bot.audio.session", "clip")
+                pcm, sample_rate_hz, channels = _unwrap_wav(audio)
+                clip = self._classify_clip(pcm, sample_rate_hz=sample_rate_hz, channels=channels)
+                active.set_attribute("bot.voice.segments.count", len(clip.segments))
+                return clip
+            active.set_attribute("bot.audio.session", "stream")
+            chunk = self._classify_stream_chunk(audio)
+            active.set_attribute("bot.voice.segments.count", len(chunk.segments))
+            active.set_attribute("bot.voice.in_speech", self._in_speech)
+            return chunk
 
     def _classify_clip(self, pcm: bytes, *, sample_rate_hz: int, channels: int) -> voice.detection.ApplyData:
         """Judge one self-contained recording on its own, leaving the live stream untouched."""

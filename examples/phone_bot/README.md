@@ -186,6 +186,15 @@ verdict prints `dialed=` for the caller, `rang=` for the callee and `decoded=` f
 audio into words, and both sides must be audible to pass. A run where the caller never dials is
 reported, not failed.
 
+Each run leaves two OpenTelemetry JSONL files per bot in the record directory:
+`<number>-otel-logs.jsonl` (generator requests) and `<number>-otel-spans.jsonl` (spans). The span
+file is how a single sound is followed from the LiveKit frame it arrived on, through chunk
+assembly, voice detection and speech decoding, to the phone delivering it — or to the reason it
+was dropped instead. Disable both with `BOT_OTEL_DISABLED=1`.
+
+The dual-agent script does not set those paths, so its phone-bot writes `otel-logs.jsonl` and
+`otel-spans.jsonl` at the example root instead.
+
 ## Unit tests (no LiveKit)
 
 From repo root:
