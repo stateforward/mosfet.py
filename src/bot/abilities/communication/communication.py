@@ -25,7 +25,7 @@ from bot.telemetry import observer
 from bot.telemetry import span
 
 Conversation = conversation_module.Conversation
-ConversationInputData = conversation_module.ConversationInputData
+TurnData = conversation_module.TurnData
 
 
 class ActivateData(pydantic.BaseModel):
@@ -53,10 +53,10 @@ ActivateEvent = hsm.Event[ActivateData](
     schema=ActivateData,
 )
 # Speech/text admit into Communication; routed to the active Conversation.
-InputEvent = hsm.Event[ConversationInputData](
+InputEvent = hsm.Event[TurnData](
     name="bot.ability.communication.input",
     kind=event_schema.EventKind,
-    schema=ConversationInputData,
+    schema=TurnData,
 )
 
 
@@ -66,7 +66,7 @@ def _has_conversation_product(
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx, instance
-    return isinstance(event.data, cognition.InputData) or isinstance(event.data, conversation_module.Response)
+    return isinstance(event.data, cognition.InputData) or isinstance(event.data, conversation_module.Messages)
 
 
 def _has_conversation_failure(
@@ -93,7 +93,7 @@ def _has_communication_input(
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx, instance
-    return isinstance(event.data, ConversationInputData)
+    return isinstance(event.data, TurnData)
 
 
 def _normalize_catalog(
@@ -121,7 +121,7 @@ def _normalize_catalog(
     return catalog, chosen
 
 
-class Communication(ability.Ability[ConversationInputData, object]):
+class Communication(ability.Ability[TurnData, object]):
     """Route communication ingress to the active Conversation; forward its products.
 
     Topology (behavior under Ability lifecycle ``attached``):
@@ -133,7 +133,7 @@ class Communication(ability.Ability[ConversationInputData, object]):
     """
 
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
-    input_event: typing.ClassVar[hsm.Event[ConversationInputData]] = InputEvent
+    input_event: typing.ClassVar[hsm.Event[TurnData]] = InputEvent
     _active_conversation: Conversation
     _conversations: list[Conversation]
     _attachment_group: attachment.Group
@@ -190,9 +190,9 @@ class Communication(ability.Ability[ConversationInputData, object]):
             context=telemetry.event_context(event),
         ) as active:
             data = event.data
-            assert isinstance(data, ConversationInputData)
+            assert isinstance(data, TurnData)
             target = instance._active_conversation
-            parent = events.StimulusData[ConversationInputData](
+            parent = events.StimulusData[TurnData](
                 event=event.name,
                 data=data,
                 id=event.id,

@@ -996,7 +996,7 @@ async def main() -> None:
         ctx,
         conversation_ability,
         conversation.InputEvent.with_data_and_id(
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=speech.source_ids,
                 target_ids=frozenset(),
                 content=speech.content,

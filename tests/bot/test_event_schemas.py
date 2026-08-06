@@ -2,6 +2,7 @@ import bot
 from bot import event_schema
 from bot.abilities import cognition, listening, processing
 from bot.abilities.communication import communication, conversation
+from bot.abilities.communication.conversation import memory as conversation_memory
 from bot.devices import audio
 from bot.devices.phone import events as phone_events
 from bot.environment import SoundData, SoundEvent
@@ -35,6 +36,21 @@ def test_bot_completion_events_use_pydantic_schemas() -> None:
     assert activating_failed_schema == bot.ActivatingFailedEventData.model_json_schema()
     assert activating_failed_schema["description"]
     assert activating_failed_schema["examples"] == [{}]
+
+
+def test_messages_memories_are_excluded_from_model_facing_xml() -> None:
+    memory = conversation_memory.Memory(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset(),
+        content="private host context",
+        content_type="text/plain",
+    )
+    history = conversation.Messages(memories=(memory,))
+
+    xml = processing.InputData(input=conversation.OutputEvent.with_data(history)).model_facing_payload()
+
+    assert "memories" not in xml
+    assert "private host context" not in xml
 
 
 def test_observed_bot_event_serializes_binary_payload_as_type_only() -> None:
@@ -97,7 +113,7 @@ def test_response_model_facing_xml_nests_causal_event_ancestry() -> None:
     speech_event = dataclasses.replace(
         listening.SpeechEvent.with_data_and_id(speech, "speech-1"), source="listening-1", target="cognition-1"
     )
-    input_data = conversation.ConversationInputData(
+    input_data = conversation.TurnData(
         source_ids=frozenset({"caller"}),
         target_ids=frozenset(),
         content="hello",
@@ -109,13 +125,39 @@ def test_response_model_facing_xml_nests_causal_event_ancestry() -> None:
         source="communication-1",
         target="conversation-1",
     )
-    response = conversation.Response(
-        source_ids=input_data.source_ids,
-        target_ids=input_data.target_ids,
-        content="hi",
-        content_type="text/plain",
-        session_ref="session-1",
+    response = conversation.Messages(
         parent=bot.StimulusData.from_event(communication_event),
+        messages=(
+            conversation.Message(
+                sequence=0,
+                direction="inbound",
+                source_ids=input_data.source_ids,
+                target_ids=input_data.target_ids,
+                content="hello",
+                content_type="text/plain",
+                provenance=conversation.MessageProvenance(
+                    event=communication.InputEvent.name,
+                    id="communication-1",
+                    source="communication-1",
+                    target="conversation-1",
+                    session_ref="session-1",
+                ),
+            ),
+            conversation.Message(
+                sequence=1,
+                direction="outbound",
+                source_ids=(),
+                target_ids=input_data.source_ids,
+                content="hi",
+                content_type="text/plain",
+                provenance=conversation.MessageProvenance(
+                    event=conversation.OutputEvent.name,
+                    id="response-1",
+                    source="conversation-1",
+                    session_ref="session-1",
+                ),
+            ),
+        ),
     )
 
     xml = processing.InputData(
@@ -134,10 +176,10 @@ def test_response_model_facing_xml_nests_causal_event_ancestry() -> None:
     assert root.attrib[target_key] == "listening-1"
     speech_element = next(element for element in root.iter() if element.tag == "{urn:stateforward.bot:listening}speech")
     communication_element = next(
-        element for element in root.iter() if element.tag == "{urn:stateforward.bot:communication}conversation_input"
+        element for element in root.iter() if element.tag == "{urn:stateforward.bot:communication}turn"
     )
     response_element = next(
-        element for element in root.iter() if element.tag == "{urn:stateforward.bot:communication}response"
+        element for element in root.iter() if element.tag == "{urn:stateforward.bot:communication}messages"
     )
     assert speech_element.attrib[event_key] == listening.SpeechEvent.name
     assert speech_element.attrib[id_key] == "speech-1"
@@ -149,7 +191,7 @@ def test_response_model_facing_xml_nests_causal_event_ancestry() -> None:
     assert communication_element.attrib[target_key] == "conversation-1"
     assert response_element.attrib[event_key] == conversation.OutputEvent.name
     assert response_element.attrib[id_key] == "response-1"
-    assert xml.count("<communication:conversation_input") == 1
+    assert xml.count("<communication:turn") == 1
     assert "source-audio" not in xml
 
 

@@ -515,7 +515,7 @@ class HostOwnedVoiceEncoder(abilities.VoiceEncoder):
 class ExampleConversation(abilities.Conversation):
     """Voice conversation: Listening VAD speech observations → participant-owned turn boundaries → product."""
 
-    _outputs: list[abilities.Response]
+    _outputs: list[abilities.Messages]
     _failures: list[abilities.FailureData]
 
     def __init__(
@@ -540,8 +540,8 @@ class ExampleConversation(abilities.Conversation):
             typing.cast(hsm.Event[typing.Any], maybe_terminal) if isinstance(maybe_terminal, hsm.Event) else event
         )
         if event.name == self.output_event.name or terminal_event.name == self.output_event.name:
-            output = typing.cast(abilities.Response, terminal_event.data)
-            assert isinstance(output, abilities.Response)
+            output = typing.cast(abilities.Messages, terminal_event.data)
+            assert isinstance(output, abilities.Messages)
             self._outputs.append(output)
         if event.name == self.failed_event.name or terminal_event.name == self.failed_event.name:
             failure = typing.cast(abilities.FailureData, terminal_event.data)
@@ -549,7 +549,7 @@ class ExampleConversation(abilities.Conversation):
             self._failures.append(failure)
         return super().dispatch(ctx, event)
 
-    def outputs(self) -> tuple[abilities.Response, ...]:
+    def outputs(self) -> tuple[abilities.Messages, ...]:
         return tuple(self._outputs)
 
     def failures(self) -> tuple[abilities.FailureData, ...]:
@@ -869,7 +869,7 @@ class PhoneBot(Bot):
     _memory: memory.Memory
     _outputs: list[cognition.types.OutputData]
     _failures: list[bot.ProcessingFailedEventData]
-    _conversation_outputs: list[abilities.Response]
+    _conversation_outputs: list[abilities.Messages]
     _conversation_failures: list[abilities.FailureData]
     _listening_handoffs: list[cognition.InputData]
     _listening_failures: list[listening.FailedEventData]
@@ -897,18 +897,22 @@ class PhoneBot(Bot):
         # up with the ability and powers it down on the way out, the way phone firmware brings up
         # an earpiece — so it is injected into Speaking and never registered with the body.
         self._voice = voice if voice is not None else _voice()
-        speaking_instance = (
-            speaking if speaking is not None else _speaking(speaker=self._voice, speech_config=speech_config)
-        )
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
             cognition if cognition is not None else _phone_cognition(cognition_config, memory=self._memory)
         )
         self._listening = listening if listening is not None else _listening(speech_config)
+        self._conversation = conversation if conversation is not None else _conversation(speech_config)
+        speaking_instance = (
+            speaking
+            if speaking is not None
+            else _speaking(speaker=self._voice, speech_config=speech_config)
+        )
         self._speaking = speaking_instance
         # Speaking→Listening nerve: motor-command copy is peer delivery, not body/environment.
         self._speaking.link_listening(self._listening)
-        self._conversation = conversation if conversation is not None else _conversation(speech_config)
+        # Explicit trusted effector→Conversation route; no body policy or graph traversal.
+        self._speaking.link_conversation(self._conversation)
         # Bot acquires Communication; Conversation is nested under it for tool resolution.
         self._communication = abilities.Communication(active_conversation=self._conversation)
         super().__init__(
@@ -932,7 +936,7 @@ class PhoneBot(Bot):
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
         if event.name == self._conversation.output_event.name:
             output = event.data
-            assert isinstance(output, abilities.Response)
+            assert isinstance(output, abilities.Messages)
             self._conversation_outputs.append(output)
         if event.name == self._conversation.failed_event.name:
             failure = event.data
@@ -986,7 +990,7 @@ class PhoneBot(Bot):
     def failures(self) -> tuple[bot.ProcessingFailedEventData, ...]:
         return tuple(self._failures)
 
-    def conversation_outputs(self) -> tuple[abilities.Response, ...]:
+    def conversation_outputs(self) -> tuple[abilities.Messages, ...]:
         return tuple(self._conversation_outputs)
 
     def conversation_failures(self) -> tuple[abilities.FailureData, ...]:

@@ -8,7 +8,7 @@ import typing as typ
 
 import pydantic
 
-from .conversation import ConversationInputData
+from .conversation import TurnData
 
 
 class VoiceDecoder(decoding.Decoder[turn_detector.AudioStimulus, str], abc.ABC):
@@ -52,7 +52,7 @@ class EncodeData(pydantic.BaseModel):
         },
     )
 
-    message: ConversationInputData = pydantic.Field(
+    message: TurnData = pydantic.Field(
         description="Original voice message accepted for this turn.",
     )
     text: str = pydantic.Field(
@@ -80,4 +80,4 @@ class VoiceEncoder(encoding.Encoder[EncodeData, str | bytes], abc.ABC):
     """Encoder for a completed voice conversation turn."""
 
 
-__all__ = ["ConversationInputData", "VoiceDecoder", "VoiceEncoder", "EncodeData"]
+__all__ = ["TurnData", "VoiceDecoder", "VoiceEncoder", "EncodeData"]

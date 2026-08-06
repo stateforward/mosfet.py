@@ -71,17 +71,41 @@ class SpeakFromContributionProcessor(processing.Processor):
         assert isinstance(stimulus, hsm.Event)
         assert stimulus.name == conversation.OutputEvent.name
         response = stimulus.data
-        assert isinstance(response, conversation.Response)
-        assert isinstance(response.content, str) and response.content
-        assert response.content_type.lower().startswith("text/")
+        assert isinstance(response, conversation.Messages)
+        inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
+        assert isinstance(inbound.content, str) and inbound.content
+        assert inbound.content_type.lower().startswith("text/")
         return (
             processing.SelectedEvent(
                 event="bot.ability.speaking.input",
-                data={"text": f"Heard: {response.content}"},
+                data={"text": f"Heard: {inbound.content}"},
                 target="speaking",
                 reason="reply to conversation contribution",
             ),
         )
+
+
+def _history_message(
+    content: object,
+    *,
+    source_ids: frozenset[object] = frozenset({"caller"}),
+    target_ids: frozenset[object] = frozenset({"bot"}),
+    content_type: str = "text/plain",
+    direction: typing.Literal["inbound", "outbound"] = "inbound",
+) -> conversation.Messages:
+    return conversation.Messages(
+        messages=(
+            conversation.Message(
+                sequence=0,
+                direction=direction,
+                source_ids=source_ids if direction == "inbound" else frozenset(),
+                target_ids=target_ids if direction == "inbound" else source_ids,
+                content=None if isinstance(content, bytes) else content,
+                content_type=content_type,
+                provenance=conversation.MessageProvenance(event="test.message", session_ref="support-call"),
+            ),
+        )
+    )
 
 
 class CountingProcessor(processing.Processor):
@@ -124,7 +148,7 @@ def _text_communication(
 
 
 def test_conversation_input_uses_identity_sets_and_content() -> None:
-    message = conversation.ConversationInputData(
+    message = conversation.TurnData(
         source_ids=frozenset({"caller"}),
         target_ids=frozenset({"bot"}),
         content="hello there",
@@ -139,7 +163,7 @@ def test_conversation_input_uses_identity_sets_and_content() -> None:
 def test_bot_conversation_contribution_selects_speaking() -> None:
     """Message → Conversation contribution → Bot cognition (Speaking in actors) → Speaking."""
 
-    async def run() -> tuple[list[bytes], list[processing.InputData], conversation.Response | None]:
+    async def run() -> tuple[list[bytes], list[processing.InputData], conversation.Messages | None]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
         communication_ability, conversation_ability = _text_communication()
@@ -161,7 +185,7 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
 
         operation_id = uuid.uuid4().hex
-        message = conversation.ConversationInputData(
+        message = conversation.TurnData(
             source_ids=frozenset({"caller"}),
             target_ids=frozenset({"bot"}),
             content="hello from the room",
@@ -179,21 +203,22 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
         stimulus = processor.inputs[0].input
         assert isinstance(stimulus, hsm.Event)
         response = stimulus.data
-        assert isinstance(response, conversation.Response)
+        assert isinstance(response, conversation.Messages)
         return encoder.calls, processor.inputs, response
 
     calls, inputs, response = asyncio.run(run())
     assert calls == [b"Heard: hello from the room"]
     assert len(inputs) == 1
     assert response is not None
-    assert response.content == "hello from the room"
-    assert response.source_ids == frozenset({"caller"})
-    assert response.target_ids == frozenset({"bot"})
-    assert response.content_type == "text/plain"
+    inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
+    assert inbound.content == "hello from the room"
+    assert inbound.source_ids == frozenset({"caller"})
+    assert inbound.target_ids == frozenset({"bot"})
+    assert inbound.content_type == "text/plain"
 
 
 def test_bot_ignores_host_encoded_conversation_response() -> None:
-    """Host-encoded Response (content set) must not re-enter cognition."""
+    """Host-encoded Messages history (content set) must not re-enter cognition."""
 
     async def run() -> tuple[list[processing.InputData], str]:
         processor = CountingProcessor()
@@ -210,13 +235,7 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
-        encoded = conversation.Response(
-            source_ids=frozenset({"bot"}),
-            target_ids=frozenset({"caller"}),
-            content=b"already encoded",
-            content_type="audio/raw",
-            session_ref="support-call",
-        )
+        encoded = _history_message(None, source_ids=frozenset({"bot"}), target_ids=frozenset({"caller"}), content_type="audio/raw", direction="outbound")
         # Address this Bot by id (dispatch_to / envelope target) — still fail closed on payload shape.
         terminal = dataclasses.replace(
             conversation.OutputEvent.with_data(encoded),
@@ -233,7 +252,7 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
 
 
 def test_bot_ignores_response_without_text_product() -> None:
-    """Response with no text product (content is not text) must not re-enter cognition."""
+    """Messages history with no text product (content is not text) must not re-enter cognition."""
 
     async def run() -> list[processing.InputData]:
         processor = CountingProcessor()
@@ -250,13 +269,7 @@ def test_bot_ignores_response_without_text_product() -> None:
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
-        bare = conversation.Response(
-            source_ids=frozenset({"caller"}),
-            target_ids=frozenset({"bot"}),
-            content=None,
-            content_type="text/plain",
-            session_ref="support-call",
-        )
+        bare = _history_message(None, content_type="text/plain")
         terminal = dataclasses.replace(
             conversation.OutputEvent.with_data(bare),
             target=hsm.id(probe),
@@ -287,13 +300,7 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
-        silence = conversation.Response(
-            source_ids=frozenset({"caller"}),
-            target_ids=frozenset({"bot"}),
-            content="",
-            content_type="text/plain",
-            session_ref="support-call",
-        )
+        silence = _history_message("", content_type="text/plain")
         response_event = conversation.OutputEvent.with_data(silence)
         handoff = dataclasses.replace(
             cognition.InputEvent.with_data(cognition.InputData(stimulus=response_event)),
@@ -305,8 +312,8 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
         texts: list[object] = []
         for item in processor.inputs:
             stimulus = item.input
-            if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Response):
-                texts.append(stimulus.data.content)
+            if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Messages):
+                texts.append(stimulus.data.messages[-1].content)
         return texts
 
     assert asyncio.run(run()) == [""]
@@ -334,13 +341,7 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
-        contribution = conversation.Response(
-            source_ids=frozenset({"caller"}),
-            target_ids=frozenset({"bot"}),
-            content="addressed by id",
-            content_type="text/plain",
-            session_ref="support-call",
-        )
+        contribution = _history_message("addressed by id", content_type="text/plain")
         response_event = conversation.OutputEvent.with_data(contribution)
         handoff = dataclasses.replace(
             cognition.InputEvent.with_data(cognition.InputData(stimulus=response_event)),
@@ -382,7 +383,7 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller"}),
                     target_ids=frozenset({"bot"}),
                     content="only body path",
@@ -423,12 +424,13 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 stimulus = input.input
                 assert isinstance(stimulus, hsm.Event)
                 response = stimulus.data
-                assert isinstance(response, conversation.Response)
-                assert isinstance(response.content, str) and response.content
+                assert isinstance(response, conversation.Messages)
+                inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
+                assert isinstance(inbound.content, str) and inbound.content
                 return (
                     processing.SelectedEvent(
                         event="bot.ability.speaking.input",
-                        data={"text": response.content},
+                        data={"text": inbound.content},
                         target="speaking",
                         reason="deferred turn proof",
                     ),
@@ -456,7 +458,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller-a"}),
                     target_ids=frozenset({"bot"}),
                     content="first",
@@ -475,7 +477,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
             environment,
             conversation_ability,
             conversation_ability.input_event.with_data_and_id(
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller-b"}),
                     target_ids=frozenset({"bot"}),
                     content="second",

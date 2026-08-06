@@ -84,7 +84,7 @@ class SelectedEvent:
     event: str
     target: str | None = None
     # Domain payload: JSON dict from model/Starlark selections, or a typed event data model
-    # (e.g. ConversationInputData with audio bytes) when rebuilt from a live stimulus.
+    # (e.g. TurnData with audio bytes) when rebuilt from a live stimulus.
     data: object | None = None
     reason: str | None = None
     confidence: int | None = None

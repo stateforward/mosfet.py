@@ -1,5 +1,5 @@
 from bot.abilities.communication import conversation
-from bot.abilities import decoding
+from bot.abilities import ability, decoding
 from bot.abilities import processing
 from bot.abilities.hearing import voice
 from bot.abilities.listening import interpretation
@@ -9,6 +9,8 @@ from bot.abilities.communication.conversation import memory as conversation_memo
 from bot.abilities.identity import value
 
 import asyncio
+import collections.abc
+import dataclasses
 import typing
 
 import hsm
@@ -30,7 +32,7 @@ def run_input(
     return asyncio.run(
         conversation.contribute_conversation_input(
             ability,
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=source_ids,
                 target_ids=target_ids,
                 content=content,
@@ -58,7 +60,7 @@ def started_conversation(
 
 
 def test_input_contract_has_identity_content_and_audio_packaging_fields() -> None:
-    assert tuple(conversation.ConversationInputData.model_fields) == (
+    assert tuple(conversation.TurnData.model_fields) == (
         "parent",
         "source_ids",
         "target_ids",
@@ -67,11 +69,11 @@ def test_input_contract_has_identity_content_and_audio_packaging_fields() -> Non
         "sample_rate_hz",
         "channels",
     )
-    assert "conversation_ref" not in conversation.ConversationInputData.model_fields
-    assert "self_participant_ref" not in conversation.ConversationInputData.model_fields
-    assert "participants" not in conversation.ConversationInputData.model_fields
+    assert "conversation_ref" not in conversation.TurnData.model_fields
+    assert "self_participant_ref" not in conversation.TurnData.model_fields
+    assert "participants" not in conversation.TurnData.model_fields
     with pytest.raises(pydantic.ValidationError):
-        conversation.ConversationInputData.model_validate(
+        conversation.TurnData.model_validate(
             {
                 "source_ids": ["caller"],
                 "target_ids": ["bot"],
@@ -81,13 +83,13 @@ def test_input_contract_has_identity_content_and_audio_packaging_fields() -> Non
             }
         )
     schema = typing.cast(type[pydantic.BaseModel], conversation.InputEvent.schema)
-    assert tuple(schema.model_fields) == tuple(conversation.ConversationInputData.model_fields)
+    assert tuple(schema.model_fields) == tuple(conversation.TurnData.model_fields)
 
 
 def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provenance() -> None:
     """Model selections cannot forge causal ancestry, while runtime input validation retains it."""
 
-    schema = conversation.ConversationInputData.model_json_schema()
+    schema = conversation.TurnData.model_json_schema()
     assert "parent" not in schema["properties"]
 
     speech = interpretation.SpeechData(
@@ -103,7 +105,7 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
         event="bot.ability.listening.speech.output",
         data=speech,
     )
-    validated = conversation.ConversationInputData.model_validate(
+    validated = conversation.TurnData.model_validate(
         {
             "parent": parent,
             "source_ids": ["caller"],
@@ -115,7 +117,7 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
     assert validated.parent == parent
 
     with pytest.raises(pydantic.ValidationError):
-        conversation.ConversationInputData.model_validate(
+        conversation.TurnData.model_validate(
             {
                 "parent": {
                     "event": "bot.ability.listening.speech.output",
@@ -144,7 +146,7 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
             media_type="audio/pcm",
             source_ids=frozenset({"caller"}),
         )
-        input_data = conversation.ConversationInputData(
+        input_data = conversation.TurnData(
             parent=events.StimulusData[interpretation.SpeechData](
                 event="bot.ability.listening.speech.output",
                 data=speech,
@@ -180,7 +182,7 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
 
 def test_zero_vector_is_rejected_at_the_input_boundary() -> None:
     with pytest.raises(pydantic.ValidationError, match="zero vector"):
-        conversation.ConversationInputData(
+        conversation.TurnData(
             source_ids=frozenset({(0.0, 0.0)}),
             target_ids=frozenset({"bot"}),
             content="invalid voice identity",
@@ -189,7 +191,7 @@ def test_zero_vector_is_rejected_at_the_input_boundary() -> None:
 
 
 def test_input_accepts_an_empty_target_set() -> None:
-    input_data = conversation.ConversationInputData(
+    input_data = conversation.TurnData(
         source_ids=frozenset({"caller"}),
         target_ids=frozenset(),
         content="ambient message",
@@ -210,14 +212,14 @@ def test_input_rejects_identity_sets_above_the_provider_neutral_limit(field_name
     fields[field_name] = frozenset(f"speaker-{index}" for index in range(value.MAX_IDENTITY_SET_SIZE + 1))
 
     with pytest.raises(pydantic.ValidationError, match="maximum is 4"):
-        conversation.ConversationInputData.model_validate(fields)
+        conversation.TurnData.model_validate(fields)
 
 
 def test_input_rejects_embeddings_above_the_provider_neutral_dimension_limit() -> None:
     oversized = (1.0,) * (value.MAX_EMBEDDING_DIMENSION + 1)
 
     with pytest.raises(pydantic.ValidationError, match="exceeds the maximum of 2048"):
-        conversation.ConversationInputData(
+        conversation.TurnData(
             source_ids=frozenset({oversized}),
             target_ids=frozenset(),
             content="embedding too large",
@@ -726,7 +728,7 @@ def test_source_only_embedding_turns_share_ambient_session_and_preserve_empty_ta
             end_of_turn_silence_seconds=0.01,
         )
 
-    input_data = conversation.ConversationInputData(
+    input_data = conversation.TurnData(
         source_ids=frozenset({(1.0, 0.0, 0.0)}),
         target_ids=frozenset(),
         content="ambient turn",
@@ -969,7 +971,7 @@ def test_cancellation_stops_active_cached_detector_but_preserves_idle_detector()
         await start_ability_tree(context, ability)
         first = await conversation.contribute_conversation_input(
             ability,
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=frozenset({"alice", "bob"}),
                 target_ids=frozenset({"bot"}),
                 content="first",
@@ -981,7 +983,7 @@ def test_cancellation_stops_active_cached_detector_but_preserves_idle_detector()
         operation = asyncio.create_task(
             conversation.contribute_conversation_input(
                 ability,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"alice", "bob"}),
                     target_ids=frozenset({"bot"}),
                     content="cancelled",
@@ -1000,7 +1002,7 @@ def test_cancellation_stops_active_cached_detector_but_preserves_idle_detector()
 
         await conversation.contribute_conversation_input(
             ability,
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=frozenset({"alice", "bob"}),
                 target_ids=frozenset({"bot"}),
                 content="retry",
@@ -1027,7 +1029,7 @@ def test_public_input_only_accepts_the_first_missing_detector_failure() -> None:
         )
 
     ability, context = started_conversation(factory)
-    input_data = conversation.ConversationInputData(
+    input_data = conversation.TurnData(
         source_ids=frozenset({"alice", "bob", "carol"}),
         target_ids=frozenset({"bot"}),
         content="hello",
@@ -1059,7 +1061,7 @@ def test_public_input_only_accepts_the_first_missing_detector_failure() -> None:
 
 def test_identity_sets_reject_blank_members() -> None:
     with pytest.raises(ValueError, match="must not be blank"):
-        conversation.ConversationInputData(
+        conversation.TurnData(
             source_ids=frozenset({" "}),
             target_ids=frozenset({"bot"}),
             content="hello",
@@ -1083,7 +1085,7 @@ def test_conversation_input_rehydrates_audio_bytes_from_base64_selection() -> No
         "content_type": "audio/raw",
     }
     validated = validate_event_data(conversation.InputEvent, raw)
-    assert isinstance(validated, conversation.ConversationInputData)
+    assert isinstance(validated, conversation.TurnData)
     assert isinstance(validated.content, bytes)
     assert validated.content == audio
     assert validated.content_type == "audio/raw"
@@ -1168,7 +1170,7 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
             "channels": dumped["channels"],
         },
     )
-    assert isinstance(validated, conversation.ConversationInputData)
+    assert isinstance(validated, conversation.TurnData)
     assert validated.content == audio
     assert validated.sample_rate_hz == 16_000
     assert validated.channels == 1
@@ -1186,7 +1188,7 @@ def test_processing_dispatch_accepts_typed_event_data_instance() -> None:
     from bot.protocols import attachment
 
     audio = bytes((9, 8, 7, 6)) * 200
-    typed = conversation.ConversationInputData(
+    typed = conversation.TurnData(
         source_ids=frozenset({(0.1, 0.2, 0.3)}),
         target_ids=frozenset(),
         content=audio,
@@ -1330,7 +1332,7 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
         await start_ability_tree(context, ability)
         _ = await conversation.contribute_conversation_input(
             ability,
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=frozenset({"caller"}),
                 target_ids=frozenset({"bot"}),
                 content="one",
@@ -1342,7 +1344,7 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
         offered = tuple(event.name for event in processing.enabled_call_events(ability))
         second = await conversation.contribute_conversation_input(
             ability,
-            conversation.ConversationInputData(
+            conversation.TurnData(
                 source_ids=frozenset({"caller"}),
                 target_ids=frozenset({"bot"}),
                 content="two",
@@ -1357,3 +1359,100 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
     assert state_after.endswith("/behavior/active/waiting"), state_after
     assert conversation.InputEvent.name in offered
     assert second_text == "two"
+
+
+def test_messages_reject_raw_media_and_preserve_immutable_provenance() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        conversation.Message(
+            sequence=0,
+            direction="inbound",
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset(),
+            content=typing.cast(typing.Any, b"raw-audio"),
+            content_type="audio/pcm",
+            provenance=conversation.MessageProvenance(event="test.input"),
+        )
+
+
+def test_conversation_append_same_correlation_is_idempotent() -> None:
+    class RecordingConversation(conversation.Conversation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.outputs: list[conversation.Messages] = []
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+            if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
+                terminal = event.data
+                if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
+                    self.outputs.append(terminal.data)
+            return super().dispatch(ctx, event)
+
+    async def run() -> tuple[conversation.Messages, conversation.Messages]:
+        context = hsm.Context()
+        target = RecordingConversation()
+        await start_ability_tree(context, target)
+        message = conversation.Message(
+            sequence=0,
+            direction="outbound",
+            source_ids=frozenset(),
+            target_ids=frozenset({"caller"}),
+            content="hi",
+            content_type="text/plain",
+            provenance=conversation.MessageProvenance(event="test.message"),
+        )
+        event = dataclasses.replace(
+            conversation.AppendEvent.with_data(conversation.AppendData(message=message)),
+            id="append-1",
+            source="speaking-1",
+            target=hsm.id(target),
+        )
+        await hsm.dispatch(context, target, event)
+        first = target.outputs[-1]
+        await hsm.dispatch(context, target, event)
+        second = target.outputs[-1]
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert len(first.messages) == 1
+    assert len(second.messages) == 1
+    assert second.messages == first.messages
+    assert second.messages[0].sequence == 0
+    assert second.messages[0].provenance.id == "append-1"
+
+
+def test_conversation_commits_cumulative_bidirectional_history() -> None:
+    ability, context = started_conversation()
+    inbound = run_input(
+        ability,
+        context,
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content="hello",
+        content_type="text/plain",
+    )
+    assert tuple(item.direction for item in inbound.messages) == ("inbound",)
+
+    async def append() -> conversation.Messages:
+        return await conversation.append_conversation_message(
+            ability,
+            conversation.Message(
+                sequence=1,
+                direction="outbound",
+                source_ids=frozenset(),
+                target_ids=frozenset({"caller"}),
+                content="hi",
+                content_type="text/plain",
+                provenance=conversation.MessageProvenance(
+                    event="bot.ability.speaking.output",
+                    source="speaking-1",
+                    session_ref=inbound.session_ref,
+                ),
+            ),
+            ctx=context,
+        )
+
+    history = asyncio.run(append())
+    assert tuple(item.sequence for item in history.messages) == (0, 1)
+    assert tuple(item.direction for item in history.messages) == ("inbound", "outbound")

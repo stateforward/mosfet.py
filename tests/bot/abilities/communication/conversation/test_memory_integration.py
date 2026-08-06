@@ -33,7 +33,7 @@ def test_conversation_recalls_and_persists_relationship_memory() -> None:
 
             first = await conversation.contribute_conversation_input(
                 ability,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller"}),
                     target_ids=frozenset({"bot"}),
                     content="first contribution",
@@ -43,7 +43,7 @@ def test_conversation_recalls_and_persists_relationship_memory() -> None:
             )
             second = await conversation.contribute_conversation_input(
                 ability,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller"}),
                     target_ids=frozenset({"bot"}),
                     content="second contribution",
@@ -102,7 +102,7 @@ def test_remember_failure_rolls_back_new_detector_and_profile() -> None:
 
             first = await conversation.contribute_conversation_input(
                 ability_instance,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({(1.0, 0.0)}),
                     target_ids=frozenset({"bot"}),
                     content="committed",
@@ -125,7 +125,7 @@ def test_remember_failure_rolls_back_new_detector_and_profile() -> None:
             with pytest.raises(RuntimeError, match="remember failed"):
                 await conversation.contribute_conversation_input(
                     ability_instance,
-                    conversation.ConversationInputData(
+                    conversation.TurnData(
                         source_ids=frozenset({(0.0, 1.0)}),
                         target_ids=frozenset({"bot"}),
                         content="not committed",
@@ -143,7 +143,7 @@ def test_remember_failure_rolls_back_new_detector_and_profile() -> None:
             connection.commit()
             retry = await conversation.contribute_conversation_input(
                 ability_instance,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({(0.0, 1.0)}),
                     target_ids=frozenset({"bot"}),
                     content="retry",
@@ -173,7 +173,7 @@ def test_remember_failure_preserves_existing_participant_profile() -> None:
 
             first = await conversation.contribute_conversation_input(
                 ability_instance,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({(1.0, 0.0)}),
                     target_ids=frozenset({"bot"}),
                     content="initial contribution",
@@ -198,7 +198,7 @@ def test_remember_failure_preserves_existing_participant_profile() -> None:
             with pytest.raises(RuntimeError, match="remember failed"):
                 await conversation.contribute_conversation_input(
                     ability_instance,
-                    conversation.ConversationInputData(
+                    conversation.TurnData(
                         source_ids=frozenset({(0.99, 0.1)}),
                         target_ids=frozenset({"bot"}),
                         content="failed contribution",
@@ -228,7 +228,7 @@ def test_memory_failure_is_a_typed_conversation_failure() -> None:
         with pytest.raises(RuntimeError, match="stage='memory'"):
             await conversation.contribute_conversation_input(
                 ability,
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller"}),
                     target_ids=frozenset({"bot"}),
                     content="unavailable storage",
@@ -271,7 +271,7 @@ def test_memory_rejects_mismatched_terminal(monkeypatch: pytest.MonkeyPatch) -> 
             with pytest.raises(RuntimeError, match="stage='memory'"):
                 await conversation.contribute_conversation_input(
                     ability_instance,
-                    conversation.ConversationInputData(
+                    conversation.TurnData(
                         source_ids=frozenset({"caller"}),
                         target_ids=frozenset({"bot"}),
                         content="mismatched terminal",
@@ -314,7 +314,7 @@ def test_memory_timeout_is_a_typed_conversation_failure(monkeypatch: pytest.Monk
             with pytest.raises(RuntimeError, match="stage='memory'.*timed out"):
                 await conversation.contribute_conversation_input(
                     ability_instance,
-                    conversation.ConversationInputData(
+                    conversation.TurnData(
                         source_ids=frozenset({"caller"}),
                         target_ids=frozenset({"bot"}),
                         content="timed out memory",

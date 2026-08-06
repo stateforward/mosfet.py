@@ -37,6 +37,10 @@ from bot.telemetry import span
 
 Stage: typ.TypeAlias = typ.Literal["memory", "turn_detector", "voice_routing"]
 Content: typ.TypeAlias = object
+MessageContent = typ.TypeAliasType(
+    "MessageContent",
+    str | int | float | bool | None | list["MessageContent"] | dict[str, "MessageContent"],
+)
 IdentitySet: typ.TypeAlias = value.IdentitySet
 IdentityValue: typ.TypeAlias = value.IdentityValue
 TrackRef: typ.TypeAlias = str
@@ -73,7 +77,7 @@ def _schema(description: str, example: JsonDict) -> JsonDict:
     return {"description": description, "examples": examples}
 
 
-class ConversationInputData(pydantic.BaseModel):
+class TurnData(pydantic.BaseModel):
     """One modality-neutral input entering Conversation.
 
     ``source_ids`` and ``target_ids`` are sets of opaque identity references.
@@ -187,63 +191,163 @@ class ConversationInputData(pydantic.BaseModel):
         return value.identities_json(identities)
 
 
-class Response(pydantic.BaseModel):
-    """Conversation's contribution terminal.
+class MessageProvenance(pydantic.BaseModel):
+    """Typed HSM provenance for one committed model-facing message.
 
-    ``session_ref`` is an opaque relationship reference for terminal
-    correlation and turn-detector provenance.  It is derived from the current
-    identity sets for each operation; Conversation never stores a session
-    object for it.
+    Provenance identifies the event that committed the item.  It intentionally carries
+    no payload or media, so model-facing history cannot become a raw-media side channel.
     """
 
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        arbitrary_types_allowed=True,
         extra="forbid",
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        json_schema_extra={
+            "examples": [
+                {
+                    "event": "bot.ability.conversation.append",
+                    "id": "append-1",
+                    "source": "speaking",
+                    "target": "conversation",
+                }
+            ]
+        },
     )
 
-    parent: events.StimulusData[ConversationInputData] | None = pydantic.Field(
+    event: str = pydantic.Field(min_length=1, description="Canonical event that committed this message.")
+    id: str | None = pydantic.Field(default=None, description="Correlation id of the committing event.")
+    source: str | None = pydantic.Field(default=None, description="HSM source identity of the committing event.")
+    target: str | None = pydantic.Field(default=None, description="HSM target identity of the committing event.")
+    session_ref: str | None = pydantic.Field(default=None, min_length=1, description="Conversation relationship reference, when known.")
+    turn_ref: str | None = pydantic.Field(default=None, min_length=1, description="Turn detector reference, when known.")
+
+
+class Message(pydantic.BaseModel):
+    """One immutable, ordered, model-safe inbound or outbound message."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "sequence": 0,
+                    "direction": "inbound",
+                    "source_ids": ["caller"],
+                    "target_ids": ["bot"],
+                    "content": "Hello",
+                    "content_type": "text/plain",
+                    "provenance": {
+                        "event": "bot.ability.conversation.input",
+                        "id": "turn-1",
+                        "source": "caller",
+                        "target": "conversation",
+                    },
+                }
+            ]
+        },
+    )
+
+    sequence: int = pydantic.Field(ge=0, description="Zero-based position in committed conversation history.")
+    direction: typ.Literal["inbound", "outbound"] = pydantic.Field(description="Whether the message came from a participant or the bot.")
+    source_ids: IdentitySet = pydantic.Field(description="Opaque source identities associated with the message.")
+    target_ids: IdentitySet = pydantic.Field(description="Opaque target identities associated with the message.")
+    content: MessageContent = pydantic.Field(
         default=None,
-        description="The exact Conversation or Communication input event that admitted the turn that produced this response.",
+        description="Decoded text or JSON-safe structured content; raw media bytes are never accepted here.",
     )
-    source_ids: IdentitySet = pydantic.Field(description="Source identities for the completed turn.")
-    target_ids: IdentitySet = pydantic.Field(
-        description="Zero or more target identities for the completed turn; an empty set means no addressee is known.",
-        examples=[[], ["bot"]],
-    )
-    content: Content | None = pydantic.Field(
-        default=None,
-        description=(
-            "Response product payload. After turn decode this is the transcript (``text/plain``). "
-            "Host-encoded media keeps bytes under an audio/* content_type and does not re-enter cognition."
-        ),
-    )
-    content_type: str = pydantic.Field(
-        description="Response product modality (decode rewrites admit audio/* to text/plain).",
-    )
-    session_ref: str = pydantic.Field(
-        description="Transient relationship reference derived from the current identity sets; not a stored session.",
-    )
-    memories: tuple[conversation_memory.Memory, ...] = pydantic.Field(
-        default=(),
-        description="Conversation memories recalled for this relationship before the completed turn.",
-    )
+
+    @pydantic.field_validator("content", mode="before")
+    @classmethod
+    def reject_media(cls, raw_value: object) -> object:
+        def contains_media(value: object) -> bool:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                return True
+            if isinstance(value, dict):
+                return any(contains_media(item) for item in value.values())
+            if isinstance(value, list | tuple):
+                return any(contains_media(item) for item in value)
+            return False
+
+        if contains_media(raw_value):
+            raise ValueError("message content cannot contain raw media")
+        return raw_value
+    content_type: str = pydantic.Field(min_length=1, description="Media type of the model-safe message content.")
+    provenance: MessageProvenance = pydantic.Field(description="Typed event provenance for this committed message.")
 
     @pydantic.field_validator("source_ids", "target_ids", mode="before")
     @classmethod
     def normalize_ids(cls, raw_value: object, info: pydantic.ValidationInfo) -> IdentitySet:
-        field_name = info.field_name or "identity set"
-        return value.normalize_identity_set(
-            raw_value,
-            field_name=field_name,
-            allow_empty=field_name == "target_ids",
-        )
+        return value.normalize_identity_set(raw_value, field_name=info.field_name or "identity set", allow_empty=True)
 
     @pydantic.field_serializer("source_ids", "target_ids", when_used="json")
     def serialize_ids(self, identities: IdentitySet) -> list[str | list[float]]:
         return value.identities_json(identities)
+
+
+class Messages(pydantic.BaseModel):
+    """Cumulative immutable conversation history emitted after each commit."""
+
+    __model_facing_excluded_fields__: typ.ClassVar[frozenset[str]] = frozenset({"memories"})
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "messages": [
+                        {
+                            "sequence": 0,
+                            "direction": "inbound",
+                            "source_ids": ["caller"],
+                            "target_ids": ["bot"],
+                            "content": "Hello",
+                            "content_type": "text/plain",
+                            "provenance": {
+                                "event": "bot.ability.conversation.input",
+                                "id": "turn-1",
+                            },
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+    __producer_stamped_fields__: typ.ClassVar[frozenset[str]] = frozenset({"parent"})
+
+    parent: events.StimulusData[TurnData] | None = pydantic.Field(
+        default=None,
+        description="The exact typed inbound event that caused this history emission, when one exists.",
+    )
+    messages: tuple[Message, ...] = pydantic.Field(
+        default=(),
+        description="All committed inbound and outbound messages in causal order.",
+    )
+    memories: SkipJsonSchema[tuple[conversation_memory.Memory, ...]] = pydantic.Field(
+        default=(),
+        exclude=True,
+        description="Host-only recalled context for the latest inbound turn; never model-projected.",
+    )
+
+
+def _message_for_turn(
+    data: TurnData,
+    *,
+    content: MessageContent,
+    content_type: str,
+    sequence: int,
+    provenance: MessageProvenance,
+) -> Message:
+    return Message(
+        sequence=sequence,
+        direction="inbound",
+        source_ids=data.source_ids,
+        target_ids=data.target_ids,
+        content=content,
+        content_type=content_type,
+        provenance=provenance,
+    )
 
 
 class FailureData(pydantic.BaseModel):
@@ -280,29 +384,30 @@ class ParticipatedTurn(pydantic.BaseModel):
 
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
 
-    input: pydantic.SkipValidation[ConversationInputData]
+    input: pydantic.SkipValidation[TurnData]
     stimulus: turn_detector.ParticipationStimulus
     participation: turn_detector.ParticipantContribution
     participations: tuple[turn_detector.ParticipantContribution, ...] = ()
     session_ref: str = pydantic.Field(min_length=1)
     memories: tuple[conversation_memory.Memory, ...] = ()
+    messages: tuple[Message, ...] = ()
 
 
-def participated_turn_from_response(
-    input_data: ConversationInputData,
-    response: Response,
+def participated_turn_from_messages(
+    input_data: TurnData,
+    messages: Messages,
 ) -> ParticipatedTurn:
-    """Reconstruct host composition data from Conversation's typed response terminal."""
+    """Reconstruct host composition data from the latest inbound history item."""
 
-    if response.source_ids != input_data.source_ids or response.target_ids != input_data.target_ids:
-        raise RuntimeError("Conversation response identities do not match the input identities.")
-    content = response.content
-    content_type = response.content_type
+    inbound = next((item for item in reversed(messages.messages) if item.direction == "inbound"), None)
+    if inbound is None or inbound.source_ids != input_data.source_ids or inbound.target_ids != input_data.target_ids:
+        raise RuntimeError("Conversation history has no matching inbound message for the input identities.")
+    content = inbound.content
+    content_type = inbound.content_type
     normalized_type = content_type.lower()
-    sources = value.sorted_identities(response.source_ids)
-    structured = content if isinstance(content, dict) else None
+    sources = value.sorted_identities(inbound.source_ids)
+    structured = typ.cast(dict[str, object] | None, content) if isinstance(content, dict) else None
     readable = content if isinstance(content, str) else None
-    # Empty shell when Response carries no product body (e.g. audio admit with no transcript).
     if content is None and structured is None:
         readable = ""
         perception_content: Content | None = ""
@@ -314,13 +419,6 @@ def participated_turn_from_response(
             return turn_detector.TextStimulus(source_participant_ref=source_id, content=content)
         if content is None and readable == "":
             return turn_detector.TextStimulus(source_participant_ref=source_id, content="")
-        if normalized_type.startswith("audio/") and isinstance(content, bytes):
-            return turn_detector.AudioStimulus(
-                source_participant_ref=source_id,
-                content=content,
-                sample_rate_hz=input_data.sample_rate_hz,
-                channels=input_data.channels,
-            )
         return turn_detector.ContentStimulus(
             source_participant_ref=source_id,
             content=perception_content,
@@ -328,23 +426,21 @@ def participated_turn_from_response(
         )
 
     if not sources:
-        raise RuntimeError("Conversation response contains no source identities.")
+        raise RuntimeError("Conversation history inbound message contains no source identities.")
     stimuli = tuple(stimulus_for(source_id) for source_id in sources)
+    session_ref = inbound.provenance.session_ref or "history"
     contributions = tuple(
         turn_detector.ParticipantContribution(
-            conversation_ref=response.session_ref,
+            conversation_ref=session_ref,
             participant_ref=source_id,
             perception=turn_detector.Perception(
                 source_participant_ref=source_id,
                 modality=(
                     "text"
                     if normalized_type.startswith("text/") or isinstance(content, str) or content is None
-                    else "audio"
-                    if normalized_type.startswith("audio/")
                     else "multimodal"
                 ),
                 readable=readable,
-                speech=content if normalized_type.startswith("audio/") and isinstance(content, bytes) else None,
                 structured=structured,
                 content=None if isinstance(content, str) or content is None else content,
             ),
@@ -356,15 +452,16 @@ def participated_turn_from_response(
         stimulus=stimuli[0],
         participation=contributions[0],
         participations=contributions,
-        session_ref=response.session_ref,
-        memories=response.memories,
+        session_ref=session_ref,
+        memories=messages.memories,
+        messages=messages.messages,
     )
 
 
-InputEvent = hsm.Event[ConversationInputData](
+InputEvent = hsm.Event[TurnData](
     name="bot.ability.conversation.input",
     kind=event_schema.EventKind,
-    schema=ConversationInputData,
+    schema=TurnData,
 )
 
 
@@ -373,16 +470,30 @@ class RoutedInputData(pydantic.BaseModel):
 
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    parent: events.StimulusData[ConversationInputData]
+    parent: events.StimulusData[TurnData]
 
 
 RoutedInputEvent = hsm.Event[RoutedInputData](
     name="bot.ability.conversation.routed_input",
     schema=RoutedInputData,
 )
-OutputEvent = hsm.Event[Response](
+
+
+class AppendData(pydantic.BaseModel):
+    """Trusted outbound message record submitted by an effector to Conversation."""
+
+    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    message: Message = pydantic.Field(description="Immutable bot message and its typed effector provenance.")
+
+
+AppendEvent = hsm.Event[AppendData](
+    name="bot.ability.conversation.append",
+    schema=AppendData,
+)
+OutputEvent = hsm.Event[Messages](
     name="bot.ability.conversation.output",
-    schema=Response,
+    schema=Messages,
 )
 FailedEvent = hsm.Event[FailureData](
     name="bot.ability.conversation.failed",
@@ -401,8 +512,8 @@ SnapshotOutputEvent = hsm.Event[Snapshot](
 class _InputWorkData(pydantic.BaseModel):
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    input: pydantic.SkipValidation[ConversationInputData]
-    input_parent: events.StimulusData[ConversationInputData] | None = None
+    input: pydantic.SkipValidation[TurnData]
+    input_parent: events.StimulusData[TurnData] | None = None
 
 
 class _InputCancelledData(pydantic.BaseModel):
@@ -441,8 +552,8 @@ class _TurnOperationCompletedData(pydantic.BaseModel):
         arbitrary_types_allowed=True,
     )
 
-    input: pydantic.SkipValidation[ConversationInputData]
-    input_parent: events.StimulusData[ConversationInputData] | None = None
+    input: pydantic.SkipValidation[TurnData]
+    input_parent: events.StimulusData[TurnData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     turns: tuple[turn_detector.TurnCompleteData, ...] = pydantic.Field(min_length=1)
@@ -454,8 +565,8 @@ class _TurnFailedData(pydantic.BaseModel):
 
     model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    input: pydantic.SkipValidation[ConversationInputData]
-    input_parent: events.StimulusData[ConversationInputData] | None = None
+    input: pydantic.SkipValidation[TurnData]
+    input_parent: events.StimulusData[TurnData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     failure: FailureData
@@ -524,7 +635,7 @@ def _stable_identity_basis(
     return (*named, *vectors)
 
 
-def _stable_context_ref(data: ConversationInputData) -> str:
+def _stable_context_ref(data: TurnData) -> str:
     return conversation_memory.relationship_context_ref(
         source_ids=_stable_identity_basis(data.source_ids),
         target_ids=_stable_identity_basis(data.target_ids),
@@ -664,8 +775,27 @@ def _with_operation(
 conversation_event_with_operation = _with_operation
 
 
+def _model_safe_content(content: object) -> MessageContent:
+    """Project completed products to JSON-safe content without carrying raw media."""
+
+    if content is None or isinstance(content, (str, int, float, bool)):
+        return content
+    if isinstance(content, bytes | bytearray | memoryview):
+        return None
+    if isinstance(content, dict):
+        projected: dict[str, MessageContent] = {}
+        for key, item in content.items():
+            if not isinstance(key, str):
+                continue
+            projected[key] = _model_safe_content(item)
+        return typ.cast(MessageContent, projected)
+    if isinstance(content, list | tuple):
+        return [_model_safe_content(item) for item in content]
+    return None
+
+
 def _content_for_detector(
-    data: ConversationInputData,
+    data: TurnData,
     source_id: IdentityValue,
 ) -> turn_detector.ParticipationStimulus:
     """Preserve the declared modality while adapting to the detector boundary.
@@ -732,52 +862,47 @@ async def _run_memory_operation(
     return terminal.data
 
 
-def _is_text_product(output: Response) -> bool:
-    """True when Response carries a text product (post-decode or pure text admit)."""
+def _messages_from_contribution_terminal(terminal: hsm.Event[typ.Any]) -> Messages:
+    """Extract cumulative history from a Conversation contribution terminal."""
 
-    return isinstance(output.content, str) and output.content_type.lower().startswith("text/")
-
-
-def _response_from_contribution_terminal(terminal: hsm.Event[typ.Any]) -> Response:
-    """Extract ``Response`` from a Conversation contribution or host-encoded terminal.
-
-    Text products hand the body ``cognition.InputEvent`` (Listening pattern) whose stimulus is
-    ``OutputEvent[Response]`` with transcript ``content``. Host-encoded media keeps a bare
-    ``OutputEvent[Response]`` terminal (body ignores; no cognition re-entry).
-    """
-
-    if isinstance(terminal.data, Response):
+    if isinstance(terminal.data, Messages):
         return terminal.data
     if isinstance(terminal.data, cognition.InputData):
         stimulus = terminal.data.stimulus
-        if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Response):
+        if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Messages):
             return stimulus.data
-    raise RuntimeError("Conversation produced no response terminal.")
+    raise RuntimeError("Conversation produced no messages terminal.")
 
 
 def _terminal_output(
     ctx: hsm.Context,
     instance: "Conversation",
     event: hsm.Event[typ.Any],
-    output: Response,
+    output: Messages,
 ) -> None:
-    response_event = dataclasses.replace(
+    history_event = dataclasses.replace(
         _with_operation(instance.output_event.with_data(output), event),
         source=hsm.id(instance),
     )
-    # Text product (including empty string): hand body cognition.InputEvent like Listening.
-    # Host-encoded media (audio/* bytes): bare OutputEvent only — no cognition re-entry.
-    if _is_text_product(output):
+    latest_inbound = next((item for item in reversed(output.messages) if item.direction == "inbound"), None)
+    text_product = (
+        latest_inbound is not None
+        and isinstance(latest_inbound.content, str)
+        and latest_inbound.content_type.lower().startswith("text/")
+    )
+    if text_product:
+        # Text contributions hand body cognition a typed history stimulus. Non-text products
+        # remain bare Conversation output terminals, preserving the audio trust boundary.
         handoff = dataclasses.replace(
             _with_operation(
-                cognition.InputEvent.with_data(cognition.InputData(stimulus=response_event)),
+                cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event)),
                 event,
             ),
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
         return
-    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(response_event))
+    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(history_event))
 
 
 def _terminal_failure(
@@ -793,7 +918,7 @@ def _terminal_failure(
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
 
-class Conversation(ability.Ability[ConversationInputData, Response]):
+class Conversation(ability.Ability[TurnData, Messages]):
     """Infer relationships and own one detector per participant track.
 
     One Conversation instance is the topology-owned ambient stream boundary:
@@ -802,10 +927,10 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
     conversation_ref.
     """
 
-    input_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = ConversationInputData
-    output_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = Response
-    input_event: typ.ClassVar[hsm.Event[ConversationInputData]] = InputEvent
-    output_event: typ.ClassVar[hsm.Event[Response]] = OutputEvent
+    input_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
+    output_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = Messages
+    input_event: typ.ClassVar[hsm.Event[TurnData]] = InputEvent
+    output_event: typ.ClassVar[hsm.Event[Messages]] = OutputEvent
     failed_event: typ.ClassVar[hsm.Event[FailureData]] = FailedEvent
     snapshot_request_event: typ.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
     snapshot_output_event: typ.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
@@ -827,6 +952,8 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
     _typing: language.TextGeneration | None
     _encoding: encoding_module.Encoding[typ.Any, str | bytes] | None
     _memory: ability.Ability[typ.Any, typ.Any] | None
+    _history: list[Message]
+    _history_parent: events.StimulusData[TurnData] | None
 
     def __init__(
         self,
@@ -865,6 +992,8 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
         self._relationships = []
         self._similarity_threshold = similarity_threshold
         self._similarity_margin = similarity_margin
+        self._history = []
+        self._history_parent = None
 
     @property
     def typing(self) -> language.TextGeneration | None:
@@ -902,7 +1031,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
     def detector_count(self) -> int:
         return len(self._detectors)
 
-    def _relationship_for_input(self, data: ConversationInputData) -> _RelationshipProfile:
+    def _relationship_for_input(self, data: TurnData) -> _RelationshipProfile:
         observed_sources = value.sorted_identities(data.source_ids)
         observed_targets = value.sorted_identities(data.target_ids)
         observed_groups = value.identity_groups(data.source_ids, data.target_ids)
@@ -1067,7 +1196,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
     @staticmethod
     def _has_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, ConversationInputData)
+        return isinstance(event.data, TurnData)
 
     @staticmethod
     def _has_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
@@ -1078,6 +1207,49 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
     def _has_snapshot_request(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, SnapshotRequest)
+
+    @staticmethod
+    def _has_append(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, AppendData)
+
+    @staticmethod
+    def _append_message(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+        data = event.data
+        assert isinstance(data, AppendData)
+        message = data.message
+        if message.direction != "outbound":
+            raise ValueError("Conversation append accepts outbound messages only.")
+        event_source = event.source or None
+        event_target = event.target or None
+        duplicate = bool(event.id) and any(
+            committed.provenance.id == event.id
+            and committed.provenance.source == event_source
+            and committed.provenance.target == event_target
+            for committed in instance._history
+        )
+        if not duplicate:
+            provenance = message.provenance.model_copy(
+                update={
+                    "event": event.name,
+                    "id": event.id or None,
+                    "source": event_source,
+                    "target": event_target,
+                }
+            )
+            committed = message.model_copy(
+                update={"sequence": len(instance._history), "provenance": provenance}
+            )
+            instance._history.append(committed)
+        output = Messages(parent=instance._history_parent, messages=tuple(instance._history))
+        terminal = dataclasses.replace(
+            instance.output_event.with_data(output),
+            id=event.id or None,
+            source=hsm.id(instance),
+            target=event.source,
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     @staticmethod
     def _has_input_cancelled(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
@@ -1100,7 +1272,7 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
             context=telemetry.event_context(event),
         ) as active:
             data = event.data
-            assert isinstance(data, ConversationInputData)
+            assert isinstance(data, TurnData)
             active.set_attribute("bot.identity.source.count", len(data.source_ids))
             active.set_attribute("bot.identity.target.count", len(data.target_ids))
             active.set_attribute("bot.content.type", data.content_type or "")
@@ -1649,11 +1821,11 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
         data = event.data
         assert isinstance(data, _TurnOperationCompletedData)
         input_data = data.input
-        # Decode rewrites the product: admit media stays turn-local; Response is transcript text.
-        # Audio without transcript is not re-emitted. Structured/non-audio admit content is kept.
+        # Decode rewrites the product: media stays turn-local and only transcript/structured
+        # products enter model-facing committed history.
         non_empty = tuple(part for turn in data.turns if (part := turn.text))
         if non_empty:
-            product_content: Content | None = " ".join(non_empty)
+            product_content: object = " ".join(non_empty)
             product_type = "text/plain"
         elif input_data.content_type.lower().startswith("audio/") or isinstance(input_data.content, bytes):
             product_content = None
@@ -1661,19 +1833,29 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
         else:
             product_content = input_data.content
             product_type = input_data.content_type
+        parent = data.input_parent
+        provenance = MessageProvenance(
+            event=parent.event if parent is not None else instance.input_event.name,
+            id=parent.id if parent is not None else event.id,
+            source=parent.source if parent is not None else event.source,
+            target=parent.target if parent is not None else event.target,
+            session_ref=data.provenance.session_ref,
+            turn_ref=next(iter(data.provenance.turn_refs), None),
+        )
+        inbound = _message_for_turn(
+            input_data,
+            content=_model_safe_content(product_content),
+            content_type=product_type,
+            sequence=len(instance._history),
+            provenance=provenance,
+        )
+        instance._history.append(inbound)
+        instance._history_parent = parent
         _terminal_output(
             ctx,
             instance,
             event,
-            Response(
-                parent=data.input_parent,
-                source_ids=input_data.source_ids,
-                target_ids=input_data.target_ids,
-                content=product_content,
-                content_type=product_type,
-                session_ref=data.provenance.session_ref,
-                memories=data.memories,
-            ),
+            Messages(parent=parent, messages=tuple(instance._history), memories=data.memories),
         )
 
     @staticmethod
@@ -1739,6 +1921,11 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     hsm.effect(cls._queue_routed_input),
                     hsm.target(f"{root}/active"),
                 ),
+                hsm.transition(
+                    hsm.on(AppendEvent),
+                    hsm.guard(cls._has_append),
+                    hsm.effect(cls._append_message),
+                ),
             ),
             hsm.state(
                 "active",
@@ -1759,6 +1946,11 @@ class Conversation(ability.Ability[ConversationInputData, Response]):
                     hsm.on(_InputCancelledEvent),
                     hsm.guard(cls._has_input_cancelled),
                     hsm.target(f"{root}/inactive"),
+                ),
+                hsm.transition(
+                    hsm.on(AppendEvent),
+                    hsm.guard(cls._has_append),
+                    hsm.effect(cls._append_message),
                 ),
                 hsm.defer(*deferred),
                 hsm.state(
@@ -1810,9 +2002,40 @@ def define_conversation_model(root_name: str, **_: object) -> hsm.Model:
     return Conversation.define_model(root_name)
 
 
+async def append_conversation_message(
+    conversation: Conversation,
+    message: Message,
+    *,
+    ctx: hsm.Context | None = None,
+) -> Messages:
+    """Commit one trusted outbound message through Conversation's typed event boundary."""
+
+    context = conversation.context() if ctx is None else ctx
+    operation_id = uuid.uuid4().hex
+    waiter: asyncio.Future[hsm.Event[typ.Any]] = asyncio.get_running_loop().create_future()
+    conversation.register_terminal_waiter(operation_id, waiter)
+    try:
+        await hsm.dispatch(
+            context,
+            conversation,
+            dataclasses.replace(
+                AppendEvent.with_data(AppendData(message=message)),
+                id=operation_id,
+                source="",
+                target=hsm.id(conversation),
+            ),
+        )
+        terminal = await asyncio.wait_for(waiter, timeout=_TURN_TIMEOUT_SECONDS)
+    finally:
+        conversation.clear_terminal_waiter(operation_id)
+    if not isinstance(terminal.data, Messages):
+        raise RuntimeError("Conversation outbound append produced no history output.")
+    return terminal.data
+
+
 async def contribute_conversation_input(
     conversation: Conversation,
-    input_data: ConversationInputData,
+    input_data: TurnData,
     *,
     ctx: hsm.Context | None = None,
 ) -> ParticipatedTurn:
@@ -1841,7 +2064,7 @@ async def contribute_conversation_input(
         conversation.clear_terminal_waiter(operation_id)
     if terminal.name == conversation.failed_event.name:
         raise RuntimeError(f"Conversation failed during input contribution: {terminal.data!r}")
-    return participated_turn_from_response(input_data, _response_from_contribution_terminal(terminal))
+    return participated_turn_from_messages(input_data, _messages_from_contribution_terminal(terminal))
 
 
 Conversation.submodel = define_conversation_model("Conversation")
@@ -1849,15 +2072,17 @@ Conversation.model = Conversation.define_lifecycle_model("Conversation", Convers
 
 
 __all__ = [
-    "ConversationInputData",
+    "TurnData",
     "Conversation",
     "FailedEvent",
     "FailureData",
     "InputEvent",
     "OutputEvent",
     "ParticipatedTurn",
-    "participated_turn_from_response",
-    "Response",
+    "participated_turn_from_messages",
+    "Messages",
+    "Message",
+    "MessageProvenance",
     "RoutedInputData",
     "RoutedInputEvent",
     "Snapshot",
@@ -1868,6 +2093,7 @@ __all__ = [
     "TrackRef",
     "TurnDetectorFactory",
     "contribute_conversation_input",
+    "append_conversation_message",
     "conversation_event_with_operation",
     "define_conversation_model",
 ]

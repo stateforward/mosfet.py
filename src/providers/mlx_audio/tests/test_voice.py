@@ -33,8 +33,8 @@ class RecordingSpeechEncoder(bot.abilities.Encoder[bytes, bytes]):
         return b"encoded voice response"
 
 
-def voice_message() -> conversation.ConversationInputData:
-    return conversation.ConversationInputData(
+def voice_message() -> conversation.TurnData:
+    return conversation.TurnData(
         source_ids=frozenset({"caller"}),
         target_ids=frozenset({"bot"}),
         content=b"encoded speech",

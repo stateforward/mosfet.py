@@ -188,7 +188,7 @@ def test_conversation_input_enabled_while_active() -> None:
             ctx,
             hung,
             hung.input_event.with_data_and_id(
-                conversation.ConversationInputData(
+                conversation.TurnData(
                     source_ids=frozenset({"caller"}),
                     target_ids=frozenset({"bot"}),
                     content="in flight",
@@ -322,7 +322,7 @@ def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
         source_ids=frozenset({"caller"}),
         parent=StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
     )
-    input_data = conversation.ConversationInputData(
+    input_data = conversation.TurnData(
         source_ids=frozenset({"caller"}),
         target_ids=frozenset(),
         content=b"speech",

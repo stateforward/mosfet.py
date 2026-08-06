@@ -294,6 +294,11 @@ def _model_element(
         return root
 
     fields = type(model).model_fields
+    excluded_fields = frozenset(
+        name
+        for level in _payload_ancestry(type(model))
+        for name in getattr(level, "__model_facing_excluded_fields__", frozenset())
+    )
     parent: object | None = None
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None
@@ -307,7 +312,7 @@ def _model_element(
         current = element
         declared = getattr(level, "__annotations__", {})
         for name in fields:
-            if name in rendered or name not in declared:
+            if name in rendered or name not in declared or name in excluded_fields:
                 continue
             rendered.add(name)
             value = getattr(model, name, None)

@@ -14,6 +14,7 @@ from __future__ import annotations
 from .. import ability
 from .. import encoding
 
+import datetime
 import collections.abc
 import dataclasses
 import typing
@@ -31,6 +32,8 @@ if typing.TYPE_CHECKING:
 
 _DEFAULT_SAMPLE_RATE_HZ = 24_000
 _DEFAULT_CHANNELS = 1
+_RECORDING_TIMEOUT = datetime.timedelta(seconds=5)
+ConversationTarget: typing.TypeAlias = ability.Ability[typing.Any, typing.Any]
 
 _LINEAR_PCM_BYTES_PER_SAMPLE = 2
 """Sample width, in bytes, of the linear PCM this ability plays out (16-bit)."""
@@ -160,6 +163,11 @@ _SpeakFailedEvent = hsm.Event[ability.FailureData](
     kind=hsm.ErrorEventKind,
     schema=ability.FailureData,
 )
+_ConversationRecordedEvent = hsm.Event[OutputData](
+    name="bot.ability.speaking.conversation.recorded",
+    kind=hsm.CompletionEventKind,
+    schema=OutputData,
+)
 
 # Selectable by Processing / cognition: mark the ability's one front door offerable.
 InputEvent = hsm.Event[InputData](
@@ -272,6 +280,28 @@ def _normalize_efference_targets(
     return tuple(listening)
 
 
+def _normalize_conversation_targets(
+    conversation: ConversationTarget | collections.abc.Sequence[ConversationTarget] | None,
+) -> tuple[ConversationTarget, ...]:
+    if conversation is None:
+        return ()
+    if isinstance(conversation, ability.Ability):
+        targets = (conversation,)
+    elif isinstance(conversation, collections.abc.Sequence):
+        targets = tuple(conversation)
+    else:
+        raise TypeError("Speaking conversation targets must be Ability instances.")
+    if any(not isinstance(target, ability.Ability) for target in targets):
+        raise TypeError("Speaking conversation targets must be Ability instances.")
+    return tuple(dict.fromkeys(targets))
+
+
+def link_conversation(speaking: "Speaking", *conversation: ConversationTarget) -> None:
+    """Register explicit Conversation sink(s) for trusted outbound history records."""
+
+    speaking.link_conversation(*conversation)
+
+
 def link_listening(speaking: "Speaking", *listening: hsm.Instance) -> None:
     """Register Listening peers that receive motor-command copies from ``speaking`` on playout.
 
@@ -330,6 +360,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
     # Listening peers that receive the playout-entry motor-command copy. Composition/DI only —
     # never walked from the actor graph, never the body attachment list.
     _efference_targets: tuple[hsm.Instance, ...]
+    # Explicit trusted sink(s) for committed bot text; never discovered through actor graphs.
+    _conversation_targets: tuple[ConversationTarget, ...]
 
     def __init__(
         self,
@@ -337,6 +369,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         encoder: encoding.Encoder[bytes, bytes],
         speaker: Speaker | None = None,
         listening: hsm.Instance | collections.abc.Sequence[hsm.Instance] | None = None,
+        conversation: ConversationTarget | collections.abc.Sequence[ConversationTarget] | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
         channels: int = _DEFAULT_CHANNELS,
         media_type: str = "audio/pcm",
@@ -354,6 +387,16 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._channels = channels
         self._media_type = media_type
         self._efference_targets = _normalize_efference_targets(listening)
+        self._conversation_targets = _normalize_conversation_targets(conversation)
+
+    def link_conversation(self, *conversation: ConversationTarget) -> None:
+        """Register explicit Conversation sink(s) for trusted outbound history recording."""
+
+        existing = list(self._conversation_targets)
+        for target in _normalize_conversation_targets(conversation):
+            if target not in existing:
+                existing.append(target)
+        self._conversation_targets = tuple(existing)
 
     def link_listening(self, *listening: hsm.Instance) -> None:
         """Register Listening peer(s) that receive motor-command copies on playout entry.
@@ -411,6 +454,87 @@ class Speaking(ability.Ability[InputData, OutputData]):
             source=hsm.id(instance),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+
+    @staticmethod
+    async def _record_output(
+        ctx: hsm.Context,
+        instance: "Speaking",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        assert isinstance(data, OutputData)
+        try:
+            from ..communication.conversation import conversation as conversation_module
+
+            for target in instance._conversation_targets:
+                operation_id = f"{event.id or hsm.id(instance)}:conversation:{hsm.id(target)}"
+                waiter = ability.Ability.prepare_child_terminal_wait(instance, target, operation_id)
+                try:
+                    message = conversation_module.Message(
+                        sequence=0,
+                        direction="outbound",
+                        source_ids=frozenset(),
+                        target_ids=frozenset(),
+                        content=data.text,
+                        content_type="text/plain",
+                        provenance=conversation_module.MessageProvenance(event=conversation_module.AppendEvent.name),
+                    )
+                    await hsm.dispatch(
+                        ctx,
+                        target,
+                        dataclasses.replace(
+                            conversation_module.AppendEvent.with_data(
+                                conversation_module.AppendData(message=message)
+                            ),
+                            id=operation_id,
+                            source=hsm.id(instance),
+                            target=hsm.id(target),
+                            metadata=dict(event.metadata),
+                        ),
+                    )
+                    terminal = await waiter
+                    if (
+                        terminal.name != conversation_module.OutputEvent.name
+                        or terminal.id != operation_id
+                        or terminal.source != hsm.id(target)
+                        or terminal.target != hsm.id(instance)
+                        or not isinstance(terminal.data, conversation_module.Messages)
+                    ):
+                        raise RuntimeError("Conversation outbound append returned an unrelated terminal.")
+                finally:
+                    ability.Ability.clear_child_terminal_wait(instance, target, operation_id)
+        except Exception as error:
+            Speaking._dispatch_speak_failure(ctx, instance, event, error)
+            return
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _ConversationRecordedEvent.with_data(data),
+                id=event.id or None,
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _recording_timeout_delay(
+        ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]
+    ) -> datetime.timedelta:
+        del ctx, instance, event
+        return _RECORDING_TIMEOUT
+
+    @staticmethod
+    def _dispatch_recording_timeout(
+        ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]
+    ) -> None:
+        failure = ability.FailureData(message="Conversation history recording timed out.")
+        terminal = dataclasses.replace(
+            instance.failed_event.with_data(failure),
+            id=event.id or None,
+            source=hsm.id(instance),
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _dispatch_failure(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -607,6 +731,22 @@ class Speaking(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(_SpeakCompletedEvent),
                 hsm.guard(_has_speak_completed),
+                hsm.target("../recording"),
+            ),
+            hsm.transition(
+                hsm.on(_SpeakFailedEvent),
+                hsm.guard(_has_speak_failure),
+                hsm.effect(_dispatch_failure),
+                hsm.target("../idle"),
+            ),
+        ),
+        hsm.state(
+            "recording",
+            hsm.defer(InputEvent),
+            hsm.activity(_record_output),
+            hsm.transition(
+                hsm.on(_ConversationRecordedEvent),
+                hsm.guard(_has_speak_completed),
                 hsm.effect(_dispatch_output),
                 hsm.target("../idle"),
             ),
@@ -614,6 +754,11 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 hsm.on(_SpeakFailedEvent),
                 hsm.guard(_has_speak_failure),
                 hsm.effect(_dispatch_failure),
+                hsm.target("../idle"),
+            ),
+            hsm.transition(
+                hsm.after(_recording_timeout_delay),
+                hsm.effect(_dispatch_recording_timeout),
                 hsm.target("../idle"),
             ),
         ),
@@ -627,6 +772,7 @@ __all__ = [
     "InputData",
     "InputEvent",
     "link_listening",
+    "link_conversation",
     "OutputData",
     "OutputEvent",
     "Speaking",

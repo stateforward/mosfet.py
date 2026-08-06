@@ -12,7 +12,7 @@
 
 | Path | Acoustic energy | VAD / HearingSpeech | Conversation STT product |
 |------|-----------------|---------------------|---------------------------|
-| Harness → Alice room | Yes (16 kHz, ~3.6 s) | Yes | **Yes** when cognition reaches STT — historically transcript `"Call Bob at 555-0142"` on contribution `content` |
+| Harness → Alice room | Yes (16 kHz, ~3.6 s) | Yes | **Yes** when cognition reaches STT — historically transcript `"Call Bob at 555-0142"` on latest inbound message `content` |
 | LiveKit call (both sides) | Yes when call is up (mostly 48 kHz chunks) | Yes when answered | **Not re-proven** since Communication cutover — recent runs never reach answered media |
 
 **Important:** the original mid-call STT failure and the current demo FAIL are not the same dominant cause. Recheck which layer dies first before applying the old fix order.
@@ -26,7 +26,7 @@ environment.sound
   → SpeechHeard (Communication behavior seed)
   → communication.input → Communication routes to active Conversation
   → TurnDetector normalize → GeminiVoiceDecoder (AudioStimulus only)
-  → contribution (text product on Response.content) → cognition
+  → contribution (text product in the latest inbound `Messages.messages` item) → cognition
 ```
 
 STT lives only on the Conversation path. If admit or normalize fails, there is no fallback STT.

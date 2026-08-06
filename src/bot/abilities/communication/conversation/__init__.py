@@ -1,6 +1,6 @@
 from . import conversation, decision_input, host_turn, memory, turn_detector, voice
 from .conversation import (
-    ConversationInputData,
+    TurnData,
     FailedEvent,
     InputEvent,
     IdentitySet,
@@ -11,7 +11,11 @@ from .conversation import (
     Conversation,
     FailureData,
     ParticipatedTurn,
-    Response,
+    Messages,
+    Message,
+    MessageProvenance,
+    AppendData,
+    AppendEvent,
     RoutedInputData,
     RoutedInputEvent,
     Snapshot,
@@ -20,6 +24,8 @@ from .conversation import (
     TrackRef,
     TurnDetectorFactory,
     contribute_conversation_input,
+    append_conversation_message,
+    participated_turn_from_messages,
     define_conversation_model,
 )
 from .decision_input import DecisionInputFactory, agent_conversation_decision_input
@@ -32,7 +38,7 @@ from .host_turn import (
 from .voice import VoiceDecoder, VoiceEncoder, EncodeData
 
 __all__ = [
-    "ConversationInputData",
+    "TurnData",
     "Memory",
     "FailedEvent",
     "InputEvent",
@@ -45,7 +51,11 @@ __all__ = [
     "DecisionInputFactory",
     "FailureData",
     "ParticipatedTurn",
-    "Response",
+    "Messages",
+    "Message",
+    "MessageProvenance",
+    "AppendData",
+    "AppendEvent",
     "RoutedInputData",
     "RoutedInputEvent",
     "Snapshot",
@@ -59,6 +69,8 @@ __all__ = [
     "agent_conversation_decision_input",
     "contribute_conversation_turn",
     "contribute_conversation_input",
+    "append_conversation_message",
+    "participated_turn_from_messages",
     "define_conversation_model",
     "run_host_text_respond_turn",
     "run_host_voice_respond_turn",

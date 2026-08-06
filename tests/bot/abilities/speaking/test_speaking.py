@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import typing
 
 import hsm
+import pytest
 from bot import lifecycle
 from bot.abilities import processing
 
-from bot.abilities import encoding
+from bot.abilities import ability, encoding
 from bot.abilities import speaking
+from bot.abilities.communication import conversation
 from bot.devices import audio
 from bot.abilities.speaking import EfferenceData, EfferenceEvent
 from bot.environment import SoundData, SoundEvent, Environment
@@ -29,6 +32,20 @@ class RecordingEncoder(encoding.Encoder[bytes, bytes]):
         return self._audio
 
 
+class RecordingConversation(conversation.Conversation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.outputs: list[conversation.Messages] = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
+            terminal = event.data
+            if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
+                self.outputs.append(terminal.data)
+        return super().dispatch(ctx, event)
+
+
 class FailingEncoder(encoding.Encoder[bytes, bytes]):
     @typing.override
     async def encode(self, input: bytes) -> bytes:
@@ -43,6 +60,44 @@ async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition not met")
+
+
+def test_speaking_rejects_non_ability_conversation_targets() -> None:
+    with pytest.raises(TypeError):
+        speaking.Speaking(encoder=RecordingEncoder(), conversation=typing.cast(typing.Any, hsm.Instance()))
+
+    speaker = speaking.Speaking(encoder=RecordingEncoder())
+    with pytest.raises(TypeError):
+        speaker.link_conversation(typing.cast(typing.Any, hsm.Instance()))
+
+
+def test_speaking_records_one_trusted_outbound_message() -> None:
+    async def run() -> tuple[list[conversation.Messages], str, str]:
+        environment = Environment()
+        target = RecordingConversation()
+        speaker = speaking.Speaking(encoder=RecordingEncoder(), conversation=target)
+        await start_ability_tree(environment, target)
+        await start_ability_tree(environment, speaker)
+
+        _ = await speaker.apply(speaking.InputData(text="Hello there."), ctx=environment)
+        await _wait_until(lambda: bool(target.outputs))
+        return target.outputs, hsm.id(speaker), hsm.id(target)
+
+    histories, speaker_id, conversation_id = asyncio.run(run())
+
+    assert histories
+    assert all(
+        len(history.messages) == 1 and history.messages[0].direction == "outbound"
+        for history in histories
+    )
+    provenance_ids = {history.messages[0].provenance.id for history in histories}
+    assert len(provenance_ids) == 1
+    message = histories[0].messages[0]
+    assert message.content == "Hello there."
+    assert message.provenance.event == conversation.AppendEvent.name
+    assert message.provenance.id in provenance_ids
+    assert message.provenance.source == speaker_id
+    assert message.provenance.target == conversation_id
 
 
 def test_speaking_input_is_call_event_for_cognition_selection() -> None:
