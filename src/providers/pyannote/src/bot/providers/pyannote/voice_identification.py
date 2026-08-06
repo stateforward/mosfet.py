@@ -111,7 +111,8 @@ class Classifier(classifying.Classifier[voice.identification.InputData, voice.id
                     )
                 output = voice.identification.OutputData(embeddings=tuple(embeddings))
             except Exception as error:
-                raise VoiceIdentificationError("pyannote voice identification failed.") from error
+                message = f"pyannote voice identification failed: {type(error).__name__}: {error}"
+                raise VoiceIdentificationError(message) from error
             active.set_attribute("bot.voice.embeddings.count", len(output.embeddings))
             return output
 

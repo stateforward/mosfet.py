@@ -51,9 +51,12 @@ class FakeInference:
 
 
 class FailingInference:
+    def __init__(self) -> None:
+        self.error: RuntimeError = RuntimeError("pyannote unavailable")
+
     def __call__(self, audio: pathlib.Path) -> object:
         del audio
-        raise RuntimeError("pyannote unavailable")
+        raise self.error
 
 
 async def _await_output(
@@ -118,13 +121,17 @@ def test_classifier_is_awaitable() -> None:
     assert asyncio.run(output).embeddings[0].embedding == (0.1,)
 
 
-def test_classifier_wraps_provider_errors() -> None:
-    classifier = Classifier(inference=FailingInference())
+def test_classifier_failure_names_underlying_inference_error() -> None:
+    inference = FailingInference()
+    classifier = Classifier(inference=inference)
 
     with pytest.raises(VoiceIdentificationError) as error:
         _ = asyncio.run(_await_output(classifier.classify(_input())))
 
-    assert isinstance(error.value.__cause__, RuntimeError)
+    assert error.value.__cause__ is inference.error
+    message = str(error.value)
+    assert "RuntimeError" in message
+    assert "pyannote unavailable" in message
 
 
 def test_classifier_rejects_non_finite_embedding() -> None:
