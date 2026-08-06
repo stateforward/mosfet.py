@@ -1,6 +1,7 @@
 """OpenTelemetry observation helpers for stateforward.bot HSM models."""
 
 import collections.abc
+import dataclasses
 import datetime
 import logging
 import typing
@@ -54,6 +55,26 @@ def event_context(event: hsm.Event[object]) -> OtelContext:
     """Extract an OpenTelemetry context from string-valued event metadata."""
 
     return propagate.extract(carrier=_carrier_from_metadata(event.metadata))
+
+
+def inject_context[TEventData](event: hsm.Event[TEventData]) -> hsm.Event[TEventData]:
+    """Return ``event`` with the active trace context stamped into its metadata.
+
+    The extract counterpart is `event_context`. In-process the active span rides
+    contextvars, so this is only needed where an event crosses a process or
+    transport boundary (bot-to-bot over a room, a serialized queue): stamp on the
+    way out, extract on the way in.
+
+    `hsm.Event.metadata` carries telemetry propagation only — never domain data,
+    identity, or progression decisions. Returns a new event so a shared metadata
+    dict is never mutated; a no-op (same event) when no context is active.
+    """
+
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    if not carrier:
+        return event
+    return dataclasses.replace(event, metadata={**event.metadata, **carrier})
 
 
 def _empty_event() -> hsm.Event[typing.Any]:
@@ -211,6 +232,7 @@ def observer(ctx: hsm.Context, instance: hsm.Instance, observation: hsm.Event[ty
 __all__ = [
     "ObservationData",
     "event_context",
+    "inject_context",
     "observer",
     "observation_attributes",
     "observed_event",

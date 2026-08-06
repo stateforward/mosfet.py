@@ -13,6 +13,12 @@ Documented per [CORE-EXC-001](../../../rules/core.rules.md#core-exc-001-must-doc
 | Expiration | When local file export is removed, made opt-in-only for non-dev, or replaced by a redacting production exporter |
 | Removal plan | Delete the `JsonlFileLogRecordExporter` path (and default-on configure wiring), flip the default to disabled, and remove this exception entry |
 
+The span file (`otel-spans.jsonl`) shares the same confined, `O_NOFOLLOW`, `0o600`
+writer but is **not** covered by this exception: span attributes are
+low-cardinality and payload-free by contract (see
+[`FAILURE_KINDS.md`](FAILURE_KINDS.md) and `bot.telemetry.span`), so no prompt,
+transcript, audio, or credential is written there.
+
 ## Process-global `_RUNTIME` (PY-OBJ-002)
 
 | Field | Value |

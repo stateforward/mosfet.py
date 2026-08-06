@@ -1,4 +1,4 @@
-"""Local JSONL OpenTelemetry log-record exporter for development."""
+"""Local JSONL OpenTelemetry exporters (log records and spans) for development."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 
 from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportResult
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o755
@@ -27,12 +29,17 @@ def _severity(record: ReadableLogRecord) -> str | int | None:
     return None
 
 
-def _timestamp(record: ReadableLogRecord) -> str | None:
-    log_record = record.log_record
-    nanos = log_record.timestamp if log_record.timestamp is not None else log_record.observed_timestamp
+def _iso_nanos(nanos: int | None) -> str | None:
+    if nanos is None:
+        return None
     seconds, frac = divmod(int(nanos), 1_000_000_000)
     instant = datetime.fromtimestamp(seconds, tz=UTC)
     return instant.strftime("%Y-%m-%dT%H:%M:%S.") + f"{frac:09d}Z"
+
+
+def _timestamp(record: ReadableLogRecord) -> str | None:
+    log_record = record.log_record
+    return _iso_nanos(log_record.timestamp if log_record.timestamp is not None else log_record.observed_timestamp)
 
 
 def _resolve_existing_prefix(path: pathlib.Path) -> pathlib.Path:
@@ -134,8 +141,8 @@ def _require_safe_regular_file(fd: int) -> None:
         raise OSError(message)
 
 
-class JsonlFileLogRecordExporter(LogRecordExporter):
-    """Write one compact JSON object per log record to a local file.
+class _JsonlAppendFile:
+    """Append JSON lines to a local file without following symlinks.
 
     Path components are stored relative to the process cwd at construction.
     Construction retains a directory fd for that cwd; parent walks and leaf
@@ -189,25 +196,19 @@ class JsonlFileLogRecordExporter(LogRecordExporter):
             if parent_fd != root_fd:
                 os.close(parent_fd)
 
-    @typing.override
-    def export(self, batch: collections.abc.Sequence[ReadableLogRecord]) -> LogRecordExportResult:
-        lines: list[str] = []
-        for record in batch:
-            log_record = record.log_record
-            payload: dict[str, object] = {
-                "timestamp": _timestamp(record),
-                "body": log_record.body,
-                "attributes": dict(log_record.attributes) if log_record.attributes else {},
-                "severity": _severity(record),
-            }
-            lines.append(json.dumps(payload, default=str, separators=(",", ":")))
+    def write(self, payloads: collections.abc.Sequence[dict[str, object]]) -> None:
+        """Append one JSON line per payload.
+
+        An empty batch still opens the leaf: the open is the check that the
+        path has not been swapped for a symlink or hard link since construction.
+        """
+
+        lines = [json.dumps(payload, default=str, separators=(",", ":")) for payload in payloads]
         with self._open_append() as handle:
             _ = handle.write("\n".join(lines))
             _ = handle.write("\n")
-        return LogRecordExportResult.SUCCESS
 
-    @typing.override
-    def shutdown(self) -> None:
+    def close(self) -> None:
         root_fd = self._root_fd
         if root_fd is None:
             return
@@ -215,4 +216,86 @@ class JsonlFileLogRecordExporter(LogRecordExporter):
         os.close(root_fd)
 
 
-__all__ = ["JsonlFileLogRecordExporter"]
+class JsonlFileLogRecordExporter(LogRecordExporter):
+    """Write one compact JSON object per log record to a local file."""
+
+    _file: _JsonlAppendFile
+
+    def __init__(self, path: str | pathlib.Path) -> None:
+        self._file = _JsonlAppendFile(path)
+
+    @typing.override
+    def export(self, batch: collections.abc.Sequence[ReadableLogRecord]) -> LogRecordExportResult:
+        payloads: list[dict[str, object]] = []
+        for record in batch:
+            log_record = record.log_record
+            payloads.append(
+                {
+                    "timestamp": _timestamp(record),
+                    "body": log_record.body,
+                    "attributes": dict(log_record.attributes) if log_record.attributes else {},
+                    "severity": _severity(record),
+                }
+            )
+        self._file.write(payloads)
+        return LogRecordExportResult.SUCCESS
+
+    @typing.override
+    def shutdown(self) -> None:
+        self._file.close()
+
+
+def _span_payload(span: ReadableSpan) -> dict[str, object]:
+    context = span.get_span_context()
+    parent = span.parent
+    start = span.start_time
+    end = span.end_time
+    scope = span.instrumentation_scope
+    return {
+        "timestamp": _iso_nanos(end if end is not None else start),
+        "name": span.name,
+        "trace_id": f"{context.trace_id:032x}" if context is not None else None,
+        "span_id": f"{context.span_id:016x}" if context is not None else None,
+        "parent_span_id": f"{parent.span_id:016x}" if parent is not None else None,
+        "scope": scope.name if scope is not None else None,
+        "kind": span.kind.name,
+        "start_time": _iso_nanos(start),
+        "end_time": _iso_nanos(end),
+        "duration_ns": (end - start) if start is not None and end is not None else None,
+        "status": span.status.status_code.name,
+        "status_message": span.status.description,
+        "attributes": dict(span.attributes) if span.attributes else {},
+        "events": [
+            {
+                "name": event.name,
+                "timestamp": _iso_nanos(event.timestamp),
+                "attributes": dict(event.attributes) if event.attributes else {},
+            }
+            for event in span.events
+        ],
+    }
+
+
+class JsonlFileSpanExporter(SpanExporter):
+    """Write one compact JSON object per finished span to a local file.
+
+    Shares the symlink-safe, cwd-confined append path used for log records so a
+    run leaves a greppable trace artifact next to ``otel-logs.jsonl``.
+    """
+
+    _file: _JsonlAppendFile
+
+    def __init__(self, path: str | pathlib.Path) -> None:
+        self._file = _JsonlAppendFile(path)
+
+    @typing.override
+    def export(self, spans: collections.abc.Sequence[ReadableSpan]) -> SpanExportResult:
+        self._file.write([_span_payload(span) for span in spans])
+        return SpanExportResult.SUCCESS
+
+    @typing.override
+    def shutdown(self) -> None:
+        self._file.close()
+
+
+__all__ = ["JsonlFileLogRecordExporter", "JsonlFileSpanExporter"]
