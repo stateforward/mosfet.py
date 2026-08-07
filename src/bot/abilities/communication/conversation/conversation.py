@@ -39,7 +39,7 @@ Stage: typ.TypeAlias = typ.Literal["memory", "turn_detector", "voice_routing"]
 Content: typ.TypeAlias = object
 MessageContent = typ.TypeAliasType(
     "MessageContent",
-    str | int | float | bool | None | list["MessageContent"] | dict[str, "MessageContent"],
+    "str | int | float | bool | None | list[MessageContent] | dict[str, MessageContent]",
 )
 IdentitySet: typ.TypeAlias = value.IdentitySet
 IdentityValue: typ.TypeAlias = value.IdentityValue

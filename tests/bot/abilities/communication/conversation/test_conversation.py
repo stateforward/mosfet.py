@@ -131,6 +131,32 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
         )
 
 
+def test_message_content_recursive_alias_preserves_schema_and_validation() -> None:
+    """The named recursive alias keeps the schema and runtime content contract stable."""
+
+    import hashlib
+    import json
+
+    schema = conversation.Message.model_json_schema()
+    schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert schema_hash == "109f08a03de24b2f15bb139333e038e26aaf2a83254d7821cfe5d3d12734ed6f"
+
+    payload = {
+        "sequence": 0,
+        "direction": "inbound",
+        "source_ids": ["caller"],
+        "target_ids": ["bot"],
+        "content": {"nested": [True, 3, {"text": "hello"}]},
+        "content_type": "application/json",
+        "provenance": {"event": "bot.ability.conversation.input"},
+    }
+    validated = conversation.Message.model_validate(payload)
+    assert validated.content == payload["content"]
+
+    with pytest.raises(pydantic.ValidationError, match="raw media"):
+        conversation.Message.model_validate({**payload, "content": {"nested": [b"raw-media"]}})
+
+
 def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
     """Model-selected Conversation.input cannot forge trusted causal provenance."""
 
