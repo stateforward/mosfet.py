@@ -56,6 +56,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 Published models are persisted by the collector and reloaded when Vite starts.
 The default store is `.data/models.json` (ignored by git); override it with
 `BOT_MODEL_STORE_PATH` when the collector needs a different durable location.
+The OTLP/control gRPC listener defaults to `127.0.0.1:4317`; override its port
+with `BOT_GRPC_PORT` when an isolated collector is needed.
 Writes use an atomic file replacement. A model POST returns an error if the
 store cannot be updated, so the caller can retry without receiving a false
 success. The collector is the single owner of this file: concurrent

@@ -17,7 +17,12 @@ import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { type ObserveSpan } from "../src/otel/span.ts";
 
 export const GRPC_HOST = "127.0.0.1";
-export const GRPC_PORT = 4317;
+const DEFAULT_GRPC_PORT = 4317;
+const configuredGrpcPort = Number(process.env["BOT_GRPC_PORT"] ?? DEFAULT_GRPC_PORT);
+if (!Number.isInteger(configuredGrpcPort) || configuredGrpcPort < 1 || configuredGrpcPort > 65_535) {
+  throw new Error("BOT_GRPC_PORT must be an integer from 1 to 65535");
+}
+export const GRPC_PORT = configuredGrpcPort;
 export const GRPC_ADDRESS = `${GRPC_HOST}:${String(GRPC_PORT)}`;
 
 const RING_CAP = 5000;
@@ -89,10 +94,12 @@ export class ModelStore {
     try {
       value = JSON.parse(contents) as unknown;
     } catch {
+      console.warn("model store ignored corrupt persisted data");
       return;
     }
     const records = isRecord(value) ? value["models"] : value;
     if (!Array.isArray(records)) {
+      console.warn("model store ignored persisted data with invalid shape");
       return;
     }
     let invalidRecords = 0;
