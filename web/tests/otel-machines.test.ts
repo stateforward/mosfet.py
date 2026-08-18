@@ -1,0 +1,164 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  documentFromOtlp,
+  documentFromSpans,
+  foldMachines,
+  graphFromPublishedModel,
+  overlayObserve,
+  parsePublishedModel,
+  type PublishedModel,
+} from "../src/otel/machines.ts";
+import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
+
+const fixturePath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "hsm-observe-spans.otlp.json",
+);
+
+describe("otel observe fold", () => {
+  test("OTLP ExportTraceServiceRequest observe spans become a machine graph", () => {
+    const request: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const parsed = parseExportTraceServiceRequest(request);
+    assert.ok(parsed !== null);
+    assert.ok(parsed.spans.length >= 1);
+    const last = parsed.spans[parsed.spans.length - 1];
+    assert.ok(last !== undefined);
+    const machines = foldMachines(parsed.spans);
+    const machine = machines.find((item) => item.name === last.attributes["hsm.machine.name"]);
+    assert.ok(machine !== undefined);
+    assert.equal(machine.currentState, last.attributes["hsm.machine.state"]);
+    assert.equal(machine.name, "/PhoneBot");
+    assert.equal(machine.currentState, "/PhoneBot/active/processing");
+    assert.equal(machine.lastEventName, "bot.processing.completed");
+    assert.ok(machine.nodes.some((node) => node.path === "/PhoneBot/active"));
+    assert.ok(machine.nodes.some((node) => node.parent === "/PhoneBot"));
+    assert.ok(machine.edges.some((edge) => edge.eventName === "bot.activate"));
+    const lastEdge = machine.edges.find((edge) => edge.lastFired);
+    assert.ok(lastEdge !== undefined);
+    assert.equal(lastEdge.target, "/PhoneBot/active/processing");
+    assert.equal(lastEdge.eventName, "bot.processing.completed");
+    const document = documentFromOtlp(request);
+    assert.ok(document !== null);
+    assert.equal(document.observeCount, parsed.spans.length);
+  });
+
+  test("skips non-observe and invalid OTLP spans", () => {
+    const request = {
+      resourceSpans: [
+        {
+          scopeSpans: [
+            {
+              spans: [
+                { name: "bot.reasoning.stage", attributes: [] },
+                {
+                  name: "bot.hsm.observe",
+                  attributes: [{ key: "hsm.machine.name", value: { stringValue: "" } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const parsed = parseExportTraceServiceRequest(request);
+    assert.ok(parsed !== null);
+    assert.equal(parsed.spans.length, 0);
+    assert.equal(parsed.skipped, 2);
+    const document = documentFromOtlp(request);
+    assert.ok(document !== null);
+    assert.equal(document.machines.length, 0);
+    assert.equal(document.selectedMachine, null);
+  });
+
+  test("rejects a malformed ExportTraceServiceRequest", () => {
+    assert.equal(parseExportTraceServiceRequest("not-json-object"), null);
+    assert.equal(parseExportTraceServiceRequest({ resourceSpans: "nope" }), null);
+    assert.equal(documentFromOtlp({ resourceSpans: "nope" }), null);
+  });
+});
+
+const demoModel: PublishedModel = {
+  name: "/Demo",
+  initial: "/Demo/.initial",
+  states: [
+    { qualified_name: "/Demo", parent: "/", initial: "/Demo/.initial" },
+    { qualified_name: "/Demo/idle", parent: "/Demo", initial: "" },
+    { qualified_name: "/Demo/run", parent: "/Demo", initial: "" },
+  ],
+  transitions: [
+    { source: "/Demo/.initial", target: "/Demo/idle", events: ["hsm/initial"] },
+    { source: "/Demo/idle", target: "/Demo/run", events: ["go"] },
+  ],
+};
+
+describe("published model topology", () => {
+  test("published model renders idle and run with no observe spans", () => {
+    const parsed = parsePublishedModel(demoModel);
+    assert.ok(parsed !== null);
+    const graph = graphFromPublishedModel(parsed);
+    assert.equal(graph.currentState, "");
+    assert.ok(graph.nodes.some((node) => node.path === "/Demo/idle"));
+    assert.ok(graph.nodes.some((node) => node.path === "/Demo/run"));
+    assert.ok(graph.edges.some((edge) => edge.eventName === "go" && edge.source === "/Demo/idle"));
+    const document = documentFromSpans([], 0, null, [parsed]);
+    assert.equal(document.machines.length, 1);
+    assert.equal(document.machines[0]?.currentState, "");
+    assert.equal(document.observeCount, 0);
+  });
+
+  test("a live payload on a published model sets current leaf without observe spans", () => {
+    const document = documentFromSpans([], 0, null, [
+      { ...demoModel, live: true, state: "/Demo/idle", component: "Demo" },
+    ]);
+    assert.equal(document.machines.length, 1);
+    assert.equal(document.machines[0]?.currentState, "/Demo/idle");
+    assert.equal(document.machines[0]?.componentName, "Demo");
+    assert.ok(document.machines[0]?.nodes.some((node) => node.path === "/Demo/run"));
+    assert.equal(document.observeCount, 0);
+  });
+
+  test("observe spans overlay the current leaf without dropping model states", () => {
+    const graph = overlayObserve(graphFromPublishedModel(demoModel), [
+      {
+        name: "bot.hsm.observe",
+        timestamp: "2026-08-16T00:00:00.000000000Z",
+        start_time: "2026-08-16T00:00:00.000000000Z",
+        attributes: {
+          "hsm.machine.name": "/Demo",
+          "hsm.machine.state": "/Demo/idle",
+          "bot.component.name": "Demo",
+          "hsm.event.name": "hsm/initial",
+          "hsm.event.kind": "event",
+          "hsm.observation.occurrence": "event",
+          "bot.outcome": "observed",
+        },
+      },
+      {
+        name: "bot.hsm.observe",
+        timestamp: "2026-08-16T00:00:01.000000000Z",
+        start_time: "2026-08-16T00:00:01.000000000Z",
+        attributes: {
+          "hsm.machine.name": "/Demo",
+          "hsm.machine.state": "/Demo/run",
+          "bot.component.name": "Demo",
+          "hsm.event.name": "go",
+          "hsm.event.kind": "event",
+          "hsm.observation.occurrence": "event",
+          "bot.outcome": "observed",
+        },
+      },
+    ]);
+    assert.equal(graph.currentState, "/Demo/run");
+    assert.ok(graph.nodes.some((node) => node.path === "/Demo/idle"));
+    const last = graph.edges.find((edge) => edge.lastFired);
+    assert.ok(last !== undefined);
+    assert.equal(last.eventName, "go");
+    assert.equal(last.target, "/Demo/run");
+  });
+});

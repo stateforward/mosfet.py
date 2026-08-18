@@ -84,29 +84,50 @@ describe("collector published models", () => {
 
       const reloaded = new ModelStore(filePath);
       await reloaded.load();
-      assert.deepEqual(reloaded.list(), store.list());
+      assert.deepEqual(reloaded.list(), [{
+        name: "/Demo",
+        initial: "/Demo/.initial",
+        states: [{ qualified_name: "/Demo/idle", parent: "/Demo", initial: "" }],
+        transitions: [],
+        component: "Demo",
+      }]);
       assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), { models: store.list() });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  test("ignores corrupted or schema-invalid persisted data", async () => {
+  test("loads valid persisted records around malformed records", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "collector-models-"));
     const filePath = path.join(directory, "models.json");
     try {
-      const corrupted = new ModelStore(filePath);
-      await corrupted.persist();
-      await rm(filePath);
+      await writeFile(filePath, JSON.stringify({
+        models: [
+          { name: "/bad" },
+          { name: "/Good", initial: "/Good/.initial", states: [], transitions: [], live: true, state: "/Good/run" },
+        ],
+      }), "utf8");
+      const reloaded = new ModelStore(filePath);
+      await reloaded.load();
+      assert.deepEqual(reloaded.list(), [{ name: "/Good", initial: "/Good/.initial", states: [], transitions: [] }]);
+
       await writeFile(filePath, "not-json", "utf8");
       const corruptedReload = new ModelStore(filePath);
       await corruptedReload.load();
       assert.deepEqual(corruptedReload.list(), []);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
-      await writeFile(filePath, JSON.stringify({ models: [{ name: "/bad" }] }), "utf8");
-      const invalidReload = new ModelStore(filePath);
-      await invalidReload.load();
-      assert.deepEqual(invalidReload.list(), []);
+  test("does not commit a model when durable persistence fails", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "collector-models-"));
+    try {
+      const store = new ModelStore(directory);
+      const model = parsePublishedModel({ name: "/Demo", initial: "/Demo/.initial", states: [], transitions: [] });
+      assert.ok(model !== null);
+      await assert.rejects(store.commit(model), /EISDIR|directory|invalid argument/i);
+      assert.deepEqual(store.list(), []);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

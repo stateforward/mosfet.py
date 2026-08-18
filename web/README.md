@@ -58,7 +58,9 @@ The default store is `.data/models.json` (ignored by git); override it with
 `BOT_MODEL_STORE_PATH` when the collector needs a different durable location.
 Writes use an atomic file replacement. A model POST returns an error if the
 store cannot be updated, so the caller can retry without receiving a false
-success.
+success. The collector is the single owner of this file: concurrent
+cross-process writers are not supported. The file and its containing directory
+are synchronized before a successful write is acknowledged.
 
 Open the printed local URL. The dashboard auto-connects to
 `/v1/traces/stream`. Live observe spans appear as the bot exports them.

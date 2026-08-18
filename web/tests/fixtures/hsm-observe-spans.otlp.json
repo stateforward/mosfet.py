@@ -1,0 +1,446 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "stateforward.bot"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "bot.telemetry.hsm"
+          },
+          "spans": [
+            {
+              "traceId": "e4b8680191e3a8799d6754b9758ca3d9",
+              "spanId": "bdae02a99bea75e1",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594234512970000",
+              "endTimeUnixNano": "1786594234512987000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "event"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/PhoneBot/.initial/transition_2"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "hsm/initial"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "280"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "a2cc34eef0d78dc490a207d2a53e3d30",
+              "spanId": "5096bbb96e774511",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594234518017000",
+              "endTimeUnixNano": "1786594234518036000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "event"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/PhoneBot/inactive/transition_4"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "bot.activate"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "280"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/PhoneBot/inactive"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "ba8c567c5d5ae09d3fe06352fdbc14dd",
+              "spanId": "a2cefb250e85732b",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594234649212000",
+              "endTimeUnixNano": "1786594234649225000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "event"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/PhoneBot/activating/transition_12"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "attachment.attach.complete"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "71705"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/PhoneBot/activating"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "dd831ed094bceb0734db75e10960db56",
+              "spanId": "f6a7597e9722607c",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594236568226000",
+              "endTimeUnixNano": "1786594236568232000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "event"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/PhoneBot/active/transition_68"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "environment.sound"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "280"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/PhoneBot/active/unfocused"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "49a842c6bb4b375f2c1ac1d54449c4ca",
+              "spanId": "6ea889dc31a6a488",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594234522445000",
+              "endTimeUnixNano": "1786594234522453000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "event"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/Phone/.initial/transition_2"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "hsm/initial"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "280"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/Phone"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/Phone"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneFirmware"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "a28a1cb835395c418af22c4e162eb7a5",
+              "spanId": "104b74556f10aac4",
+              "parentSpanId": "3edc84aa11ed602f",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594294735847000",
+              "endTimeUnixNano": "1786594294735865000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": {
+                    "stringValue": "behavior"
+                  }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": {
+                    "stringValue": "/PhoneBot/active/processing/transition_100/_retire_bot_turn"
+                  }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": {
+                    "stringValue": "bot.processing.completed"
+                  }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": {
+                    "intValue": "71705"
+                  }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": {
+                    "stringValue": "/PhoneBot"
+                  }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": {
+                    "stringValue": "/PhoneBot/active/processing"
+                  }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": {
+                    "stringValue": "PhoneBot"
+                  }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": {
+                    "stringValue": "observed"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

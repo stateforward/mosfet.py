@@ -1,0 +1,148 @@
+// Copyright 2019, OpenTelemetry Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package opentelemetry.proto.trace.v1;
+
+import "opentelemetry/proto/common/v1/common.proto";
+import "opentelemetry/proto/resource/v1/resource.proto";
+
+option csharp_namespace = "OpenTelemetry.Proto.Trace.V1";
+option java_multiple_files = true;
+option java_package = "io.opentelemetry.proto.trace.v1";
+option java_outer_classname = "TraceProto";
+option go_package = "go.opentelemetry.io/proto/otlp/trace/v1";
+
+// TracesData represents the traces data that can be stored in a persistent storage,
+// OR can be embedded by other protocols that transfer OTLP traces data but do
+// not implement the OTLP protocol.
+message TracesData {
+  // An array of ResourceSpans.
+  repeated ResourceSpans resource_spans = 1;
+}
+
+// A collection of ScopeSpans from a Resource.
+message ResourceSpans {
+  reserved 1000;
+
+  // The resource for the spans in this message.
+  opentelemetry.proto.resource.v1.Resource resource = 1;
+
+  // A list of ScopeSpans that originate from a resource.
+  repeated ScopeSpans scope_spans = 2;
+
+  // The Schema URL, if known.
+  string schema_url = 3;
+}
+
+// A collection of Spans produced by an InstrumentationScope.
+message ScopeSpans {
+  // The instrumentation scope information for the spans in this message.
+  opentelemetry.proto.common.v1.InstrumentationScope scope = 1;
+
+  // A list of Spans that originate from an instrumentation scope.
+  repeated Span spans = 2;
+
+  // The Schema URL, if known.
+  string schema_url = 3;
+}
+
+// A Span represents a single operation performed by a single component of the system.
+message Span {
+  // A unique identifier for a trace. All spans from the same trace share
+  // the same `trace_id`. The ID is a 16-byte array.
+  bytes trace_id = 1;
+
+  // A unique identifier for a span within a trace, assigned when the span
+  // is created. The ID is an 8-byte array.
+  bytes span_id = 2;
+
+  // trace_state conveys information about request position in multiple distributed tracing graphs.
+  string trace_state = 3;
+
+  // The `span_id` of this span's parent span. If this is a root span, then this
+  // field must be empty. The ID is an 8-byte array.
+  bytes parent_span_id = 4;
+
+  // Flags, a bit field.
+  fixed32 flags = 16;
+
+  // A description of the span's operation.
+  string name = 5;
+
+  // SpanKind is the type of span.
+  enum SpanKind {
+    SPAN_KIND_UNSPECIFIED = 0;
+    SPAN_KIND_INTERNAL = 1;
+    SPAN_KIND_SERVER = 2;
+    SPAN_KIND_CLIENT = 3;
+    SPAN_KIND_PRODUCER = 4;
+    SPAN_KIND_CONSUMER = 5;
+  }
+
+  SpanKind kind = 6;
+
+  // start_time_unix_nano is the start time of the span.
+  fixed64 start_time_unix_nano = 7;
+
+  // end_time_unix_nano is the end time of the span.
+  fixed64 end_time_unix_nano = 8;
+
+  // attributes is a collection of key/value pairs.
+  repeated opentelemetry.proto.common.v1.KeyValue attributes = 9;
+
+  uint32 dropped_attributes_count = 10;
+
+  message Event {
+    fixed64 time_unix_nano = 1;
+    string name = 2;
+    repeated opentelemetry.proto.common.v1.KeyValue attributes = 3;
+    uint32 dropped_attributes_count = 4;
+  }
+
+  repeated Event events = 11;
+  uint32 dropped_events_count = 12;
+
+  message Link {
+    bytes trace_id = 1;
+    bytes span_id = 2;
+    string trace_state = 3;
+    repeated opentelemetry.proto.common.v1.KeyValue attributes = 4;
+    uint32 dropped_attributes_count = 5;
+    fixed32 flags = 6;
+  }
+
+  repeated Link links = 13;
+  uint32 dropped_links_count = 14;
+  Status status = 15;
+}
+
+message Status {
+  reserved 1;
+  string message = 2;
+  enum StatusCode {
+    STATUS_CODE_UNSET = 0;
+    STATUS_CODE_OK = 1;
+    STATUS_CODE_ERROR = 2;
+  }
+  StatusCode code = 3;
+}
+
+enum SpanFlags {
+  SPAN_FLAGS_DO_NOT_USE = 0;
+  SPAN_FLAGS_TRACE_FLAGS_MASK = 0x000000FF;
+  SPAN_FLAGS_CONTEXT_HAS_IS_REMOTE_MASK = 0x00000100;
+  SPAN_FLAGS_CONTEXT_IS_REMOTE_MASK = 0x00000200;
+}

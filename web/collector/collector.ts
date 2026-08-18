@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,7 +11,6 @@ import {
   mergePublishedModel,
   parseLiveModel,
   parsePublishedModel,
-  parsePublishedModels,
   type PublishedModel,
 } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -91,31 +91,92 @@ export class ModelStore {
     } catch {
       return;
     }
-    const models = parsePublishedModels(value);
-    if (models === null) {
+    const records = isRecord(value) ? value["models"] : value;
+    if (!Array.isArray(records)) {
       return;
     }
-    for (const model of models) {
-      this.put(model);
+    let invalidRecords = 0;
+    for (const record of records) {
+      const model = parsePublishedModel(record);
+      if (model === null) {
+        invalidRecords += 1;
+        continue;
+      }
+      this.put(durableModel(model));
+    }
+    if (invalidRecords > 0) {
+      console.warn(`model store skipped ${String(invalidRecords)} invalid persisted record(s)`);
     }
   }
 
   persist(): Promise<void> {
-    const contents = JSON.stringify({ models: this.list() });
-    const operation = this.#writeTail.then(
-      () => this.#write(contents),
-      () => this.#write(contents),
+    return this.#enqueue(async () => {
+      await this.#write(JSON.stringify({ models: this.list() }));
+    });
+  }
+
+  commit(model: PublishedModel): Promise<PublishedModel> {
+    return this.#enqueue(async () => {
+      const next = mergePublishedModel(this.#models.get(model.name), model);
+      const nextModels = new Map(this.#models);
+      nextModels.set(next.name, next);
+      await this.#write(JSON.stringify({ models: [...nextModels.values()].sort((left, right) => left.name.localeCompare(right.name)) }));
+      this.#models = nextModels;
+      return next;
+    });
+  }
+
+  commitLive(live: { name: string; component: string; state: string; live: boolean }): Promise<PublishedModel> {
+    return this.#enqueue(async () => {
+      const existing = this.#models.get(live.name);
+      const next = mergePublishedModel(existing, {
+        name: live.name,
+        states: existing?.states ?? [],
+        transitions: existing?.transitions ?? [],
+        initial: existing?.initial ?? "",
+        live: live.live,
+        state: live.state,
+        component: live.component,
+      });
+      const nextModels = new Map(this.#models);
+      nextModels.set(next.name, next);
+      await this.#write(JSON.stringify({ models: [...nextModels.values()].sort((left, right) => left.name.localeCompare(right.name)) }));
+      this.#models = nextModels;
+      return next;
+    });
+  }
+
+  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.#writeTail.then(operation, operation);
+    this.#writeTail = next.then(
+      () => undefined,
+      () => undefined,
     );
-    this.#writeTail = operation.catch(() => undefined);
-    return operation;
+    return next;
   }
 
   async #write(contents: string): Promise<void> {
     const directory = path.dirname(this.#filePath);
-    const temporaryPath = `${this.#filePath}.tmp-${String(process.pid)}`;
+    const temporaryPath = `${this.#filePath}.tmp-${String(process.pid)}-${randomUUID()}`;
     await mkdir(directory, { recursive: true });
-    await writeFile(temporaryPath, `${contents}\n`, "utf8");
-    await rename(temporaryPath, this.#filePath);
+    try {
+      await writeFile(temporaryPath, `${contents}\n`, "utf8");
+      const file = await open(temporaryPath, "r");
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await rename(temporaryPath, this.#filePath);
+      const directoryHandle = await open(directory, "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
   }
 
   put(model: PublishedModel): PublishedModel {
@@ -140,6 +201,19 @@ export class ModelStore {
   list(): PublishedModel[] {
     return [...this.#models.values()].sort((left, right) => left.name.localeCompare(right.name));
   }
+}
+
+function durableModel(model: PublishedModel): PublishedModel {
+  const durable: PublishedModel = {
+    name: model.name,
+    states: model.states,
+    transitions: model.transitions,
+    initial: model.initial,
+  };
+  if (model.component !== undefined) {
+    durable.component = model.component;
+  }
+  return durable;
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {
@@ -381,9 +455,9 @@ export async function createCollector(): Promise<CollectorHandles> {
           writeJson(response, 400, { result: "error", detail: "name, states, transitions, initial required" });
           return;
         }
-        const stored = models.put(model);
+        let stored: PublishedModel;
         try {
-          await models.persist();
+          stored = await models.commit(model);
         } catch {
           writeJson(response, 500, { result: "error", detail: "model persistence failed" });
           return;
@@ -415,9 +489,9 @@ export async function createCollector(): Promise<CollectorHandles> {
           writeJson(response, 400, { result: "error", detail: "name, component, state, live required" });
           return;
         }
-        const stored = models.applyLive(live);
+        let stored: PublishedModel;
         try {
-          await models.persist();
+          stored = await models.commitLive(live);
         } catch {
           writeJson(response, 500, { result: "error", detail: "model persistence failed" });
           return;

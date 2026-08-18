@@ -1,0 +1,75 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "stateforward.bot"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "bot.telemetry.hsm"
+          },
+          "spans": [
+            {
+              "traceId": "c1d2e3f4a5b697887766554433221100",
+              "spanId": "1122334455667788",
+              "name": "bot.hsm.observe",
+              "kind": 1,
+              "startTimeUnixNano": "1786594294900000000",
+              "endTimeUnixNano": "1786594294900012000",
+              "attributes": [
+                {
+                  "key": "hsm.observation.occurrence",
+                  "value": { "stringValue": "event" }
+                },
+                {
+                  "key": "hsm.observation.source",
+                  "value": { "stringValue": "/Phone/idle/transition_3" }
+                },
+                {
+                  "key": "hsm.event.name",
+                  "value": { "stringValue": "phone.ring" }
+                },
+                {
+                  "key": "hsm.event.kind",
+                  "value": { "intValue": "280" }
+                },
+                {
+                  "key": "hsm.event.has_data",
+                  "value": { "boolValue": false }
+                },
+                {
+                  "key": "hsm.event.has_metadata",
+                  "value": { "boolValue": false }
+                },
+                {
+                  "key": "hsm.machine.name",
+                  "value": { "stringValue": "/Phone" }
+                },
+                {
+                  "key": "hsm.machine.state",
+                  "value": { "stringValue": "/Phone/ringing" }
+                },
+                {
+                  "key": "bot.component.name",
+                  "value": { "stringValue": "PhoneFirmware" }
+                },
+                {
+                  "key": "bot.outcome",
+                  "value": { "stringValue": "observed" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,213 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { DashboardController } from "../src/dashboard-hsm.ts";
+import { MachineGraphController } from "../src/machine-graph-hsm.ts";
+import { documentFromOtlp } from "../src/otel/machines.ts";
+import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
+import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
+import { OtelSourceController } from "../src/otel-source-hsm.ts";
+
+const fixturePath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "hsm-observe-spans.otlp.json",
+);
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("timed out waiting for dashboard stream update");
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+}
+
+describe("companion-style HSM controllers", () => {
+  test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
+    const dashboard = new DashboardController();
+    const source = new OtelSourceController();
+    const draws: string[] = [];
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: (value) => {
+          draws.push(value.currentState);
+        },
+        destroy: () => {
+          draws.push("destroy");
+        },
+      },
+    });
+
+    assert.match(dashboard.snapshot().statePath, /^\//);
+    assert.match(source.snapshot().statePath, /^\//);
+    assert.match(graph.snapshot().statePath, /^\//);
+    assert.equal(dashboard.snapshot().phase, "idle");
+    assert.equal(source.snapshot().phase, "idle");
+    assert.equal(graph.snapshot().phase, "empty");
+
+    const ready: string[] = [];
+    const emitting = new OtelSourceController({
+      onReady: (otelSource) => {
+        ready.push(otelSource.label);
+      },
+    });
+    const afterConnect = await emitting.dispatch("source.connect.requested");
+    assert.equal(afterConnect.phase, "live");
+    assert.ok(afterConnect.statePath.startsWith("/"));
+    assert.deepEqual(ready, ["OTLP"]);
+    assert.equal(afterConnect.source?.kind, "stream");
+    assert.equal(afterConnect.source?.url, "/v1/traces/stream");
+
+    const document = documentFromOtlp(JSON.parse(readFileSync(fixturePath, "utf8")));
+    assert.ok(document !== null);
+    const phone = document.machines.find((machine) => machine.name === "/PhoneBot");
+    assert.ok(phone !== undefined);
+    const afterDraw = await graph.dispatch("graph.set", { graph: phone });
+    assert.equal(afterDraw.phase, "drawing");
+    assert.ok(afterDraw.statePath.startsWith("/"));
+    assert.ok(draws.includes("/PhoneBot/active/processing"));
+
+    await dashboard.stop();
+    await source.stop();
+    await emitting.stop();
+    await graph.stop();
+  });
+
+  test("stream source incrementally folds spans into live dashboard state", async () => {
+    const request: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const parsed = parseExportTraceServiceRequest(request);
+    assert.ok(parsed !== null);
+    assert.ok(parsed.spans.length >= 2);
+    const first = parsed.spans[0];
+    const rest = parsed.spans.slice(1);
+    assert.ok(first !== undefined);
+
+    const captured: { handlers?: OtelStreamHandlers } = {};
+    let closed = 0;
+    const live = new DashboardController({
+      connectStream: (url, next): OtelStreamSubscription => {
+        assert.equal(url, "/v1/traces/stream");
+        captured.handlers = next;
+        return {
+          close(): void {
+            closed += 1;
+          },
+        };
+      },
+    });
+
+    const afterSelect = await live.dispatch("dashboard.source.selected", { source: streamSource() });
+    assert.equal(afterSelect.phase, "live");
+    assert.equal(afterSelect.source?.kind, "stream");
+    const handlers = captured.handlers;
+    assert.ok(handlers !== undefined);
+
+    handlers.onSnapshot({ observeSpans: [first], skipped: 0 });
+    await waitFor(() => live.snapshot().document?.observeCount === 1);
+    assert.equal(live.snapshot().phase, "live");
+
+    handlers.onSpans({ observeSpans: rest, skipped: 1 });
+    await waitFor(() => live.snapshot().document?.observeCount === parsed.spans.length);
+    const afterIncremental = live.snapshot();
+    assert.equal(afterIncremental.phase, "live");
+    assert.equal(afterIncremental.document?.skippedCount, 1);
+    const phone = afterIncremental.document?.machines.find((machine) => machine.name === "/PhoneBot");
+    assert.ok(phone !== undefined);
+    assert.equal(phone.currentState, "/PhoneBot/active/processing");
+
+    await live.stop();
+    assert.ok(closed >= 1);
+  });
+
+  test("a published model appears before any observe spans and overlay highlights the leaf", async () => {
+    const dashboard = new DashboardController({
+      connectStream: () => ({
+        close(): void {
+          return;
+        },
+      }),
+    });
+    const afterSource = await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    assert.equal(afterSource.phase, "live");
+    const afterModel = await dashboard.dispatch("dashboard.model.published", {
+      name: "/Demo",
+      initial: "/Demo/.initial",
+      states: [
+        { qualified_name: "/Demo", parent: "/", initial: "/Demo/.initial" },
+        { qualified_name: "/Demo/idle", parent: "/Demo", initial: "" },
+        { qualified_name: "/Demo/run", parent: "/Demo", initial: "" },
+      ],
+      transitions: [{ source: "/Demo/idle", target: "/Demo/run", events: ["go"] }],
+    });
+    assert.equal(afterModel.selectedGraph?.name, "/Demo");
+    assert.equal(afterModel.selectedGraph?.currentState, "");
+    assert.ok(afterModel.selectedGraph?.nodes.some((node) => node.path === "/Demo/run"));
+
+    const afterLive = await dashboard.dispatch("dashboard.model.published", {
+      name: "/Demo",
+      initial: "/Demo/.initial",
+      states: [
+        { qualified_name: "/Demo", parent: "/", initial: "/Demo/.initial" },
+        { qualified_name: "/Demo/idle", parent: "/Demo", initial: "" },
+        { qualified_name: "/Demo/run", parent: "/Demo", initial: "" },
+      ],
+      transitions: [{ source: "/Demo/idle", target: "/Demo/run", events: ["go"] }],
+      live: true,
+      state: "/Demo/idle",
+      component: "Demo",
+    });
+    assert.equal(afterLive.selectedGraph?.currentState, "/Demo/idle");
+    assert.equal(afterLive.selectedGraph?.componentName, "Demo");
+    assert.ok(afterLive.selectedGraph?.nodes.some((node) => node.path === "/Demo/run"));
+
+    const afterObserve = await dashboard.dispatch("dashboard.load.completed", {
+      mode: "replace",
+      skipped: 0,
+      observeSpans: [
+        {
+          name: "bot.hsm.observe",
+          timestamp: "2026-08-16T00:00:00.000000000Z",
+          start_time: "2026-08-16T00:00:00.000000000Z",
+          attributes: {
+            "hsm.machine.name": "/Demo",
+            "hsm.machine.state": "/Demo/run",
+            "bot.component.name": "Demo",
+            "hsm.event.name": "go",
+            "hsm.event.kind": "event",
+            "hsm.observation.occurrence": "event",
+            "bot.outcome": "observed",
+          },
+        },
+      ],
+    });
+    assert.equal(afterObserve.selectedGraph?.currentState, "/Demo/run");
+    assert.ok(afterObserve.selectedGraph?.nodes.some((node) => node.path === "/Demo/idle"));
+    await dashboard.stop();
+  });
+
+  test("send event posts the named command and records the gateway result", async () => {
+    const posted: Array<{ eventName: string; dataJson: string }> = [];
+    const dashboard = new DashboardController({
+      postCommand: async (command) => {
+        posted.push(command);
+        return { result: "no_subscriber", detail: "no subscriber" };
+      },
+    });
+    const afterPrefill = await dashboard.dispatch("dashboard.command.prefill", { eventName: "phone.ring" });
+    assert.equal(afterPrefill.commandEventName, "phone.ring");
+    const afterSend = await dashboard.dispatch("dashboard.command.send", {
+      eventName: "phone.ring",
+      dataJson: "",
+    });
+    assert.deepEqual(posted, [{ eventName: "phone.ring", dataJson: "" }]);
+    assert.equal(afterSend.commandResult?.result, "no_subscriber");
+    await dashboard.stop();
+  });
+});
