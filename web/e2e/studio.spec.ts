@@ -96,11 +96,31 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page })
 test("environment graph visibility is independent from machine selection", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openStudio(page);
-  await expect(page.getByTestId("title")).toHaveText("Environment graph");
+  await expect(page).toHaveTitle("Environment workspace");
+  await expect(page.getByTestId("title")).toHaveText("Environment");
+  await expect(page.getByTestId("members")).toBeVisible();
+  await expect(page.getByTestId("map-header")).toBeVisible();
+  await expect(page.getByTestId("event-rail")).toBeVisible();
+  await expect(page.getByTestId("show-all")).toBeVisible();
+  await expect(page.getByTestId("hide-all")).toBeVisible();
+  await expect(page.getByTestId("hide-unobserved")).toBeVisible();
 
   await exportTraces(firstBatch);
+  await expect(page.getByTestId("event-list")).toContainText("bot.processing.completed");
+  await expect(page.getByTestId("event-list")).toContainText("/PhoneBot/active/processing");
   const phoneVisibility = page.getByRole("checkbox", { name: "Show /Phone graph" });
   const botVisibility = page.getByRole("checkbox", { name: "Show /PhoneBot graph" });
+  await expect(phoneVisibility).toBeChecked();
+  await expect(botVisibility).toBeChecked();
+  await page.getByTestId("hide-all").click();
+  await expect(phoneVisibility).not.toBeChecked();
+  await expect(botVisibility).not.toBeChecked();
+  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "0");
+  await expect(page.getByTestId("members").locator('.machine[data-machine-name="/Phone"]')).toHaveAttribute(
+    "data-visible",
+    "false",
+  );
+  await page.getByTestId("show-all").click();
   await expect(phoneVisibility).toBeChecked();
   await expect(botVisibility).toBeChecked();
   const initialGraphs = await visibleGraphs(page);

@@ -1,7 +1,7 @@
-# bot HSM dashboard
+# Environment workspace dashboard
 
-Standalone TypeScript page that folds live OpenTelemetry spans into a hierarchical
-state diagram. It does not reimplement the Python bot.
+Standalone TypeScript page that folds live OpenTelemetry spans into a composed
+environment map. It does not reimplement the Python bot.
 
 The Vite dev server is the collector. Bots export finished spans to OTLP gRPC
 `TraceService.Export` on `127.0.0.1:4317`. The page subscribes to
