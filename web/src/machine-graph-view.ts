@@ -12,6 +12,31 @@ export const INITIAL_BORDER = "#2dd4bf";
 export const INITIAL_BORDER_WIDTH = 2;
 export const CANVAS_FILL = "#0b0d12";
 
+export type GraphNodeStyle = {
+  backgroundColor: string;
+  backgroundOpacity: number;
+  borderColor: string;
+  borderWidth: number;
+  fontWeight: number;
+  textColor: string;
+  underlayOpacity: number;
+  zIndex: number;
+};
+
+export function graphNodeStyle(kind: "active-path" | "current"): GraphNodeStyle {
+  const current = kind === "current";
+  return {
+    backgroundColor: "#161b22",
+    backgroundOpacity: 1,
+    borderColor: NOW_BORDER,
+    borderWidth: current ? 3 : 2,
+    fontWeight: current ? 800 : 650,
+    textColor: "#d5dbe8",
+    underlayOpacity: 0,
+    zIndex: current ? 10 : 0,
+  };
+}
+
 export type Size = { width: number; height: number };
 export type Point = { x: number; y: number };
 

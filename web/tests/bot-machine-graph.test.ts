@@ -17,6 +17,7 @@ import {
   initialTargets,
   nodeClasses,
   nodeLabel,
+  graphNodeStyle,
 } from "../src/machine-graph-view.ts";
 import { foldMachines, graphFromPublishedModel } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -28,6 +29,21 @@ const fixturePath = path.join(
 );
 
 describe("machine graph now theme and UML initial", () => {
+  test("active graph states use neutral interiors and outline emphasis", () => {
+    const active = graphNodeStyle("active-path");
+    const current = graphNodeStyle("current");
+
+    assert.equal(active.backgroundColor, "#161b22");
+    assert.equal(active.backgroundOpacity, 1);
+    assert.equal(active.borderColor, NOW_BORDER);
+    assert.ok(active.borderWidth >= 2);
+    assert.equal(current.backgroundColor, "#161b22");
+    assert.equal(current.backgroundOpacity, 1);
+    assert.equal(current.borderColor, NOW_BORDER);
+    assert.ok(current.borderWidth > active.borderWidth);
+    assert.equal(current.underlayOpacity, 0);
+  });
+
   test("now paint stays in the teal charcoal family", () => {
     assert.equal(NOW_FILL, "#14b8a6");
     assert.equal(NOW_BORDER, "#2dd4bf");

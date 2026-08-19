@@ -8,9 +8,7 @@ import {
   INITIAL_EVENT,
   INITIAL_FILL,
   INITIAL_SIZE,
-  NOW_BORDER,
-  NOW_FILL,
-  NOW_INK,
+  graphNodeStyle,
   initialNodeId,
   initialPosition,
   initialTargets,
@@ -54,11 +52,6 @@ const LEAF_HEIGHT = 40;
 const GAP = 22;
 const PAD_X = 22;
 const PAD_Y = 36;
-const NOW_BORDER_WIDTH = 3;
-const NOW_UNDERLAY_PADDING = 10;
-const NOW_UNDERLAY_OPACITY = 0.5;
-const PATH_OUTLINE = NOW_BORDER;
-const PATH_OUTLINE_WIDTH = 2;
 
 function childrenOf(nodes: readonly MachineStateNode[], parent: string | null): MachineStateNode[] {
   return nodes.filter((node) => node.parent === parent);
@@ -342,25 +335,25 @@ class CytoscapeRenderer implements GraphRenderer {
           {
             selector: "node.active-path",
             style: {
-              "border-color": PATH_OUTLINE,
-              "border-width": PATH_OUTLINE_WIDTH,
-              "border-opacity": 1,
+              "background-color": graphNodeStyle("active-path").backgroundColor,
+              "background-opacity": graphNodeStyle("active-path").backgroundOpacity,
+              "border-color": graphNodeStyle("active-path").borderColor,
+              "border-width": graphNodeStyle("active-path").borderWidth,
+              color: graphNodeStyle("active-path").textColor,
+              "font-weight": graphNodeStyle("active-path").fontWeight,
+              "z-index": graphNodeStyle("active-path").zIndex,
             },
           },
           {
             selector: "node.current",
             style: {
-              "background-color": NOW_FILL,
-              "background-opacity": 1,
-              color: NOW_INK,
-              "border-color": NOW_BORDER,
-              "border-width": NOW_BORDER_WIDTH,
-              "font-weight": 800,
-              "underlay-color": NOW_BORDER,
-              "underlay-padding": NOW_UNDERLAY_PADDING,
-              "underlay-opacity": NOW_UNDERLAY_OPACITY,
-              "underlay-shape": "round-rectangle",
-              "z-index": 10,
+              "background-color": graphNodeStyle("current").backgroundColor,
+              "background-opacity": graphNodeStyle("current").backgroundOpacity,
+              "border-color": graphNodeStyle("current").borderColor,
+              "border-width": graphNodeStyle("current").borderWidth,
+              color: graphNodeStyle("current").textColor,
+              "font-weight": graphNodeStyle("current").fontWeight,
+              "z-index": graphNodeStyle("current").zIndex,
             },
           },
           {
