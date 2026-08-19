@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,9 @@ const firstBatch = JSON.parse(
 const secondBatch = JSON.parse(
   readFileSync(path.join(here, "../tests/fixtures/hsm-observe-spans-state-change.otlp.json"), "utf8"),
 ) as unknown;
+const populatedModels = JSON.parse(
+  readFileSync(path.join(here, "../.data/models.json"), "utf8"),
+) as { readonly models: readonly unknown[] };
 
 function shotPath(name: string): string {
   return path.join("test-results", "screenshots", name);
@@ -23,6 +26,13 @@ async function openStudio(page: Page): Promise<void> {
   await expect(page.getByTestId("canvas")).toBeVisible();
   await expect(page.getByTestId("live-badge")).toHaveText(/live|connecting/i);
   await expect(page.getByTestId("inspector-status")).toHaveText(/live|connecting/i);
+}
+
+async function loadPopulatedData(request: APIRequestContext): Promise<void> {
+  for (const model of populatedModels.models) {
+    const response = await request.post("/v1/models", { data: model });
+    expect(response.ok()).toBeTruthy();
+  }
 }
 
 type DashboardLayout = {
@@ -215,4 +225,37 @@ test("command gateway reports no subscriber when no bot is attached", async ({ p
   await page.getByTestId("event-name").fill("phone.ring");
   await page.getByTestId("send-event").click();
   await expect(page.getByTestId("command-result")).toHaveText(/no subscriber/i);
+});
+
+test("populated mobile rails stay contained around the map", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openStudio(page);
+  await loadPopulatedData(request);
+
+  await expect(page.getByTestId("machine-list")).toContainText("/Ability");
+  const machineCount = await page.getByTestId("machine-list").locator(".machine").count();
+  expect(machineCount).toBeGreaterThanOrEqual(populatedModels.models.length);
+
+  const layout = await dashboardLayout(page);
+  expect(layout.inspector.top).toBeGreaterThanOrEqual(0);
+  expect(layout.inspector.bottom).toBeLessThanOrEqual(844);
+  expect(layout.inspector.bottom).toBeLessThanOrEqual(layout.map.top);
+  expect(layout.map.bottom).toBeLessThanOrEqual(layout.events.top);
+  expect(layout.canvas.top).toBeGreaterThanOrEqual(layout.map.top);
+  expect(layout.canvas.bottom).toBeLessThanOrEqual(layout.map.bottom);
+  expect(layout.events.bottom).toBeLessThanOrEqual(844);
+
+  const memberLayout = await page.getByTestId("members").evaluate((element) => {
+    const members = element as HTMLElement;
+    const membersRect = members.getBoundingClientRect();
+    return {
+      membersBottom: membersRect.bottom,
+      membersClientHeight: members.clientHeight,
+      membersScrollHeight: members.scrollHeight,
+      overflowY: getComputedStyle(members).overflowY,
+    };
+  });
+  expect(memberLayout.membersBottom).toBeLessThanOrEqual(layout.inspector.bottom);
+  expect(memberLayout.overflowY).toBe("auto");
+  expect(memberLayout.membersScrollHeight).toBeGreaterThan(memberLayout.membersClientHeight);
 });

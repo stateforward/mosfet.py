@@ -312,8 +312,10 @@ button.tool {
 }
 .members {
   display: grid;
+  flex: 1 1 0;
   align-content: start;
   gap: 0.55rem;
+  overflow: auto;
 }
 .rail-heading,
 .map-heading,
@@ -486,7 +488,7 @@ button.tool {
 @media (max-width: 720px) {
   .studio {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 38vh) minmax(0, 1fr) auto;
   }
   .canvas {
     order: 1;
@@ -524,9 +526,15 @@ button.tool {
   .inspector {
     grid-column: 1;
     grid-row: 1;
-    max-height: 38vh;
+    max-height: none;
+    min-height: 0;
+    overflow: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--bot-line, #2a3140);
+  }
+  .details {
+    min-height: 0;
+    overflow: auto;
   }
   .event-rail {
     grid-column: 1;
@@ -547,14 +555,20 @@ button.tool {
   }
   .studio {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 38vh) minmax(0, 1fr) auto;
   }
   .inspector {
     grid-column: 1;
     grid-row: 1;
-    max-height: 38vh;
+    max-height: none;
+    min-height: 0;
+    overflow: hidden;
     border-right: 0;
     border-bottom: 1px solid var(--bot-line, #2a3140);
+  }
+  .details {
+    min-height: 0;
+    overflow: auto;
   }
   .map-panel {
     display: grid;
