@@ -28,7 +28,7 @@ export function graphsForVisibility(
   const byName = new Map(machines.map((machine) => [machine.name, machine]));
   const included = new Set<string>();
   for (const machine of machines) {
-    if (visibleMachines.get(machine.name) !== true) {
+    if (visibleMachines.get(machine.name) !== true || !hasRoot(machine)) {
       continue;
     }
     const ownerChain = [machine.name];

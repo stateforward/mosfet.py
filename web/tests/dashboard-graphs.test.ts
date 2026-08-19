@@ -88,6 +88,25 @@ describe("dashboard render graph admission", () => {
     );
   });
 
+  test("excludes visible children with no root", () => {
+    const owner = machine("/Environment");
+    const child = {
+      ...machine("/Child", "/Environment"),
+      nodes: [{ path: "/Child/ready", parent: "/Child", label: "ready" }],
+    };
+
+    assert.deepEqual(
+      graphsForVisibility(
+        [owner, child],
+        new Map([
+          ["/Environment", false],
+          ["/Child", true],
+        ]),
+      ),
+      [],
+    );
+  });
+
   test("excludes visible models in ownership cycles", () => {
     const first = machine("/First", "/Second");
     const second = machine("/Second", "/First");
