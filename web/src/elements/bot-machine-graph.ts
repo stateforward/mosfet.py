@@ -197,7 +197,7 @@ class CytoscapeRenderer implements GraphRenderer {
       for (const target of initialTargets(graph)) {
         const targetId = namespacedPath(machine, target);
         const targetPos = localPositions.get(target) ?? { x: 0, y: 0 };
-        const size = measureState(graphs, ownership, index, target);
+        const size = measureState(renderable, ownership, index, target);
         const position = initialPosition(targetPos, size);
         const sourceId = `${machine}:${initialNodeId(target)}`;
         elements.push({
