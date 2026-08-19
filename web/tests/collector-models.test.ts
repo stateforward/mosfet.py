@@ -64,6 +64,39 @@ describe("collector published models", () => {
     assert.equal(parseLiveModel({ name: "/Demo" }), null);
   });
 
+  test("persists ownership from topology through live merge and rehydration", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "collector-models-owner-"));
+    const filePath = path.join(directory, "models.json");
+    try {
+      const store = new ModelStore(filePath);
+      const topology = parsePublishedModel({
+        name: "/PhoneService",
+        owner: "/Phone",
+        initial: "/PhoneService/.initial",
+        states: [],
+        transitions: [],
+      });
+      assert.ok(topology !== null);
+      await store.commit(topology);
+      const live = parseLiveModel({
+        name: "/PhoneService",
+        component: "PhoneService",
+        state: "/PhoneService/ready",
+        live: true,
+        owner: "/Phone",
+      });
+      assert.ok(live !== null);
+      await store.commitLive(live);
+      await store.persist();
+
+      const reloaded = new ModelStore(filePath);
+      await reloaded.load();
+      assert.equal(reloaded.list()[0]?.owner, "/Phone");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("persists merged topology and live state, then reloads it", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "collector-models-"));
     const filePath = path.join(directory, "models.json");

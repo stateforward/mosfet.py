@@ -2,6 +2,12 @@ import cytoscape from "cytoscape";
 
 import { MachineGraphController, type GraphRenderer } from "../machine-graph-hsm.ts";
 import {
+  environmentBoxPositions,
+  machineOwnerIndex,
+  measureState,
+  ownershipLayout,
+} from "../machine-graph-layout.ts";
+import {
   CANVAS_FILL,
   INITIAL_BORDER,
   INITIAL_BORDER_WIDTH,
@@ -13,13 +19,14 @@ import {
   initialNodeId,
   initialPosition,
   initialTargets,
+  machineKey,
+  namespacedPath,
   nodeClasses,
   nodeLabel,
   structureKey,
   type Point,
-  type Size,
 } from "../machine-graph-view.ts";
-import { type MachineGraph, type MachineStateNode } from "../otel/machines.ts";
+import { type MachineGraph } from "../otel/machines.ts";
 import { applyStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "bot-machine-graph";
@@ -49,91 +56,7 @@ const cssText = `
 }
 `;
 
-const LEAF_WIDTH = 120;
-const LEAF_HEIGHT = 40;
-const GAP = 22;
-const PAD_X = 22;
-const PAD_Y = 36;
-
-function childrenOf(nodes: readonly MachineStateNode[], parent: string | null): MachineStateNode[] {
-  return nodes.filter((node) => node.parent === parent);
-}
-
 const COMPOUND_TITLE = compoundTitleStyle();
-
-function measureNode(nodes: readonly MachineStateNode[], path: string | null): Size {
-  const kids = childrenOf(nodes, path);
-  if (kids.length === 0) {
-    return { width: LEAF_WIDTH, height: LEAF_HEIGHT };
-  }
-  let width = PAD_X;
-  let height = 0;
-  for (const kid of kids) {
-    const size = measureNode(nodes, kid.path);
-    width += size.width + GAP;
-    height = Math.max(height, size.height);
-  }
-  return { width: width - GAP + PAD_X, height: height + PAD_Y + PAD_X };
-}
-
-function nestedBoxPositions(graph: MachineGraph): Map<string, Point> {
-  const positions = new Map<string, Point>();
-  const roots = childrenOf(graph.nodes, null);
-  let originX = 0;
-  for (const root of roots) {
-    const size = measureNode(graph.nodes, root.path);
-    placeNode(graph.nodes, root.path, originX, 0, positions);
-    originX += size.width + GAP * 2;
-  }
-  return positions;
-}
-
-function machineWidth(graph: MachineGraph): number {
-  return childrenOf(graph.nodes, null).reduce(
-    (width, root) => width + measureNode(graph.nodes, root.path).width + GAP * 2,
-    0,
-  );
-}
-
-function environmentBoxPositions(graphs: readonly MachineGraph[]): Map<string, Point> {
-  const positions = new Map<string, Point>();
-  let originX = 0;
-  graphs.forEach((graph, index) => {
-    const key = machineKey(graph, index);
-    for (const [path, position] of nestedBoxPositions(graph)) {
-      positions.set(namespacedPath(key, path), { x: position.x + originX, y: position.y });
-    }
-    originX += machineWidth(graph) + GAP * 3;
-  });
-  return positions;
-}
-
-function placeNode(
-  nodes: readonly MachineStateNode[],
-  path: string,
-  originX: number,
-  originY: number,
-  positions: Map<string, Point>,
-): Size {
-  const size = measureNode(nodes, path);
-  positions.set(path, { x: originX + size.width / 2, y: originY + size.height / 2 });
-  const kids = childrenOf(nodes, path);
-  let childX = originX + PAD_X;
-  const childY = originY + PAD_Y;
-  for (const kid of kids) {
-    const childSize = placeNode(nodes, kid.path, childX, childY, positions);
-    childX += childSize.width + GAP;
-  }
-  return size;
-}
-
-function machineKey(graph: MachineGraph, index: number): string {
-  return `machine:${index}:${encodeURIComponent(graph.name)}`;
-}
-
-function namespacedPath(key: string, path: string): string {
-  return `${key}:${encodeURIComponent(path)}`;
-}
 
 function ancestorSet(path: string): Set<string> {
   const parts = path.split("/").filter((part) => part.length > 0);
@@ -221,6 +144,7 @@ class CytoscapeRenderer implements GraphRenderer {
     }
     this.#structure = nextStructure;
     const positions = environmentBoxPositions(graphs);
+    const ownership = ownershipLayout(graphs);
     const elements: cytoscape.ElementDefinition[] = [];
     for (const [index, graph] of graphs.entries()) {
       const machine = machineKey(graph, index);
@@ -237,6 +161,14 @@ class CytoscapeRenderer implements GraphRenderer {
         };
         if (node.parent !== null) {
           data["parent"] = namespacedPath(machine, node.parent);
+        } else if (node.path === graph.name) {
+          const ownerIndex = machineOwnerIndex(graphs, index);
+          if (ownerIndex !== null) {
+            const ownerGraph = graphs[ownerIndex];
+            if (ownerGraph !== undefined) {
+              data["parent"] = namespacedPath(machineKey(ownerGraph, ownerIndex), ownerGraph.name);
+            }
+          }
         }
         const position = positions.get(id);
         if (position !== undefined) {
@@ -252,7 +184,7 @@ class CytoscapeRenderer implements GraphRenderer {
       for (const target of initialTargets(graph)) {
         const targetId = namespacedPath(machine, target);
         const targetPos = localPositions.get(target) ?? { x: 0, y: 0 };
-        const size = measureNode(graph.nodes, target);
+        const size = measureState(graphs, ownership, index, target);
         const position = initialPosition(targetPos, size);
         const sourceId = `${machine}:${initialNodeId(target)}`;
         elements.push({

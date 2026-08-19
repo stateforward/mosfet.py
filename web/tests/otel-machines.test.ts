@@ -123,6 +123,25 @@ describe("published model topology", () => {
     assert.equal(document.observeCount, 0);
   });
 
+  test("published and live ownership survives graph creation and overlays", () => {
+    const service = parsePublishedModel({
+      name: "/PhoneService",
+      owner: "/Phone",
+      initial: "/PhoneService/.initial",
+      states: [{ qualified_name: "/PhoneService/ready", parent: "/PhoneService", initial: "" }],
+      transitions: [],
+      live: true,
+      state: "/PhoneService/ready",
+      component: "PhoneService",
+    });
+    assert.ok(service !== null);
+    const graph = graphFromPublishedModel(service);
+    assert.equal(graph.owner, "/Phone");
+    assert.equal(overlayObserve(graph, []).owner, "/Phone");
+    const document = documentFromSpans([], 0, null, [service]);
+    assert.equal(document.machines[0]?.owner, "/Phone");
+  });
+
   test("observe spans overlay the current leaf without dropping model states", () => {
     const graph = overlayObserve(graphFromPublishedModel(demoModel), [
       {

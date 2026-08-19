@@ -12,8 +12,12 @@ export const INITIAL_BORDER = "#2dd4bf";
 export const INITIAL_BORDER_WIDTH = 2;
 export const CANVAS_FILL = "#0b0d12";
 
-function machineKey(graph: MachineGraph, index: number): string {
+export function machineKey(graph: MachineGraph, index: number): string {
   return `machine:${index}:${encodeURIComponent(graph.name)}`;
+}
+
+export function namespacedPath(key: string, path: string): string {
+  return `${key}:${encodeURIComponent(path)}`;
 }
 
 export function structureKey(graphs: readonly MachineGraph[]): string {
@@ -23,7 +27,7 @@ export function structureKey(graphs: readonly MachineGraph[]): string {
         .map((node) => JSON.stringify([node.path, node.parent, node.label]))
         .sort();
       const edges = graph.edges.map((edge) => `${edge.source}->${edge.target}:${edge.eventName}`).sort();
-      return `${machineKey(graph, index)}|${nodes.join(",")}|${edges.join(",")}`;
+      return `${machineKey(graph, index)}|owner=${graph.owner ?? ""}|${nodes.join(",")}|${edges.join(",")}`;
     })
     .join(";");
 }

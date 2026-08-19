@@ -21,6 +21,7 @@ export type MachineEdge = {
 
 export type MachineGraph = {
   name: string;
+  owner?: string;
   componentName: string;
   currentState: string;
   lastEventName: string;
@@ -56,6 +57,7 @@ export type PublishedModel = {
   live?: boolean;
   state?: string;
   component?: string;
+  owner?: string;
 };
 
 export type LiveModel = {
@@ -63,6 +65,7 @@ export type LiveModel = {
   component: string;
   state: string;
   live: boolean;
+  owner?: string;
 };
 
 function stateSegments(path: string): string[] {
@@ -180,6 +183,9 @@ export function parsePublishedModel(value: unknown): PublishedModel | null {
   if (typeof value["component"] === "string") {
     model.component = value["component"];
   }
+  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+    model.owner = value["owner"];
+  }
   return model;
 }
 
@@ -194,12 +200,16 @@ export function parseLiveModel(value: unknown): LiveModel | null {
   ) {
     return null;
   }
-  return {
+  const model: LiveModel = {
     name: value["name"],
     component: value["component"],
     state: value["state"],
     live: value["live"],
   };
+  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+    model.owner = value["owner"];
+  }
+  return model;
 }
 
 export function mergePublishedModel(
@@ -223,6 +233,7 @@ export function mergePublishedModel(
     incoming.component !== undefined && incoming.component.length > 0
       ? incoming.component
       : existing.component;
+  const owner = incoming.owner !== undefined ? incoming.owner : existing.owner;
   if (live !== undefined) {
     merged.live = live;
   }
@@ -231,6 +242,9 @@ export function mergePublishedModel(
   }
   if (component !== undefined) {
     merged.component = component;
+  }
+  if (owner !== undefined) {
+    merged.owner = owner;
   }
   return merged;
 }
@@ -275,6 +289,7 @@ export function graphFromPublishedModel(model: PublishedModel): MachineGraph {
   }
   return {
     name: model.name,
+    ...(model.owner === undefined ? {} : { owner: model.owner }),
     componentName: model.component && model.component.length > 0 ? model.component : nodeLabel(model.name),
     currentState: model.live === true ? (model.state ?? "") : "",
     lastEventName: "",
@@ -310,6 +325,7 @@ export function overlayObserve(base: MachineGraph, spans: readonly ObserveSpan[]
   }
   return {
     name: base.name,
+    ...(base.owner === undefined ? {} : { owner: base.owner }),
     componentName: folded.componentName || base.componentName,
     currentState: folded.currentState,
     lastEventName: folded.lastEventName,
@@ -462,7 +478,7 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     }
     edges.push(edge);
   }
-  return {
+  const graph: MachineGraph = {
     name: value["name"],
     componentName: value["componentName"],
     currentState: value["currentState"],
@@ -471,6 +487,10 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     edges,
     observationCount: value["observationCount"],
   };
+  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+    graph.owner = value["owner"];
+  }
+  return graph;
 }
 
 export function foldMachines(spans: readonly ObserveSpan[]): MachineGraph[] {

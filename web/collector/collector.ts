@@ -133,7 +133,13 @@ export class ModelStore {
     });
   }
 
-  commitLive(live: { name: string; component: string; state: string; live: boolean }): Promise<PublishedModel> {
+  commitLive(live: {
+    name: string;
+    component: string;
+    state: string;
+    live: boolean;
+    owner?: string;
+  }): Promise<PublishedModel> {
     return this.#enqueue(async () => {
       const existing = this.#models.get(live.name);
       const next = mergePublishedModel(existing, {
@@ -144,6 +150,7 @@ export class ModelStore {
         live: live.live,
         state: live.state,
         component: live.component,
+        ...(live.owner === undefined ? {} : { owner: live.owner }),
       });
       const nextModels = new Map(this.#models);
       nextModels.set(next.name, next);
@@ -192,7 +199,13 @@ export class ModelStore {
     return next;
   }
 
-  applyLive(live: { name: string; component: string; state: string; live: boolean }): PublishedModel {
+  applyLive(live: {
+    name: string;
+    component: string;
+    state: string;
+    live: boolean;
+    owner?: string;
+  }): PublishedModel {
     const existing = this.#models.get(live.name);
     return this.put({
       name: live.name,
@@ -202,6 +215,7 @@ export class ModelStore {
       live: live.live,
       state: live.state,
       component: live.component,
+      ...(live.owner === undefined ? {} : { owner: live.owner }),
     });
   }
 
@@ -219,6 +233,9 @@ function durableModel(model: PublishedModel): PublishedModel {
   };
   if (model.component !== undefined) {
     durable.component = model.component;
+  }
+  if (model.owner !== undefined) {
+    durable.owner = model.owner;
   }
   return durable;
 }

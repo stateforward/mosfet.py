@@ -19,7 +19,15 @@ import {
   nodeClasses,
   nodeLabel,
   graphNodeStyle,
+  machineKey,
+  namespacedPath,
+  structureKey,
 } from "../src/machine-graph-view.ts";
+import {
+  environmentBoxPositions,
+  machineOwnerIndex,
+  ownershipLayout,
+} from "../src/machine-graph-layout.ts";
 import { foldMachines, graphFromPublishedModel } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 
@@ -30,6 +38,56 @@ const fixturePath = path.join(
 );
 
 describe("machine graph now theme and UML initial", () => {
+  const model = (name: string, owner?: string) => ({
+    name,
+    ...(owner === undefined ? {} : { owner }),
+    componentName: name.slice(1),
+    currentState: `${name}/ready`,
+    lastEventName: "",
+    observationCount: 1,
+    nodes: [
+      { path: name, parent: null, label: name.slice(1) },
+      { path: `${name}/ready`, parent: name, label: "ready" },
+    ],
+    edges: [],
+  });
+
+  test("owned model roots use the owner's namespaced compound id", () => {
+    const owner = model("/Phone");
+    const child = model("/PhoneService", "/Phone");
+    const graphs = [owner, child];
+    assert.equal(machineOwnerIndex(graphs, 1), 0);
+    const ownerId = namespacedPath(machineKey(owner, 0), owner.name);
+    assert.equal(ownershipLayout(graphs).childrenByIndex.get(0)?.[0], 1);
+    assert.equal(ownerId, "machine:0:%2FPhone:%2FPhone");
+    assert.notEqual(structureKey(graphs), structureKey([owner, model("/PhoneService")]));
+  });
+
+  test("owned layout keeps the child graph inside the owner's combined box", () => {
+    const owner = model("/Phone");
+    const child = model("/PhoneService", "/Phone");
+    const graphs = [owner, child];
+    const positions = environmentBoxPositions(graphs);
+    const topLevelPositions = environmentBoxPositions([owner, model("/PhoneService")]);
+    const ownerPosition = positions.get(namespacedPath(machineKey(owner, 0), owner.name));
+    const childPosition = positions.get(namespacedPath(machineKey(child, 1), child.name));
+    assert.ok(ownerPosition !== undefined);
+    assert.ok(childPosition !== undefined);
+    const topLevelOwner = topLevelPositions.get(namespacedPath(machineKey(owner, 0), owner.name));
+    const topLevelChild = topLevelPositions.get(namespacedPath(machineKey(child, 1), child.name));
+    assert.ok(topLevelOwner !== undefined);
+    assert.ok(topLevelChild !== undefined);
+    assert.ok(ownerPosition.x > topLevelOwner.x);
+    assert.ok(childPosition.x < topLevelChild.x);
+  });
+
+  test("missing owners and ownership cycles remain top-level", () => {
+    const missing = [model("/PhoneService", "/Phone")];
+    assert.equal(machineOwnerIndex(missing, 0), null);
+    const cycle = [model("/Phone", "/PhoneService"), model("/PhoneService", "/Phone")];
+    assert.deepEqual([...ownershipLayout(cycle).ownerByIndex], []);
+  });
+
   test("compound titles have a neutral padded backdrop that clears the border", () => {
     const title = compoundTitleStyle();
     assert.equal(title.backgroundColor, "#161b22");
