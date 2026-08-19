@@ -526,6 +526,9 @@ button.tool {
   .inspector {
     grid-column: 1;
     grid-row: 1;
+    display: grid;
+    grid-template-rows: minmax(7rem, 1fr) minmax(0, 1fr);
+    align-content: stretch;
     max-height: none;
     min-height: 0;
     overflow: hidden;

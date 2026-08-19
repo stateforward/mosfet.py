@@ -247,15 +247,29 @@ test("populated mobile rails stay contained around the map", async ({ page, requ
 
   const memberLayout = await page.getByTestId("members").evaluate((element) => {
     const members = element as HTMLElement;
+    const details = members.parentElement?.querySelector<HTMLElement>(".details");
+    if (details === null || details === undefined) {
+      throw new Error("dashboard details element is unavailable");
+    }
     const membersRect = members.getBoundingClientRect();
+    const detailsRect = details.getBoundingClientRect();
     return {
       membersBottom: membersRect.bottom,
       membersClientHeight: members.clientHeight,
       membersScrollHeight: members.scrollHeight,
       overflowY: getComputedStyle(members).overflowY,
+      detailsTop: detailsRect.top,
+      detailsBottom: detailsRect.bottom,
+      detailsClientHeight: details.clientHeight,
+      detailsOverflowY: getComputedStyle(details).overflowY,
     };
   });
+  expect(memberLayout.membersClientHeight).toBeGreaterThan(0);
   expect(memberLayout.membersBottom).toBeLessThanOrEqual(layout.inspector.bottom);
   expect(memberLayout.overflowY).toBe("auto");
   expect(memberLayout.membersScrollHeight).toBeGreaterThan(memberLayout.membersClientHeight);
+  expect(memberLayout.detailsTop).toBeGreaterThanOrEqual(memberLayout.membersBottom);
+  expect(memberLayout.detailsClientHeight).toBeGreaterThan(0);
+  expect(memberLayout.detailsBottom).toBeLessThanOrEqual(layout.inspector.bottom);
+  expect(memberLayout.detailsOverflowY).toBe("auto");
 });
