@@ -36,8 +36,8 @@ describe("companion-style HSM controllers", () => {
     const draws: string[] = [];
     const graph = new MachineGraphController({
       renderer: {
-        draw: (value) => {
-          draws.push(value.currentState);
+        draw: (values) => {
+          draws.push(values.map((value) => value.currentState).join(","));
         },
         destroy: () => {
           draws.push("destroy");
@@ -67,12 +67,15 @@ describe("companion-style HSM controllers", () => {
 
     const document = documentFromOtlp(JSON.parse(readFileSync(fixturePath, "utf8")));
     assert.ok(document !== null);
-    const phone = document.machines.find((machine) => machine.name === "/PhoneBot");
+    const phone = document.machines.find((machine) => machine.name === "/Phone");
     assert.ok(phone !== undefined);
-    const afterDraw = await graph.dispatch("graph.set", { graph: phone });
+    const phoneBot = document.machines.find((machine) => machine.name === "/PhoneBot");
+    assert.ok(phoneBot !== undefined);
+    const afterDraw = await graph.dispatch("graph.set", { graphs: [phone, phoneBot] });
     assert.equal(afterDraw.phase, "drawing");
     assert.ok(afterDraw.statePath.startsWith("/"));
-    assert.ok(draws.includes("/PhoneBot/active/processing"));
+    assert.ok(draws.includes("/Phone,/PhoneBot/active/processing"));
+    assert.equal(afterDraw.graphs.length, 2);
 
     await dashboard.stop();
     await source.stop();

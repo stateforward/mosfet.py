@@ -87,6 +87,26 @@ function nestedBoxPositions(graph: MachineGraph): Map<string, Point> {
   return positions;
 }
 
+function machineWidth(graph: MachineGraph): number {
+  return childrenOf(graph.nodes, null).reduce(
+    (width, root) => width + measureNode(graph.nodes, root.path).width + GAP * 2,
+    0,
+  );
+}
+
+function environmentBoxPositions(graphs: readonly MachineGraph[]): Map<string, Point> {
+  const positions = new Map<string, Point>();
+  let originX = 0;
+  graphs.forEach((graph, index) => {
+    const key = machineKey(graph, index);
+    for (const [path, position] of nestedBoxPositions(graph)) {
+      positions.set(namespacedPath(key, path), { x: position.x + originX, y: position.y });
+    }
+    originX += machineWidth(graph) + GAP * 3;
+  });
+  return positions;
+}
+
 function placeNode(
   nodes: readonly MachineStateNode[],
   path: string,
@@ -106,10 +126,22 @@ function placeNode(
   return size;
 }
 
-function structureKey(graph: MachineGraph): string {
-  const nodes = graph.nodes.map((node) => node.path).sort();
-  const edges = graph.edges.map((edge) => `${edge.source}->${edge.target}:${edge.eventName}`).sort();
-  return `${graph.name}|${nodes.join(",")}|${edges.join(",")}`;
+function machineKey(graph: MachineGraph, index: number): string {
+  return `machine:${index}:${encodeURIComponent(graph.name)}`;
+}
+
+function namespacedPath(key: string, path: string): string {
+  return `${key}:${encodeURIComponent(path)}`;
+}
+
+function structureKey(graphs: readonly MachineGraph[]): string {
+  return graphs
+    .map((graph, index) => {
+      const nodes = graph.nodes.map((node) => node.path).sort();
+      const edges = graph.edges.map((edge) => `${edge.source}->${edge.target}:${edge.eventName}`).sort();
+      return `${machineKey(graph, index)}|${nodes.join(",")}|${edges.join(",")}`;
+    })
+    .join(";");
 }
 
 function ancestorSet(path: string): Set<string> {
@@ -135,8 +167,11 @@ function graphEdgeKey(edge: { source: string; target: string; eventName: string 
   return `${edge.source}->${edge.target}:${edge.eventName}`;
 }
 
-function loopAnchorId(edge: { source: string; target: string; eventName: string }): string {
-  return `loop:${graphEdgeKey(edge)}`;
+function loopAnchorId(
+  machine: string,
+  edge: { source: string; target: string; eventName: string },
+): string {
+  return `${machine}:loop:${graphEdgeKey(edge)}`;
 }
 
 function isDescendantPath(descendant: string, ancestor: string): boolean {
@@ -187,111 +222,128 @@ class CytoscapeRenderer implements GraphRenderer {
     private readonly onEdge: (eventName: string) => void,
   ) {}
 
-  draw(graph: MachineGraph): void {
-    const nextStructure = structureKey(graph);
+  draw(graphs: readonly MachineGraph[]): void {
+    const nextStructure = structureKey(graphs);
     if (this.#cy !== null && this.#structure === nextStructure) {
-      this.#paint(graph);
+      this.#paint(graphs);
       return;
     }
     this.#structure = nextStructure;
-    const positions = nestedBoxPositions(graph);
-    const active = ancestorSet(graph.currentState);
+    const positions = environmentBoxPositions(graphs);
     const elements: cytoscape.ElementDefinition[] = [];
-    for (const node of graph.nodes) {
-      const data: Record<string, string> = {
-        id: node.path,
-        name: node.label,
-        label: nodeLabel(node.label, node.path, graph.currentState),
-      };
-      if (node.parent !== null) {
-        data["parent"] = node.parent;
-      }
-      const position = positions.get(node.path);
-      elements.push({
-        group: "nodes",
-        data,
-        classes: nodeClasses(node.path, graph.currentState, active),
-        ...(position === undefined ? {} : { position }),
-      });
-    }
-    for (const target of initialTargets(graph)) {
-      const targetPos = positions.get(target) ?? { x: 0, y: 0 };
-      const size = measureNode(graph.nodes, target);
-      const position = initialPosition(targetPos, size);
-      const sourceId = initialNodeId(target);
-      elements.push({
-        group: "nodes",
-        data: { id: sourceId, label: "" },
-        classes: "initial",
-        position,
-      });
-      const kind: EdgeKind = shareAxis(position, targetPos) ? "aligned" : "taxi";
-      elements.push({
-        group: "edges",
-        data: {
-          id: `initial->${target}`,
-          source: sourceId,
-          target,
-          label: "",
-          eventName: INITIAL_EVENT,
-          edgeKey: `initial->${target}`,
-        },
-        classes: edgeClasses(kind, false, ["initial"]),
-      });
-    }
-    for (const edge of graph.edges) {
-      if (edge.eventName === INITIAL_EVENT) {
-        continue;
-      }
-      const kind = classifyEdge(edge.source, edge.target, positions);
-      const key = graphEdgeKey(edge);
-      if (kind === "loop") {
-        const anchor = waypointPosition(edge.source, edge.target, positions);
-        const anchorId = loopAnchorId(edge);
+    for (const [index, graph] of graphs.entries()) {
+      const machine = machineKey(graph, index);
+      const active = ancestorSet(graph.currentState);
+      const localPositions = new Map<string, Point>();
+      for (const node of graph.nodes) {
+        const id = namespacedPath(machine, node.path);
+        const data: Record<string, string> = {
+          id,
+          machine,
+          path: node.path,
+          name: node.label,
+          label: nodeLabel(node.label, node.path, graph.currentState),
+        };
+        if (node.parent !== null) {
+          data["parent"] = namespacedPath(machine, node.parent);
+        }
+        const position = positions.get(id);
+        if (position !== undefined) {
+          localPositions.set(node.path, position);
+        }
         elements.push({
           group: "nodes",
-          data: { id: anchorId, label: "" },
-          classes: "loop-anchor",
-          position: anchor,
+          data,
+          classes: nodeClasses(node.path, graph.currentState, active),
+          ...(position === undefined ? {} : { position }),
         });
+      }
+      for (const target of initialTargets(graph)) {
+        const targetId = namespacedPath(machine, target);
+        const targetPos = localPositions.get(target) ?? { x: 0, y: 0 };
+        const size = measureNode(graph.nodes, target);
+        const position = initialPosition(targetPos, size);
+        const sourceId = `${machine}:${initialNodeId(target)}`;
+        elements.push({
+          group: "nodes",
+          data: { id: sourceId, machine, label: "" },
+          classes: "initial",
+          position,
+        });
+        const kind: EdgeKind = shareAxis(position, targetPos) ? "aligned" : "taxi";
         elements.push({
           group: "edges",
           data: {
-            id: `${edge.source}->${anchorId}:${edge.eventName}`,
-            source: edge.source,
-            target: anchorId,
+            id: `${sourceId}->${targetId}`,
+            source: sourceId,
+            target: targetId,
+            label: "",
+            eventName: INITIAL_EVENT,
+            edgeKey: `${machine}:initial->${target}`,
+            machine,
+          },
+          classes: edgeClasses(kind, false, ["initial"]),
+        });
+      }
+      for (const edge of graph.edges) {
+        if (edge.eventName === INITIAL_EVENT) {
+          continue;
+        }
+        const sourceId = namespacedPath(machine, edge.source);
+        const targetId = namespacedPath(machine, edge.target);
+        const kind = classifyEdge(edge.source, edge.target, localPositions);
+        const key = `${machine}:${graphEdgeKey(edge)}`;
+        if (kind === "loop") {
+          const anchor = waypointPosition(edge.source, edge.target, localPositions);
+          const anchorId = loopAnchorId(machine, edge);
+          elements.push({
+            group: "nodes",
+            data: { id: anchorId, machine, label: "" },
+            classes: "loop-anchor",
+            position: anchor,
+          });
+          elements.push({
+            group: "edges",
+            data: {
+              id: `${sourceId}->${anchorId}:${edge.eventName}`,
+              source: sourceId,
+              target: anchorId,
+              label: edge.eventName,
+              eventName: edge.eventName,
+              edgeKey: key,
+              machine,
+            },
+            classes: edgeClasses(kind, edge.lastFired, ["loop-out"]),
+          });
+          elements.push({
+            group: "edges",
+            data: {
+              id: `${anchorId}->${targetId}:${edge.eventName}`,
+              source: anchorId,
+              target: targetId,
+              label: "",
+              eventName: edge.eventName,
+              edgeKey: key,
+              machine,
+            },
+            classes: edgeClasses(kind, edge.lastFired, ["loop-in"]),
+          });
+          continue;
+        }
+        elements.push({
+          group: "edges",
+          data: {
+            id: key,
+            source: sourceId,
+            target: targetId,
             label: edge.eventName,
             eventName: edge.eventName,
             edgeKey: key,
+            machine,
           },
-          classes: edgeClasses(kind, edge.lastFired, ["loop-out"]),
+          classes: edgeClasses(kind, edge.lastFired),
         });
-        elements.push({
-          group: "edges",
-          data: {
-            id: `${anchorId}->${edge.target}:${edge.eventName}`,
-            source: anchorId,
-            target: edge.target,
-            label: "",
-            eventName: edge.eventName,
-            edgeKey: key,
-          },
-          classes: edgeClasses(kind, edge.lastFired, ["loop-in"]),
-        });
-        continue;
       }
-      elements.push({
-        group: "edges",
-        data: {
-          id: key,
-          source: edge.source,
-          target: edge.target,
-          label: edge.eventName,
-          eventName: edge.eventName,
-          edgeKey: key,
-        },
-        classes: edgeClasses(kind, edge.lastFired),
-      });
     }
     if (this.#cy === null) {
       this.#cy = cytoscape({
@@ -473,25 +525,39 @@ class CytoscapeRenderer implements GraphRenderer {
     this.#fitCapped();
   }
 
-  #paint(graph: MachineGraph): void {
+  #paint(graphs: readonly MachineGraph[]): void {
     const cy = this.#cy;
     if (cy === null) {
       return;
     }
-    const active = ancestorSet(graph.currentState);
+    const byMachine = new Map(graphs.map((graph, index) => [machineKey(graph, index), graph]));
     cy.nodes().forEach((node) => {
       if (node.hasClass("loop-anchor") || node.hasClass("initial")) {
         return;
       }
-      const path = node.id();
+      const machine = node.data("machine");
+      const graph = typeof machine === "string" ? byMachine.get(machine) : undefined;
+      if (graph === undefined) {
+        return;
+      }
+      const path = node.data("path");
+      if (typeof path !== "string") {
+        return;
+      }
+      const active = ancestorSet(graph.currentState);
       const name = node.data("name");
       const label = typeof name === "string" && name.length > 0 ? name : path.split("/").pop() ?? path;
       node.classes(nodeClasses(path, graph.currentState, active));
       node.data("label", nodeLabel(label, path, graph.currentState));
     });
     cy.edges().forEach((edge) => {
+      const machine = edge.data("machine");
+      const graph = typeof machine === "string" ? byMachine.get(machine) : undefined;
+      if (graph === undefined) {
+        return;
+      }
       const key = edge.data("edgeKey");
-      const last = graph.edges.some((item) => item.lastFired && graphEdgeKey(item) === key);
+      const last = graph.edges.some((item) => item.lastFired && `${machine}:${graphEdgeKey(item)}` === key);
       edge.toggleClass("last-fired", last);
     });
   }
@@ -530,7 +596,7 @@ export class BotMachineGraph extends HTMLElement {
   readonly #frame: HTMLDivElement;
   #controller: MachineGraphController | null = null;
   #renderer: CytoscapeRenderer | null = null;
-  #pending: MachineGraph | null | undefined;
+  #pending: readonly MachineGraph[] | undefined;
 
   constructor() {
     super();
@@ -543,14 +609,13 @@ export class BotMachineGraph extends HTMLElement {
     this.#root.append(this.#frame);
   }
 
-  get graph(): MachineGraph | null {
-    return this.#controller?.snapshot().graph ?? this.#pending ?? null;
+  get graphs(): readonly MachineGraph[] {
+    return this.#controller?.snapshot().graphs ?? this.#pending ?? [];
   }
 
-  set graph(value: MachineGraph | null) {
+  set graphs(value: readonly MachineGraph[]) {
     this.#pending = value;
-    this.setAttribute("data-node-count", value === null ? "0" : String(value.nodes.length));
-    this.setAttribute("data-current-state", value?.currentState ?? "");
+    this.setAttribute("data-node-count", String(value.reduce((count, graph) => count + graph.nodes.length, 0)));
     void this.#admit(value);
   }
 
@@ -601,16 +666,16 @@ export class BotMachineGraph extends HTMLElement {
     }
   }
 
-  async #admit(value: MachineGraph | null): Promise<void> {
+  async #admit(value: readonly MachineGraph[]): Promise<void> {
     const controller = this.#controller;
     if (controller === null) {
       return;
     }
-    if (value === null) {
+    if (value.length === 0) {
       await controller.dispatch("graph.clear");
       return;
     }
-    await controller.dispatch("graph.set", { graph: value });
+    await controller.dispatch("graph.set", { graphs: value });
   }
 }
 

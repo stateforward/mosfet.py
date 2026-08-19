@@ -475,7 +475,7 @@ export class BotDashboard extends HTMLElement {
       this.#lastEvent.textContent = "—";
       this.#observes.textContent = "0";
       this.#writeGraphHooks(null);
-      this.#graph.graph = null;
+      this.#graph.graphs = [];
       return;
     }
     for (const machine of view.machines) {
@@ -506,14 +506,14 @@ export class BotDashboard extends HTMLElement {
       this.#lastEvent.textContent = "—";
       this.#observes.textContent = String(view.observeCount);
       this.#writeGraphHooks(null);
-      this.#graph.graph = null;
+      this.#graph.graphs = [];
       return;
     }
     this.#writeCurrentState(selected.currentState);
     this.#lastEvent.textContent = selected.lastEventName;
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
-    this.#graph.graph = selected;
+    this.#graph.graphs = view.machines;
   }
 
   #writeCurrentState(currentState: string | null): void {

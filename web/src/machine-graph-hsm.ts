@@ -13,14 +13,14 @@ export type MachineGraphEventName = keyof typeof graphEvents;
 export type MachineGraphPhase = "empty" | "drawing";
 
 export type GraphRenderer = {
-  draw(graph: MachineGraph): void;
+  draw(graphs: readonly MachineGraph[]): void;
   destroy(): void;
 };
 
 export type MachineGraphSnapshot = {
   readonly phase: MachineGraphPhase;
   readonly statePath: string;
-  readonly graph: MachineGraph | null;
+  readonly graphs: readonly MachineGraph[];
 };
 
 export type MachineGraphControllerOptions = {
@@ -36,23 +36,35 @@ function controllerOf(instance: hsm.Instance): MachineGraphController | null {
   return instance instanceof MachineGraphRuntime ? instance.controller : null;
 }
 
-function graphFromEvent(event: hsm.Event): MachineGraph | null {
+function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
   if (!isRecord(event.data)) {
     return null;
   }
-  return parseMachineGraph(event.data["graph"]);
+  const value = event.data["graphs"];
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const graphs: MachineGraph[] = [];
+  for (const item of value) {
+    const graph = parseMachineGraph(item);
+    if (graph === null) {
+      return null;
+    }
+    graphs.push(graph);
+  }
+  return graphs;
 }
 
 function rememberGraph(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const graph = graphFromEvent(event);
-  if (graph === null) {
+  const graphs = graphsFromEvent(event);
+  if (graphs === null) {
     return;
   }
-  controllerOf(instance)?.rememberGraph(graph);
+  controllerOf(instance)?.rememberGraphs(graphs);
 }
 
 function clearGraph(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-  controllerOf(instance)?.rememberGraph(null);
+  controllerOf(instance)?.rememberGraphs([]);
 }
 
 function drawGraph(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -94,7 +106,7 @@ export function isMachineGraphEventName(value: string): value is MachineGraphEve
 export class MachineGraphController {
   #runtime = new MachineGraphRuntime();
   #machine: MachineGraphRuntime;
-  #graph: MachineGraph | null = null;
+  #graphs: readonly MachineGraph[] = [];
   #renderer: GraphRenderer | null;
   #onSnapshot: ((snapshot: MachineGraphSnapshot) => void) | null;
 
@@ -110,7 +122,7 @@ export class MachineGraphController {
     return {
       phase: phaseFromStatePath(statePath),
       statePath,
-      graph: this.#graph,
+      graphs: this.#graphs,
     };
   }
 
@@ -126,18 +138,17 @@ export class MachineGraphController {
     await stopMachine(this.#machine);
   }
 
-  rememberGraph(graph: MachineGraph | null): void {
-    this.#graph = graph;
+  rememberGraphs(graphs: readonly MachineGraph[]): void {
+    this.#graphs = graphs;
     this.#emit();
   }
 
   draw(): void {
-    const graph = this.#graph;
-    if (graph === null) {
+    if (this.#graphs.length === 0) {
       this.#renderer?.destroy();
       return;
     }
-    this.#renderer?.draw(graph);
+    this.#renderer?.draw(this.#graphs);
   }
 
   destroyRenderer(): void {
