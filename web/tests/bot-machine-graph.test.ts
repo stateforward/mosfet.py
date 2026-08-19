@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CANVAS_FILL,
+  compoundTitleStyle,
   INITIAL_BORDER,
   INITIAL_BORDER_WIDTH,
   INITIAL_FILL,
@@ -29,6 +30,14 @@ const fixturePath = path.join(
 );
 
 describe("machine graph now theme and UML initial", () => {
+  test("compound titles have a neutral padded backdrop that clears the border", () => {
+    const title = compoundTitleStyle();
+    assert.equal(title.backgroundColor, "#161b22");
+    assert.equal(title.backgroundOpacity, 1);
+    assert.equal(title.padding, 3);
+    assert.equal(title.marginY, 8);
+  });
+
   test("active graph states use neutral interiors and outline emphasis", () => {
     const active = graphNodeStyle("active-path");
     const current = graphNodeStyle("current");

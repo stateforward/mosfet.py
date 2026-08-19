@@ -8,6 +8,7 @@ import {
   INITIAL_EVENT,
   INITIAL_FILL,
   INITIAL_SIZE,
+  compoundTitleStyle,
   graphNodeStyle,
   initialNodeId,
   initialPosition,
@@ -56,6 +57,8 @@ const PAD_Y = 36;
 function childrenOf(nodes: readonly MachineStateNode[], parent: string | null): MachineStateNode[] {
   return nodes.filter((node) => node.parent === parent);
 }
+
+const COMPOUND_TITLE = compoundTitleStyle();
 
 function measureNode(nodes: readonly MachineStateNode[], path: string | null): Size {
   const kids = childrenOf(nodes, path);
@@ -326,7 +329,10 @@ class CytoscapeRenderer implements GraphRenderer {
               color: "#9aa3b5",
               "text-valign": "top",
               "text-halign": "center",
-              "text-margin-y": 8,
+              "text-margin-y": COMPOUND_TITLE.marginY,
+              "text-background-color": COMPOUND_TITLE.backgroundColor,
+              "text-background-opacity": COMPOUND_TITLE.backgroundOpacity,
+              "text-background-padding": `${COMPOUND_TITLE.padding}px`,
               "font-weight": 650,
               "font-size": 10,
               padding: "18px",

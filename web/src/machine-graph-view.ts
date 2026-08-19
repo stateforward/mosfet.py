@@ -23,6 +23,22 @@ export type GraphNodeStyle = {
   zIndex: number;
 };
 
+export type CompoundTitleStyle = {
+  backgroundColor: string;
+  backgroundOpacity: number;
+  padding: number;
+  marginY: number;
+};
+
+export function compoundTitleStyle(): CompoundTitleStyle {
+  return {
+    backgroundColor: "#161b22",
+    backgroundOpacity: 1,
+    padding: 3,
+    marginY: 8,
+  };
+}
+
 export function graphNodeStyle(kind: "active-path" | "current"): GraphNodeStyle {
   const current = kind === "current";
   return {
