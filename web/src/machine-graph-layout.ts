@@ -29,7 +29,7 @@ export function ownershipLayout(graphs: readonly MachineGraph[]): OwnershipLayou
   });
   const candidates = new Map<number, number>();
   graphs.forEach((graph, index) => {
-    if (graph.owner === undefined || graph.owner === graph.name || !hasRoot(graph)) {
+    if (graph.owner === undefined || graph.owner === null || graph.owner === graph.name || !hasRoot(graph)) {
       return;
     }
     const ownerIndex = byName.get(graph.owner);

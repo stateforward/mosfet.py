@@ -138,7 +138,7 @@ export class ModelStore {
     component: string;
     state: string;
     live: boolean;
-    owner?: string;
+    owner?: string | null;
   }): Promise<PublishedModel> {
     return this.#enqueue(async () => {
       const existing = this.#models.get(live.name);
@@ -204,7 +204,7 @@ export class ModelStore {
     component: string;
     state: string;
     live: boolean;
-    owner?: string;
+    owner?: string | null;
   }): PublishedModel {
     const existing = this.#models.get(live.name);
     return this.put({

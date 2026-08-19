@@ -78,6 +78,15 @@ describe("collector published models", () => {
       });
       assert.ok(topology !== null);
       await store.commit(topology);
+      const omittedOwnerLive = parseLiveModel({
+        name: "/PhoneService",
+        component: "PhoneService",
+        state: "/PhoneService/ready",
+        live: true,
+      });
+      assert.ok(omittedOwnerLive !== null);
+      await store.commitLive(omittedOwnerLive);
+      assert.equal(store.list()[0]?.owner, "/Phone");
       const live = parseLiveModel({
         name: "/PhoneService",
         component: "PhoneService",
@@ -92,6 +101,40 @@ describe("collector published models", () => {
       const reloaded = new ModelStore(filePath);
       await reloaded.load();
       assert.equal(reloaded.list()[0]?.owner, "/Phone");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("explicit null live ownership clears and rehydrates", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "collector-models-owner-clear-"));
+    const filePath = path.join(directory, "models.json");
+    try {
+      const store = new ModelStore(filePath);
+      const topology = parsePublishedModel({
+        name: "/PhoneService",
+        owner: "/Phone",
+        initial: "/PhoneService/.initial",
+        states: [],
+        transitions: [],
+      });
+      assert.ok(topology !== null);
+      await store.commit(topology);
+      const live = parseLiveModel({
+        name: "/PhoneService",
+        component: "PhoneService",
+        state: "/PhoneService/ready",
+        live: true,
+        owner: null,
+      });
+      assert.ok(live !== null);
+      await store.commitLive(live);
+      assert.equal(store.list()[0]?.owner, null);
+      await store.persist();
+
+      const reloaded = new ModelStore(filePath);
+      await reloaded.load();
+      assert.equal(reloaded.list()[0]?.owner, null);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

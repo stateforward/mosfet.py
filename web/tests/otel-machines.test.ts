@@ -10,6 +10,7 @@ import {
   foldMachines,
   graphFromPublishedModel,
   overlayObserve,
+  parseLiveModel,
   parsePublishedModel,
   type PublishedModel,
 } from "../src/otel/machines.ts";
@@ -140,6 +141,29 @@ describe("published model topology", () => {
     assert.equal(overlayObserve(graph, []).owner, "/Phone");
     const document = documentFromSpans([], 0, null, [service]);
     assert.equal(document.machines[0]?.owner, "/Phone");
+  });
+
+  test("explicit null ownership survives parsing and overlays as a clear", () => {
+    const service = parsePublishedModel({
+      name: "/PhoneService",
+      owner: null,
+      initial: "/PhoneService/.initial",
+      states: [],
+      transitions: [],
+    });
+    const live = parseLiveModel({
+      name: "/PhoneService",
+      component: "PhoneService",
+      state: "",
+      live: true,
+      owner: null,
+    });
+    assert.ok(service !== null);
+    assert.ok(live !== null);
+    assert.equal(service.owner, null);
+    assert.equal(live.owner, null);
+    assert.equal(graphFromPublishedModel(service).owner, null);
+    assert.equal(overlayObserve(graphFromPublishedModel(service), []).owner, null);
   });
 
   test("observe spans overlay the current leaf without dropping model states", () => {

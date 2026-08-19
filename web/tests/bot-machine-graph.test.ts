@@ -38,7 +38,7 @@ const fixturePath = path.join(
 );
 
 describe("machine graph now theme and UML initial", () => {
-  const model = (name: string, owner?: string) => ({
+  const model = (name: string, owner?: string | null) => ({
     name,
     ...(owner === undefined ? {} : { owner }),
     componentName: name.slice(1),
@@ -84,6 +84,7 @@ describe("machine graph now theme and UML initial", () => {
   test("missing owners and ownership cycles remain top-level", () => {
     const missing = [model("/PhoneService", "/Phone")];
     assert.equal(machineOwnerIndex(missing, 0), null);
+    assert.equal(machineOwnerIndex([model("/Phone"), model("/PhoneService", null)], 1), null);
     const cycle = [model("/Phone", "/PhoneService"), model("/PhoneService", "/Phone")];
     assert.deepEqual([...ownershipLayout(cycle).ownerByIndex], []);
   });

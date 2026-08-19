@@ -21,7 +21,7 @@ export type MachineEdge = {
 
 export type MachineGraph = {
   name: string;
-  owner?: string;
+  owner?: string | null;
   componentName: string;
   currentState: string;
   lastEventName: string;
@@ -57,7 +57,7 @@ export type PublishedModel = {
   live?: boolean;
   state?: string;
   component?: string;
-  owner?: string;
+  owner?: string | null;
 };
 
 export type LiveModel = {
@@ -65,7 +65,7 @@ export type LiveModel = {
   component: string;
   state: string;
   live: boolean;
-  owner?: string;
+  owner?: string | null;
 };
 
 function stateSegments(path: string): string[] {
@@ -183,7 +183,7 @@ export function parsePublishedModel(value: unknown): PublishedModel | null {
   if (typeof value["component"] === "string") {
     model.component = value["component"];
   }
-  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
     model.owner = value["owner"];
   }
   return model;
@@ -206,7 +206,7 @@ export function parseLiveModel(value: unknown): LiveModel | null {
     state: value["state"],
     live: value["live"],
   };
-  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
     model.owner = value["owner"];
   }
   return model;
@@ -487,7 +487,7 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     edges,
     observationCount: value["observationCount"],
   };
-  if (typeof value["owner"] === "string" && value["owner"].length > 0) {
+  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
     graph.owner = value["owner"];
   }
   return graph;
