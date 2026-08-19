@@ -3,6 +3,7 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
+import { graphsForVisibility } from "../dashboard-graphs.ts";
 import { type MachineGraph } from "../otel/machines.ts";
 import { isOtelSource } from "../otel/source.ts";
 import { BotMachineGraph } from "./bot-machine-graph.ts";
@@ -977,7 +978,7 @@ export class BotDashboard extends HTMLElement {
     this.#lastEvent.textContent = selected.lastEventName;
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
-    this.#graph.graphs = view.machines.filter((machine) => this.#visibleMachines.get(machine.name) === true);
+    this.#graph.graphs = graphsForVisibility(view.machines, this.#visibleMachines);
   }
 
   #writeVisibilityStats(view: DashboardSnapshot["document"]): void {
@@ -1047,7 +1048,7 @@ export class BotDashboard extends HTMLElement {
     }
     this.#syncMachineControls();
     this.#writeVisibilityStats(view);
-    this.#graph.graphs = view.machines.filter((machine) => this.#visibleMachines.get(machine.name) === true);
+    this.#graph.graphs = graphsForVisibility(view.machines, this.#visibleMachines);
   }
 
   #setMachineVisibility(machineName: string, visible: boolean): void {
@@ -1059,7 +1060,7 @@ export class BotDashboard extends HTMLElement {
     }
     this.#syncMachineControls();
     this.#writeVisibilityStats(document);
-    this.#graph.graphs = document.machines.filter((machine) => this.#visibleMachines.get(machine.name) === true);
+    this.#graph.graphs = graphsForVisibility(document.machines, this.#visibleMachines);
   }
 
   #writeCurrentState(currentState: string | null): void {
