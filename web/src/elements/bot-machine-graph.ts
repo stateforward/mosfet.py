@@ -57,8 +57,8 @@ const PAD_Y = 36;
 const NOW_BORDER_WIDTH = 3;
 const NOW_UNDERLAY_PADDING = 10;
 const NOW_UNDERLAY_OPACITY = 0.5;
-const PATH_OUTLINE = "#64748b";
-const PATH_OUTLINE_WIDTH = 1;
+const PATH_OUTLINE = NOW_BORDER;
+const PATH_OUTLINE_WIDTH = 2;
 
 function childrenOf(nodes: readonly MachineStateNode[], parent: string | null): MachineStateNode[] {
   return nodes.filter((node) => node.parent === parent);
@@ -326,8 +326,8 @@ class CytoscapeRenderer implements GraphRenderer {
           {
             selector: "node:parent",
             style: {
-              "background-opacity": 0.08,
-              "background-color": "#2dd4bf",
+              "background-opacity": 1,
+              "background-color": "#161b22",
               "border-color": "#3f4b5f",
               "border-width": 1.2,
               color: "#9aa3b5",
@@ -344,7 +344,7 @@ class CytoscapeRenderer implements GraphRenderer {
             style: {
               "border-color": PATH_OUTLINE,
               "border-width": PATH_OUTLINE_WIDTH,
-              "border-opacity": 0.85,
+              "border-opacity": 1,
             },
           },
           {
