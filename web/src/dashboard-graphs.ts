@@ -22,23 +22,34 @@ export function graphsForVisibility(
   visibleMachines: ReadonlyMap<string, boolean>,
 ): MachineGraph[] {
   const byName = new Map(machines.map((machine) => [machine.name, machine]));
-  const included = new Set(
-    machines.filter((machine) => visibleMachines.get(machine.name) === true).map((machine) => machine.name),
-  );
+  const included = new Set<string>();
   for (const machine of machines) {
     if (visibleMachines.get(machine.name) !== true) {
       continue;
     }
-    const visitedOwners = new Set<string>();
+    const ownerChain = [machine.name];
+    const visitedOwners = new Set<string>(ownerChain);
     let ownerName = machine.owner;
-    while (ownerName !== undefined && ownerName !== null && !visitedOwners.has(ownerName)) {
+    let validOwnerChain = true;
+    while (ownerName !== undefined && ownerName !== null) {
+      if (visitedOwners.has(ownerName)) {
+        validOwnerChain = false;
+        break;
+      }
       visitedOwners.add(ownerName);
       const owner = byName.get(ownerName);
       if (owner === undefined) {
+        validOwnerChain = false;
         break;
       }
-      included.add(owner.name);
+      ownerChain.push(owner.name);
       ownerName = owner.owner;
+    }
+    if (!validOwnerChain) {
+      continue;
+    }
+    for (const name of ownerChain) {
+      included.add(name);
     }
   }
   return machines

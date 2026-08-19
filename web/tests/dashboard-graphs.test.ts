@@ -4,7 +4,7 @@ import { describe, test } from "node:test";
 import { graphsForVisibility } from "../src/dashboard-graphs.ts";
 import { type MachineGraph } from "../src/otel/machines.ts";
 
-function machine(name: string, owner?: string): MachineGraph {
+function machine(name: string, owner?: string | null): MachineGraph {
   return {
     name,
     ...(owner === undefined ? {} : { owner }),
@@ -55,5 +55,36 @@ describe("dashboard render graph admission", () => {
 
     assert.deepEqual(graphsForVisibility([owner, child], new Map([["/Environment", false], ["/Child", false]])), []);
     assert.deepEqual(graphsForVisibility([owner, child], new Map([["/Environment", true], ["/Child", false]])).map((graph) => graph.name), ["/Environment"]);
+  });
+
+  test("treats explicit null ownership as an environment root", () => {
+    const environment = machine("/Environment", null);
+
+    assert.deepEqual(
+      graphsForVisibility([environment], new Map([["/Environment", true]])).map((graph) => graph.name),
+      ["/Environment"],
+    );
+  });
+
+  test("excludes visible models whose owner is missing", () => {
+    const missingOwner = machine("/Service", "/MissingOwner");
+
+    assert.deepEqual(graphsForVisibility([missingOwner], new Map([["/Service", true]])), []);
+  });
+
+  test("excludes visible models in ownership cycles", () => {
+    const first = machine("/First", "/Second");
+    const second = machine("/Second", "/First");
+
+    assert.deepEqual(
+      graphsForVisibility(
+        [first, second],
+        new Map([
+          ["/First", true],
+          ["/Second", true],
+        ]),
+      ),
+      [],
+    );
   });
 });
