@@ -11,6 +11,7 @@ import {
   graphFromPublishedModel,
   overlayObserve,
   parseLiveModel,
+  parseMachineGraph,
   parsePublishedModel,
   type PublishedModel,
 } from "../src/otel/machines.ts";
@@ -99,6 +100,51 @@ const demoModel: PublishedModel = {
 };
 
 describe("published model topology", () => {
+  test("rejects explicitly present malformed ownership fields", () => {
+    const malformedOwners: unknown[] = ["", 0, false, {}, [], undefined];
+    for (const owner of malformedOwners) {
+      assert.equal(
+        parsePublishedModel({ ...demoModel, owner }),
+        null,
+        `published owner ${String(owner)} should be rejected`,
+      );
+      assert.equal(
+        parseLiveModel({
+          name: "/PhoneService",
+          component: "PhoneService",
+          state: "",
+          live: true,
+          owner,
+        }),
+        null,
+        `live owner ${String(owner)} should be rejected`,
+      );
+      assert.equal(
+        parseMachineGraph({
+          name: "/PhoneService",
+          componentName: "PhoneService",
+          currentState: "",
+          lastEventName: "",
+          observationCount: 0,
+          nodes: [{ path: "/PhoneService", parent: null, label: "PhoneService" }],
+          edges: [],
+          owner,
+        }),
+        null,
+        `graph owner ${String(owner)} should be rejected`,
+      );
+    }
+  });
+
+  test("distinguishes missing ownership from explicit ownerless ownership", () => {
+    const missing = parsePublishedModel(demoModel);
+    const explicitNull = parsePublishedModel({ ...demoModel, owner: null });
+    assert.ok(missing !== null);
+    assert.ok(explicitNull !== null);
+    assert.equal(Object.hasOwn(missing, "owner"), false);
+    assert.equal(explicitNull.owner, null);
+  });
+
   test("published model renders idle and run with no observe spans", () => {
     const parsed = parsePublishedModel(demoModel);
     assert.ok(parsed !== null);

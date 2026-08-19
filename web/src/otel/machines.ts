@@ -68,6 +68,22 @@ export type LiveModel = {
   owner?: string | null;
 };
 
+const INVALID_OWNER = Symbol("invalid owner");
+
+function parseOwner(value: Record<string, unknown>): string | null | undefined | typeof INVALID_OWNER {
+  if (!Object.hasOwn(value, "owner")) {
+    return undefined;
+  }
+  const owner = value["owner"];
+  if (owner === null) {
+    return null;
+  }
+  if (typeof owner === "string" && owner.length > 0) {
+    return owner;
+  }
+  return INVALID_OWNER;
+}
+
 function stateSegments(path: string): string[] {
   return path.split("/").filter((part) => part.length > 0);
 }
@@ -152,6 +168,10 @@ export function parsePublishedModel(value: unknown): PublishedModel | null {
   ) {
     return null;
   }
+  const owner = parseOwner(value);
+  if (owner === INVALID_OWNER) {
+    return null;
+  }
   const states: PublishedState[] = [];
   for (const item of value["states"]) {
     const state = parsePublishedState(item);
@@ -183,8 +203,8 @@ export function parsePublishedModel(value: unknown): PublishedModel | null {
   if (typeof value["component"] === "string") {
     model.component = value["component"];
   }
-  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
-    model.owner = value["owner"];
+  if (owner !== undefined) {
+    model.owner = owner;
   }
   return model;
 }
@@ -200,14 +220,18 @@ export function parseLiveModel(value: unknown): LiveModel | null {
   ) {
     return null;
   }
+  const owner = parseOwner(value);
+  if (owner === INVALID_OWNER) {
+    return null;
+  }
   const model: LiveModel = {
     name: value["name"],
     component: value["component"],
     state: value["state"],
     live: value["live"],
   };
-  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
-    model.owner = value["owner"];
+  if (owner !== undefined) {
+    model.owner = owner;
   }
   return model;
 }
@@ -462,6 +486,10 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
   ) {
     return null;
   }
+  const owner = parseOwner(value);
+  if (owner === INVALID_OWNER) {
+    return null;
+  }
   const nodes: MachineStateNode[] = [];
   for (const item of value["nodes"]) {
     const node = parseStateNode(item);
@@ -487,8 +515,8 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     edges,
     observationCount: value["observationCount"],
   };
-  if (value["owner"] === null || (typeof value["owner"] === "string" && value["owner"].length > 0)) {
-    graph.owner = value["owner"];
+  if (owner !== undefined) {
+    graph.owner = owner;
   }
   return graph;
 }

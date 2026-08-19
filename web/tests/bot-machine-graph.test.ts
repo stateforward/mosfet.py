@@ -30,6 +30,7 @@ import {
   environmentBoxPositions,
   machineOwnerIndex,
   ownershipLayout,
+  renderableGraphs,
 } from "../src/machine-graph-layout.ts";
 import { foldMachines, graphFromPublishedModel } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -114,6 +115,26 @@ describe("machine graph now theme and UML initial", () => {
     assert.equal(machineOwnerIndex([model("/Phone"), model("/PhoneService", null)], 1), null);
     const cycle = [model("/Phone", "/PhoneService"), model("/PhoneService", "/Phone")];
     assert.deepEqual([...ownershipLayout(cycle).ownerByIndex], []);
+  });
+
+  test("direct renderer admission skips unresolved and cyclic ownership graphs", () => {
+    const owner = model("/Phone");
+    const child = model("/PhoneService", "/Phone");
+    const unresolved = model("/MissingOwnerChild", "/MissingOwner");
+    const firstCycle = model("/FirstCycle", "/SecondCycle");
+    const secondCycle = model("/SecondCycle", "/FirstCycle");
+    const graphs = [unresolved, owner, child, firstCycle, secondCycle];
+
+    assert.deepEqual(
+      renderableGraphs(graphs).map((graph) => graph.name),
+      ["/Phone", "/PhoneService"],
+    );
+    const positions = environmentBoxPositions(graphs);
+    assert.ok([...positions.keys()].some((key) => key.includes(encodeURIComponent("/Phone"))));
+    assert.ok([...positions.keys()].some((key) => key.includes(encodeURIComponent("/PhoneService"))));
+    assert.ok(![...positions.keys()].some((key) => key.includes(encodeURIComponent("/MissingOwnerChild"))));
+    assert.ok(![...positions.keys()].some((key) => key.includes(encodeURIComponent("/FirstCycle"))));
+    assert.ok(![...positions.keys()].some((key) => key.includes(encodeURIComponent("/SecondCycle"))));
   });
 
   test("compound titles have a neutral padded backdrop that clears the border", () => {

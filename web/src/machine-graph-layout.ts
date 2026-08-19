@@ -20,6 +20,48 @@ function hasRoot(graph: MachineGraph): boolean {
   return graph.nodes.some((node) => node.path === graph.name && node.parent === null);
 }
 
+function hasRenderableOwnerChain(
+  graphs: readonly MachineGraph[],
+  byName: ReadonlyMap<string, number>,
+  index: number,
+): boolean {
+  const visited = new Set<number>();
+  let current: number | undefined = index;
+  while (current !== undefined) {
+    if (visited.has(current)) {
+      return false;
+    }
+    visited.add(current);
+    const graph = graphs[current];
+    if (graph === undefined || !hasRoot(graph)) {
+      return false;
+    }
+    const owner = graph.owner;
+    if (owner === undefined || owner === null) {
+      return true;
+    }
+    if (typeof owner !== "string") {
+      return false;
+    }
+    current = byName.get(owner);
+  }
+  return false;
+}
+
+/**
+ * Graphs admitted to the renderer must have a root state and, when owned,
+ * remain nested under an existing owner through a complete acyclic chain.
+ */
+export function renderableGraphs(graphs: readonly MachineGraph[]): MachineGraph[] {
+  const byName = new Map<string, number>();
+  graphs.forEach((graph, index) => {
+    if (!byName.has(graph.name)) {
+      byName.set(graph.name, index);
+    }
+  });
+  return graphs.filter((_graph, index) => hasRenderableOwnerChain(graphs, byName, index));
+}
+
 export function ownershipLayout(graphs: readonly MachineGraph[]): OwnershipLayout {
   const byName = new Map<string, number>();
   graphs.forEach((graph, index) => {
@@ -169,14 +211,15 @@ function placeMachine(
 
 export function environmentBoxPositions(graphs: readonly MachineGraph[]): Map<string, Point> {
   const positions = new Map<string, Point>();
-  const ownership = ownershipLayout(graphs);
+  const renderable = renderableGraphs(graphs);
+  const ownership = ownershipLayout(renderable);
   let originX = 0;
-  graphs.forEach((_graph, index) => {
+  renderable.forEach((_graph, index) => {
     if (ownership.ownerByIndex.has(index)) {
       return;
     }
-    const size = measureMachine(graphs, ownership, index);
-    placeMachine(graphs, ownership, index, originX, 0, positions);
+    const size = measureMachine(renderable, ownership, index);
+    placeMachine(renderable, ownership, index, originX, 0, positions);
     originX += size.width + GAP * 3;
   });
   return positions;

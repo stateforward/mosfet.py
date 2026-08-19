@@ -6,6 +6,7 @@ import {
   machineOwnerIndex,
   measureState,
   ownershipLayout,
+  renderableGraphs,
 } from "../machine-graph-layout.ts";
 import {
   CANVAS_FILL,
@@ -145,17 +146,18 @@ class CytoscapeRenderer implements GraphRenderer {
 
   draw(graphs: readonly MachineGraph[]): void {
     this.#ensureResizeObserver();
-    const nextStructure = structureKey(graphs);
+    const renderable = renderableGraphs(graphs);
+    const nextStructure = structureKey(renderable);
     if (this.#cy !== null && this.#structure === nextStructure) {
-      this.#paint(graphs);
+      this.#paint(renderable);
       this.#resizeForContainer();
       return;
     }
     this.#structure = nextStructure;
-    const positions = environmentBoxPositions(graphs);
-    const ownership = ownershipLayout(graphs);
+    const positions = environmentBoxPositions(renderable);
+    const ownership = ownershipLayout(renderable);
     const elements: cytoscape.ElementDefinition[] = [];
-    for (const [index, graph] of graphs.entries()) {
+    for (const [index, graph] of renderable.entries()) {
       const machine = machineKey(graph, index);
       const active = ancestorSet(graph.currentState);
       const localPositions = new Map<string, Point>();
@@ -173,9 +175,9 @@ class CytoscapeRenderer implements GraphRenderer {
         if (node.parent !== null) {
           data["parent"] = namespacedPath(machine, node.parent);
         } else if (node.path === graph.name) {
-          const ownerIndex = machineOwnerIndex(graphs, index);
+          const ownerIndex = machineOwnerIndex(renderable, index);
           if (ownerIndex !== null) {
-            const ownerGraph = graphs[ownerIndex];
+            const ownerGraph = renderable[ownerIndex];
             if (ownerGraph !== undefined) {
               data["parent"] = namespacedPath(machineKey(ownerGraph, ownerIndex), ownerGraph.name);
             }
