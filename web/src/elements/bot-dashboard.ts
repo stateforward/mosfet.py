@@ -76,21 +76,47 @@ bot-machine-graph {
 }
 .machine {
   display: grid;
-  gap: 0.1rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   width: 100%;
   margin: 0;
-  padding: 0.4rem 0.5rem;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 0.4rem;
   background: #161922;
   color: inherit;
   font: inherit;
   text-align: left;
+}
+.machine-select {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
-.machine[aria-current="true"] {
+.machine-select[aria-current="true"] {
   border-color: color-mix(in srgb, var(--bot-accent, #2dd4bf) 55%, #2a3140);
   background: color-mix(in srgb, var(--bot-active-fill, #134e4a) 55%, #161922);
+}
+.machine-visibility {
+  display: flex;
+  align-items: center;
+  padding: 0.4rem 0.5rem;
+  color: var(--bot-muted, #8b93a7);
+  cursor: pointer;
+}
+.machine-visibility input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--bot-accent, #2dd4bf);
 }
 .machine-name {
   font-weight: 600;
@@ -277,6 +303,7 @@ export class BotDashboard extends HTMLElement {
   readonly #commandResult: HTMLParagraphElement;
   readonly #source: BotOtelSource;
   readonly #graph: BotMachineGraph;
+  #visibleMachines = new Map<string, boolean>();
   #controller: DashboardController | null = null;
   #abort: AbortController | null = null;
 
@@ -289,7 +316,8 @@ export class BotDashboard extends HTMLElement {
     topbar.className = "topbar";
     const title = document.createElement("h1");
     title.className = "title";
-    title.textContent = "bot HSM";
+    title.textContent = "Environment graph";
+    mark(title, "title");
     this.#source = document.createElement("bot-otel-source");
     this.#picker = document.createElement("select");
     this.#picker.setAttribute("aria-label", "Observed machine");
@@ -330,7 +358,7 @@ export class BotDashboard extends HTMLElement {
     const machineBlock = document.createElement("div");
     const machineLabel = document.createElement("p");
     machineLabel.className = "section-label";
-    machineLabel.textContent = "Machines";
+    machineLabel.textContent = "Environment machines";
     this.#machines = document.createElement("div");
     this.#machines.className = "machine-list";
     mark(this.#machines, "machine-list");
@@ -471,12 +499,24 @@ export class BotDashboard extends HTMLElement {
     this.#machines.replaceChildren();
     const view = snapshot.document;
     if (view === null || view.machines.length === 0) {
+      this.#visibleMachines.clear();
       this.#writeCurrentState(null);
       this.#lastEvent.textContent = "—";
       this.#observes.textContent = "0";
       this.#writeGraphHooks(null);
       this.#graph.graphs = [];
       return;
+    }
+    const machineNames = new Set(view.machines.map((machine) => machine.name));
+    for (const machine of view.machines) {
+      if (!this.#visibleMachines.has(machine.name)) {
+        this.#visibleMachines.set(machine.name, true);
+      }
+    }
+    for (const machineName of this.#visibleMachines.keys()) {
+      if (!machineNames.has(machineName)) {
+        this.#visibleMachines.delete(machineName);
+      }
     }
     for (const machine of view.machines) {
       const option = document.createElement("option");
@@ -485,19 +525,33 @@ export class BotDashboard extends HTMLElement {
       option.selected = machine.name === view.selectedMachine;
       this.#picker.append(option);
 
-      const item = document.createElement("button");
-      item.type = "button";
+      const item = document.createElement("div");
       item.className = "machine";
-      item.dataset["event"] = "dashboard.machine.selected";
-      item.dataset["machineName"] = machine.name;
-      item.setAttribute("aria-current", machine.name === view.selectedMachine ? "true" : "false");
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "machine-select";
+      select.dataset["event"] = "dashboard.machine.selected";
+      select.dataset["machineName"] = machine.name;
+      select.setAttribute("aria-current", machine.name === view.selectedMachine ? "true" : "false");
       const name = document.createElement("span");
       name.className = "machine-name";
       name.textContent = machine.name;
       const component = document.createElement("span");
       component.className = "machine-component";
       component.textContent = machine.componentName;
-      item.append(name, component);
+      select.append(name, component);
+      const visibilityLabel = document.createElement("label");
+      visibilityLabel.className = "machine-visibility";
+      visibilityLabel.title = `Show or hide ${machine.name} graph`;
+      const visibility = document.createElement("input");
+      visibility.type = "checkbox";
+      visibility.checked = this.#visibleMachines.get(machine.name) === true;
+      visibility.setAttribute("aria-label", `Show ${machine.name} graph`);
+      visibility.addEventListener("change", () => {
+        this.#setMachineVisibility(machine.name, visibility.checked);
+      });
+      visibilityLabel.append(visibility);
+      item.append(select, visibilityLabel);
       this.#machines.append(item);
     }
     const selected = snapshot.selectedGraph;
@@ -513,7 +567,17 @@ export class BotDashboard extends HTMLElement {
     this.#lastEvent.textContent = selected.lastEventName;
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
-    this.#graph.graphs = view.machines;
+    this.#graph.graphs = view.machines.filter((machine) => this.#visibleMachines.get(machine.name) === true);
+  }
+
+  #setMachineVisibility(machineName: string, visible: boolean): void {
+    this.#visibleMachines.set(machineName, visible);
+    const document = this.#controller?.snapshot().document;
+    if (document === null || document === undefined) {
+      this.#graph.graphs = [];
+      return;
+    }
+    this.#graph.graphs = document.machines.filter((machine) => this.#visibleMachines.get(machine.name) === true);
   }
 
   #writeCurrentState(currentState: string | null): void {
