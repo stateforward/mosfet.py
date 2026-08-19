@@ -21,7 +21,6 @@ const populatedModels = Array.from({ length: 85 }, (_, index) => {
     initial: `${name}/.initial`,
   };
 });
-const firstPopulatedModelName = "/StudioModel01";
 
 function shotPath(name: string): string {
   return path.join("test-results", "screenshots", name);
@@ -239,9 +238,15 @@ test("populated mobile rails stay contained around the map", async ({ page, requ
   await openStudio(page);
   await loadPopulatedData(request);
 
-  await expect(page.getByTestId("machine-list")).toContainText(firstPopulatedModelName);
-  const machineCount = await page.getByTestId("machine-list").locator(".machine").count();
-  expect(machineCount).toBeGreaterThanOrEqual(populatedModels.length);
+  await expect
+    .poll(async () => {
+      const machineNames = await page
+        .getByTestId("machine-list")
+        .locator(".machine")
+        .evaluateAll((machines) => machines.map((machine) => machine.getAttribute("data-machine-name")));
+      return populatedModels.every((model) => machineNames.includes(model.name));
+    })
+    .toBe(true);
 
   const layout = await dashboardLayout(page);
   expect(layout.inspector.top).toBeGreaterThanOrEqual(0);
