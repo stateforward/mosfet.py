@@ -25,6 +25,38 @@ async function openStudio(page: Page): Promise<void> {
   await expect(page.getByTestId("inspector-status")).toHaveText(/live|connecting/i);
 }
 
+type DashboardLayout = {
+  readonly inspector: { readonly top: number; readonly bottom: number };
+  readonly map: { readonly top: number; readonly bottom: number };
+  readonly canvas: { readonly top: number; readonly bottom: number };
+  readonly events: { readonly top: number; readonly bottom: number };
+};
+
+async function dashboardLayout(page: Page): Promise<DashboardLayout> {
+  return page.locator("bot-dashboard").evaluate((element) => {
+    const root = element.shadowRoot;
+    if (root === null) {
+      throw new Error("dashboard shadow root is unavailable");
+    }
+    const selectors = {
+      inspector: ".inspector",
+      map: ".map-panel",
+      canvas: ".canvas",
+      events: ".event-rail",
+    } as const;
+    const layout = {} as Record<keyof typeof selectors, { top: number; bottom: number }>;
+    for (const [name, selector] of Object.entries(selectors) as [keyof typeof selectors, string][]) {
+      const node = root.querySelector<HTMLElement>(selector);
+      if (node === null) {
+        throw new Error(`dashboard layout element is unavailable: ${selector}`);
+      }
+      const { top, bottom } = node.getBoundingClientRect();
+      layout[name] = { top, bottom };
+    }
+    return layout;
+  });
+}
+
 type VisibleGraph = {
   readonly name: string;
   readonly nodeCount: number;
@@ -55,6 +87,11 @@ test("studio chrome is visible while the collector is empty", async ({ page }) =
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByTestId("inspector")).toBeVisible();
   await expect(page.getByTestId("canvas")).toBeVisible();
+  const mobileLayout = await dashboardLayout(page);
+  expect(mobileLayout.inspector.bottom).toBeLessThanOrEqual(mobileLayout.map.top);
+  expect(mobileLayout.map.bottom).toBeLessThanOrEqual(mobileLayout.events.top);
+  expect(mobileLayout.canvas.bottom).toBeLessThanOrEqual(mobileLayout.events.top);
+  expect(mobileLayout.events.bottom).toBeLessThanOrEqual(844);
   await page.screenshot({ path: shotPath("mobile-empty.png"), fullPage: true });
 });
 

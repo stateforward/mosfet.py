@@ -14,8 +14,8 @@ const ELEMENT_NAME = "bot-dashboard";
 
 const cssText = `
 :host {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100dvh;
   min-height: 100dvh;
   background: var(--bot-bg, #0b0d12);
@@ -40,8 +40,9 @@ const cssText = `
 .studio {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  flex: 1 1 auto;
   min-height: 0;
-  height: 100%;
+  height: auto;
 }
 .inspector {
   display: grid;
@@ -55,7 +56,7 @@ const cssText = `
 .canvas {
   min-width: 0;
   min-height: 16rem;
-  height: 100%;
+  height: auto;
 }
 bot-machine-graph {
   display: block;
@@ -485,11 +486,12 @@ button.tool {
 @media (max-width: 720px) {
   .studio {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
   .canvas {
     order: 1;
-    min-height: 48vh;
+    height: auto;
+    min-height: 0;
   }
   .inspector {
     order: 2;
@@ -509,7 +511,15 @@ button.tool {
 @media (max-width: 820px) {
   .studio {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(16rem, 48vh) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  bot-machine-graph {
+    height: 100%;
+    min-height: 0;
+  }
+  .canvas {
+    height: auto;
+    min-height: 0;
   }
   .inspector {
     grid-column: 1;
@@ -537,7 +547,7 @@ button.tool {
   }
   .studio {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(16rem, 48vh) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
   .inspector {
     grid-column: 1;
