@@ -12,9 +12,16 @@ const firstBatch = JSON.parse(
 const secondBatch = JSON.parse(
   readFileSync(path.join(here, "../tests/fixtures/hsm-observe-spans-state-change.otlp.json"), "utf8"),
 ) as unknown;
-const populatedModels = JSON.parse(
-  readFileSync(path.join(here, "../.data/models.json"), "utf8"),
-) as { readonly models: readonly unknown[] };
+const populatedModels = Array.from({ length: 85 }, (_, index) => {
+  const name = `/StudioModel${String(index + 1).padStart(2, "0")}`;
+  return {
+    name,
+    states: [{ qualified_name: name, parent: "/", initial: `${name}/.initial` }],
+    transitions: [],
+    initial: `${name}/.initial`,
+  };
+});
+const firstPopulatedModelName = "/StudioModel01";
 
 function shotPath(name: string): string {
   return path.join("test-results", "screenshots", name);
@@ -29,7 +36,7 @@ async function openStudio(page: Page): Promise<void> {
 }
 
 async function loadPopulatedData(request: APIRequestContext): Promise<void> {
-  for (const model of populatedModels.models) {
+  for (const model of populatedModels) {
     const response = await request.post("/v1/models", { data: model });
     expect(response.ok()).toBeTruthy();
   }
@@ -232,9 +239,9 @@ test("populated mobile rails stay contained around the map", async ({ page, requ
   await openStudio(page);
   await loadPopulatedData(request);
 
-  await expect(page.getByTestId("machine-list")).toContainText("/Ability");
+  await expect(page.getByTestId("machine-list")).toContainText(firstPopulatedModelName);
   const machineCount = await page.getByTestId("machine-list").locator(".machine").count();
-  expect(machineCount).toBeGreaterThanOrEqual(populatedModels.models.length);
+  expect(machineCount).toBeGreaterThanOrEqual(populatedModels.length);
 
   const layout = await dashboardLayout(page);
   expect(layout.inspector.top).toBeGreaterThanOrEqual(0);
