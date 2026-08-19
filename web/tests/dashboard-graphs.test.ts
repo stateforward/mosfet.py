@@ -72,6 +72,22 @@ describe("dashboard render graph admission", () => {
     assert.deepEqual(graphsForVisibility([missingOwner], new Map([["/Service", true]])), []);
   });
 
+  test("excludes visible children whose owner has no root", () => {
+    const owner = { ...machine("/Environment"), nodes: [] };
+    const child = machine("/Child", "/Environment");
+
+    assert.deepEqual(
+      graphsForVisibility(
+        [owner, child],
+        new Map([
+          ["/Environment", false],
+          ["/Child", true],
+        ]),
+      ),
+      [],
+    );
+  });
+
   test("excludes visible models in ownership cycles", () => {
     const first = machine("/First", "/Second");
     const second = machine("/Second", "/First");

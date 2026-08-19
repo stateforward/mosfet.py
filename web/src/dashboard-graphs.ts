@@ -17,6 +17,10 @@ function ownerShell(graph: MachineGraph): MachineGraph {
   };
 }
 
+function hasRoot(graph: MachineGraph): boolean {
+  return graph.nodes.some((node) => node.path === graph.name && node.parent === null);
+}
+
 export function graphsForVisibility(
   machines: readonly MachineGraph[],
   visibleMachines: ReadonlyMap<string, boolean>,
@@ -38,7 +42,7 @@ export function graphsForVisibility(
       }
       visitedOwners.add(ownerName);
       const owner = byName.get(ownerName);
-      if (owner === undefined) {
+      if (owner === undefined || !hasRoot(owner)) {
         validOwnerChain = false;
         break;
       }
