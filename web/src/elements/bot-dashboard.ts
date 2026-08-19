@@ -3,7 +3,11 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
-import { graphsForVisibility } from "../dashboard-graphs.ts";
+import {
+  environmentRootGraphs,
+  graphsForVisibility,
+  machineNamesInOwnedSubtree,
+} from "../dashboard-graphs.ts";
 import { type MachineGraph } from "../otel/machines.ts";
 import { isOtelSource } from "../otel/source.ts";
 import { BotMachineGraph } from "./bot-machine-graph.ts";
@@ -932,6 +936,7 @@ export class BotDashboard extends HTMLElement {
       return;
     }
     const machineNames = new Set(view.machines.map((machine) => machine.name));
+    const memberMachines = environmentRootGraphs(view.machines);
     for (const machine of view.machines) {
       if (!this.#visibleMachines.has(machine.name)) {
         this.#visibleMachines.set(machine.name, true);
@@ -942,12 +947,22 @@ export class BotDashboard extends HTMLElement {
         this.#visibleMachines.delete(machineName);
       }
     }
+    for (const root of memberMachines) {
+      if (this.#visibleMachines.get(root.name) === true) {
+        continue;
+      }
+      for (const machineName of machineNamesInOwnedSubtree(view.machines, root.name)) {
+        this.#visibleMachines.set(machineName, false);
+      }
+    }
     for (const machine of view.machines) {
       const option = document.createElement("option");
       option.value = machine.name;
       option.textContent = machine.name;
       option.selected = machine.name === view.selectedMachine;
       this.#picker.append(option);
+    }
+    for (const machine of memberMachines) {
 
       const item = document.createElement("div");
       item.className = "machine";
@@ -989,7 +1004,7 @@ export class BotDashboard extends HTMLElement {
       item.append(select, visibilityLabel);
       this.#machines.append(item);
     }
-    this.#memberCount.textContent = `${String(view.machines.length)} loaded`;
+    this.#memberCount.textContent = `${String(memberMachines.length)} loaded`;
     this.#writeVisibilityStats(view);
     this.#writeEvents(view, view.selectedMachine);
     const selected = snapshot.selectedGraph;
@@ -1073,17 +1088,27 @@ export class BotDashboard extends HTMLElement {
       const visible = action === "show-all" || (action === "hide-unobserved" && machine.observationCount > 0);
       this.#visibleMachines.set(machine.name, visible);
     }
+    for (const root of environmentRootGraphs(view.machines)) {
+      if (this.#visibleMachines.get(root.name) === true) {
+        continue;
+      }
+      for (const machineName of machineNamesInOwnedSubtree(view.machines, root.name)) {
+        this.#visibleMachines.set(machineName, false);
+      }
+    }
     this.#syncMachineControls();
     this.#writeVisibilityStats(view);
     this.#graph.graphs = graphsForVisibility(view.machines, this.#visibleMachines);
   }
 
   #setMachineVisibility(machineName: string, visible: boolean): void {
-    this.#visibleMachines.set(machineName, visible);
     const document = this.#controller?.snapshot().document;
     if (document === null || document === undefined) {
       this.#graph.graphs = [];
       return;
+    }
+    for (const name of machineNamesInOwnedSubtree(document.machines, machineName)) {
+      this.#visibleMachines.set(name, visible);
     }
     this.#syncMachineControls();
     this.#writeVisibilityStats(document);

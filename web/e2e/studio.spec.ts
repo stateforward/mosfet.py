@@ -22,6 +22,16 @@ const populatedModels = Array.from({ length: 85 }, (_, index) => {
   };
 });
 
+function publishedModel(name: string, owner?: string | null): Record<string, unknown> {
+  return {
+    name,
+    ...(owner === undefined ? {} : { owner }),
+    states: [{ qualified_name: name, parent: "/", initial: `${name}/.initial` }],
+    transitions: [],
+    initial: `${name}/.initial`,
+  };
+}
+
 function shotPath(name: string): string {
   return path.join("test-results", "screenshots", name);
 }
@@ -217,6 +227,71 @@ test("environment graph visibility is independent from machine selection", async
   expect(phoneOnlyGraphs.map((graph) => graph.name)).toEqual(["/Phone"]);
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", totalNodeCount(phoneOnlyGraphs));
   await page.screenshot({ path: shotPath("environment-graph-visibility.png"), fullPage: true });
+});
+
+test("Members shows direct roots while owned models stay nested and focusable", async ({ page, request }) => {
+  await openStudio(page);
+  const rootName = "/OwnedRoot";
+  const childName = "/OwnedChild";
+  for (const model of [publishedModel(rootName), publishedModel(childName, rootName)]) {
+    const response = await request.post("/v1/models", { data: model });
+    expect(response.ok()).toBeTruthy();
+  }
+
+  await expect(page.getByTestId("machine-list").locator(`.machine[data-machine-name="${rootName}"]`)).toHaveCount(1);
+  await expect(page.getByTestId("machine-list").locator(`.machine[data-machine-name="${childName}"]`)).toHaveCount(0);
+  await expect(page.getByLabel("Observed machine").locator(`option[value="${childName}"]`)).toHaveCount(1);
+  await expect(page.getByTestId("event-list")).toContainText(childName);
+
+  await expect.poll(async () => {
+    const graphs = await visibleGraphs(page);
+    return graphs
+      .filter((graph) => graph.name === rootName || graph.name === childName)
+      .map((graph) => graph.name)
+      .sort();
+  }).toEqual([childName, rootName].sort());
+  const nestedGraph = await page.getByTestId("canvas").evaluate((element, names) => {
+    const graphElement = element as HTMLElement & {
+      readonly graphs: readonly { readonly name: string; readonly owner?: string | null }[];
+    };
+    return graphElement.graphs
+      .filter((graph) => names.includes(graph.name))
+      .map((graph) => ({ name: graph.name, owner: graph.owner ?? null }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [rootName, childName]);
+  expect(nestedGraph).toEqual([
+    { name: childName, owner: rootName },
+    { name: rootName, owner: null },
+  ]);
+
+  const rootVisibility = page.getByRole("checkbox", { name: `Show ${rootName} graph` });
+  await rootVisibility.click();
+  await expect(rootVisibility).not.toBeChecked();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).some((graph) => graph.name === rootName || graph.name === childName),
+  ).toBe(false);
+  await rootVisibility.click();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).filter((graph) => graph.name === rootName || graph.name === childName).length,
+  ).toBe(2);
+
+  await page.getByTestId("hide-all").click();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).some((graph) => graph.name === rootName || graph.name === childName),
+  ).toBe(false);
+  await page.getByTestId("show-all").click();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).filter((graph) => graph.name === rootName || graph.name === childName).length,
+  ).toBe(2);
+
+  await page.getByTestId("hide-unobserved").click();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).some((graph) => graph.name === rootName || graph.name === childName),
+  ).toBe(false);
+  await page.getByTestId("show-all").click();
+  await expect.poll(async () =>
+    (await visibleGraphs(page)).filter((graph) => graph.name === rootName || graph.name === childName).length,
+  ).toBe(2);
 });
 
 test("command gateway reports no subscriber when no bot is attached", async ({ page, request }) => {

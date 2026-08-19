@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { graphsForVisibility } from "../src/dashboard-graphs.ts";
+import {
+  environmentRootGraphs,
+  graphsForVisibility,
+  machineNamesInOwnedSubtree,
+} from "../src/dashboard-graphs.ts";
 import { type MachineGraph } from "../src/otel/machines.ts";
 
 function machine(name: string, owner?: string | null): MachineGraph {
@@ -21,6 +25,28 @@ function machine(name: string, owner?: string | null): MachineGraph {
 }
 
 describe("dashboard render graph admission", () => {
+  test("lists only valid direct environment roots and keeps owned descendants in the subtree", () => {
+    const environment = machine("/Environment");
+    const explicitRoot = machine("/ExplicitRoot", null);
+    const child = machine("/Child", "/Environment");
+    const grandchild = machine("/Grandchild", "/Child");
+    const malformedRoot = { ...machine("/MalformedRoot"), nodes: [] };
+    const malformedChild = { ...machine("/MalformedChild", "/Environment"), nodes: [] };
+
+    assert.deepEqual(
+      environmentRootGraphs([environment, explicitRoot, child, grandchild, malformedRoot, malformedChild])
+        .map((graph) => graph.name),
+      ["/Environment", "/ExplicitRoot"],
+    );
+    assert.deepEqual(
+      [...machineNamesInOwnedSubtree(
+        [environment, explicitRoot, child, grandchild, malformedRoot, malformedChild],
+        "/Environment",
+      )],
+      ["/Environment", "/Child", "/Grandchild"],
+    );
+  });
+
   test("keeps visible descendants nested under root-only hidden owner shells", () => {
     const environment = machine("/Environment");
     const service = machine("/Service", "/Environment");
