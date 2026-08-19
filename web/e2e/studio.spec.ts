@@ -115,6 +115,17 @@ test("environment graph visibility is independent from machine selection", async
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", totalNodeCount(botOnlyGraphs));
   await expect(page.getByTestId("current-path")).toContainText("/Phone");
 
+  await exportTraces(secondBatch);
+  await expect(phoneVisibility).not.toBeChecked();
+  await expect(botVisibility).toBeChecked();
+  const botOnlyGraphsAfterUpdate = await visibleGraphs(page);
+  expect(botOnlyGraphsAfterUpdate.map((graph) => graph.name)).toEqual(["/PhoneBot"]);
+  await expect(page.getByTestId("canvas")).toHaveAttribute(
+    "data-node-count",
+    totalNodeCount(botOnlyGraphsAfterUpdate),
+  );
+  await expect(page.getByTestId("current-path")).toContainText("/Phone/ringing");
+
   await page.getByLabel("Observed machine").selectOption("/PhoneBot");
   await expect(page.getByTestId("current-path")).toContainText("/PhoneBot/active/processing");
 
