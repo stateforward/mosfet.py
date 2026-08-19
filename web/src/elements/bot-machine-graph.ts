@@ -140,15 +140,11 @@ class CytoscapeRenderer implements GraphRenderer {
     private readonly onZoom: (zoom: number) => void,
     private readonly onEdge: (eventName: string) => void,
   ) {
-    if (typeof ResizeObserver !== "undefined") {
-      this.#resizeObserver = new ResizeObserver(() => {
-        this.#resizeForContainer();
-      });
-      this.#resizeObserver.observe(container);
-    }
+    this.#ensureResizeObserver();
   }
 
   draw(graphs: readonly MachineGraph[]): void {
+    this.#ensureResizeObserver();
     const nextStructure = structureKey(graphs);
     if (this.#cy !== null && this.#structure === nextStructure) {
       this.#paint(graphs);
@@ -549,6 +545,16 @@ class CytoscapeRenderer implements GraphRenderer {
     cy.zoom(zoom);
     cy.pan(pan);
     this.onZoom(cy.zoom());
+  }
+
+  #ensureResizeObserver(): void {
+    if (this.#resizeObserver !== null || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    this.#resizeObserver = new ResizeObserver(() => {
+      this.#resizeForContainer();
+    });
+    this.#resizeObserver.observe(this.container);
   }
 
   zoom(): number {

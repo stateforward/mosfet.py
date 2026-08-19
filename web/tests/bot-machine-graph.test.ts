@@ -233,6 +233,30 @@ describe("machine graph now theme and UML initial", () => {
     assert.deepEqual(targets, ["/Machine"]);
   });
 
+  test("an invalid transition endpoint does not invent an initial circle", () => {
+    const graph = {
+      name: "/Machine",
+      componentName: "Machine",
+      currentState: "",
+      lastEventName: "go",
+      observationCount: 1,
+      nodes: [
+        { path: "/Machine", parent: null, label: "Machine" },
+        { path: "/Machine/idle", parent: "/Machine", label: "idle" },
+      ],
+      edges: [
+        {
+          source: "/Machine/idle",
+          target: "",
+          eventName: "go",
+          count: 1,
+          lastFired: true,
+        },
+      ],
+    };
+    assert.deepEqual(initialTargets(graph), []);
+  });
+
   test("published topology still draws a UML initial onto idle before any visit", () => {
     const graph = graphFromPublishedModel({
       name: "/Demo",

@@ -85,6 +85,9 @@ describe("companion-style HSM controllers", () => {
     const malformedPayload = await graph.dispatch("graph.set", { graphs: "invalid" });
     assert.equal(malformedPayload.phase, "empty");
     assert.equal(malformedPayload.graphs.length, 0);
+    const redraw = await graph.dispatch("graph.set", { graphs: [valid] });
+    assert.equal(redraw.phase, "drawing");
+    assert.equal(draws, 2);
     await graph.stop();
   });
 

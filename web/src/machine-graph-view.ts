@@ -121,7 +121,13 @@ function isVisitedState(path: string, graph: MachineGraph): boolean {
   if (path === graph.currentState) {
     return true;
   }
-  return graph.edges.some((edge) => edge.source === path || edge.target === path);
+  const known = new Set(graph.nodes.map((node) => node.path));
+  return graph.edges.some(
+    (edge) =>
+      known.has(edge.source) &&
+      known.has(edge.target) &&
+      (edge.source === path || edge.target === path),
+  );
 }
 
 export function initialNodeId(target: string): string {
