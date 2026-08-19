@@ -36,11 +36,7 @@ function controllerOf(instance: hsm.Instance): MachineGraphController | null {
   return instance instanceof MachineGraphRuntime ? instance.controller : null;
 }
 
-function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
-  if (!isRecord(event.data)) {
-    return null;
-  }
-  const value = event.data["graphs"];
+function parseGraphs(value: unknown): MachineGraph[] | null {
   if (!Array.isArray(value)) {
     return null;
   }
@@ -53,6 +49,10 @@ function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
     graphs.push(graph);
   }
   return graphs;
+}
+
+function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
+  return isRecord(event.data) ? parseGraphs(event.data["graphs"]) : null;
 }
 
 function rememberGraph(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -81,6 +81,7 @@ const machineGraphModel = hsm.define(
   hsm.state(
     "empty",
     hsm.entry(destroyGraph),
+    hsm.transition(hsm.on("graph.clear"), hsm.target("."), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("graph.set"), hsm.target("../drawing"), hsm.effect(rememberGraph)),
   ),
   hsm.state(
@@ -127,6 +128,14 @@ export class MachineGraphController {
   }
 
   async dispatch(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot> {
+    if (eventName === "graph.set") {
+      const graphs = isRecord(data) ? parseGraphs(data["graphs"]) : null;
+      if (graphs === null || graphs.length === 0) {
+        await this.#machine.dispatch(namedEvent(graphEvents["graph.clear"].name));
+        this.#emit();
+        return this.snapshot();
+      }
+    }
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
     this.#emit();
     return this.snapshot();

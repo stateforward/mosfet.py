@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { DashboardController } from "../src/dashboard-hsm.ts";
 import { MachineGraphController } from "../src/machine-graph-hsm.ts";
+import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
@@ -30,6 +31,63 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("companion-style HSM controllers", () => {
+  test("graph structure identity includes node parent and label metadata", () => {
+    const node = { path: "/Demo", parent: null, label: "Demo" };
+    const graph = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [node],
+      edges: [],
+    };
+    const parentChanged = { ...graph, nodes: [{ path: node.path, parent: "/Root", label: node.label }] };
+    const labelChanged = { ...graph, nodes: [{ path: node.path, parent: node.parent, label: "Renamed" }] };
+    assert.notEqual(structureKey([graph]), structureKey([parentChanged]));
+    assert.notEqual(structureKey([graph]), structureKey([labelChanged]));
+  });
+
+  test("malformed and empty graph sets remain empty and clear a drawing", async () => {
+    let draws = 0;
+    let destroys = 0;
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: () => {
+          draws += 1;
+        },
+        destroy: () => {
+          destroys += 1;
+        },
+      },
+    });
+    const valid = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
+      edges: [],
+    };
+
+    const empty = await graph.dispatch("graph.set", { graphs: [] });
+    assert.equal(empty.phase, "empty");
+    assert.equal(empty.graphs.length, 0);
+    assert.equal(draws, 0);
+    const drawing = await graph.dispatch("graph.set", { graphs: [valid] });
+    assert.equal(drawing.phase, "drawing");
+    assert.equal(draws, 1);
+    const malformed = await graph.dispatch("graph.set", { graphs: [{}] });
+    assert.equal(malformed.phase, "empty");
+    assert.equal(malformed.graphs.length, 0);
+    assert.ok(destroys >= 1);
+    const malformedPayload = await graph.dispatch("graph.set", { graphs: "invalid" });
+    assert.equal(malformedPayload.phase, "empty");
+    assert.equal(malformedPayload.graphs.length, 0);
+    await graph.stop();
+  });
+
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
     const dashboard = new DashboardController();
     const source = new OtelSourceController();

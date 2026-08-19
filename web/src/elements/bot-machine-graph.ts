@@ -15,6 +15,7 @@ import {
   initialTargets,
   nodeClasses,
   nodeLabel,
+  structureKey,
   type Point,
   type Size,
 } from "../machine-graph-view.ts";
@@ -132,16 +133,6 @@ function machineKey(graph: MachineGraph, index: number): string {
 
 function namespacedPath(key: string, path: string): string {
   return `${key}:${encodeURIComponent(path)}`;
-}
-
-function structureKey(graphs: readonly MachineGraph[]): string {
-  return graphs
-    .map((graph, index) => {
-      const nodes = graph.nodes.map((node) => node.path).sort();
-      const edges = graph.edges.map((edge) => `${edge.source}->${edge.target}:${edge.eventName}`).sort();
-      return `${machineKey(graph, index)}|${nodes.join(",")}|${edges.join(",")}`;
-    })
-    .join(";");
 }
 
 function ancestorSet(path: string): Set<string> {
