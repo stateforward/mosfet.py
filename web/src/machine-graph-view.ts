@@ -1,4 +1,4 @@
-import { type MachineGraph, type MachineStateNode } from "./otel/machines.ts";
+import { type MachineEdge, type MachineGraph, type MachineStateNode } from "./otel/machines.ts";
 
 export const NOW_FILL = "#14b8a6";
 export const NOW_INK = "#042f2e";
@@ -18,6 +18,24 @@ export function machineKey(graph: MachineGraph, index: number): string {
 
 export function namespacedPath(key: string, path: string): string {
   return `${key}:${encodeURIComponent(path)}`;
+}
+
+export type GraphEdgeIdentityInput = Pick<MachineEdge, "source" | "target" | "eventName">;
+
+export function graphEdgeSignature(edge: GraphEdgeIdentityInput): string {
+  return `${edge.source}->${edge.target}:${edge.eventName}`;
+}
+
+export function graphEdgeIdentity(machine: string, edge: GraphEdgeIdentityInput, occurrence: number): string {
+  return `${machine}:${graphEdgeSignature(edge)}:${String(occurrence)}`;
+}
+
+export function loopAnchorIdentity(machine: string, edge: GraphEdgeIdentityInput, occurrence: number): string {
+  return `${machine}:loop:${graphEdgeSignature(edge)}:${String(occurrence)}`;
+}
+
+export function isRenderableGraphEdge(edge: GraphEdgeIdentityInput, knownPaths: ReadonlySet<string>): boolean {
+  return knownPaths.has(edge.source) && knownPaths.has(edge.target);
 }
 
 export function structureKey(graphs: readonly MachineGraph[]): string {

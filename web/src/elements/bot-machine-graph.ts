@@ -16,13 +16,17 @@ import {
   INITIAL_SIZE,
   compoundTitleStyle,
   graphNodeStyle,
+  graphEdgeIdentity,
+  graphEdgeSignature,
   initialNodeId,
   initialPosition,
   initialTargets,
+  isRenderableGraphEdge,
   machineKey,
   namespacedPath,
   nodeClasses,
   nodeLabel,
+  loopAnchorIdentity,
   structureKey,
   type Point,
 } from "../machine-graph-view.ts";
@@ -77,15 +81,14 @@ function shareAxis(left: Point, right: Point): boolean {
   return Math.abs(left.x - right.x) <= AXIS_EPS || Math.abs(left.y - right.y) <= AXIS_EPS;
 }
 
-function graphEdgeKey(edge: { source: string; target: string; eventName: string }): string {
-  return `${edge.source}->${edge.target}:${edge.eventName}`;
-}
-
-function loopAnchorId(
-  machine: string,
+function edgeOccurrenceIndex(
+  occurrences: Map<string, number>,
   edge: { source: string; target: string; eventName: string },
-): string {
-  return `${machine}:loop:${graphEdgeKey(edge)}`;
+): number {
+  const signature = graphEdgeSignature(edge);
+  const occurrence = occurrences.get(signature) ?? 0;
+  occurrences.set(signature, occurrence + 1);
+  return occurrence;
 }
 
 function isDescendantPath(descendant: string, ancestor: string): boolean {
@@ -129,17 +132,27 @@ function edgeClasses(kind: EdgeKind, lastFired: boolean, extra: readonly string[
 class CytoscapeRenderer implements GraphRenderer {
   #cy: cytoscape.Core | null = null;
   #structure: string | null = null;
+  #resizeObserver: ResizeObserver | null = null;
+  #hasRealDimensions = false;
 
   constructor(
     private readonly container: HTMLElement,
     private readonly onZoom: (zoom: number) => void,
     private readonly onEdge: (eventName: string) => void,
-  ) {}
+  ) {
+    if (typeof ResizeObserver !== "undefined") {
+      this.#resizeObserver = new ResizeObserver(() => {
+        this.#resizeForContainer();
+      });
+      this.#resizeObserver.observe(container);
+    }
+  }
 
   draw(graphs: readonly MachineGraph[]): void {
     const nextStructure = structureKey(graphs);
     if (this.#cy !== null && this.#structure === nextStructure) {
       this.#paint(graphs);
+      this.#resizeForContainer();
       return;
     }
     this.#structure = nextStructure;
@@ -150,6 +163,8 @@ class CytoscapeRenderer implements GraphRenderer {
       const machine = machineKey(graph, index);
       const active = ancestorSet(graph.currentState);
       const localPositions = new Map<string, Point>();
+      const knownPaths = new Set(graph.nodes.map((node) => node.path));
+      const edgeOccurrences = new Map<string, number>();
       for (const node of graph.nodes) {
         const id = namespacedPath(machine, node.path);
         const data: Record<string, string> = {
@@ -212,13 +227,17 @@ class CytoscapeRenderer implements GraphRenderer {
         if (edge.eventName === INITIAL_EVENT) {
           continue;
         }
+        if (!isRenderableGraphEdge(edge, knownPaths)) {
+          continue;
+        }
+        const occurrence = edgeOccurrenceIndex(edgeOccurrences, edge);
         const sourceId = namespacedPath(machine, edge.source);
         const targetId = namespacedPath(machine, edge.target);
         const kind = classifyEdge(edge.source, edge.target, localPositions);
-        const key = `${machine}:${graphEdgeKey(edge)}`;
+        const key = graphEdgeIdentity(machine, edge, occurrence);
         if (kind === "loop") {
           const anchor = waypointPosition(edge.source, edge.target, localPositions);
-          const anchorId = loopAnchorId(machine, edge);
+          const anchorId = loopAnchorIdentity(machine, edge, occurrence);
           elements.push({
             group: "nodes",
             data: { id: anchorId, machine, label: "" },
@@ -480,7 +499,18 @@ class CytoscapeRenderer implements GraphRenderer {
         return;
       }
       const key = edge.data("edgeKey");
-      const last = graph.edges.some((item) => item.lastFired && `${machine}:${graphEdgeKey(item)}` === key);
+      const edgeOccurrences = new Map<string, number>();
+      const lastFired = new Set<string>();
+      for (const item of graph.edges) {
+        if (item.eventName === INITIAL_EVENT) {
+          continue;
+        }
+        const occurrence = edgeOccurrenceIndex(edgeOccurrences, item);
+        if (item.lastFired) {
+          lastFired.add(graphEdgeIdentity(machine, item, occurrence));
+        }
+      }
+      const last = typeof key === "string" && lastFired.has(key);
       edge.toggleClass("last-fired", last);
     });
   }
@@ -503,14 +533,35 @@ class CytoscapeRenderer implements GraphRenderer {
     this.onZoom(cy.zoom());
   }
 
+  #resizeForContainer(): void {
+    const cy = this.#cy;
+    if (cy === null || this.container.clientWidth <= 0 || this.container.clientHeight <= 0) {
+      return;
+    }
+    if (!this.#hasRealDimensions) {
+      this.#hasRealDimensions = true;
+      this.#fitCapped();
+      return;
+    }
+    const zoom = cy.zoom();
+    const pan = cy.pan();
+    cy.resize();
+    cy.zoom(zoom);
+    cy.pan(pan);
+    this.onZoom(cy.zoom());
+  }
+
   zoom(): number {
     return this.#cy?.zoom() ?? 1;
   }
 
   destroy(): void {
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
     this.#cy?.destroy();
     this.#cy = null;
     this.#structure = null;
+    this.#hasRealDimensions = false;
   }
 }
 

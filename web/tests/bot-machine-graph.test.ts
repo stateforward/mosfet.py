@@ -19,6 +19,9 @@ import {
   nodeClasses,
   nodeLabel,
   graphNodeStyle,
+  graphEdgeIdentity,
+  isRenderableGraphEdge,
+  loopAnchorIdentity,
   machineKey,
   namespacedPath,
   structureKey,
@@ -61,6 +64,30 @@ describe("machine graph now theme and UML initial", () => {
     assert.equal(ownershipLayout(graphs).childrenByIndex.get(0)?.[0], 1);
     assert.equal(ownerId, "machine:0:%2FPhone:%2FPhone");
     assert.notEqual(structureKey(graphs), structureKey([owner, model("/PhoneService")]));
+  });
+
+  test("duplicate transition occurrences receive distinct edge and loop identities", () => {
+    const edge = { source: "/Machine/a", target: "/Machine/b", eventName: "go" };
+    assert.notEqual(graphEdgeIdentity("machine:0", edge, 0), graphEdgeIdentity("machine:0", edge, 1));
+    assert.notEqual(loopAnchorIdentity("machine:0", edge, 0), loopAnchorIdentity("machine:0", edge, 1));
+  });
+
+  test("invalid transition targets are excluded from rendered edge paths", () => {
+    const knownPaths = new Set(["/Ability", "/Ability/ready"]);
+    assert.equal(
+      isRenderableGraphEdge(
+        { source: "/Ability/ready", target: "", eventName: "invalid" },
+        knownPaths,
+      ),
+      false,
+    );
+    assert.equal(
+      isRenderableGraphEdge(
+        { source: "/Ability/ready", target: "/Ability", eventName: "valid" },
+        knownPaths,
+      ),
+      true,
+    );
   });
 
   test("owned layout keeps the child graph inside the owner's combined box", () => {
