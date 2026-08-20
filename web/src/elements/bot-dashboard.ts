@@ -31,6 +31,7 @@ const cssText = `
   flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem 0.75rem;
+  min-width: 0;
   min-height: 2.5rem;
   padding: 0.35rem 0.7rem;
   border-bottom: 1px solid var(--bot-line, #2a3140);
@@ -127,10 +128,16 @@ bot-machine-graph {
 }
 .machine-name {
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .machine-component {
   color: var(--bot-muted, #8b93a7);
   font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .path,
 .last-event,
@@ -299,7 +306,8 @@ button.tool {
   font-size: 0.7rem;
 }
 .studio {
-  grid-template-columns: 250px minmax(0, 1fr) 290px;
+  grid-template-columns: minmax(11rem, 13.5rem) minmax(0, 1fr) minmax(12rem, 15rem);
+  min-width: 0;
 }
 .inspector {
   display: flex;
@@ -416,6 +424,7 @@ button.tool {
 }
 .map-heading {
   min-height: 2.65rem;
+  min-width: 0;
   padding: 0.55rem 0.75rem;
   border-bottom: 1px solid var(--bot-line, #2a3140);
   background: #10131a;
@@ -426,6 +435,15 @@ button.tool {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 0.45rem 0.7rem;
+}
+.map-heading-left {
+  min-width: 0;
+}
+.map-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .map-stats {
   justify-content: flex-end;
@@ -474,6 +492,9 @@ button.tool {
   color: var(--bot-ink, #e8eaef);
   font-size: 0.72rem;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .event-name {
   color: var(--bot-accent, #5eead4);
@@ -509,7 +530,7 @@ button.tool {
 }
 @media (max-width: 1080px) {
   .studio {
-    grid-template-columns: 230px minmax(0, 1fr) 245px;
+    grid-template-columns: minmax(10rem, 12rem) minmax(0, 1fr) minmax(11rem, 13rem);
   }
   .subtitle {
     display: none;
