@@ -126,6 +126,33 @@ describe("companion-style HSM controllers", () => {
     await graph.stop();
   });
 
+  test("stopping a graph controller gates queued admission before the HSM stops", async () => {
+    let draws = 0;
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: () => {
+          draws += 1;
+          return true;
+        },
+        destroy: () => undefined,
+      },
+    });
+    const valid = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
+      edges: [],
+    };
+
+    const admission = graph.dispatch("graph.set", { graphs: [valid] });
+    await graph.stop();
+    await assert.rejects(admission, /MachineGraphController is stopped/);
+    assert.equal(draws, 0);
+  });
+
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
     const dashboard = new DashboardController();
     const source = new OtelSourceController();

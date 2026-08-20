@@ -162,6 +162,24 @@ export class NativeGraphRenderer implements GraphRenderer {
     this.#focusedMachine = undefined;
   }
 
+  dispose(): void {
+    this.destroy();
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
+    this.#viewport.removeEventListener("pointerdown", this.#onPointerDown);
+    this.#viewport.removeEventListener("pointermove", this.#onPointerMove);
+    this.#viewport.removeEventListener("pointerup", this.#onPointerUp);
+    this.#viewport.removeEventListener("pointercancel", this.#onPointerUp);
+    this.#viewport.removeEventListener("wheel", this.#onWheel);
+    this.#edgeLayer.removeEventListener("click", this.#onEdgeClick);
+    this.#pointers.clear();
+    this.#dragStart = null;
+    this.#pinchStart = null;
+    this.#interactionDispatch = null;
+    this.#onZoom = () => undefined;
+    this.#onEdge = () => undefined;
+  }
+
   #renderStructure(graphs: readonly MachineGraph[]): void {
     this.#nodes.clear();
     this.#edges = [];

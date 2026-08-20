@@ -144,6 +144,9 @@ export class MachineGraphController {
   #renderer: GraphRenderer | null;
   #onSnapshot: ((snapshot: MachineGraphSnapshot) => void) | null;
   #initialViewPending = false;
+  #dispatchTail: Promise<void> = Promise.resolve();
+  #stopping = false;
+  #stopPromise: Promise<void> | null = null;
 
   constructor(options: MachineGraphControllerOptions = {}) {
     this.#renderer = options.renderer ?? null;
@@ -162,6 +165,18 @@ export class MachineGraphController {
   }
 
   async dispatch(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot> {
+    if (this.#stopping) {
+      throw new Error("MachineGraphController is stopped");
+    }
+    const dispatch = this.#dispatchTail.then(() => this.#dispatchNow(eventName, data));
+    this.#dispatchTail = dispatch.then(() => undefined, () => undefined);
+    return dispatch;
+  }
+
+  async #dispatchNow(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot> {
+    if (this.#stopping) {
+      throw new Error("MachineGraphController is stopped");
+    }
     if (eventName === "graph.set") {
       const graphs = isRecord(data) ? parseGraphs(data["graphs"]) : null;
       if (graphs === null || graphs.length === 0) {
@@ -174,8 +189,9 @@ export class MachineGraphController {
     this.#emit();
     if (this.#initialViewPending) {
       this.#initialViewPending = false;
+      const renderer = this.#renderer;
       queueMicrotask(() => {
-        if (this.#renderer !== null) {
+        if (!this.#stopping && this.#renderer === renderer && renderer !== null) {
           void this.dispatch("viewport.fit");
         }
       });
@@ -187,7 +203,16 @@ export class MachineGraphController {
     this.#renderer?.applyViewport?.(data);
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.#stopPromise !== null) return this.#stopPromise;
+    this.#stopping = true;
+    this.#initialViewPending = false;
+    this.#stopPromise = this.#finishStop();
+    return this.#stopPromise;
+  }
+
+  async #finishStop(): Promise<void> {
+    await this.#dispatchTail;
     this.destroyRenderer();
     this.#runtime.controller = null;
     await stopMachine(this.#machine);

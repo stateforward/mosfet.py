@@ -5,6 +5,11 @@ import { NativeGraphRenderer } from "./renderer.ts";
 import { graphStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "bot-machine-graph";
+const STOPPED_CONTROLLER_ERROR = "MachineGraphController is stopped";
+
+function isExpectedControllerStop(error: unknown): boolean {
+  return error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR;
+}
 
 export type GraphZoomDetail = { zoom: number };
 export type GraphEdgeDetail = { eventName: string };
@@ -16,6 +21,7 @@ export class BotMachineGraph extends HTMLElement {
   #renderer: NativeGraphRenderer | null = null;
   #pending: readonly MachineGraph[] | undefined;
   #pendingFocus: string | undefined;
+  #connectionGeneration = 0;
 
   constructor() {
     super();
@@ -35,7 +41,7 @@ export class BotMachineGraph extends HTMLElement {
   set graphs(value: readonly MachineGraph[]) {
     this.#pending = value;
     this.setAttribute("data-node-count", String(value.reduce((count, graph) => count + graph.nodes.length, 0)));
-    void this.#admit(value);
+    void this.#admit(value, this.#connectionGeneration);
   }
 
   fit(): void {
@@ -49,6 +55,7 @@ export class BotMachineGraph extends HTMLElement {
   }
 
   connectedCallback(): void {
+    const generation = ++this.#connectionGeneration;
     if (this.#renderer === null) {
       this.#renderer = new NativeGraphRenderer(
         this.#frame,
@@ -68,25 +75,35 @@ export class BotMachineGraph extends HTMLElement {
       this.#controller = new MachineGraphController({ renderer: this.#renderer });
       this.#renderer.setInteractionDispatcher((eventName, data) => void this.#controller?.dispatch(eventName, data));
     }
-    if (this.#pending !== undefined) void this.#admit(this.#pending);
+    if (this.#pending !== undefined) void this.#admit(this.#pending, generation);
   }
 
   disconnectedCallback(): void {
     const controller = this.#controller;
+    const renderer = this.#renderer;
+    this.#connectionGeneration += 1;
     this.#controller = null;
     this.#renderer = null;
+    renderer?.dispose();
     if (controller !== null) void controller.stop();
     this.#frame.replaceChildren();
   }
 
-  async #admit(value: readonly MachineGraph[]): Promise<void> {
+  async #admit(value: readonly MachineGraph[], generation: number): Promise<void> {
     const controller = this.#controller;
-    if (controller === null) return;
-    if (value.length === 0) {
-      await controller.dispatch("graph.clear");
-      return;
+    const isCurrent = (): boolean => generation === this.#connectionGeneration && controller === this.#controller;
+    if (controller === null || !isCurrent()) return;
+    try {
+      if (value.length === 0) {
+        await controller.dispatch("graph.clear");
+      } else {
+        await controller.dispatch("graph.set", { graphs: value });
+      }
+    } catch (error) {
+      if (!isCurrent() && isExpectedControllerStop(error)) return;
+      throw error;
     }
-    await controller.dispatch("graph.set", { graphs: value });
+    if (!isCurrent()) return;
     if (this.#pendingFocus !== undefined && this.#renderer?.focusMachine(this.#pendingFocus)) {
       this.#pendingFocus = undefined;
     }
