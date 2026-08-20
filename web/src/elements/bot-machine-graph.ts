@@ -211,13 +211,13 @@ class NativeGraphRenderer implements GraphRenderer {
     if (this.#structure === nextStructure && this.#nodes.size > 0) { this.#paint(renderable); return false; }
     this.#structure = nextStructure; this.#renderStructure(renderable); return true;
   }
-  focusMachine(machineName: string): boolean { this.#focusedMachine = machineName; return this.#focusMachine(machineName); }
+  focusMachine(machineName: string): boolean { const focused = this.#focusMachine(machineName); this.#focusedMachine = focused ? machineName : undefined; return focused; }
   fit(): void { this.#focusedMachine = undefined; this.#dispatchInteraction("viewport.fit"); }
   zoom(): number { return this.#scale; }
   destroy(): void {
     this.#edgeLayer.replaceChildren(); this.#nodeLayer.replaceChildren();
     this.#world.style.width = "1px"; this.#world.style.height = "1px"; this.#structure = null; this.#graphs = [];
-    this.#nodes.clear(); this.#edges = []; this.#initialNodes = []; this.#focusedMachine = undefined; this.#hasRealDimensions = false;
+    this.#nodes.clear(); this.#edges = []; this.#initialNodes = []; this.#focusedMachine = undefined;
   }
 
   #renderStructure(graphs: readonly MachineGraph[]): void {
@@ -289,19 +289,28 @@ class NativeGraphRenderer implements GraphRenderer {
     const bounds: Bounds = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity }; for (const node of focused) { const rect = rectFor(node.center, node.size); bounds.left = Math.min(bounds.left, rect.left); bounds.right = Math.max(bounds.right, rect.right); bounds.top = Math.min(bounds.top, rect.top); bounds.bottom = Math.max(bounds.bottom, rect.bottom); }
     this.#dispatchInteraction("viewport.focus", { bounds }); return true;
   }
-  #applyFocusedMachine(): void { if (this.#focusedMachine !== undefined) this.#focusMachine(this.#focusedMachine); }
+  #applyFocusedMachine(): boolean { return this.#focusedMachine !== undefined && this.#focusMachine(this.#focusedMachine); }
   #fitCapped(): void { if (this.#hasViewport()) this.#dispatchInteraction("viewport.fit"); }
   #fitBounds(bounds: Bounds, padding: number, maxZoom = MAX_FIT_ZOOM): void { const width = Math.max(1, bounds.right - bounds.left + padding * 2); const height = Math.max(1, bounds.bottom - bounds.top + padding * 2); const scale = Math.min(maxZoom, Math.max(MIN_ZOOM, Math.min(this.#viewport.clientWidth / width, this.#viewport.clientHeight / height))); const center = shiftedPoint({ x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 }, this.#origin); this.#setTransform(scale, { x: this.#viewport.clientWidth / 2 - center.x * scale, y: this.#viewport.clientHeight / 2 - center.y * scale }); }
   #hasViewport(): boolean { return this.#viewport.clientWidth > 0 && this.#viewport.clientHeight > 0; }
   #setTransform(scale: number, pan: Point): void { this.#scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale)); this.#pan = pan; this.#world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${this.#scale})`; this.#onZoom(this.#scale); }
   #positionElements(): void { for (const node of this.#nodes.values()) { node.element.style.left = `${node.center.x + this.#origin.x}px`; node.element.style.top = `${node.center.y + this.#origin.y}px`; } for (const initial of this.#initialNodes) { initial.element.style.left = `${initial.point.x + this.#origin.x}px`; initial.element.style.top = `${initial.point.y + this.#origin.y}px`; } for (const edge of this.#edges) { const points = edge.points.map((point) => shiftedPoint(point, this.#origin)); const d = pathFor(points); edge.path.setAttribute("d", d); edge.hit.setAttribute("d", d); if (edge.label !== null) { const point = shiftedPoint(labelPosition(edge.points), this.#origin); edge.label.setAttribute("x", String(point.x)); edge.label.setAttribute("y", String(point.y)); } } }
   #ensureResizeObserver(): void { if (this.#resizeObserver !== null || typeof ResizeObserver === "undefined") return; this.#resizeObserver = new ResizeObserver(() => this.#resizeForContainer()); this.#resizeObserver.observe(this.#container); }
-  #resizeForContainer(): void { if (!this.#hasViewport()) return; if (!this.#hasRealDimensions) { this.#hasRealDimensions = true; this.#fitCapped(); this.#applyFocusedMachine(); return; } this.#fitCapped(); this.#applyFocusedMachine(); }
+  #resizeForContainer(): void {
+    if (!this.#hasViewport()) return;
+    if (!this.#hasRealDimensions) {
+      this.#hasRealDimensions = true;
+      this.#fitCapped();
+      this.#applyFocusedMachine();
+      return;
+    }
+    this.#applyFocusedMachine();
+  }
 
   #dispatchInteraction(eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom", data?: unknown): void { this.#interactionDispatch?.(eventName, data); }
   #interactionDispatch: ((eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom", data?: unknown) => void) | null = null;
   setInteractionDispatcher(dispatch: (eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom", data?: unknown) => void): void { this.#interactionDispatch = dispatch; }
-  applyViewport(data: unknown): void { const record = data as { bounds?: Bounds; scale?: number; pan?: Point; point?: Point } | null; if (record?.bounds !== undefined) { this.#fitBounds(record.bounds, FIT_PADDING); return; } if (record?.scale !== undefined && record.pan !== undefined) { this.#setTransform(record.scale, record.pan); return; } if (record?.point !== undefined && record.scale !== undefined) { const worldPoint = { x: (record.point.x - this.#pan.x) / this.#scale, y: (record.point.y - this.#pan.y) / this.#scale }; this.#setTransform(record.scale, { x: record.point.x - worldPoint.x * record.scale, y: record.point.y - worldPoint.y * record.scale }); return; } this.#fitBounds(this.#bounds, FIT_PADDING); }
+  applyViewport(data: unknown): void { const record = data as { bounds?: Bounds; scale?: number; pan?: Point; point?: Point } | null; if (record?.bounds !== undefined) { this.#fitBounds(record.bounds, FIT_PADDING); return; } if (record?.scale !== undefined && record.pan !== undefined) { this.#setTransform(record.scale, record.pan); return; } if (record?.point !== undefined && record.scale !== undefined) { const worldPoint = { x: (record.point.x - this.#pan.x) / this.#scale, y: (record.point.y - this.#pan.y) / this.#scale }; this.#setTransform(record.scale, { x: record.point.x - worldPoint.x * record.scale, y: record.point.y - worldPoint.y * record.scale }); return; } if (this.#focusedMachine !== undefined) return; this.#fitBounds(this.#bounds, FIT_PADDING); }
 
   #onPointerDown = (event: PointerEvent): void => { if (event.button !== 0 && event.pointerType === "mouse") return; this.#pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); this.#viewport.setPointerCapture(event.pointerId); if (this.#pointers.size === 1) { this.#dragStart = { pointerId: event.pointerId, point: { x: event.clientX, y: event.clientY }, pan: { ...this.#pan } }; this.#container.classList.add("is-dragging"); this.#dispatchInteraction("viewport.pan.start"); } else { this.#dragStart = null; this.#container.classList.remove("is-dragging"); const first = [...this.#pointers.values()][0]; const second = [...this.#pointers.values()][1]; if (first !== undefined && second !== undefined) this.#pinchStart = { distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)), scale: this.#scale }; } };
   #onPointerMove = (event: PointerEvent): void => { if (!this.#pointers.has(event.pointerId)) return; this.#pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (this.#pointers.size >= 2 && this.#pinchStart !== null) { const points = [...this.#pointers.values()]; const first = points[0]; const second = points[1]; if (first !== undefined && second !== undefined) { const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 }; const scale = this.#pinchStart.scale * Math.hypot(second.x - first.x, second.y - first.y) / this.#pinchStart.distance; this.#dispatchInteraction("viewport.zoom", { scale, point: midpoint }); } return; } if (this.#dragStart?.pointerId === event.pointerId) this.#dispatchInteraction("viewport.pan", { pan: { x: this.#dragStart.pan.x + event.clientX - this.#dragStart.point.x, y: this.#dragStart.pan.y + event.clientY - this.#dragStart.point.y } }); };
