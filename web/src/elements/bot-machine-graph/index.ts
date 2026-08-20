@@ -73,7 +73,14 @@ export class BotMachineGraph extends HTMLElement {
     }
     if (this.#controller === null) {
       this.#controller = new MachineGraphController({ renderer: this.#renderer });
-      this.#renderer.setInteractionDispatcher((eventName, data) => void this.#controller?.dispatch(eventName, data));
+      this.#renderer.setInteractionDispatcher((eventName, data) => {
+        const controller = this.#controller;
+        if (controller === null) return;
+        return controller.dispatch(eventName, data).then(() => undefined).catch((error: unknown) => {
+          if (isExpectedControllerStop(error)) return;
+          throw error;
+        });
+      });
     }
     if (this.#pending !== undefined) void this.#admit(this.#pending, generation);
   }

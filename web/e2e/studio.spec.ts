@@ -497,3 +497,35 @@ test("populated mobile rails stay contained around the map", async ({ page, requ
   expect(memberLayout.detailsBottom).toBeLessThanOrEqual(layout.inspector.bottom);
   expect(memberLayout.detailsOverflowY).toBe("auto");
 });
+
+test("queued graph gestures do not reject when the element disconnects", async ({ page, request }) => {
+  await openStudio(page);
+  const response = await request.post("/v1/models", { data: publishedModel("/Lifecycle", null) });
+  expect(response.ok()).toBeTruthy();
+  await expect(page.getByTestId("members")).toContainText("/Lifecycle");
+  await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
+
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.evaluate(async () => {
+    const dashboard = document.querySelector("bot-dashboard");
+    const graph = dashboard?.shadowRoot?.querySelector("bot-machine-graph");
+    const parent = graph?.parentElement;
+    const viewport = graph?.shadowRoot?.querySelector<HTMLElement>(".viewport");
+    if (graph === null || graph === undefined || parent === null || parent === undefined || viewport === null || viewport === undefined) {
+      throw new Error("graph lifecycle test surface is unavailable");
+    }
+    viewport.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      deltaY: 12,
+      clientX: 40,
+      clientY: 40,
+    }));
+    graph.remove();
+    parent.append(graph);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+  expect(pageErrors).toEqual([]);
+  await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
+});

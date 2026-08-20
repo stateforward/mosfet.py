@@ -525,18 +525,19 @@ export class NativeGraphRenderer implements GraphRenderer {
     eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
     data?: unknown,
   ): void {
-    this.#interactionDispatch?.(eventName, data);
+    const dispatch = this.#interactionDispatch?.(eventName, data);
+    if (dispatch !== undefined) void dispatch;
   }
 
   #interactionDispatch: ((
     eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
     data?: unknown,
-  ) => void) | null = null;
+  ) => void | Promise<void>) | null = null;
 
   setInteractionDispatcher(dispatch: (
     eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
     data?: unknown,
-  ) => void): void {
+  ) => void | Promise<void>): void {
     this.#interactionDispatch = dispatch;
   }
 
