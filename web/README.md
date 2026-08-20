@@ -21,7 +21,8 @@ attributes come from `src/bot/telemetry/hsm.py` `observation_attributes`:
 - `hsm.observation.occurrence`
 - `bot.outcome`
 
-Compound cytoscape nodes are slash-separated observed state paths. Edges are
+Native HTML/SVG graph nodes represent slash-separated observed state paths.
+Ownership is shown with nested machine shells, while SVG edges connect
 consecutive observations of the same `hsm.machine.name` when the state changes.
 The latest observed state is highlighted. Clicking an edge prefills the send-event
 name. Nothing here hard-codes a PhoneBot topology.
@@ -93,15 +94,16 @@ Machines:
   `dashboard.command.send` posts `/v1/commands`
 - `bot-otel-source` → `OtelSourceController` (`idle` / `connecting` / `live` / `error`);
   the composed `bot-otel-source` event is an **effect** of entering `live`
-- `bot-machine-graph` → `MachineGraphController` (`empty` / `drawing`);
-  cytoscape create/update/destroy runs from activities/effects
+- `bot-machine-graph` → `MachineGraphController` (`empty` / `drawing`), with
+  HSM-backed viewport transitions for fit, focus, pan, and zoom; the native
+  HTML/SVG renderer creates and updates the graph from controller effects
 
 ## Stack
 
 - TypeScript (strict, `noUncheckedIndexedAccess`)
 - Autonomous custom elements: `bot-dashboard`, `bot-machine-graph`, `bot-otel-source`
 - CSS via component stylesheets plus `src/dashboard.css`
-- `@stateforward/hsm.ts` 1.3.3 for every element controller
-- cytoscape as the graph renderer only
+- `@stateforward/hsm.ts` 1.3.3 for every element controller and graph viewport
+- Native HTML/SVG web-component rendering for nodes and edges
 - `@grpc/grpc-js` + `@grpc/proto-loader` for the in-process OTLP/control collector
 - Vite for local serve/build
