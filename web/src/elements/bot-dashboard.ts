@@ -11,7 +11,7 @@ import {
 } from "../dashboard-graphs.ts";
 import { type MachineGraph } from "../otel/machines.ts";
 import { isOtelSource } from "../otel/source.ts";
-import { BotMachineGraph } from "./bot-machine-graph.ts";
+import { BotMachineGraph } from "./bot-machine-graph/index.ts";
 import { BotOtelSource, type OtelSourceDetail } from "./bot-otel-source.ts";
 import { applyStyles } from "./styles.ts";
 
