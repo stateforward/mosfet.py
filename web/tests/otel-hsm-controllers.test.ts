@@ -167,6 +167,58 @@ describe("companion-style HSM controllers", () => {
     await graph.stop();
   });
 
+  test("removing the focused machine clears focus and fits the remaining graphs", async () => {
+    const applied: unknown[] = [];
+    let available = new Set<string>();
+    const graphFor = (name: string) => ({
+      name,
+      componentName: name,
+      currentState: `${name}/idle`,
+      lastEventName: "",
+      observationCount: 1,
+      nodes: [{ path: name, parent: null, label: name }],
+      edges: [],
+    });
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: (graphs) => {
+          available = new Set(graphs.map((value) => value.name));
+          return true;
+        },
+        destroy: () => undefined,
+        viewportMetrics: () => ({
+          width: 1000,
+          height: 600,
+          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+          origin: { x: 0, y: 0 },
+        }),
+        focusBounds: (machineName) => available.has(machineName)
+          ? { left: 0, right: 96, top: 0, bottom: 96 }
+          : null,
+        applyViewport: (data) => {
+          applied.push(data);
+        },
+      },
+    });
+
+    await graph.dispatch("graph.set", { graphs: [graphFor("/A")] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(graph.focusMachine("/A"), true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await graph.dispatch("graph.set", { graphs: [graphFor("/B")] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const transforms = applied.filter((value) =>
+      typeof value === "object" && value !== null && "scale" in value,
+    );
+    assert.notDeepEqual(transforms.at(-1), { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
+    assert.deepEqual(transforms.at(-1), {
+      scale: 600 / 656,
+      pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
+    });
+    await graph.stop();
+  });
+
   test("stopping a graph controller gates queued admission before the HSM stops", async () => {
     let draws = 0;
     const graph = new MachineGraphController({

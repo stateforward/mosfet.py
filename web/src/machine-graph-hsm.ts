@@ -254,25 +254,31 @@ export class MachineGraphController {
     if (this.#stopping) {
       throw new Error("MachineGraphController is stopped");
     }
+    let nextGraphs: MachineGraph[] | null = null;
     if (eventName === "graph.set") {
-      const graphs = isRecord(data) ? parseGraphs(data["graphs"]) : null;
-      if (graphs === null || graphs.length === 0) {
+      nextGraphs = isRecord(data) ? parseGraphs(data["graphs"]) : null;
+      if (nextGraphs === null || nextGraphs.length === 0) {
         await this.#machine.dispatch(namedEvent(graphEvents["graph.clear"].name));
         this.#emit();
         return this.snapshot();
       }
     }
+    const focusRemoved = eventName === "graph.set"
+      && this.#focusedMachine !== undefined
+      && nextGraphs !== null
+      && !nextGraphs.some((graph) => graph.name === this.#focusedMachine);
+    if (focusRemoved) this.#focusedMachine = undefined;
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
     this.#emit();
     const shouldRefocus = eventName === "graph.set" && this.#focusedMachine !== undefined;
-    if (this.#initialViewPending || shouldRefocus) {
+    if (this.#initialViewPending || shouldRefocus || focusRemoved) {
       this.#initialViewPending = false;
       const renderer = this.#renderer;
       queueMicrotask(() => {
         if (!this.#stopping && this.#renderer === renderer && renderer !== null) {
           const eventName = this.#focusedMachine === undefined ? "viewport.fit" : "viewport.focus";
           const data = this.#focusedMachine === undefined
-            ? { reason: "initial" }
+            ? focusRemoved ? undefined : { reason: "initial" }
             : { machineName: this.#focusedMachine };
           void this.dispatch(eventName, data).catch((error: unknown) => {
             if (!isExpectedControllerStop(error)) throw error;

@@ -43,6 +43,7 @@ import {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const WORLD_PADDING = 56;
 const EDGE_LABEL_LIMIT = 30;
+const STOPPED_CONTROLLER_ERROR = "MachineGraphController is stopped";
 
 type LayoutNode = {
   id: string;
@@ -82,6 +83,20 @@ function pointOf(value: unknown): Point | null {
   return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
     ? { x, y }
     : null;
+}
+
+function reportInteractionFailure(error: unknown): void {
+  if (error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR) return;
+  const reportError = (globalThis as typeof globalThis & {
+    reportError?: (value: unknown) => void;
+  }).reportError;
+  if (reportError !== undefined) {
+    reportError(error);
+    return;
+  }
+  setTimeout(() => {
+    throw error;
+  }, 0);
 }
 
 export class NativeGraphRenderer implements GraphRenderer {
@@ -489,7 +504,7 @@ export class NativeGraphRenderer implements GraphRenderer {
     data?: unknown,
   ): void {
     const dispatch = this.#interactionDispatch?.(eventName, data);
-    if (dispatch !== undefined) void dispatch;
+    if (dispatch !== undefined) void dispatch.catch(reportInteractionFailure);
   }
 
   #interactionDispatch: ((
