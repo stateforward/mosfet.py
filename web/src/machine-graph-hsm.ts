@@ -86,6 +86,10 @@ function applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Eve
   controllerOf(instance)?.applyViewport(event.data);
 }
 
+function ignoreViewport(): void {
+  // Empty graph surfaces accept viewport events without re-entering their lifecycle.
+}
+
 const machineGraphModel = hsm.define(
   "MachineGraph",
   hsm.initial(hsm.target("empty")),
@@ -94,10 +98,10 @@ const machineGraphModel = hsm.define(
     hsm.entry(destroyGraph),
     hsm.transition(hsm.on("graph.clear"), hsm.target("."), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("graph.set"), hsm.target("../drawing"), hsm.effect(rememberGraph)),
-    hsm.transition(hsm.on("viewport.fit"), hsm.target(".")),
-    hsm.transition(hsm.on("viewport.focus"), hsm.target(".")),
-    hsm.transition(hsm.on("viewport.pan"), hsm.target(".")),
-    hsm.transition(hsm.on("viewport.zoom"), hsm.target(".")),
+    hsm.transition(hsm.on("viewport.fit"), hsm.effect(ignoreViewport)),
+    hsm.transition(hsm.on("viewport.focus"), hsm.effect(ignoreViewport)),
+    hsm.transition(hsm.on("viewport.pan"), hsm.effect(ignoreViewport)),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.effect(ignoreViewport)),
   ),
   hsm.state(
     "drawing",
@@ -105,20 +109,20 @@ const machineGraphModel = hsm.define(
     hsm.exit(destroyGraph),
     hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
-    hsm.transition(hsm.on("viewport.fit"), hsm.target("."), hsm.effect(applyViewport)),
-    hsm.transition(hsm.on("viewport.focus"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.fit"), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.focus"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.pan.start"), hsm.target("../panning")),
-    hsm.transition(hsm.on("viewport.zoom"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.effect(applyViewport)),
   ),
   hsm.state(
     "panning",
     hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
-    hsm.transition(hsm.on("viewport.pan"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.pan"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.pan.end"), hsm.target("../drawing")),
-    hsm.transition(hsm.on("viewport.fit"), hsm.target("../drawing"), hsm.effect(applyViewport)),
-    hsm.transition(hsm.on("viewport.focus"), hsm.target("../drawing"), hsm.effect(applyViewport)),
-    hsm.transition(hsm.on("viewport.zoom"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.fit"), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.focus"), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.effect(applyViewport)),
   ),
 );
 

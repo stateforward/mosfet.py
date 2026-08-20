@@ -135,6 +135,19 @@ test("studio chrome is visible while the collector is empty", async ({ page }) =
   await page.screenshot({ path: shotPath("mobile-empty.png"), fullPage: true });
 });
 
+test("two persisted root models render the native graph without locking the page", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openStudio(page);
+  for (const name of ["/Phone", "/PhoneBot"]) {
+    const response = await request.post("/v1/models", { data: publishedModel(name, null) });
+    expect(response.ok()).toBeTruthy();
+  }
+  await expect(page).toHaveTitle("Environment workspace");
+  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "2");
+  await expect(page.locator("bot-machine-graph .state-node")).toHaveCount(2);
+  await expect(page.locator("bot-machine-graph .edge-layer")).toBeVisible();
+});
+
 test("live OTLP observe spans update the inspector and canvas", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openStudio(page);
