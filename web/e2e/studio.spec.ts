@@ -116,6 +116,12 @@ test("studio chrome is visible while the collector is empty", async ({ page }) =
   await openStudio(page);
   await expect(page.getByTestId("current-path")).toHaveText("—");
   await expect(page.getByTestId("last-event")).toHaveText("—");
+  await expect(page.getByTestId("replay-status")).toHaveText("Live · 0 events");
+  await page.getByTestId("replay-enter").click();
+  await expect(page.getByTestId("replay-status")).toHaveText("No events");
+  await expect(page.getByTestId("replay-next")).toBeDisabled();
+  await expect(page.getByTestId("replay-range")).toBeDisabled();
+  await page.getByTestId("replay-live").click();
   await page.screenshot({ path: shotPath("desktop-empty.png"), fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -154,7 +160,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
     "data-current-state",
     "/PhoneBot/active/processing",
   );
-  await expect(page.getByTestId("current-path")).toContainText("/PhoneBot/active/processing");
+  await expect(page.getByTestId("current-path")).toContainText("/PhoneBot");
   await expect(page.getByTestId("last-event")).toHaveText("bot.processing.completed");
   await page.screenshot({ path: shotPath("desktop-after-spans.png"), fullPage: true });
 
@@ -163,6 +169,48 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
   await expect(page.getByTestId("canvas")).toBeVisible();
   await expect(page.getByTestId("current-path")).toContainText("/PhoneBot/active/processing");
   await page.screenshot({ path: shotPath("mobile-after-spans.png"), fullPage: true });
+});
+
+test("simulated replay steps through event spans and focuses the owning graph", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openStudio(page);
+  await publishObservedEnvironmentRoots(request);
+  await exportTraces(firstBatch);
+  await expect(page.getByTestId("machine-list")).toContainText("/PhoneBot");
+
+  await page.getByTestId("canvas").evaluate((element) => {
+    const graph = element as HTMLElement & {
+      focusMachine: (machineName: string) => boolean;
+      replayFocusCalls?: string[];
+    };
+    const original = graph.focusMachine.bind(graph);
+    graph.replayFocusCalls = [];
+    graph.focusMachine = (machineName: string): boolean => {
+      graph.replayFocusCalls?.push(machineName);
+      return original(machineName);
+    };
+  });
+
+  await expect(page.getByTestId("replay-enter")).toBeVisible();
+  await expect(page.getByTestId("replay-status")).toHaveText(/Live · \d+ events/);
+  await page.getByTestId("replay-enter").click();
+  await expect(page.getByTestId("replay-status")).toHaveText(/Replay 0 \/ \d+/);
+  await expect(page.getByTestId("replay-next")).toBeEnabled();
+
+  await page.getByTestId("replay-next").click();
+  await expect(page.getByTestId("replay-status")).toHaveText(/Replay 1 \/ \d+/);
+  await expect(page.getByTestId("current-path")).toContainText("/PhoneBot");
+  await expect(page.getByTestId("last-event")).toHaveText("hsm/initial");
+  await expect.poll(async () => page.getByTestId("canvas").evaluate((element) => {
+    return (element as HTMLElement & { replayFocusCalls?: string[] }).replayFocusCalls ?? [];
+  })).toContain("/PhoneBot");
+
+  await exportTraces(secondBatch);
+  await expect(page.getByTestId("replay-status")).toHaveText(/Replay 1 \/ \d+/);
+  await page.getByTestId("replay-live").click();
+  await expect(page.getByTestId("replay-status")).toHaveText(/Live · \d+ events/);
+  await page.getByLabel("Observed machine").selectOption("/Phone");
+  await expect(page.getByTestId("current-path")).toContainText("/Phone/ringing");
 });
 
 test("environment graph visibility is independent from machine selection", async ({ page, request }) => {

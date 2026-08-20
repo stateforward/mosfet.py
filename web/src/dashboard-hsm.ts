@@ -18,6 +18,7 @@ import {
   type OtelStreamConnect,
 } from "./otel/source.ts";
 import { type ObserveSpan } from "./otel/span.ts";
+import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } from "./otel/replay.ts";
 
 const dashboardEvents = {
   "dashboard.source.selected": { name: "dashboard.source.selected", kind: hsm.Kinds.Event },
@@ -28,6 +29,13 @@ const dashboardEvents = {
   "dashboard.command.send": { name: "dashboard.command.send", kind: hsm.Kinds.Event },
   "dashboard.reset": { name: "dashboard.reset", kind: hsm.Kinds.Event },
   "dashboard.model.published": { name: "dashboard.model.published", kind: hsm.Kinds.Event },
+  "dashboard.replay.enter": { name: "dashboard.replay.enter", kind: hsm.Kinds.Event },
+  "dashboard.replay.play": { name: "dashboard.replay.play", kind: hsm.Kinds.Event },
+  "dashboard.replay.pause": { name: "dashboard.replay.pause", kind: hsm.Kinds.Event },
+  "dashboard.replay.previous": { name: "dashboard.replay.previous", kind: hsm.Kinds.Event },
+  "dashboard.replay.next": { name: "dashboard.replay.next", kind: hsm.Kinds.Event },
+  "dashboard.replay.seek": { name: "dashboard.replay.seek", kind: hsm.Kinds.Event },
+  "dashboard.replay.live": { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
 } as const;
 
 export type CommandResult = {
@@ -41,6 +49,14 @@ export type DashboardEventName = keyof typeof dashboardEvents;
 
 export type DashboardPhase = "idle" | "live" | "error";
 
+export type DashboardReplaySnapshot = {
+  readonly active: boolean;
+  readonly playing: boolean;
+  readonly position: number;
+  readonly total: number;
+  readonly current: ObserveSpan | null;
+};
+
 export type DashboardSnapshot = {
   readonly phase: DashboardPhase;
   readonly statePath: string;
@@ -51,6 +67,7 @@ export type DashboardSnapshot = {
   readonly commandEventName: string;
   readonly commandDataJson: string;
   readonly commandResult: CommandResult | null;
+  readonly replay: DashboardReplaySnapshot;
 };
 
 export type DashboardControllerOptions = {
@@ -108,6 +125,13 @@ function stringField(event: hsm.Event, key: string): string | null {
     return null;
   }
   return event.data[key];
+}
+
+function replayPositionFromEvent(event: hsm.Event): number | null {
+  if (!isRecord(event.data) || typeof event.data["position"] !== "number") {
+    return null;
+  }
+  return event.data["position"];
 }
 
 export async function postCommandHttp(command: { eventName: string; dataJson: string }): Promise<CommandResult> {
@@ -198,6 +222,37 @@ function clearView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event)
   controllerOf(instance)?.clearView();
 }
 
+function enterReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.enterReplay();
+}
+
+function playReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.playReplay();
+}
+
+function pauseReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.pauseReplay();
+}
+
+function previousReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.previousReplay();
+}
+
+function nextReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.nextReplay();
+}
+
+function seekReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const position = replayPositionFromEvent(event);
+  if (position !== null) {
+    controllerOf(instance)?.seekReplay(position);
+  }
+}
+
+function returnToLive(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.returnToLive();
+}
+
 async function streamLive(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
@@ -215,6 +270,7 @@ const dashboardModel = hsm.define(
     hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
     hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
     hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
+    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live"), hsm.effect(enterReplay)),
   ),
   hsm.state(
     "live",
@@ -227,6 +283,13 @@ const dashboardModel = hsm.define(
     hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
     hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
     hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.effect(enterReplay)),
+    hsm.transition(hsm.on("dashboard.replay.play"), hsm.effect(playReplay)),
+    hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
+    hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
+    hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
+    hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
+    hsm.transition(hsm.on("dashboard.replay.live"), hsm.effect(returnToLive)),
   ),
   hsm.state(
     "error",
@@ -235,6 +298,7 @@ const dashboardModel = hsm.define(
     hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
     hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
     hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live"), hsm.effect(enterReplay)),
   ),
 );
 
@@ -257,6 +321,11 @@ export class DashboardController {
   #machine: DashboardRuntime;
   #source: OtelSource | null = null;
   #spans: ObserveSpan[] = [];
+  #replayEvents: ReplayEvent[] = [];
+  #replayActive = false;
+  #replayPlaying = false;
+  #replayPosition = 0;
+  #replayTimer: ReturnType<typeof setTimeout> | null = null;
   #models: PublishedModel[] = [];
   #skipped = 0;
   #document: OtelDocument | null = null;
@@ -290,6 +359,13 @@ export class DashboardController {
       commandEventName: this.#commandEventName,
       commandDataJson: this.#commandDataJson,
       commandResult: this.#commandResult,
+      replay: {
+        active: this.#replayActive,
+        playing: this.#replayPlaying,
+        position: this.#replayPosition,
+        total: this.#replayEvents.length,
+        current: this.#replayActive ? this.#replayEvents[this.#replayPosition - 1]?.span ?? null : null,
+      },
     };
   }
 
@@ -321,6 +397,8 @@ export class DashboardController {
       this.#spans = [...this.#spans, ...spans];
       this.#skipped += skipped;
     }
+    this.#replayEvents = replayEvents(this.#spans);
+    this.#replayPosition = clampReplayPosition(this.#replayPosition, this.#replayEvents.length);
     this.#rebuildDocument();
     this.#errorMessage = null;
     this.#emit();
@@ -352,8 +430,13 @@ export class DashboardController {
   }
 
   clearView(): void {
+    this.#stopReplayTimer();
     this.#source = null;
     this.#spans = [];
+    this.#replayEvents = [];
+    this.#replayActive = false;
+    this.#replayPlaying = false;
+    this.#replayPosition = 0;
     this.#models = [];
     this.#skipped = 0;
     this.#document = null;
@@ -361,6 +444,75 @@ export class DashboardController {
     this.#commandEventName = "";
     this.#commandDataJson = "";
     this.#commandResult = null;
+    this.#emit();
+  }
+
+  enterReplay(): void {
+    this.#stopReplayTimer();
+    this.#replayEvents = replayEvents(this.#spans);
+    this.#replayActive = true;
+    this.#replayPlaying = false;
+    this.#replayPosition = 0;
+    this.#rebuildDocument();
+    this.#emit();
+  }
+
+  playReplay(): void {
+    if (!this.#replayActive) {
+      this.enterReplay();
+    }
+    if (this.#replayEvents.length === 0 || this.#replayPosition >= this.#replayEvents.length) {
+      return;
+    }
+    this.#replayPlaying = true;
+    this.#scheduleReplayStep();
+    this.#emit();
+  }
+
+  pauseReplay(): void {
+    this.#stopReplayTimer();
+    this.#emit();
+  }
+
+  previousReplay(): void {
+    if (!this.#replayActive) {
+      return;
+    }
+    this.#stopReplayTimer();
+    this.#replayPosition = clampReplayPosition(this.#replayPosition - 1, this.#replayEvents.length);
+    this.#rebuildDocument();
+    this.#emit();
+  }
+
+  nextReplay(): void {
+    if (!this.#replayActive) {
+      return;
+    }
+    this.#replayPosition = clampReplayPosition(this.#replayPosition + 1, this.#replayEvents.length);
+    if (this.#replayPosition >= this.#replayEvents.length) {
+      this.#stopReplayTimer();
+    }
+    this.#rebuildDocument();
+    this.#emit();
+  }
+
+  seekReplay(position: number): void {
+    if (!this.#replayActive) {
+      return;
+    }
+    this.#replayPosition = clampReplayPosition(position, this.#replayEvents.length);
+    if (this.#replayPosition >= this.#replayEvents.length) {
+      this.#stopReplayTimer();
+    }
+    this.#rebuildDocument();
+    this.#emit();
+  }
+
+  returnToLive(): void {
+    this.#stopReplayTimer();
+    this.#replayActive = false;
+    this.#replayPosition = this.#replayEvents.length;
+    this.#rebuildDocument();
     this.#emit();
   }
 
@@ -447,7 +599,38 @@ export class DashboardController {
 
   #rebuildDocument(): void {
     const previous = this.#document?.selectedMachine ?? null;
-    this.#document = documentFromSpans(this.#spans, this.#skipped, previous, this.#models);
+    const spans = this.#replayActive
+      ? replayPrefix(this.#spans, this.#replayEvents, this.#replayPosition)
+      : this.#spans;
+    const currentMachine = this.#replayEvents[this.#replayPosition - 1]?.span.attributes["hsm.machine.name"] ?? null;
+    this.#document = documentFromSpans(
+      spans,
+      this.#replayActive ? 0 : this.#skipped,
+      this.#replayActive ? currentMachine : previous,
+      this.#models,
+    );
+  }
+
+  #scheduleReplayStep(): void {
+    this.#stopReplayTimer();
+    if (!this.#replayPlaying) {
+      return;
+    }
+    this.#replayTimer = setTimeout(() => {
+      this.#replayTimer = null;
+      this.nextReplay();
+      if (this.#replayPlaying) {
+        this.#scheduleReplayStep();
+      }
+    }, 700);
+  }
+
+  #stopReplayTimer(): void {
+    if (this.#replayTimer !== null) {
+      clearTimeout(this.#replayTimer);
+      this.#replayTimer = null;
+    }
+    this.#replayPlaying = false;
   }
 
   #emit(): void {

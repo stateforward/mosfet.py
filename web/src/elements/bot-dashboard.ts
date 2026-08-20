@@ -461,6 +461,29 @@ button.tool {
   padding: 0.17rem 0.35rem;
   font-size: 0.68rem;
 }
+.replay-tools {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding-left: 0.35rem;
+  border-left: 1px solid var(--bot-line, #2a3140);
+}
+.replay-tools input[type="range"] {
+  width: 5rem;
+  accent-color: var(--bot-accent, #2dd4bf);
+}
+.replay-status {
+  min-width: 6.5rem;
+  color: var(--bot-muted, #8b93a7);
+  font-size: 0.65rem;
+  white-space: nowrap;
+}
+button.tool:disabled,
+.replay-tools input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .event-rail {
   display: flex;
   flex-direction: column;
@@ -651,6 +674,12 @@ export class BotDashboard extends HTMLElement {
   readonly #observedCount: HTMLSpanElement;
   readonly #memberCount: HTMLSpanElement;
   readonly #eventList: HTMLDivElement;
+  readonly #replayStatus: HTMLSpanElement;
+  readonly #replayRange: HTMLInputElement;
+  readonly #replayToggle: HTMLButtonElement;
+  readonly #replayPrevious: HTMLButtonElement;
+  readonly #replayNext: HTMLButtonElement;
+  readonly #replayLive: HTMLButtonElement;
   #visibleMachines = new Map<string, boolean>();
   #controller: DashboardController | null = null;
   #abort: AbortController | null = null;
@@ -843,6 +872,55 @@ export class BotDashboard extends HTMLElement {
     const mapTools = document.createElement("div");
     mapTools.className = "map-tools";
     mapTools.append(fit, this.#zoom, reset);
+    const replayTools = document.createElement("div");
+    replayTools.className = "replay-tools";
+    const replayEnter = document.createElement("button");
+    replayEnter.type = "button";
+    replayEnter.className = "tool";
+    replayEnter.dataset["event"] = "dashboard.replay.enter";
+    replayEnter.textContent = "Replay";
+    replayEnter.setAttribute("data-testid", "replay-enter");
+    this.#replayPrevious = document.createElement("button");
+    this.#replayPrevious.type = "button";
+    this.#replayPrevious.className = "tool";
+    this.#replayPrevious.dataset["event"] = "dashboard.replay.previous";
+    this.#replayPrevious.textContent = "‹";
+    this.#replayPrevious.setAttribute("aria-label", "Previous replay event");
+    this.#replayPrevious.setAttribute("data-testid", "replay-previous");
+    this.#replayToggle = document.createElement("button");
+    this.#replayToggle.type = "button";
+    this.#replayToggle.className = "tool";
+    this.#replayToggle.dataset["event"] = "dashboard.replay.play";
+    this.#replayToggle.textContent = "Play";
+    this.#replayToggle.setAttribute("data-testid", "replay-toggle");
+    this.#replayNext = document.createElement("button");
+    this.#replayNext.type = "button";
+    this.#replayNext.className = "tool";
+    this.#replayNext.dataset["event"] = "dashboard.replay.next";
+    this.#replayNext.textContent = "›";
+    this.#replayNext.setAttribute("aria-label", "Next replay event");
+    this.#replayNext.setAttribute("data-testid", "replay-next");
+    this.#replayLive = document.createElement("button");
+    this.#replayLive.type = "button";
+    this.#replayLive.className = "tool";
+    this.#replayLive.dataset["event"] = "dashboard.replay.live";
+    this.#replayLive.textContent = "Live";
+    this.#replayLive.setAttribute("data-testid", "replay-live");
+    this.#replayStatus = document.createElement("span");
+    this.#replayStatus.className = "replay-status";
+    this.#replayStatus.setAttribute("aria-live", "polite");
+    this.#replayStatus.setAttribute("data-testid", "replay-status");
+    this.#replayRange = document.createElement("input");
+    this.#replayRange.type = "range";
+    this.#replayRange.min = "0";
+    this.#replayRange.max = "0";
+    this.#replayRange.value = "0";
+    this.#replayRange.step = "1";
+    this.#replayRange.setAttribute("aria-label", "Replay position");
+    this.#replayRange.dataset["event"] = "dashboard.replay.seek";
+    this.#replayRange.setAttribute("data-testid", "replay-range");
+    replayTools.append(replayEnter, this.#replayPrevious, this.#replayToggle, this.#replayNext, this.#replayRange, this.#replayStatus, this.#replayLive);
+    mapTools.append(replayTools);
     mapHeadingLeft.append(mapTitle, mapTools);
     const mapStats = document.createElement("div");
     mapStats.className = "map-stats";
@@ -941,6 +1019,7 @@ export class BotDashboard extends HTMLElement {
       snapshot.commandResult === null
         ? ""
         : `${snapshot.commandResult.result.replaceAll("_", " ")}: ${snapshot.commandResult.detail}`;
+    this.#writeReplay(snapshot);
     this.#picker.replaceChildren();
     this.#machines.replaceChildren();
     this.#eventList.replaceChildren();
@@ -1049,6 +1128,28 @@ export class BotDashboard extends HTMLElement {
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
     this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
+    if (snapshot.replay.active && snapshot.replay.current !== null) {
+      this.#graph.focusMachine(snapshot.replay.current.attributes["hsm.machine.name"]);
+    }
+  }
+
+  #writeReplay(snapshot: DashboardSnapshot): void {
+    const replay = snapshot.replay;
+    this.#replayRange.max = String(replay.total);
+    this.#replayRange.value = String(replay.position);
+    this.#replayRange.disabled = replay.total === 0 || !replay.active;
+    this.#replayPrevious.disabled = !replay.active || replay.position === 0;
+    this.#replayNext.disabled = !replay.active || replay.position >= replay.total;
+    this.#replayLive.disabled = !replay.active;
+    this.#replayToggle.disabled = !replay.active || replay.total === 0 || replay.position >= replay.total;
+    this.#replayToggle.textContent = replay.playing ? "Pause" : "Play";
+    this.#replayToggle.dataset["event"] = replay.playing ? "dashboard.replay.pause" : "dashboard.replay.play";
+    this.#replayToggle.setAttribute("aria-label", replay.playing ? "Pause replay" : "Play replay");
+    this.#replayStatus.textContent = replay.active
+      ? replay.total === 0
+        ? "No events"
+        : `Replay ${String(replay.position)} / ${String(replay.total)}`
+      : `Live · ${String(replay.total)} events`;
   }
 
   #writeVisibilityStats(machines: readonly MachineGraph[]): void {
@@ -1244,6 +1345,13 @@ export class BotDashboard extends HTMLElement {
         eventName: this.#eventName.value,
         dataJson: this.#eventData.value,
       });
+      return;
+    }
+    if (eventName === "dashboard.replay.seek") {
+      const position = control instanceof HTMLInputElement ? Number(control.value) : Number.NaN;
+      if (Number.isFinite(position)) {
+        void this.#controller.dispatch(eventName, { position });
+      }
       return;
     }
     void this.#controller.dispatch(eventName);
