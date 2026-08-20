@@ -91,6 +91,41 @@ describe("companion-style HSM controllers", () => {
     await graph.stop();
   });
 
+  test("viewport gestures use modeled fit, pan, and zoom transitions", async () => {
+    const applied: unknown[] = [];
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: () => undefined,
+        destroy: () => undefined,
+        applyViewport: (data) => {
+          applied.push(data);
+        },
+      },
+    });
+    const valid = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
+      edges: [],
+    };
+
+    await graph.dispatch("graph.set", { graphs: [valid] });
+    await graph.dispatch("viewport.fit");
+    assert.equal(applied.length, 1);
+    const panning = await graph.dispatch("viewport.pan.start");
+    assert.equal(panning.phase, "drawing");
+    assert.match(panning.statePath, /\/panning$/);
+    await graph.dispatch("viewport.pan", { pan: { x: 12, y: 8 } });
+    await graph.dispatch("viewport.zoom", { scale: 1.1, point: { x: 20, y: 20 } });
+    assert.equal(applied.length, 3);
+    const drawing = await graph.dispatch("viewport.pan.end");
+    assert.match(drawing.statePath, /\/drawing$/);
+    await graph.stop();
+  });
+
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
     const dashboard = new DashboardController();
     const source = new OtelSourceController();

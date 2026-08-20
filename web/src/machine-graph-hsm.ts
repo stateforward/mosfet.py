@@ -6,6 +6,12 @@ import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 const graphEvents = {
   "graph.set": { name: "graph.set", kind: hsm.Kinds.Event },
   "graph.clear": { name: "graph.clear", kind: hsm.Kinds.Event },
+  "viewport.fit": { name: "viewport.fit", kind: hsm.Kinds.Event },
+  "viewport.focus": { name: "viewport.focus", kind: hsm.Kinds.Event },
+  "viewport.pan.start": { name: "viewport.pan.start", kind: hsm.Kinds.Event },
+  "viewport.pan": { name: "viewport.pan", kind: hsm.Kinds.Event },
+  "viewport.pan.end": { name: "viewport.pan.end", kind: hsm.Kinds.Event },
+  "viewport.zoom": { name: "viewport.zoom", kind: hsm.Kinds.Event },
 } as const;
 
 export type MachineGraphEventName = keyof typeof graphEvents;
@@ -15,6 +21,7 @@ export type MachineGraphPhase = "empty" | "drawing";
 export type GraphRenderer = {
   draw(graphs: readonly MachineGraph[]): void;
   destroy(): void;
+  applyViewport?(data: unknown): void;
 };
 
 export type MachineGraphSnapshot = {
@@ -75,6 +82,10 @@ function destroyGraph(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Eve
   controllerOf(instance)?.destroyRenderer();
 }
 
+function applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  controllerOf(instance)?.applyViewport(event.data);
+}
+
 const machineGraphModel = hsm.define(
   "MachineGraph",
   hsm.initial(hsm.target("empty")),
@@ -83,6 +94,10 @@ const machineGraphModel = hsm.define(
     hsm.entry(destroyGraph),
     hsm.transition(hsm.on("graph.clear"), hsm.target("."), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("graph.set"), hsm.target("../drawing"), hsm.effect(rememberGraph)),
+    hsm.transition(hsm.on("viewport.fit"), hsm.target(".")),
+    hsm.transition(hsm.on("viewport.focus"), hsm.target(".")),
+    hsm.transition(hsm.on("viewport.pan"), hsm.target(".")),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.target(".")),
   ),
   hsm.state(
     "drawing",
@@ -90,11 +105,25 @@ const machineGraphModel = hsm.define(
     hsm.exit(destroyGraph),
     hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
+    hsm.transition(hsm.on("viewport.fit"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.focus"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.pan.start"), hsm.target("../panning")),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.target("."), hsm.effect(applyViewport)),
+  ),
+  hsm.state(
+    "panning",
+    hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
+    hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
+    hsm.transition(hsm.on("viewport.pan"), hsm.target("."), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.pan.end"), hsm.target("../drawing")),
+    hsm.transition(hsm.on("viewport.fit"), hsm.target("../drawing"), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.focus"), hsm.target("../drawing"), hsm.effect(applyViewport)),
+    hsm.transition(hsm.on("viewport.zoom"), hsm.target("."), hsm.effect(applyViewport)),
   ),
 );
 
 function phaseFromStatePath(statePath: string): MachineGraphPhase {
-  if (statePath.endsWith("/drawing")) {
+  if (statePath.endsWith("/drawing") || statePath.endsWith("/panning")) {
     return "drawing";
   }
   return "empty";
@@ -139,6 +168,10 @@ export class MachineGraphController {
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
     this.#emit();
     return this.snapshot();
+  }
+
+  applyViewport(data: unknown): void {
+    this.#renderer?.applyViewport?.(data);
   }
 
   async stop(): Promise<void> {

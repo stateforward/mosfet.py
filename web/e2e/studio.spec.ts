@@ -147,7 +147,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
   await expect(page.getByTestId("current-path")).toContainText("/Phone");
   await expect(page.getByTestId("last-event")).toHaveText("hsm/initial");
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "7");
-  await expect(page.locator('bot-machine-graph canvas[data-id="layer2-node"]')).toBeVisible();
+  await expect(page.locator("bot-machine-graph .edge-layer")).toBeVisible();
 
   await exportTraces(secondBatch);
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-current-state", "/Phone/ringing");
