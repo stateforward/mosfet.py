@@ -4,6 +4,7 @@ import {
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
 import {
+  environmentWorkspaceGraphs,
   environmentRootGraphs,
   graphsForVisibility,
   machineNamesInOwnedSubtree,
@@ -926,8 +927,8 @@ export class BotDashboard extends HTMLElement {
     if (view === null || view.machines.length === 0) {
       this.#visibleMachines.clear();
       this.#memberCount.textContent = "0 loaded";
-      this.#writeVisibilityStats(null);
-      this.#writeEvents(null, null);
+      this.#writeVisibilityStats([]);
+      this.#writeEvents([], null);
       this.#writeCurrentState(null);
       this.#lastEvent.textContent = "—";
       this.#observes.textContent = "0";
@@ -935,10 +936,14 @@ export class BotDashboard extends HTMLElement {
       this.#graph.graphs = [];
       return;
     }
-    const machineNames = new Set(view.machines.map((machine) => machine.name));
-    const memberMachines = environmentRootGraphs(view.machines);
+    const workspaceMachines = environmentWorkspaceGraphs(view.machines);
+    const machineNames = new Set(workspaceMachines.map((machine) => machine.name));
+    const memberMachines = environmentRootGraphs(workspaceMachines);
+    const selectedMachine = workspaceMachines.some((machine) => machine.name === view.selectedMachine)
+      ? view.selectedMachine
+      : memberMachines[0]?.name ?? null;
     for (const machine of view.machines) {
-      if (!this.#visibleMachines.has(machine.name)) {
+      if (machineNames.has(machine.name) && !this.#visibleMachines.has(machine.name)) {
         this.#visibleMachines.set(machine.name, true);
       }
     }
@@ -955,11 +960,11 @@ export class BotDashboard extends HTMLElement {
         this.#visibleMachines.set(machineName, false);
       }
     }
-    for (const machine of view.machines) {
+    for (const machine of workspaceMachines) {
       const option = document.createElement("option");
       option.value = machine.name;
       option.textContent = machine.name;
-      option.selected = machine.name === view.selectedMachine;
+      option.selected = machine.name === selectedMachine;
       this.#picker.append(option);
     }
     for (const machine of memberMachines) {
@@ -972,7 +977,7 @@ export class BotDashboard extends HTMLElement {
       select.className = "machine-select";
       select.dataset["event"] = "dashboard.machine.selected";
       select.dataset["machineName"] = machine.name;
-      select.setAttribute("aria-current", machine.name === view.selectedMachine ? "true" : "false");
+      select.setAttribute("aria-current", machine.name === selectedMachine ? "true" : "false");
       const name = document.createElement("span");
       name.className = "machine-name";
       name.textContent = machine.name;
@@ -1005,9 +1010,11 @@ export class BotDashboard extends HTMLElement {
       this.#machines.append(item);
     }
     this.#memberCount.textContent = `${String(memberMachines.length)} loaded`;
-    this.#writeVisibilityStats(view);
-    this.#writeEvents(view, view.selectedMachine);
-    const selected = snapshot.selectedGraph;
+    this.#writeVisibilityStats(workspaceMachines);
+    this.#writeEvents(workspaceMachines, selectedMachine);
+    const selected = selectedMachine === null
+      ? null
+      : workspaceMachines.find((machine) => machine.name === selectedMachine) ?? null;
     if (selected === null) {
       this.#writeCurrentState(null);
       this.#lastEvent.textContent = "—";
@@ -1020,11 +1027,10 @@ export class BotDashboard extends HTMLElement {
     this.#lastEvent.textContent = selected.lastEventName;
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
-    this.#graph.graphs = graphsForVisibility(view.machines, this.#visibleMachines);
+    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
   }
 
-  #writeVisibilityStats(view: DashboardSnapshot["document"]): void {
-    const machines = view?.machines ?? [];
+  #writeVisibilityStats(machines: readonly MachineGraph[]): void {
     const shown = machines.filter((machine) => this.#visibleMachines.get(machine.name) === true).length;
     const observed = machines.filter((machine) => machine.observationCount > 0).length;
     this.#shownCount.textContent = String(shown);
@@ -1032,20 +1038,20 @@ export class BotDashboard extends HTMLElement {
     this.#observedCount.textContent = String(observed);
   }
 
-  #writeEvents(view: DashboardSnapshot["document"], selectedMachine: string | null): void {
+  #writeEvents(machines: readonly MachineGraph[], selectedMachine: string | null): void {
     this.#eventList.replaceChildren();
-    const machines = view === null ? [] : [...view.machines].sort((left, right) => {
+    const orderedMachines = [...machines].sort((left, right) => {
       const observationOrder = right.observationCount - left.observationCount;
       return observationOrder === 0 ? left.name.localeCompare(right.name) : observationOrder;
     });
-    if (machines.length === 0) {
+    if (orderedMachines.length === 0) {
       const empty = document.createElement("p");
       empty.className = "event-empty";
       empty.textContent = "No machine events yet.";
       this.#eventList.append(empty);
       return;
     }
-    for (const machine of machines) {
+    for (const machine of orderedMachines) {
       const item = document.createElement("article");
       item.className = "event-item";
       mark(item, "event-item");
@@ -1084,21 +1090,22 @@ export class BotDashboard extends HTMLElement {
     if (view === null || view === undefined) {
       return;
     }
-    for (const machine of view.machines) {
+    const workspaceMachines = environmentWorkspaceGraphs(view.machines);
+    for (const machine of workspaceMachines) {
       const visible = action === "show-all" || (action === "hide-unobserved" && machine.observationCount > 0);
       this.#visibleMachines.set(machine.name, visible);
     }
-    for (const root of environmentRootGraphs(view.machines)) {
+    for (const root of environmentRootGraphs(workspaceMachines)) {
       if (this.#visibleMachines.get(root.name) === true) {
         continue;
       }
-      for (const machineName of machineNamesInOwnedSubtree(view.machines, root.name)) {
+      for (const machineName of machineNamesInOwnedSubtree(workspaceMachines, root.name)) {
         this.#visibleMachines.set(machineName, false);
       }
     }
     this.#syncMachineControls();
-    this.#writeVisibilityStats(view);
-    this.#graph.graphs = graphsForVisibility(view.machines, this.#visibleMachines);
+    this.#writeVisibilityStats(workspaceMachines);
+    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
   }
 
   #setMachineVisibility(machineName: string, visible: boolean): void {
@@ -1107,12 +1114,13 @@ export class BotDashboard extends HTMLElement {
       this.#graph.graphs = [];
       return;
     }
-    for (const name of machineNamesInOwnedSubtree(document.machines, machineName)) {
+    const workspaceMachines = environmentWorkspaceGraphs(document.machines);
+    for (const name of machineNamesInOwnedSubtree(workspaceMachines, machineName)) {
       this.#visibleMachines.set(name, visible);
     }
     this.#syncMachineControls();
-    this.#writeVisibilityStats(document);
-    this.#graph.graphs = graphsForVisibility(document.machines, this.#visibleMachines);
+    this.#writeVisibilityStats(workspaceMachines);
+    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
   }
 
   #writeCurrentState(currentState: string | null): void {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
+  environmentWorkspaceGraphs,
   environmentRootGraphs,
   graphsForVisibility,
   machineNamesInOwnedSubtree,
@@ -26,7 +27,7 @@ function machine(name: string, owner?: string | null): MachineGraph {
 
 describe("dashboard render graph admission", () => {
   test("lists only valid direct environment roots and keeps owned descendants in the subtree", () => {
-    const environment = machine("/Environment");
+    const environment = machine("/Environment", null);
     const explicitRoot = machine("/ExplicitRoot", null);
     const child = machine("/Child", "/Environment");
     const grandchild = machine("/Grandchild", "/Child");
@@ -48,7 +49,7 @@ describe("dashboard render graph admission", () => {
   });
 
   test("keeps visible descendants nested under root-only hidden owner shells", () => {
-    const environment = machine("/Environment");
+    const environment = machine("/Environment", null);
     const service = machine("/Service", "/Environment");
     const child = machine("/Child", "/Service");
 
@@ -68,7 +69,7 @@ describe("dashboard render graph admission", () => {
     assert.equal(graphs[1]?.edges.length, 0);
     assert.equal(graphs[0]?.currentState, "");
     assert.equal(graphs[1]?.observationCount, 0);
-    assert.equal(graphs[0]?.owner, undefined);
+    assert.equal(graphs[0]?.owner, null);
     assert.equal(graphs[1]?.owner, "/Environment");
     assert.equal(graphs[1]?.componentName, "Service");
     assert.deepEqual(graphs[1]?.nodes, [{ path: "/Service", parent: null, label: "Service" }]);
@@ -76,7 +77,7 @@ describe("dashboard render graph admission", () => {
   });
 
   test("does not include hidden shells when no visible descendant needs them", () => {
-    const owner = machine("/Environment");
+    const owner = machine("/Environment", null);
     const child = machine("/Child", "/Environment");
 
     assert.deepEqual(graphsForVisibility([owner, child], new Map([["/Environment", false], ["/Child", false]])), []);
@@ -92,6 +93,32 @@ describe("dashboard render graph admission", () => {
     );
   });
 
+  test("excludes observed-only ownerless graphs even when visible", () => {
+    const observedOnly = machine("/Ability");
+
+    assert.deepEqual(environmentRootGraphs([observedOnly]), []);
+    assert.deepEqual(
+      [...machineNamesInOwnedSubtree([observedOnly], "/Ability")],
+      [],
+    );
+    assert.deepEqual(graphsForVisibility([observedOnly], new Map([["/Ability", true]])), []);
+    assert.deepEqual(environmentWorkspaceGraphs([observedOnly]), []);
+  });
+
+  test("requires ownership chains to terminate at an explicit null root", () => {
+    const root = machine("/Environment", null);
+    const child = machine("/Child", "/Environment");
+    const ownerless = machine("/Ownerless");
+
+    assert.deepEqual(
+      graphsForVisibility(
+        [root, child, ownerless],
+        new Map([["/Environment", false], ["/Child", true], ["/Ownerless", true]]),
+      ).map((graph) => graph.name),
+      ["/Environment", "/Child"],
+    );
+  });
+
   test("excludes visible models whose owner is missing", () => {
     const missingOwner = machine("/Service", "/MissingOwner");
 
@@ -99,7 +126,7 @@ describe("dashboard render graph admission", () => {
   });
 
   test("excludes visible children whose owner has no root", () => {
-    const owner = { ...machine("/Environment"), nodes: [] };
+    const owner = { ...machine("/Environment", null), nodes: [] };
     const child = machine("/Child", "/Environment");
 
     assert.deepEqual(
@@ -115,7 +142,7 @@ describe("dashboard render graph admission", () => {
   });
 
   test("excludes visible children with no root", () => {
-    const owner = machine("/Environment");
+    const owner = machine("/Environment", null);
     const child = {
       ...machine("/Child", "/Environment"),
       nodes: [{ path: "/Child/ready", parent: "/Child", label: "ready" }],

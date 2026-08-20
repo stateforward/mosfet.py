@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { ModelStore } from "../collector/collector.ts";
-import { parseLiveModel, parsePublishedModel } from "../src/otel/machines.ts";
+import {
+  graphFromPublishedModel,
+  parseLiveModel,
+  parsePublishedModel,
+} from "../src/otel/machines.ts";
+import { graphsForVisibility } from "../src/dashboard-graphs.ts";
 
 describe("collector published models", () => {
   test("store keeps models by name and lists them", () => {
@@ -71,7 +76,7 @@ describe("collector published models", () => {
       const store = new ModelStore(filePath);
       const topology = parsePublishedModel({
         name: "/PhoneService",
-        owner: "/Phone",
+        owner: null,
         initial: "/PhoneService/.initial",
         states: [],
         transitions: [],
@@ -86,7 +91,16 @@ describe("collector published models", () => {
       });
       assert.ok(omittedOwnerLive !== null);
       await store.commitLive(omittedOwnerLive);
-      assert.equal(store.list()[0]?.owner, "/Phone");
+      const merged = store.list()[0];
+      assert.ok(merged !== undefined);
+      assert.equal(Object.hasOwn(merged, "owner"), false);
+      assert.deepEqual(
+        graphsForVisibility(
+          [graphFromPublishedModel(merged)],
+          new Map([["/PhoneService", true]]),
+        ),
+        [],
+      );
       const live = parseLiveModel({
         name: "/PhoneService",
         component: "PhoneService",
@@ -96,6 +110,7 @@ describe("collector published models", () => {
       });
       assert.ok(live !== null);
       await store.commitLive(live);
+      assert.equal(store.list()[0]?.owner, "/Phone");
       await store.persist();
 
       const reloaded = new ModelStore(filePath);

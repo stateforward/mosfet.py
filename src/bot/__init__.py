@@ -52,6 +52,27 @@ from bot.events import (
     RebootReason,
     StimulusData,
 )
+# Construction API before abilities so class-body `bot.define` sees the hook.
+from bot.define import (
+    activity,
+    after,
+    choice,
+    defer,
+    define,
+    effect,
+    entry,
+    exit,
+    final,
+    guard,
+    initial,
+    observe,
+    on,
+    source,
+    state,
+    target,
+    transition,
+)
+from bot.start import register, start, started
 from bot import abilities, behavior, skills
 
 if TYPE_CHECKING:
@@ -68,6 +89,26 @@ def __getattr__(name: str) -> object:
 
 __all__ = [
     "Bot",
+    "activity",
+    "after",
+    "choice",
+    "defer",
+    "define",
+    "effect",
+    "entry",
+    "exit",
+    "final",
+    "guard",
+    "initial",
+    "observe",
+    "on",
+    "source",
+    "start",
+    "started",
+    "register",
+    "state",
+    "target",
+    "transition",
     "ActivateEvent",
     "ActivateEventData",
     "ActivatingDoneEvent",

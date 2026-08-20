@@ -257,7 +257,12 @@ export function mergePublishedModel(
     incoming.component !== undefined && incoming.component.length > 0
       ? incoming.component
       : existing.component;
-  const owner = incoming.owner !== undefined ? incoming.owner : existing.owner;
+  const owner =
+    incoming.owner !== undefined
+      ? incoming.owner
+      : incoming.live !== undefined
+        ? undefined
+        : existing.owner;
   if (live !== undefined) {
     merged.live = live;
   }

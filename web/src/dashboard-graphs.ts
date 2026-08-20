@@ -31,26 +31,31 @@ function renderableOwnerChain(
   const ownerChain = [machine.name];
   const visitedOwners = new Set<string>(ownerChain);
   let ownerName = machine.owner;
-  while (ownerName !== undefined && ownerName !== null) {
-    if (visitedOwners.has(ownerName)) {
+  if (ownerName === undefined) {
+    return null;
+  }
+  while (ownerName !== null) {
+    const currentOwnerName = ownerName;
+    if (visitedOwners.has(currentOwnerName)) {
       return null;
     }
-    visitedOwners.add(ownerName);
-    const owner = byName.get(ownerName);
+    visitedOwners.add(currentOwnerName);
+    const owner = byName.get(currentOwnerName);
     if (owner === undefined || !hasRoot(owner)) {
       return null;
     }
     ownerChain.push(owner.name);
+    if (owner.owner === undefined) {
+      return null;
+    }
     ownerName = owner.owner;
   }
   return ownerChain;
 }
 
-/** Direct, ownerless graphs that can be rendered as environment members. */
+/** Direct graphs explicitly published as environment members. */
 export function environmentRootGraphs(machines: readonly MachineGraph[]): MachineGraph[] {
-  return machines.filter(
-    (machine) => (machine.owner === undefined || machine.owner === null) && hasRoot(machine),
-  );
+  return machines.filter((machine) => machine.owner === null && hasRoot(machine));
 }
 
 /** All renderable graphs in one direct environment member's owned subtree. */
@@ -67,6 +72,17 @@ export function machineNamesInOwnedSubtree(
     }
   }
   return names;
+}
+
+/** Graphs admitted to the Environment workspace through a direct root subtree. */
+export function environmentWorkspaceGraphs(machines: readonly MachineGraph[]): MachineGraph[] {
+  const names = new Set<string>();
+  for (const root of environmentRootGraphs(machines)) {
+    for (const name of machineNamesInOwnedSubtree(machines, root.name)) {
+      names.add(name);
+    }
+  }
+  return machines.filter((machine) => names.has(machine.name));
 }
 
 export function graphsForVisibility(

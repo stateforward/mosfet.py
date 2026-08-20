@@ -9,6 +9,7 @@ import {
   documentFromSpans,
   foldMachines,
   graphFromPublishedModel,
+  mergePublishedModel,
   overlayObserve,
   parseLiveModel,
   parseMachineGraph,
@@ -16,6 +17,7 @@ import {
   type PublishedModel,
 } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
+import { graphsForVisibility } from "../src/dashboard-graphs.ts";
 
 const fixturePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -82,6 +84,31 @@ describe("otel observe fold", () => {
     assert.equal(parseExportTraceServiceRequest("not-json-object"), null);
     assert.equal(parseExportTraceServiceRequest({ resourceSpans: "nope" }), null);
     assert.equal(documentFromOtlp({ resourceSpans: "nope" }), null);
+  });
+
+  test("observed-only ownerless graphs are not admitted to the workspace", () => {
+    const document = documentFromSpans([
+      {
+        name: "bot.hsm.observe",
+        timestamp: "2026-08-16T00:00:00.000000000Z",
+        start_time: "2026-08-16T00:00:00.000000000Z",
+        attributes: {
+          "hsm.machine.name": "/Ability",
+          "hsm.machine.state": "/Ability/ready",
+          "bot.component.name": "Ability",
+          "hsm.event.name": "hsm/initial",
+          "hsm.event.kind": "event",
+          "hsm.observation.occurrence": "event",
+          "bot.outcome": "observed",
+        },
+      },
+    ], 0);
+
+    assert.equal(document.machines[0]?.owner, undefined);
+    assert.deepEqual(
+      graphsForVisibility(document.machines, new Map([["/Ability", true]])),
+      [],
+    );
   });
 });
 
@@ -210,6 +237,47 @@ describe("published model topology", () => {
     assert.equal(live.owner, null);
     assert.equal(graphFromPublishedModel(service).owner, null);
     assert.equal(overlayObserve(graphFromPublishedModel(service), []).owner, null);
+  });
+
+  test("live owner omission clears stale ownership while explicit null remains a root", () => {
+    const topology = parsePublishedModel({ ...demoModel, owner: null });
+    assert.ok(topology !== null);
+    const omittedOwnerLive = mergePublishedModel(topology, {
+      name: "/Demo",
+      states: [],
+      transitions: [],
+      initial: "",
+      live: true,
+      state: "/Demo/idle",
+      component: "Demo",
+    });
+    assert.equal(Object.hasOwn(omittedOwnerLive, "owner"), false);
+    assert.deepEqual(
+      graphsForVisibility(
+        [graphFromPublishedModel(omittedOwnerLive)],
+        new Map([["/Demo", true]]),
+      ),
+      [],
+    );
+
+    const explicitNullLive = mergePublishedModel(topology, {
+      name: "/Demo",
+      states: [],
+      transitions: [],
+      initial: "",
+      live: true,
+      state: "/Demo/idle",
+      component: "Demo",
+      owner: null,
+    });
+    assert.equal(explicitNullLive.owner, null);
+    assert.deepEqual(
+      graphsForVisibility(
+        [graphFromPublishedModel(explicitNullLive)],
+        new Map([["/Demo", true]]),
+      ).map((graph) => graph.name),
+      ["/Demo"],
+    );
   });
 
   test("observe spans overlay the current leaf without dropping model states", () => {

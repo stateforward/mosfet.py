@@ -16,6 +16,7 @@ const populatedModels = Array.from({ length: 85 }, (_, index) => {
   const name = `/StudioModel${String(index + 1).padStart(2, "0")}`;
   return {
     name,
+    owner: null,
     states: [{ qualified_name: name, parent: "/", initial: `${name}/.initial` }],
     transitions: [],
     initial: `${name}/.initial`,
@@ -47,6 +48,13 @@ async function openStudio(page: Page): Promise<void> {
 async function loadPopulatedData(request: APIRequestContext): Promise<void> {
   for (const model of populatedModels) {
     const response = await request.post("/v1/models", { data: model });
+    expect(response.ok()).toBeTruthy();
+  }
+}
+
+async function publishObservedEnvironmentRoots(request: APIRequestContext): Promise<void> {
+  for (const name of ["/Phone", "/PhoneBot"]) {
+    const response = await request.post("/v1/models", { data: publishedModel(name, null) });
     expect(response.ok()).toBeTruthy();
   }
 }
@@ -121,9 +129,10 @@ test("studio chrome is visible while the collector is empty", async ({ page }) =
   await page.screenshot({ path: shotPath("mobile-empty.png"), fullPage: true });
 });
 
-test("live OTLP observe spans update the inspector and canvas", async ({ page }) => {
+test("live OTLP observe spans update the inspector and canvas", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openStudio(page);
+  await publishObservedEnvironmentRoots(request);
 
   await exportTraces(firstBatch);
   await expect(page.getByTestId("machine-list")).toContainText("/Phone");
@@ -156,7 +165,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page })
   await page.screenshot({ path: shotPath("mobile-after-spans.png"), fullPage: true });
 });
 
-test("environment graph visibility is independent from machine selection", async ({ page }) => {
+test("environment graph visibility is independent from machine selection", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openStudio(page);
   await expect(page).toHaveTitle("Environment workspace");
@@ -167,6 +176,7 @@ test("environment graph visibility is independent from machine selection", async
   await expect(page.getByTestId("show-all")).toBeVisible();
   await expect(page.getByTestId("hide-all")).toBeVisible();
   await expect(page.getByTestId("hide-unobserved")).toBeVisible();
+  await publishObservedEnvironmentRoots(request);
 
   await exportTraces(firstBatch);
   await expect(page.getByTestId("event-list")).toContainText("bot.processing.completed");
@@ -233,14 +243,21 @@ test("Members shows direct roots while owned models stay nested and focusable", 
   await openStudio(page);
   const rootName = "/OwnedRoot";
   const childName = "/OwnedChild";
-  for (const model of [publishedModel(rootName), publishedModel(childName, rootName)]) {
+  for (const model of [publishedModel(rootName, null), publishedModel(childName, rootName)]) {
     const response = await request.post("/v1/models", { data: model });
     expect(response.ok()).toBeTruthy();
   }
 
+  const privateAbility = "/Ability";
+  const privateResponse = await request.post("/v1/models", { data: publishedModel(privateAbility) });
+  expect(privateResponse.ok()).toBeTruthy();
+
   await expect(page.getByTestId("machine-list").locator(`.machine[data-machine-name="${rootName}"]`)).toHaveCount(1);
+  await expect(page.getByTestId("machine-list").locator(`.machine[data-machine-name="${privateAbility}"]`)).toHaveCount(0);
   await expect(page.getByTestId("machine-list").locator(`.machine[data-machine-name="${childName}"]`)).toHaveCount(0);
   await expect(page.getByLabel("Observed machine").locator(`option[value="${childName}"]`)).toHaveCount(1);
+  await expect(page.getByLabel("Observed machine").locator(`option[value="${privateAbility}"]`)).toHaveCount(0);
+  await expect(page.getByTestId("event-list").getByText(privateAbility, { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("event-list")).toContainText(childName);
 
   await expect.poll(async () => {
@@ -250,6 +267,7 @@ test("Members shows direct roots while owned models stay nested and focusable", 
       .map((graph) => graph.name)
       .sort();
   }).toEqual([childName, rootName].sort());
+  expect((await visibleGraphs(page)).some((graph) => graph.name === privateAbility)).toBe(false);
   const nestedGraph = await page.getByTestId("canvas").evaluate((element, names) => {
     const graphElement = element as HTMLElement & {
       readonly graphs: readonly { readonly name: string; readonly owner?: string | null }[];
