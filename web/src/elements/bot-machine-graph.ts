@@ -206,10 +206,10 @@ class NativeGraphRenderer implements GraphRenderer {
     this.#viewport.addEventListener("wheel", this.#onWheel, { passive: false }); this.#edgeLayer.addEventListener("click", this.#onEdgeClick); this.#ensureResizeObserver();
   }
 
-  draw(graphs: readonly MachineGraph[]): void {
+  draw(graphs: readonly MachineGraph[]): boolean {
     const renderable = renderableGraphs(graphs); this.#graphs = renderable; const nextStructure = structureKey(renderable);
-    if (this.#structure === nextStructure && this.#nodes.size > 0) { this.#paint(renderable); return; }
-    this.#structure = nextStructure; this.#renderStructure(renderable); this.#fitCapped(); this.#applyFocusedMachine();
+    if (this.#structure === nextStructure && this.#nodes.size > 0) { this.#paint(renderable); return false; }
+    this.#structure = nextStructure; this.#renderStructure(renderable); return true;
   }
   focusMachine(machineName: string): boolean { this.#focusedMachine = machineName; return this.#focusMachine(machineName); }
   fit(): void { this.#focusedMachine = undefined; this.#dispatchInteraction("viewport.fit"); }

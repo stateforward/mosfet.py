@@ -19,7 +19,7 @@ export type MachineGraphEventName = keyof typeof graphEvents;
 export type MachineGraphPhase = "empty" | "drawing";
 
 export type GraphRenderer = {
-  draw(graphs: readonly MachineGraph[]): void;
+  draw(graphs: readonly MachineGraph[]): boolean | void;
   destroy(): void;
   applyViewport?(data: unknown): void;
 };
@@ -143,6 +143,7 @@ export class MachineGraphController {
   #graphs: readonly MachineGraph[] = [];
   #renderer: GraphRenderer | null;
   #onSnapshot: ((snapshot: MachineGraphSnapshot) => void) | null;
+  #initialViewPending = false;
 
   constructor(options: MachineGraphControllerOptions = {}) {
     this.#renderer = options.renderer ?? null;
@@ -171,6 +172,14 @@ export class MachineGraphController {
     }
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
     this.#emit();
+    if (this.#initialViewPending) {
+      this.#initialViewPending = false;
+      queueMicrotask(() => {
+        if (this.#renderer !== null) {
+          void this.dispatch("viewport.fit");
+        }
+      });
+    }
     return this.snapshot();
   }
 
@@ -192,13 +201,17 @@ export class MachineGraphController {
   draw(): void {
     if (this.#graphs.length === 0) {
       this.#renderer?.destroy();
+      this.#initialViewPending = false;
       return;
     }
-    this.#renderer?.draw(this.#graphs);
+    if (this.#renderer?.draw(this.#graphs) === true) {
+      this.#initialViewPending = true;
+    }
   }
 
   destroyRenderer(): void {
     this.#renderer?.destroy();
+    this.#initialViewPending = false;
   }
 
   #emit(): void {
