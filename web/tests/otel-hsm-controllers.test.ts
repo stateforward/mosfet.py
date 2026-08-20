@@ -153,6 +153,40 @@ describe("companion-style HSM controllers", () => {
     assert.equal(draws, 0);
   });
 
+  test("deferred initial fit does not reject during serialized shutdown", async () => {
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: () => true,
+        destroy: () => undefined,
+      },
+    });
+    const valid = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
+      edges: [],
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const first = graph.dispatch("graph.set", { graphs: [valid] });
+      const second = graph.dispatch("graph.set", { graphs: [valid] });
+      await first;
+      await graph.stop();
+      await second;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+  });
+
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
     const dashboard = new DashboardController();
     const source = new OtelSourceController();

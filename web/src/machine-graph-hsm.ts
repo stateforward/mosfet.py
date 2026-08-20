@@ -14,6 +14,12 @@ const graphEvents = {
   "viewport.zoom": { name: "viewport.zoom", kind: hsm.Kinds.Event },
 } as const;
 
+const STOPPED_CONTROLLER_ERROR = "MachineGraphController is stopped";
+
+function isExpectedControllerStop(error: unknown): boolean {
+  return error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR;
+}
+
 export type MachineGraphEventName = keyof typeof graphEvents;
 
 export type MachineGraphPhase = "empty" | "drawing";
@@ -192,7 +198,9 @@ export class MachineGraphController {
       const renderer = this.#renderer;
       queueMicrotask(() => {
         if (!this.#stopping && this.#renderer === renderer && renderer !== null) {
-          void this.dispatch("viewport.fit");
+          void this.dispatch("viewport.fit").catch((error: unknown) => {
+            if (!isExpectedControllerStop(error)) throw error;
+          });
         }
       });
     }
