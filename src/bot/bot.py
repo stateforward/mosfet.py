@@ -12,6 +12,7 @@ import weakref
 import hsm
 import pydantic
 
+import bot
 from bot import abilities
 from bot import lifecycle
 from bot.protocols import attachment
@@ -353,7 +354,7 @@ class Bot(hsm.Instance, abc.ABC):
     async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
         require_environment_scope(environment, self, participant="Bot")
         try:
-            _ = await hsm.started(environment, self, self.model)
+            _ = await bot.started(environment, self, self._model_for_instance())
         except Exception as error:
             if not _is_already_running_error(error):
                 raise
@@ -362,6 +363,15 @@ class Bot(hsm.Instance, abc.ABC):
         environment.join(self, placement=placement)
         await self.dispatch(environment, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
+
+    def _model_for_instance(self) -> hsm.Model:
+        return self.model
+
+    def _model_for_device(self, device: Device) -> hsm.Model:
+        model = device.model
+        if model is None:
+            raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
+        return model
 
     async def detach(self, environment: Environment) -> typing.Self:
         require_environment_scope(environment, self, participant="Bot")
@@ -1100,11 +1110,9 @@ class Bot(hsm.Instance, abc.ABC):
             # walking the tree here would start them a second time.
             for device in instance._devices.values():
                 require_environment_scope(environment, device, participant="Device")
-                model = device.model
-                if model is None:
-                    raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
+                model = instance._model_for_device(device)
                 try:
-                    _ = await hsm.started(environment, device, model)
+                    _ = await bot.started(environment, device, model, owner=instance)
                 except Exception as error:
                     if not _is_already_running_error(error):
                         raise

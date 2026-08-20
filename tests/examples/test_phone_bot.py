@@ -1174,3 +1174,41 @@ asyncio.run(main())
         pytest.skip("cognition credentials unavailable for live e2e")
     assert proc.returncode == 0, out
     assert "WIRED" in out, out
+
+
+def test_labeled_phone_bots_share_environment_instances_and_publish_distinct_owners() -> None:
+    code = """
+import asyncio
+import importlib
+
+import hsm
+import phone_bot_example as example
+from bot.environment import Environment, space
+
+
+async def main() -> None:
+    start = importlib.import_module("bot.start")
+    published = []
+    start.publish = lambda payload: published.append(payload)
+    start.publish_live = lambda payload: published.append(payload)
+    environment = Environment()
+    alice_placement = space.Placement(position=space.Position(x=0, y=0))
+    bob_placement = space.Placement(position=space.Position(x=100, y=0))
+    alice = await example.start_bot(
+        "Alice", environment=environment, placement=alice_placement
+    )
+    bob = await example.start_bot(
+        "Bob", environment=environment, placement=bob_placement
+    )
+    assert alice_placement.position.distance_to(bob_placement.position) >= 100
+    instances = environment.value(hsm.Keys.Instances)
+    assert alice.context().value(hsm.Keys.Instances) is instances
+    assert bob.context().value(hsm.Keys.Instances) is instances
+    assert {payload["name"] for payload in published if payload["name"] in {"/Alice", "/Bob"}} == {"/Alice", "/Bob"}
+    children = [payload for payload in published if payload["name"].endswith("Phone")]
+    assert {payload["owner"] for payload in children} == {"/Alice", "/Bob"}
+
+
+asyncio.run(main())
+"""
+    assert _run_phone_bot_python(code) == ""

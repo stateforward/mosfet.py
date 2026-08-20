@@ -26,6 +26,7 @@ import typing
 
 import hsm
 
+from bot import device
 from bot.bot import Bot
 
 from . import person
@@ -853,7 +854,7 @@ class PhoneBot(Bot):
     """Bot with LiveKit phone, input Listening, output Speaking, and optional conversation."""
 
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=600)
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "PhoneBot",
         Bot.model,
         hsm.observe(_log_phone_bot_observation),
@@ -861,6 +862,7 @@ class PhoneBot(Bot):
         hsm.observe(bot.ProcessingFailedEvent, _record_phone_bot_failure),
     )
     _label: str
+    _runtime_model: hsm.Model
     _phone: phone_device.Phone
     _listening: listening.Listening
     _speaking: speaking.Speaking
@@ -889,6 +891,7 @@ class PhoneBot(Bot):
         memory: memory.Memory | None = None,
     ) -> None:
         self._label = label
+        self._runtime_model = hsm.redefine(type(self).model, label)
         # Two transducers, because one object cannot be both at the ear and at the mouth. The
         # earpiece belongs to the handset; the voice belongs to the robot. Nothing to enforce
         # between them any more — Environment.join rejects a speaker placed in two places.
@@ -931,6 +934,14 @@ class PhoneBot(Bot):
         self._conversation_failures = []
         self._listening_handoffs = []
         self._listening_failures = []
+
+    @typing.override
+    def _model_for_instance(self) -> hsm.Model:
+        return self._runtime_model
+
+    @typing.override
+    def _model_for_device(self, device: device.Device) -> hsm.Model:
+        return hsm.redefine(typing.cast(hsm.Model, device.model), f"{self._label}Phone")
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
@@ -1030,6 +1041,7 @@ async def start_bot(
     *,
     config: AppConfig | None = None,
     environment: Environment | None = None,
+    placement: space.Placement | None = None,
     connect_livekit: bool = False,
     phone: phone_device.Phone | None = None,
     voice: audio.Speaker | None = None,
@@ -1054,7 +1066,12 @@ async def start_bot(
         memory=memory,
     )
     scope = environment if environment is not None else Environment()
-    _ = await body.attach(scope, placement=space.Placement(position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB))
+    _ = await body.attach(
+        scope,
+        placement=placement if placement is not None else space.Placement(
+            position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB
+        ),
+    )
     await _wait_for_active_bot(body)
     if connect_livekit and app_config.livekit.can_connect_room():
         if phone_service is None:
