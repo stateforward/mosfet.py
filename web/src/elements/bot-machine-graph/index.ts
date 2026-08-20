@@ -1,4 +1,4 @@
-import { MachineGraphController } from "../../machine-graph-hsm.ts";
+import { MachineGraphController, reportMachineGraphFailure } from "../../machine-graph-hsm.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
 import { applyStyles } from "../styles.ts";
 import { NativeGraphRenderer } from "./renderer.ts";
@@ -76,10 +76,7 @@ export class BotMachineGraph extends HTMLElement {
       this.#renderer.setInteractionDispatcher((eventName, data) => {
         const controller = this.#controller;
         if (controller === null) return;
-        return controller.dispatch(eventName, data).then(() => undefined).catch((error: unknown) => {
-          if (isExpectedControllerStop(error)) return;
-          throw error;
-        });
+        return controller.dispatch(eventName, data).then(() => undefined).catch(reportMachineGraphFailure);
       });
     }
     if (this.#pending !== undefined) void this.#admit(this.#pending, generation);
@@ -92,7 +89,7 @@ export class BotMachineGraph extends HTMLElement {
     this.#controller = null;
     this.#renderer = null;
     renderer?.dispose();
-    if (controller !== null) void controller.stop();
+    if (controller !== null) void controller.stop().catch(reportMachineGraphFailure);
     this.#frame.replaceChildren();
   }
 
@@ -106,13 +103,13 @@ export class BotMachineGraph extends HTMLElement {
       } else {
         await controller.dispatch("graph.set", { graphs: value });
       }
+      if (!isCurrent()) return;
+      if (this.#pendingFocus !== undefined && this.#controller?.focusMachine(this.#pendingFocus) === true) {
+        this.#pendingFocus = undefined;
+      }
     } catch (error) {
       if (!isCurrent() && isExpectedControllerStop(error)) return;
-      throw error;
-    }
-    if (!isCurrent()) return;
-    if (this.#pendingFocus !== undefined && this.#controller?.focusMachine(this.#pendingFocus) === true) {
-      this.#pendingFocus = undefined;
+      reportMachineGraphFailure(error);
     }
   }
 }

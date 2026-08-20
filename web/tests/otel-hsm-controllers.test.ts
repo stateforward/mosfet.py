@@ -126,6 +126,38 @@ describe("companion-style HSM controllers", () => {
     await graph.stop();
   });
 
+  test("graph updates repaint while the viewport is panning", async () => {
+    const drawn: string[][] = [];
+    const graphFor = (name: string) => ({
+      name,
+      componentName: name,
+      currentState: `${name}/idle`,
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: name, parent: null, label: name }],
+      edges: [],
+    });
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: (graphs) => {
+          drawn.push(graphs.map((value) => value.name));
+          return true;
+        },
+        destroy: () => undefined,
+      },
+    });
+
+    await graph.dispatch("graph.set", { graphs: [graphFor("/A")] });
+    await graph.dispatch("graph.set", { graphs: [graphFor("/B")] });
+    const panning = await graph.dispatch("viewport.pan.start", { pointerId: 1, point: { x: 10, y: 10 } });
+    assert.match(panning.statePath, /\/panning$/);
+    await graph.dispatch("graph.set", { graphs: [graphFor("/C")] });
+
+    assert.deepEqual(drawn, [["/A"], ["/B"], ["/C"]]);
+    assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
+    await graph.stop();
+  });
+
   test("normalized viewport intents update controller-owned transform and gesture state", async () => {
     const applied: unknown[] = [];
     const graph = new MachineGraphController({
@@ -212,6 +244,57 @@ describe("companion-style HSM controllers", () => {
       typeof value === "object" && value !== null && "scale" in value,
     );
     assert.notDeepEqual(transforms.at(-1), { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
+    assert.deepEqual(transforms.at(-1), {
+      scale: 600 / 656,
+      pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
+    });
+    await graph.stop();
+  });
+
+  test("filtered focused machines clear focus and fit the admitted graphs", async () => {
+    const applied: unknown[] = [];
+    let available = new Set<string>();
+    const graphFor = (name: string, admitted: boolean) => ({
+      name,
+      componentName: name,
+      currentState: `${name}/idle`,
+      lastEventName: "",
+      observationCount: 1,
+      nodes: admitted ? [{ path: name, parent: null, label: name }] : [],
+      edges: [],
+    });
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: (graphs) => {
+          available = new Set(graphs.filter((value) => value.nodes.length > 0).map((value) => value.name));
+          return true;
+        },
+        destroy: () => undefined,
+        viewportMetrics: () => ({
+          width: 1000,
+          height: 600,
+          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+          origin: { x: 0, y: 0 },
+        }),
+        focusBounds: (machineName) => available.has(machineName)
+          ? { left: 0, right: 96, top: 0, bottom: 96 }
+          : null,
+        applyViewport: (data) => {
+          applied.push(data);
+        },
+      },
+    });
+
+    await graph.dispatch("graph.set", { graphs: [graphFor("/A", true)] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(graph.focusMachine("/A"), true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await graph.dispatch("graph.set", { graphs: [graphFor("/A", false), graphFor("/B", true)] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const transforms = applied.filter((value) =>
+      typeof value === "object" && value !== null && "scale" in value,
+    );
     assert.deepEqual(transforms.at(-1), {
       scale: 600 / 656,
       pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },

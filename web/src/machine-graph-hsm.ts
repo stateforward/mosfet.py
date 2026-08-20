@@ -25,6 +25,20 @@ function isExpectedControllerStop(error: unknown): boolean {
   return error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR;
 }
 
+export function reportMachineGraphFailure(error: unknown): void {
+  if (isExpectedControllerStop(error)) return;
+  const reportError = (globalThis as typeof globalThis & {
+    reportError?: (value: unknown) => void;
+  }).reportError;
+  if (reportError !== undefined) {
+    reportError(error);
+    return;
+  }
+  setTimeout(() => {
+    throw error;
+  }, 0);
+}
+
 function recordOf(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;
 }
@@ -124,6 +138,11 @@ function rememberGraph(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Eve
   controllerOf(instance)?.rememberGraphs(graphs);
 }
 
+function rememberAndDrawGraph(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  rememberGraph(ctx, instance, event);
+  controllerOf(instance)?.draw(true);
+}
+
 function clearGraph(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.rememberGraphs([]);
 }
@@ -175,7 +194,7 @@ const machineGraphModel = hsm.define(
     "drawing",
     hsm.entry(drawGraph),
     hsm.exit(destroyGraph),
-    hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
+    hsm.transition(hsm.on("graph.set"), hsm.effect(rememberAndDrawGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("viewport.fit"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.focus"), hsm.effect(applyViewport)),
@@ -184,7 +203,7 @@ const machineGraphModel = hsm.define(
   ),
   hsm.state(
     "panning",
-    hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
+    hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberAndDrawGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("viewport.pan.start"), hsm.effect(beginPan)),
     hsm.transition(hsm.on("viewport.pan"), hsm.effect(applyViewport)),
@@ -263,12 +282,19 @@ export class MachineGraphController {
         return this.snapshot();
       }
     }
-    const focusRemoved = eventName === "graph.set"
+    let focusRemoved = eventName === "graph.set"
       && this.#focusedMachine !== undefined
       && nextGraphs !== null
       && !nextGraphs.some((graph) => graph.name === this.#focusedMachine);
     if (focusRemoved) this.#focusedMachine = undefined;
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
+    if (eventName === "graph.set" && !focusRemoved && this.#focusedMachine !== undefined) {
+      const renderer = this.#renderer;
+      if (renderer?.focusBounds !== undefined && renderer.focusBounds(this.#focusedMachine) === null) {
+        this.#focusedMachine = undefined;
+        focusRemoved = true;
+      }
+    }
     this.#emit();
     const shouldRefocus = eventName === "graph.set" && this.#focusedMachine !== undefined;
     if (this.#initialViewPending || shouldRefocus || focusRemoved) {
@@ -280,9 +306,7 @@ export class MachineGraphController {
           const data = this.#focusedMachine === undefined
             ? focusRemoved ? undefined : { reason: "initial" }
             : { machineName: this.#focusedMachine };
-          void this.dispatch(eventName, data).catch((error: unknown) => {
-            if (!isExpectedControllerStop(error)) throw error;
-          });
+          void this.dispatch(eventName, data).catch(reportMachineGraphFailure);
         }
       });
     }
@@ -364,13 +388,13 @@ export class MachineGraphController {
     this.#emit();
   }
 
-  draw(): void {
+  draw(preserveViewport = false): void {
     if (this.#graphs.length === 0) {
       this.#renderer?.destroy();
       this.#initialViewPending = false;
       return;
     }
-    if (this.#renderer?.draw(this.#graphs) === true) {
+    if (this.#renderer?.draw(this.#graphs) === true && !preserveViewport) {
       this.#initialViewPending = true;
     }
   }
@@ -421,9 +445,7 @@ export class MachineGraphController {
   }
 
   #requestViewport(eventName: MachineGraphEventName, data?: unknown): void {
-    void this.dispatch(eventName, data).catch((error: unknown) => {
-      if (!isExpectedControllerStop(error)) throw error;
-    });
+    void this.dispatch(eventName, data).catch(reportMachineGraphFailure);
   }
 
   #applyFocusedViewport(metrics: ViewportMetrics, data: unknown): boolean {
