@@ -14,11 +14,13 @@ import {
   NOW_BORDER,
   NOW_FILL,
   NOW_INK,
+  STATE_NODE_SIZE,
   initialPosition,
   initialTargets,
   nodeClasses,
   nodeLabel,
   graphNodeStyle,
+  stateNodeStyle,
   graphEdgeIdentity,
   isRenderableGraphEdge,
   loopAnchorIdentity,
@@ -31,6 +33,7 @@ import {
   machineOwnerIndex,
   ownershipLayout,
   renderableGraphs,
+  measureState,
 } from "../src/machine-graph-layout.ts";
 import { foldMachines, graphFromPublishedModel } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -107,6 +110,52 @@ describe("machine graph now theme and UML initial", () => {
     assert.ok(topLevelChild !== undefined);
     assert.ok(ownerPosition.x > topLevelOwner.x);
     assert.ok(childPosition.x < topLevelChild.x);
+  });
+
+  test("independent machine roots remain horizontally separated", () => {
+    const alice = model("/Alice");
+    const bob = model("/Bob");
+    const positions = environmentBoxPositions([alice, bob]);
+    const alicePosition = positions.get(namespacedPath(machineKey(alice, 0), alice.name));
+    const bobPosition = positions.get(namespacedPath(machineKey(bob, 1), bob.name));
+    assert.ok(alicePosition !== undefined);
+    assert.ok(bobPosition !== undefined);
+    assert.ok(alicePosition.x < bobPosition.x);
+    assert.equal(alicePosition.y, bobPosition.y);
+  });
+
+  test("leaf state geometry is square and balanced siblings use compact rows", () => {
+    const graph = {
+      ...model("/Machine"),
+      nodes: [
+        { path: "/Machine", parent: null, label: "Machine" },
+        { path: "/Machine/one", parent: "/Machine", label: "one" },
+        { path: "/Machine/two", parent: "/Machine", label: "two" },
+        { path: "/Machine/three", parent: "/Machine", label: "three" },
+        { path: "/Machine/four", parent: "/Machine", label: "four" },
+      ],
+    };
+    const ownership = ownershipLayout([graph]);
+    const leaf = measureState([graph], ownership, 0, "/Machine/one");
+    const style = stateNodeStyle();
+    assert.equal(style.width, style.height);
+    assert.equal(style.width, STATE_NODE_SIZE);
+    assert.equal(leaf.width, STATE_NODE_SIZE);
+    assert.equal(leaf.height, STATE_NODE_SIZE);
+    const positions = environmentBoxPositions([graph]);
+    const machine = machineKey(graph, 0);
+    const one = positions.get(namespacedPath(machine, "/Machine/one"));
+    const two = positions.get(namespacedPath(machine, "/Machine/two"));
+    const three = positions.get(namespacedPath(machine, "/Machine/three"));
+    const four = positions.get(namespacedPath(machine, "/Machine/four"));
+    assert.ok(one !== undefined);
+    assert.ok(two !== undefined);
+    assert.ok(three !== undefined);
+    assert.ok(four !== undefined);
+    assert.equal(one.y, two.y);
+    assert.equal(three.y, four.y);
+    assert.ok(one.x < two.x);
+    assert.ok(one.y < three.y);
   });
 
   test("missing owners and ownership cycles remain top-level", () => {

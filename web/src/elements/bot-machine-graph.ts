@@ -28,6 +28,7 @@ import {
   nodeClasses,
   nodeLabel,
   loopAnchorIdentity,
+  stateNodeStyle,
   structureKey,
   type Point,
 } from "../machine-graph-view.ts";
@@ -62,6 +63,7 @@ const cssText = `
 `;
 
 const COMPOUND_TITLE = compoundTitleStyle();
+const STATE_NODE = stateNodeStyle();
 
 function ancestorSet(path: string): Set<string> {
   const parts = path.split("/").filter((part) => part.length > 0);
@@ -302,13 +304,18 @@ class CytoscapeRenderer implements GraphRenderer {
               "font-size": 11,
               "font-family": "IBM Plex Sans, Segoe UI, system-ui, sans-serif",
               "text-wrap": "wrap",
-              "text-max-width": "100",
+              "text-max-width": `${STATE_NODE.textMaxWidth}`,
               "text-valign": "center",
               "text-halign": "center",
               padding: "10px",
-              width: "label",
-              height: "label",
               shape: "round-rectangle",
+            },
+          },
+          {
+            selector: "node.state:childless",
+            style: {
+              width: STATE_NODE.width,
+              height: STATE_NODE.height,
             },
           },
           {
@@ -328,6 +335,8 @@ class CytoscapeRenderer implements GraphRenderer {
               "font-weight": 650,
               "font-size": 10,
               padding: "18px",
+              width: "auto",
+              height: "auto",
             },
           },
           {

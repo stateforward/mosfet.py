@@ -11,6 +11,21 @@ export const INITIAL_FILL = "#000000";
 export const INITIAL_BORDER = "#2dd4bf";
 export const INITIAL_BORDER_WIDTH = 2;
 export const CANVAS_FILL = "#0b0d12";
+export const STATE_NODE_SIZE = 96;
+
+export type StateNodeStyle = {
+  width: number;
+  height: number;
+  textMaxWidth: number;
+};
+
+export function stateNodeStyle(): StateNodeStyle {
+  return {
+    width: STATE_NODE_SIZE,
+    height: STATE_NODE_SIZE,
+    textMaxWidth: STATE_NODE_SIZE - 20,
+  };
+}
 
 export function machineKey(graph: MachineGraph, index: number): string {
   return `machine:${index}:${encodeURIComponent(graph.name)}`;

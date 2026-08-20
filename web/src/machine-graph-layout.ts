@@ -1,8 +1,14 @@
 import { type MachineGraph, type MachineStateNode } from "./otel/machines.ts";
-import { machineKey, namespacedPath, type Point, type Size } from "./machine-graph-view.ts";
+import {
+  machineKey,
+  namespacedPath,
+  STATE_NODE_SIZE,
+  type Point,
+  type Size,
+} from "./machine-graph-view.ts";
 
-const LEAF_WIDTH = 120;
-const LEAF_HEIGHT = 40;
+const LEAF_WIDTH = STATE_NODE_SIZE;
+const LEAF_HEIGHT = STATE_NODE_SIZE;
 const GAP = 22;
 const PAD_X = 22;
 const PAD_Y = 36;
@@ -120,6 +126,77 @@ function graphLayout(graphs: readonly MachineGraph[], index: number): MachineLay
   return { graph, index, key: machineKey(graph, index) };
 }
 
+type GridMetrics = {
+  columns: number;
+  columnWidths: number[];
+  rowHeights: number[];
+  width: number;
+  height: number;
+};
+
+function gridColumns(itemCount: number): number {
+  return Math.max(1, Math.ceil(Math.sqrt(itemCount)));
+}
+
+function gridMetrics(
+  sizes: readonly Size[],
+  paddingX: number,
+  paddingY: number,
+  paddingBottom = PAD_X,
+): GridMetrics {
+  const columns = gridColumns(sizes.length);
+  const rows = Math.ceil(sizes.length / columns);
+  const columnWidths = Array.from({ length: columns }, () => 0);
+  const rowHeights = Array.from({ length: rows }, () => 0);
+  sizes.forEach((size, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    columnWidths[column] = Math.max(columnWidths[column] ?? 0, size.width);
+    rowHeights[row] = Math.max(rowHeights[row] ?? 0, size.height);
+  });
+  const contentWidth = columnWidths.reduce((total, width) => total + width, 0) + GAP * (columns - 1);
+  const contentHeight = rowHeights.reduce((total, height) => total + height, 0) + GAP * (rows - 1);
+  return {
+    columns,
+    columnWidths,
+    rowHeights,
+    width: contentWidth + paddingX * 2,
+    height: contentHeight + paddingY + paddingBottom,
+  };
+}
+
+function placeGrid(
+  sizes: readonly Size[],
+  metrics: GridMetrics,
+  originX: number,
+  originY: number,
+  place: (index: number, x: number, y: number) => void,
+): void {
+  const columnOffsets: number[] = [];
+  let columnX = originX;
+  for (const width of metrics.columnWidths) {
+    columnOffsets.push(columnX);
+    columnX += width + GAP;
+  }
+  const rowOffsets: number[] = [];
+  let rowY = originY;
+  for (const height of metrics.rowHeights) {
+    rowOffsets.push(rowY);
+    rowY += height + GAP;
+  }
+  sizes.forEach((size, index) => {
+    const column = index % metrics.columns;
+    const row = Math.floor(index / metrics.columns);
+    const cellWidth = metrics.columnWidths[column] ?? size.width;
+    const cellHeight = metrics.rowHeights[row] ?? size.height;
+    place(
+      index,
+      (columnOffsets[column] ?? originX) + (cellWidth - size.width) / 2,
+      (rowOffsets[row] ?? originY) + (cellHeight - size.height) / 2,
+    );
+  });
+}
+
 export function measureState(
   graphs: readonly MachineGraph[],
   ownership: OwnershipLayout,
@@ -138,9 +215,8 @@ export function measureState(
   if (childSizes.length === 0) {
     return { width: LEAF_WIDTH, height: LEAF_HEIGHT };
   }
-  const width = childSizes.reduce((total, size) => total + size.width + GAP, PAD_X) - GAP + PAD_X;
-  const height = Math.max(...childSizes.map((size) => size.height)) + PAD_Y + PAD_X;
-  return { width, height };
+  const metrics = gridMetrics(childSizes, PAD_X, PAD_Y);
+  return { width: metrics.width, height: metrics.height };
 }
 
 function measureMachine(
@@ -154,10 +230,8 @@ function measureMachine(
     return { width: LEAF_WIDTH, height: LEAF_HEIGHT };
   }
   const sizes = roots.map((root) => measureState(graphs, ownership, index, root.path));
-  return {
-    width: sizes.reduce((total, size) => total + size.width + GAP * 2, 0),
-    height: Math.max(...sizes.map((size) => size.height)),
-  };
+  const metrics = gridMetrics(sizes, 0, 0, 0);
+  return { width: metrics.width, height: metrics.height };
 }
 
 function placeState(
@@ -177,16 +251,24 @@ function placeState(
   });
   const stateChildren = childrenOf(layout.graph.nodes, path);
   const machineChildren = path === layout.graph.name ? ownership.childrenByIndex.get(index) ?? [] : [];
-  let childX = originX + PAD_X;
-  const childY = originY + PAD_Y;
-  for (const child of stateChildren) {
-    const childSize = placeState(graphs, ownership, index, child.path, childX, childY, positions);
-    childX += childSize.width + GAP;
-  }
-  for (const childIndex of machineChildren) {
-    const childSize = placeMachine(graphs, ownership, childIndex, childX, childY, positions);
-    childX += childSize.width + GAP;
-  }
+  const placements = [
+    ...stateChildren.map((child) => ({
+      size: measureState(graphs, ownership, index, child.path),
+      place: (x: number, y: number) => placeState(graphs, ownership, index, child.path, x, y, positions),
+    })),
+    ...machineChildren.map((childIndex) => ({
+      size: measureMachine(graphs, ownership, childIndex),
+      place: (x: number, y: number) => placeMachine(graphs, ownership, childIndex, x, y, positions),
+    })),
+  ];
+  const metrics = gridMetrics(placements.map((item) => item.size), PAD_X, PAD_Y);
+  placeGrid(
+    placements.map((item) => item.size),
+    metrics,
+    originX + PAD_X,
+    originY + PAD_Y,
+    (index, x, y) => placements[index]?.place(x, y),
+  );
   return size;
 }
 
@@ -201,11 +283,14 @@ function placeMachine(
   const graph = graphLayout(graphs, index).graph;
   const roots = childrenOf(graph.nodes, null);
   const size = measureMachine(graphs, ownership, index);
-  let childX = originX;
-  for (const root of roots) {
-    const childSize = placeState(graphs, ownership, index, root.path, childX, originY, positions);
-    childX += childSize.width + GAP * 2;
-  }
+  const rootSizes = roots.map((root) => measureState(graphs, ownership, index, root.path));
+  const metrics = gridMetrics(rootSizes, 0, 0);
+  placeGrid(rootSizes, metrics, originX, originY, (rootIndex, x, y) => {
+    const root = roots[rootIndex];
+    if (root !== undefined) {
+      placeState(graphs, ownership, index, root.path, x, y, positions);
+    }
+  });
   return size;
 }
 
