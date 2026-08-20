@@ -7,7 +7,7 @@ export function startMachine<I extends hsm.Instance, M>(instance: I, model: M): 
 }
 
 export async function stopMachine(machine: hsm.Instance): Promise<void> {
-  await hsm.stop(machine);
+  await hsm.Instance.prototype.stop.call(machine);
 }
 
 export function namedEvent(name: string, data?: unknown): hsm.DispatchEvent {

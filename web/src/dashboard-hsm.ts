@@ -76,12 +76,8 @@ export type DashboardControllerOptions = {
   readonly postCommand?: CommandPost;
 };
 
-class DashboardRuntime extends hsm.Instance {
-  controller: DashboardController | null = null;
-}
-
 function controllerOf(instance: hsm.Instance): DashboardController | null {
-  return instance instanceof DashboardRuntime ? instance.controller : null;
+  return instance instanceof DashboardController ? instance : null;
 }
 
 function sourceFromEvent(event: hsm.Event): OtelSource | null {
@@ -316,9 +312,7 @@ export function isDashboardEventName(value: string): value is DashboardEventName
   return Object.hasOwn(dashboardEvents, value);
 }
 
-export class DashboardController {
-  #runtime = new DashboardRuntime();
-  #machine: DashboardRuntime;
+export class DashboardController extends hsm.Instance {
   #source: OtelSource | null = null;
   #spans: ObserveSpan[] = [];
   #replayEvents: ReplayEvent[] = [];
@@ -339,15 +333,15 @@ export class DashboardController {
   #postCommand: CommandPost;
 
   constructor(options: DashboardControllerOptions = {}) {
+    super();
     this.#onSnapshot = options.onSnapshot ?? null;
     this.#connectStream = options.connectStream ?? connectOtelStream;
     this.#postCommand = options.postCommand ?? postCommandHttp;
-    this.#runtime.controller = this;
-    this.#machine = startMachine(this.#runtime, dashboardModel);
+    startMachine(this, dashboardModel);
   }
 
   snapshot(): DashboardSnapshot {
-    const statePath = this.#machine.takeSnapshot().state;
+    const statePath = this.takeSnapshot().state;
     const document = this.#document;
     return {
       phase: phaseFromStatePath(statePath),
@@ -369,8 +363,20 @@ export class DashboardController {
     };
   }
 
-  async dispatch(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    await this.#machine.dispatch(namedEvent(dashboardEvents[eventName].name, data));
+  override dispatch(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot>;
+  override dispatch(event: hsm.Event): hsm.Completion;
+  override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
+  override dispatch(eventOrContext: DashboardEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<DashboardSnapshot> {
+    if (typeof eventOrContext !== "string") {
+      return eventOrContext instanceof hsm.Context
+        ? super.dispatch(eventOrContext, data as hsm.Event)
+        : super.dispatch(eventOrContext);
+    }
+    return this.#dispatchController(eventOrContext, data);
+  }
+
+  async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
+    await super.dispatch(namedEvent(dashboardEvents[eventName].name, data));
     if (this.#pendingSend !== null) {
       await this.#pendingSend;
     }
@@ -378,9 +384,8 @@ export class DashboardController {
     return this.snapshot();
   }
 
-  async stop(): Promise<void> {
-    this.#runtime.controller = null;
-    await stopMachine(this.#machine);
+  override async stop(): Promise<void> {
+    await stopMachine(this);
   }
 
   applySource(source: OtelSource): void {

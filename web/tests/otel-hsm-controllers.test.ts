@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import * as hsm from "@stateforward/hsm.ts";
 
 import { DashboardController } from "../src/dashboard-hsm.ts";
 import { MachineGraphController } from "../src/machine-graph-hsm.ts";
@@ -378,6 +379,9 @@ describe("companion-style HSM controllers", () => {
       },
     });
 
+    assert.equal(dashboard instanceof hsm.Instance, true);
+    assert.equal(source instanceof hsm.Instance, true);
+    assert.equal(graph instanceof hsm.Instance, true);
     assert.match(dashboard.snapshot().statePath, /^\//);
     assert.match(source.snapshot().statePath, /^\//);
     assert.match(graph.snapshot().statePath, /^\//);

@@ -103,12 +103,8 @@ export type MachineGraphControllerOptions = {
   readonly onSnapshot?: (snapshot: MachineGraphSnapshot) => void;
 };
 
-class MachineGraphRuntime extends hsm.Instance {
-  controller: MachineGraphController | null = null;
-}
-
 function controllerOf(instance: hsm.Instance): MachineGraphController | null {
-  return instance instanceof MachineGraphRuntime ? instance.controller : null;
+  return instance instanceof MachineGraphController ? instance : null;
 }
 
 function parseGraphs(value: unknown): MachineGraph[] | null {
@@ -226,9 +222,7 @@ export function isMachineGraphEventName(value: string): value is MachineGraphEve
   return Object.hasOwn(graphEvents, value);
 }
 
-export class MachineGraphController {
-  #runtime = new MachineGraphRuntime();
-  #machine: MachineGraphRuntime;
+export class MachineGraphController extends hsm.Instance {
   #graphs: readonly MachineGraph[] = [];
   #renderer: GraphRenderer | null;
   #onSnapshot: ((snapshot: MachineGraphSnapshot) => void) | null;
@@ -245,14 +239,14 @@ export class MachineGraphController {
   #pinchStart: { distance: number; scale: number } | null = null;
 
   constructor(options: MachineGraphControllerOptions = {}) {
+    super();
     this.#renderer = options.renderer ?? null;
     this.#onSnapshot = options.onSnapshot ?? null;
-    this.#runtime.controller = this;
-    this.#machine = startMachine(this.#runtime, machineGraphModel);
+    startMachine(this, machineGraphModel);
   }
 
   snapshot(): MachineGraphSnapshot {
-    const statePath = this.#machine.takeSnapshot().state;
+    const statePath = this.takeSnapshot().state;
     return {
       phase: phaseFromStatePath(statePath),
       statePath,
@@ -260,13 +254,25 @@ export class MachineGraphController {
     };
   }
 
-  async dispatch(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot> {
+  override dispatch(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot>;
+  override dispatch(event: hsm.Event): hsm.Completion;
+  override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
+  override async dispatch(eventOrContext: MachineGraphEventName | hsm.Event | hsm.Context, data?: unknown): Promise<void | MachineGraphSnapshot> {
+    if (typeof eventOrContext !== "string") {
+      if (eventOrContext instanceof hsm.Context) {
+        await super.dispatch(eventOrContext, data as hsm.Event);
+      } else {
+        await super.dispatch(eventOrContext);
+      }
+      return;
+    }
+    const eventName = eventOrContext;
     if (this.#stopping) {
-      throw new Error("MachineGraphController is stopped");
+      return Promise.reject<MachineGraphSnapshot>(new Error("MachineGraphController is stopped"));
     }
     const dispatch = this.#dispatchTail.then(() => this.#dispatchNow(eventName, data));
     this.#dispatchTail = dispatch.then(() => undefined, () => undefined);
-    return dispatch;
+    return await dispatch;
   }
 
   async #dispatchNow(eventName: MachineGraphEventName, data?: unknown): Promise<MachineGraphSnapshot> {
@@ -277,7 +283,7 @@ export class MachineGraphController {
     if (eventName === "graph.set") {
       nextGraphs = isRecord(data) ? parseGraphs(data["graphs"]) : null;
       if (nextGraphs === null || nextGraphs.length === 0) {
-        await this.#machine.dispatch(namedEvent(graphEvents["graph.clear"].name));
+        await super.dispatch(namedEvent(graphEvents["graph.clear"].name));
         this.#emit();
         return this.snapshot();
       }
@@ -287,7 +293,7 @@ export class MachineGraphController {
       && nextGraphs !== null
       && !nextGraphs.some((graph) => graph.name === this.#focusedMachine);
     if (focusRemoved) this.#focusedMachine = undefined;
-    await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
+    await super.dispatch(namedEvent(graphEvents[eventName].name, data));
     if (eventName === "graph.set" && !focusRemoved && this.#focusedMachine !== undefined) {
       const renderer = this.#renderer;
       if (renderer?.focusBounds !== undefined && renderer.focusBounds(this.#focusedMachine) === null) {
@@ -367,7 +373,7 @@ export class MachineGraphController {
     return true;
   }
 
-  stop(): Promise<void> {
+  override stop(): Promise<void> {
     if (this.#stopPromise !== null) return this.#stopPromise;
     this.#stopping = true;
     this.#initialViewPending = false;
@@ -378,8 +384,7 @@ export class MachineGraphController {
   async #finishStop(): Promise<void> {
     await this.#dispatchTail;
     this.destroyRenderer();
-    this.#runtime.controller = null;
-    await stopMachine(this.#machine);
+    await stopMachine(this);
   }
 
   rememberGraphs(graphs: readonly MachineGraph[]): void {

@@ -26,12 +26,8 @@ export type OtelSourceControllerOptions = {
   readonly onReady?: (source: OtelSource) => void;
 };
 
-class OtelSourceRuntime extends hsm.Instance {
-  controller: OtelSourceController | null = null;
-}
-
 function controllerOf(instance: hsm.Instance): OtelSourceController | null {
-  return instance instanceof OtelSourceRuntime ? instance.controller : null;
+  return instance instanceof OtelSourceController ? instance : null;
 }
 
 function sourceFromEvent(event: hsm.Event): OtelSource | null {
@@ -113,23 +109,21 @@ export function isOtelSourceEventName(value: string): value is OtelSourceEventNa
   return Object.hasOwn(sourceEvents, value);
 }
 
-export class OtelSourceController {
-  #runtime = new OtelSourceRuntime();
-  #machine: OtelSourceRuntime;
+export class OtelSourceController extends hsm.Instance {
   #source: OtelSource | null = null;
   #errorMessage: string | null = null;
   #onSnapshot: ((snapshot: OtelSourceSnapshot) => void) | null;
   #onReady: ((source: OtelSource) => void) | null;
 
   constructor(options: OtelSourceControllerOptions = {}) {
+    super();
     this.#onSnapshot = options.onSnapshot ?? null;
     this.#onReady = options.onReady ?? null;
-    this.#runtime.controller = this;
-    this.#machine = startMachine(this.#runtime, otelSourceModel);
+    startMachine(this, otelSourceModel);
   }
 
   snapshot(): OtelSourceSnapshot {
-    const statePath = this.#machine.takeSnapshot().state;
+    const statePath = this.takeSnapshot().state;
     return {
       phase: phaseFromStatePath(statePath),
       statePath,
@@ -138,15 +132,26 @@ export class OtelSourceController {
     };
   }
 
-  async dispatch(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    await this.#machine.dispatch(namedEvent(sourceEvents[eventName].name, data));
+  override dispatch(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot>;
+  override dispatch(event: hsm.Event): hsm.Completion;
+  override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
+  override dispatch(eventOrContext: OtelSourceEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<OtelSourceSnapshot> {
+    if (typeof eventOrContext !== "string") {
+      return eventOrContext instanceof hsm.Context
+        ? super.dispatch(eventOrContext, data as hsm.Event)
+        : super.dispatch(eventOrContext);
+    }
+    return this.#dispatchController(eventOrContext, data);
+  }
+
+  async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
+    await super.dispatch(namedEvent(sourceEvents[eventName].name, data));
     this.#emit();
     return this.snapshot();
   }
 
-  async stop(): Promise<void> {
-    this.#runtime.controller = null;
-    await stopMachine(this.#machine);
+  override async stop(): Promise<void> {
+    await stopMachine(this);
   }
 
   rememberSource(source: OtelSource | null): void {
