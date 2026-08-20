@@ -1,6 +1,6 @@
 import * as hsm from "@stateforward/hsm.ts";
 
-import { isRecord, namedEvent, startMachine, stopMachine } from "./hsm-runtime.ts";
+import { isRecord, namedEvent, reportHsmFailure, startMachine, stopMachine } from "./hsm-runtime.ts";
 import {
   documentFromSpans,
   machineByName,
@@ -211,7 +211,9 @@ function applySend(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event):
   if (controller === null) {
     return;
   }
-  void controller.sendCommand(stringField(event, "eventName"), stringField(event, "dataJson"));
+  void controller
+    .sendCommand(stringField(event, "eventName"), stringField(event, "dataJson"))
+    .catch(reportHsmFailure);
 }
 
 function clearView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -385,6 +387,7 @@ export class DashboardController extends hsm.Instance {
   }
 
   override async stop(): Promise<void> {
+    this.#stopReplayTimer();
     await stopMachine(this);
   }
 
@@ -574,25 +577,25 @@ export class DashboardController extends hsm.Instance {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "replace" });
+        void this.dispatch("dashboard.load.completed", { ...batch, mode: "replace" }).catch(reportHsmFailure);
       },
       onSpans: (batch) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "append" });
+        void this.dispatch("dashboard.load.completed", { ...batch, mode: "append" }).catch(reportHsmFailure);
       },
       onModels: (models) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.model.published", { models });
+        void this.dispatch("dashboard.model.published", { models }).catch(reportHsmFailure);
       },
       onError: (message) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.failed", { message });
+        void this.dispatch("dashboard.load.failed", { message }).catch(reportHsmFailure);
       },
     });
     try {
@@ -617,7 +620,10 @@ export class DashboardController extends hsm.Instance {
   }
 
   #scheduleReplayStep(): void {
-    this.#stopReplayTimer();
+    if (this.#replayTimer !== null) {
+      clearTimeout(this.#replayTimer);
+      this.#replayTimer = null;
+    }
     if (!this.#replayPlaying) {
       return;
     }

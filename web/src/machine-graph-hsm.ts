@@ -1,6 +1,6 @@
 import * as hsm from "@stateforward/hsm.ts";
 
-import { isRecord, namedEvent, startMachine, stopMachine } from "./hsm-runtime.ts";
+import { isRecord, namedEvent, reportHsmFailure, startMachine, stopMachine } from "./hsm-runtime.ts";
 import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 
 const graphEvents = {
@@ -14,29 +14,14 @@ const graphEvents = {
   "viewport.zoom": { name: "viewport.zoom", kind: hsm.Kinds.Event },
 } as const;
 
-const STOPPED_CONTROLLER_ERROR = "MachineGraphController is stopped";
 const FIT_PADDING = 28;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.4;
 const MAX_FIT_ZOOM = 1.2;
 const ZOOM_STEP = 0.0015;
 
-function isExpectedControllerStop(error: unknown): boolean {
-  return error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR;
-}
-
 export function reportMachineGraphFailure(error: unknown): void {
-  if (isExpectedControllerStop(error)) return;
-  const reportError = (globalThis as typeof globalThis & {
-    reportError?: (value: unknown) => void;
-  }).reportError;
-  if (reportError !== undefined) {
-    reportError(error);
-    return;
-  }
-  setTimeout(() => {
-    throw error;
-  }, 0);
+  reportHsmFailure(error);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {

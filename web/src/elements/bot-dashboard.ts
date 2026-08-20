@@ -3,6 +3,7 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
+import { reportHsmFailure } from "../hsm-runtime.ts";
 import {
   environmentWorkspaceGraphs,
   environmentRootGraphs,
@@ -1001,7 +1002,7 @@ export class BotDashboard extends HTMLElement {
     const controller = this.#controller;
     this.#controller = null;
     if (controller !== null) {
-      void controller.stop();
+      void controller.stop().catch(reportHsmFailure);
     }
   }
 
@@ -1293,14 +1294,14 @@ export class BotDashboard extends HTMLElement {
     if (!isSourceDetail(event.detail)) {
       return;
     }
-    void this.#controller.dispatch("dashboard.source.selected", { source: event.detail.source });
+    void this.#controller.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(reportHsmFailure);
   };
 
   readonly #onEdge = (event: Event): void => {
     if (!(event instanceof CustomEvent) || this.#controller === null || !isEdgeDetail(event.detail)) {
       return;
     }
-    void this.#controller.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName });
+    void this.#controller.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(reportHsmFailure);
   };
 
   readonly #onZoom = (event: Event): void => {
@@ -1337,24 +1338,24 @@ export class BotDashboard extends HTMLElement {
       if (!(control instanceof HTMLSelectElement)) {
         this.#graph.focusMachine(machineName);
       }
-      void this.#controller.dispatch(eventName, { machineName });
+      void this.#controller.dispatch(eventName, { machineName }).catch(reportHsmFailure);
       return;
     }
     if (eventName === "dashboard.command.send") {
       void this.#controller.dispatch(eventName, {
         eventName: this.#eventName.value,
         dataJson: this.#eventData.value,
-      });
+      }).catch(reportHsmFailure);
       return;
     }
     if (eventName === "dashboard.replay.seek") {
       const position = control instanceof HTMLInputElement ? Number(control.value) : Number.NaN;
       if (Number.isFinite(position)) {
-        void this.#controller.dispatch(eventName, { position });
+        void this.#controller.dispatch(eventName, { position }).catch(reportHsmFailure);
       }
       return;
     }
-    void this.#controller.dispatch(eventName);
+    void this.#controller.dispatch(eventName).catch(reportHsmFailure);
   };
 }
 

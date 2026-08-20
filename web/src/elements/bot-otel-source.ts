@@ -3,6 +3,7 @@ import {
   OtelSourceController,
   type OtelSourceSnapshot,
 } from "../otel-source-hsm.ts";
+import { reportHsmFailure } from "../hsm-runtime.ts";
 import { type OtelSource } from "../otel/source.ts";
 import { applyStyles } from "./styles.ts";
 
@@ -110,7 +111,7 @@ export class BotOtelSource extends HTMLElement {
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.#controller.snapshot());
     if (this.#controller.snapshot().phase === "idle") {
-      void this.#controller.dispatch("source.connect.requested");
+      void this.#controller.dispatch("source.connect.requested").catch(reportHsmFailure);
       return;
     }
     if (this.#controller.snapshot().phase === "live") {
@@ -124,7 +125,7 @@ export class BotOtelSource extends HTMLElement {
     const controller = this.#controller;
     this.#controller = null;
     if (controller !== null) {
-      void controller.stop();
+      void controller.stop().catch(reportHsmFailure);
     }
   }
 
@@ -147,7 +148,7 @@ export class BotOtelSource extends HTMLElement {
     if (eventName === undefined || !isOtelSourceEventName(eventName) || this.#controller === null) {
       return;
     }
-    void this.#controller.dispatch(eventName);
+    void this.#controller.dispatch(eventName).catch(reportHsmFailure);
   };
 }
 

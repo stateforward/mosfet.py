@@ -5,7 +5,8 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as hsm from "@stateforward/hsm.ts";
 
-import { DashboardController } from "../src/dashboard-hsm.ts";
+import { DashboardController, type DashboardSnapshot } from "../src/dashboard-hsm.ts";
+import { reportHsmFailure } from "../src/hsm-runtime.ts";
 import { MachineGraphController } from "../src/machine-graph-hsm.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
@@ -362,6 +363,72 @@ describe("companion-style HSM controllers", () => {
       process.off("unhandledRejection", onUnhandled);
     }
     assert.deepEqual(unhandled, []);
+  });
+
+  test("source and dashboard dispatch-stop races suppress expected shutdown failures", async () => {
+    const source = new OtelSourceController();
+    const dashboard = new DashboardController();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const sourceDispatch = source.dispatch("source.connect.requested").catch(reportHsmFailure);
+      const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(reportHsmFailure);
+      await Promise.all([source.stop(), dashboard.stop()]);
+      await Promise.all([sourceDispatch, dashboardDispatch]);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    assert.deepEqual(unhandled, []);
+  });
+
+  test("HSM failure reporting suppresses shutdown and reports unexpected errors", () => {
+    const reports: unknown[] = [];
+    const globalWithReportError = globalThis as typeof globalThis & {
+      reportError?: (value: unknown) => void;
+    };
+    const previous = globalWithReportError.reportError;
+    globalWithReportError.reportError = (error) => {
+      reports.push(error);
+    };
+    try {
+      reportHsmFailure(new Error("dispatch requires a started HSM"));
+      const unexpected = new Error("unexpected HSM failure");
+      reportHsmFailure(unexpected);
+      assert.deepEqual(reports, [unexpected]);
+    } finally {
+      if (previous === undefined) {
+        delete globalWithReportError.reportError;
+      } else {
+        globalWithReportError.reportError = previous;
+      }
+    }
+  });
+
+  test("stopping the dashboard cancels replay callbacks", async () => {
+    const request: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const parsed = parseExportTraceServiceRequest(request);
+    assert.ok(parsed !== null);
+    const snapshots: DashboardSnapshot[] = [];
+    const dashboard = new DashboardController({
+      onSnapshot: (snapshot) => {
+        snapshots.push(snapshot);
+      },
+    });
+    dashboard.applySpans(parsed.spans, 0, "replace");
+    dashboard.enterReplay();
+    dashboard.playReplay();
+    assert.ok(dashboard.snapshot().replay.total > 0);
+    assert.equal(dashboard.snapshot().replay.playing, true);
+    const snapshotsBeforeStop = snapshots.length;
+
+    await dashboard.stop();
+    await new Promise<void>((resolve) => setTimeout(resolve, 750));
+
+    assert.equal(snapshots.length, snapshotsBeforeStop);
   });
 
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
