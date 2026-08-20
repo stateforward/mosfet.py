@@ -1213,6 +1213,9 @@ async def main() -> None:
         for payload in published
         if payload["name"] in {"/AlicePhone", "/BobPhone", "/AlicePhoneMicrophone", "/BobPhoneMicrophone"}
     ]
+    assert not {("/Phone", "/AlicePhone"), ("/Phone", "/BobPhone")} & {
+        (payload["name"], payload["owner"]) for payload in published
+    }
     assert {payload["name"] for payload in children} == {
         "/AlicePhone",
         "/BobPhone",
