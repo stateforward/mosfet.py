@@ -312,6 +312,64 @@ test("Members shows direct roots while owned models stay nested and focusable", 
   ).toBe(2);
 });
 
+test("clicking a member focuses its owned subtree without changing selection or visibility", async ({ page, request }) => {
+  await openStudio(page);
+  const firstRoot = "/FocusFirst";
+  const secondRoot = "/FocusSecond";
+  const firstStates = Array.from({ length: 40 }, (_, index) => `${firstRoot}/state${String(index)}`);
+  const secondStates = [`${secondRoot}/ready`];
+  for (const [name, states] of [[firstRoot, firstStates], [secondRoot, secondStates]] as const) {
+    const response = await request.post("/v1/models", {
+      data: {
+        ...publishedModel(name, null),
+        states: [
+          { qualified_name: name, parent: "/", initial: `${name}/.initial` },
+          ...states.map((state) => ({ qualified_name: state, parent: name, initial: "" })),
+        ],
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+    const liveResponse = await request.post("/v1/models/live", {
+      data: {
+        name,
+        component: name.slice(1),
+        state: states[0],
+        live: true,
+        owner: null,
+      },
+    });
+    expect(liveResponse.ok()).toBeTruthy();
+  }
+
+  const firstMember = page.getByTestId("members").locator(`.machine[data-machine-name="${firstRoot}"]`);
+  const secondMember = page.getByTestId("members").locator(`.machine[data-machine-name="${secondRoot}"]`);
+  await expect(firstMember).toHaveAttribute("data-visible", "true");
+  await expect(secondMember).toHaveAttribute("data-visible", "true");
+  await expect(page.getByTestId("current-path")).toContainText(firstRoot);
+
+  const zoomBefore = await page.getByTestId("map-header").evaluate((header) => {
+    const zoom = header.querySelector<HTMLElement>(".zoom");
+    if (zoom === null) {
+      throw new Error("graph zoom indicator is unavailable");
+    }
+    return zoom.textContent;
+  });
+  await secondMember.locator(".machine-select").click();
+  await expect(page.getByTestId("current-path")).toContainText(secondRoot);
+  await expect(secondMember.locator(".machine-select")).toHaveAttribute("aria-current", "true");
+  await expect(firstMember.locator(".machine-select")).toHaveAttribute("aria-current", "false");
+  await expect.poll(async () => {
+    return page.getByTestId("map-header").evaluate((header) => header.querySelector<HTMLElement>(".zoom")?.textContent);
+  }).not.toBe(zoomBefore);
+
+  await secondMember.locator("input[data-testid=machine-visibility]").click();
+  await expect(secondMember).toHaveAttribute("data-visible", "false");
+  await secondMember.locator(".machine-select").click();
+  await expect(page.getByTestId("current-path")).toContainText(secondRoot);
+  await expect(secondMember.locator(".machine-select")).toHaveAttribute("aria-current", "true");
+  await expect(secondMember).toHaveAttribute("data-visible", "false");
+});
+
 test("command gateway reports no subscriber when no bot is attached", async ({ page, request }) => {
   await openStudio(page);
   const response = await request.post("/v1/commands", {

@@ -1233,6 +1233,9 @@ export class BotDashboard extends HTMLElement {
       if (machineName === undefined) {
         return;
       }
+      if (!(control instanceof HTMLSelectElement)) {
+        this.#graph.focusMachine(machineName);
+      }
       void this.#controller.dispatch(eventName, { machineName });
       return;
     }

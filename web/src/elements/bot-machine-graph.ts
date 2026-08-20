@@ -135,6 +135,8 @@ function edgeClasses(kind: EdgeKind, lastFired: boolean, extra: readonly string[
 class CytoscapeRenderer implements GraphRenderer {
   #cy: cytoscape.Core | null = null;
   #structure: string | null = null;
+  #graphs: readonly MachineGraph[] = [];
+  #focusedMachine: string | undefined;
   #resizeObserver: ResizeObserver | null = null;
   #hasRealDimensions = false;
 
@@ -149,6 +151,7 @@ class CytoscapeRenderer implements GraphRenderer {
   draw(graphs: readonly MachineGraph[]): void {
     this.#ensureResizeObserver();
     const renderable = renderableGraphs(graphs);
+    this.#graphs = renderable;
     const nextStructure = structureKey(renderable);
     if (this.#cy !== null && this.#structure === nextStructure) {
       this.#paint(renderable);
@@ -170,6 +173,7 @@ class CytoscapeRenderer implements GraphRenderer {
         const data: Record<string, string> = {
           id,
           machine,
+          machineName: graph.name,
           path: node.path,
           name: node.label,
           label: nodeLabel(node.label, node.path, graph.currentState),
@@ -472,6 +476,51 @@ class CytoscapeRenderer implements GraphRenderer {
       this.#cy.layout({ name: "preset", fit: true, padding: 28 }).run();
     }
     this.#fitCapped();
+    this.#applyFocusedMachine();
+  }
+
+  focusMachine(machineName: string): boolean {
+    this.#focusedMachine = machineName;
+    return this.#focusMachine(machineName);
+  }
+
+  #focusMachine(machineName: string): boolean {
+    const cy = this.#cy;
+    if (cy === null) {
+      return false;
+    }
+    const byName = new Map(this.#graphs.map((graph) => [graph.name, graph]));
+    const target = byName.get(machineName);
+    if (target === undefined) {
+      return false;
+    }
+    const names = new Set<string>([machineName]);
+    for (const graph of this.#graphs) {
+      let ownerName = graph.owner;
+      const visited = new Set<string>();
+      while (ownerName !== null && ownerName !== undefined && !visited.has(ownerName)) {
+        if (ownerName === machineName) {
+          names.add(graph.name);
+          break;
+        }
+        visited.add(ownerName);
+        ownerName = byName.get(ownerName)?.owner;
+      }
+    }
+    const root = cy.nodes().filter((node) => {
+      return node.data("machineName") === machineName && node.data("path") === machineName;
+    });
+    if (root.empty()) {
+      return false;
+    }
+    const subtree = cy.nodes().filter((node) => {
+      const nodeMachineName = node.data("machineName");
+      return typeof nodeMachineName === "string" && names.has(nodeMachineName);
+    });
+    cy.resize();
+    cy.fit(subtree, 36);
+    this.onZoom(cy.zoom());
+    return true;
   }
 
   #paint(graphs: readonly MachineGraph[]): void {
@@ -523,7 +572,14 @@ class CytoscapeRenderer implements GraphRenderer {
   }
 
   fit(): void {
+    this.#focusedMachine = undefined;
     this.#fitCapped();
+  }
+
+  #applyFocusedMachine(): void {
+    if (this.#focusedMachine !== undefined) {
+      this.#focusMachine(this.#focusedMachine);
+    }
   }
 
   #fitCapped(): void {
@@ -548,6 +604,7 @@ class CytoscapeRenderer implements GraphRenderer {
     if (!this.#hasRealDimensions) {
       this.#hasRealDimensions = true;
       this.#fitCapped();
+      this.#applyFocusedMachine();
       return;
     }
     const zoom = cy.zoom();
@@ -556,6 +613,7 @@ class CytoscapeRenderer implements GraphRenderer {
     cy.zoom(zoom);
     cy.pan(pan);
     this.onZoom(cy.zoom());
+    this.#applyFocusedMachine();
   }
 
   #ensureResizeObserver(): void {
@@ -578,6 +636,8 @@ class CytoscapeRenderer implements GraphRenderer {
     this.#cy?.destroy();
     this.#cy = null;
     this.#structure = null;
+    this.#graphs = [];
+    this.#focusedMachine = undefined;
     this.#hasRealDimensions = false;
   }
 }
@@ -588,6 +648,7 @@ export class BotMachineGraph extends HTMLElement {
   #controller: MachineGraphController | null = null;
   #renderer: CytoscapeRenderer | null = null;
   #pending: readonly MachineGraph[] | undefined;
+  #pendingFocus: string | undefined;
 
   constructor() {
     super();
@@ -611,7 +672,13 @@ export class BotMachineGraph extends HTMLElement {
   }
 
   fit(): void {
+    this.#pendingFocus = undefined;
     this.#renderer?.fit();
+  }
+
+  focusMachine(machineName: string): void {
+    this.#pendingFocus = machineName;
+    this.#renderer?.focusMachine(machineName);
   }
 
   connectedCallback(): void {
@@ -667,6 +734,9 @@ export class BotMachineGraph extends HTMLElement {
       return;
     }
     await controller.dispatch("graph.set", { graphs: value });
+    if (this.#pendingFocus !== undefined && this.#renderer?.focusMachine(this.#pendingFocus)) {
+      this.#pendingFocus = undefined;
+    }
   }
 }
 
