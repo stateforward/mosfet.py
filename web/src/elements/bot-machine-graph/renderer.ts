@@ -1,4 +1,4 @@
-import type { GraphRenderer } from "../../machine-graph-hsm.ts";
+import type { GraphRenderer, ViewportBounds, ViewportMetrics } from "../../machine-graph-hsm.ts";
 import {
   environmentBoxPositions,
   machineOwnerIndex,
@@ -42,10 +42,6 @@ import {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const WORLD_PADDING = 56;
-const FIT_PADDING = 28;
-const MIN_ZOOM = 0.12;
-const MAX_ZOOM = 2.4;
-const MAX_FIT_ZOOM = 1.2;
 const EDGE_LABEL_LIMIT = 30;
 
 type LayoutNode = {
@@ -75,6 +71,19 @@ function addSvgElement<K extends keyof SVGElementTagNameMap>(parent: SVGElement,
   return element;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pointOf(value: unknown): Point | null {
+  if (!isRecord(value)) return null;
+  const x = value["x"];
+  const y = value["y"];
+  return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
+    ? { x, y }
+    : null;
+}
+
 export class NativeGraphRenderer implements GraphRenderer {
   #viewport: HTMLDivElement;
   #world: HTMLDivElement;
@@ -85,7 +94,6 @@ export class NativeGraphRenderer implements GraphRenderer {
   #onEdge: (eventName: string) => void;
   #structure: string | null = null;
   #graphs: readonly MachineGraph[] = [];
-  #focusedMachine: string | undefined;
   #resizeObserver: ResizeObserver | null = null;
   #nodes = new Map<string, LayoutNode>();
   #edges: RenderedEdge[] = [];
@@ -93,12 +101,6 @@ export class NativeGraphRenderer implements GraphRenderer {
   #bounds: Bounds = { left: 0, right: 0, top: 0, bottom: 0 };
   #origin: Point = { x: WORLD_PADDING, y: WORLD_PADDING };
   #worldSize: Size = { width: 1, height: 1 };
-  #scale = 1;
-  #pan: Point = { x: 0, y: 0 };
-  #hasRealDimensions = false;
-  #pointers = new Map<number, Point>();
-  #dragStart: { pointerId: number; point: Point; pan: Point } | null = null;
-  #pinchStart: { distance: number; scale: number } | null = null;
 
   constructor(container: HTMLElement, onZoom: (zoom: number) => void, onEdge: (eventName: string) => void) {
     this.#container = container;
@@ -138,17 +140,6 @@ export class NativeGraphRenderer implements GraphRenderer {
     return true;
   }
 
-  focusMachine(machineName: string): boolean {
-    const focused = this.#focusMachine(machineName);
-    this.#focusedMachine = focused ? machineName : undefined;
-    return focused;
-  }
-
-  fit(): void {
-    this.#focusedMachine = undefined;
-    this.#dispatchInteraction("viewport.fit");
-  }
-
   destroy(): void {
     this.#edgeLayer.replaceChildren();
     this.#nodeLayer.replaceChildren();
@@ -159,7 +150,8 @@ export class NativeGraphRenderer implements GraphRenderer {
     this.#nodes.clear();
     this.#edges = [];
     this.#initialNodes = [];
-    this.#focusedMachine = undefined;
+    this.#world.style.transform = "none";
+    this.#container.classList.remove("is-dragging");
   }
 
   dispose(): void {
@@ -172,9 +164,6 @@ export class NativeGraphRenderer implements GraphRenderer {
     this.#viewport.removeEventListener("pointercancel", this.#onPointerUp);
     this.#viewport.removeEventListener("wheel", this.#onWheel);
     this.#edgeLayer.removeEventListener("click", this.#onEdgeClick);
-    this.#pointers.clear();
-    this.#dragStart = null;
-    this.#pinchStart = null;
     this.#interactionDispatch = null;
     this.#onZoom = () => undefined;
     this.#onEdge = () => undefined;
@@ -419,8 +408,18 @@ export class NativeGraphRenderer implements GraphRenderer {
     }
   }
 
-  #focusMachine(machineName: string): boolean {
-    if (!this.#graphs.some((graph) => graph.name === machineName)) return false;
+  viewportMetrics(): ViewportMetrics | null {
+    if (!this.#hasViewport()) return null;
+    return {
+      width: this.#viewport.clientWidth,
+      height: this.#viewport.clientHeight,
+      bounds: { ...this.#bounds },
+      origin: { ...this.#origin },
+    };
+  }
+
+  focusBounds(machineName: string): ViewportBounds | null {
+    if (!this.#graphs.some((graph) => graph.name === machineName)) return null;
     const names = new Set([machineName]);
     const byName = new Map(this.#graphs.map((graph) => [graph.name, graph]));
     for (const graph of this.#graphs) {
@@ -436,7 +435,7 @@ export class NativeGraphRenderer implements GraphRenderer {
       }
     }
     const focused = [...this.#nodes.values()].filter((node) => names.has(node.machineName));
-    if (focused.length === 0) return false;
+    if (focused.length === 0) return null;
     const bounds: Bounds = { left: Infinity, right: -Infinity, top: Infinity, bottom: -Infinity };
     for (const node of focused) {
       const rect = rectFor(node.center, node.size);
@@ -445,41 +444,11 @@ export class NativeGraphRenderer implements GraphRenderer {
       bounds.top = Math.min(bounds.top, rect.top);
       bounds.bottom = Math.max(bounds.bottom, rect.bottom);
     }
-    this.#dispatchInteraction("viewport.focus", { bounds });
-    return true;
-  }
-
-  #applyFocusedMachine(): boolean {
-    return this.#focusedMachine !== undefined && this.#focusMachine(this.#focusedMachine);
-  }
-
-  #fitCapped(): void {
-    if (this.#hasViewport()) this.#dispatchInteraction("viewport.fit");
-  }
-
-  #fitBounds(bounds: Bounds, padding: number, maxZoom = MAX_FIT_ZOOM): void {
-    const width = Math.max(1, bounds.right - bounds.left + padding * 2);
-    const height = Math.max(1, bounds.bottom - bounds.top + padding * 2);
-    const scale = Math.min(
-      maxZoom,
-      Math.max(MIN_ZOOM, Math.min(this.#viewport.clientWidth / width, this.#viewport.clientHeight / height)),
-    );
-    const center = shiftedPoint({ x: (bounds.left + bounds.right) / 2, y: (bounds.top + bounds.bottom) / 2 }, this.#origin);
-    this.#setTransform(scale, {
-      x: this.#viewport.clientWidth / 2 - center.x * scale,
-      y: this.#viewport.clientHeight / 2 - center.y * scale,
-    });
+    return bounds;
   }
 
   #hasViewport(): boolean {
     return this.#viewport.clientWidth > 0 && this.#viewport.clientHeight > 0;
-  }
-
-  #setTransform(scale: number, pan: Point): void {
-    this.#scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
-    this.#pan = pan;
-    this.#world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${this.#scale})`;
-    this.#onZoom(this.#scale);
   }
 
   #positionElements(): void {
@@ -512,13 +481,7 @@ export class NativeGraphRenderer implements GraphRenderer {
 
   #resizeForContainer(): void {
     if (!this.#hasViewport()) return;
-    if (!this.#hasRealDimensions) {
-      this.#hasRealDimensions = true;
-      this.#fitCapped();
-      this.#applyFocusedMachine();
-      return;
-    }
-    this.#applyFocusedMachine();
+    this.#dispatchInteraction("viewport.fit", { reason: "resize" });
   }
 
   #dispatchInteraction(
@@ -542,95 +505,43 @@ export class NativeGraphRenderer implements GraphRenderer {
   }
 
   applyViewport(data: unknown): void {
-    const record = data as { bounds?: Bounds; scale?: number; pan?: Point; point?: Point } | null;
-    if (record?.bounds !== undefined) {
-      this.#fitBounds(record.bounds, FIT_PADDING);
-      return;
-    }
-    if (record?.scale !== undefined && record.pan !== undefined) {
-      this.#setTransform(record.scale, record.pan);
-      return;
-    }
-    if (record?.point !== undefined && record.scale !== undefined) {
-      const worldPoint = {
-        x: (record.point.x - this.#pan.x) / this.#scale,
-        y: (record.point.y - this.#pan.y) / this.#scale,
-      };
-      this.#setTransform(record.scale, {
-        x: record.point.x - worldPoint.x * record.scale,
-        y: record.point.y - worldPoint.y * record.scale,
-      });
-      return;
-    }
-    if (this.#focusedMachine !== undefined) return;
-    this.#fitBounds(this.#bounds, FIT_PADDING);
+    const record = isRecord(data) ? data : null;
+    const panning = record?.["panning"];
+    if (typeof panning === "boolean") this.#container.classList.toggle("is-dragging", panning);
+    const scale = record?.["scale"];
+    const pan = pointOf(record?.["pan"]);
+    if (typeof scale !== "number" || pan === null) return;
+    this.#world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${scale})`;
+    this.#onZoom(scale);
   }
 
   #onPointerDown = (event: PointerEvent): void => {
     if (event.button !== 0 && event.pointerType === "mouse") return;
-    this.#pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     this.#viewport.setPointerCapture(event.pointerId);
-    if (this.#pointers.size === 1) {
-      this.#dragStart = {
-        pointerId: event.pointerId,
-        point: { x: event.clientX, y: event.clientY },
-        pan: { ...this.#pan },
-      };
-      this.#container.classList.add("is-dragging");
-      this.#dispatchInteraction("viewport.pan.start");
-      return;
-    }
-    this.#dragStart = null;
-    this.#container.classList.remove("is-dragging");
-    const first = [...this.#pointers.values()][0];
-    const second = [...this.#pointers.values()][1];
-    if (first !== undefined && second !== undefined) {
-      this.#pinchStart = {
-        distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
-        scale: this.#scale,
-      };
-    }
+    const rect = this.#viewport.getBoundingClientRect();
+    this.#dispatchInteraction("viewport.pan.start", {
+      pointerId: event.pointerId,
+      point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+    });
   };
 
   #onPointerMove = (event: PointerEvent): void => {
-    if (!this.#pointers.has(event.pointerId)) return;
-    this.#pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (this.#pointers.size >= 2 && this.#pinchStart !== null) {
-      const points = [...this.#pointers.values()];
-      const first = points[0];
-      const second = points[1];
-      if (first !== undefined && second !== undefined) {
-        const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
-        const scale = this.#pinchStart.scale * Math.hypot(second.x - first.x, second.y - first.y) / this.#pinchStart.distance;
-        this.#dispatchInteraction("viewport.zoom", { scale, point: midpoint });
-      }
-      return;
-    }
-    if (this.#dragStart?.pointerId === event.pointerId) {
-      this.#dispatchInteraction("viewport.pan", {
-        pan: {
-          x: this.#dragStart.pan.x + event.clientX - this.#dragStart.point.x,
-          y: this.#dragStart.pan.y + event.clientY - this.#dragStart.point.y,
-        },
-      });
-    }
+    const rect = this.#viewport.getBoundingClientRect();
+    this.#dispatchInteraction("viewport.pan", {
+      pointerId: event.pointerId,
+      point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
+    });
   };
 
   #onPointerUp = (event: PointerEvent): void => {
-    this.#pointers.delete(event.pointerId);
-    if (this.#pointers.size < 2) this.#pinchStart = null;
-    if (this.#pointers.size === 0) {
-      this.#dragStart = null;
-      this.#container.classList.remove("is-dragging");
-      this.#dispatchInteraction("viewport.pan.end");
-    }
+    this.#dispatchInteraction("viewport.pan.end", { pointerId: event.pointerId });
   };
 
   #onWheel = (event: WheelEvent): void => {
     event.preventDefault();
     const rect = this.#viewport.getBoundingClientRect();
     this.#dispatchInteraction("viewport.zoom", {
-      scale: this.#scale * Math.exp(-event.deltaY * 0.0015),
+      deltaY: event.deltaY,
       point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
     });
   };

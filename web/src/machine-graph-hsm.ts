@@ -15,19 +15,67 @@ const graphEvents = {
 } as const;
 
 const STOPPED_CONTROLLER_ERROR = "MachineGraphController is stopped";
+const FIT_PADDING = 28;
+const MIN_ZOOM = 0.12;
+const MAX_ZOOM = 2.4;
+const MAX_FIT_ZOOM = 1.2;
+const ZOOM_STEP = 0.0015;
 
 function isExpectedControllerStop(error: unknown): boolean {
   return error instanceof Error && error.message === STOPPED_CONTROLLER_ERROR;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function pointOf(value: unknown): ViewportPoint | null {
+  const record = recordOf(value);
+  const x = record?.["x"];
+  const y = record?.["y"];
+  return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
+    ? { x, y }
+    : null;
+}
+
+function pointerIdOf(value: unknown): number | null {
+  const pointerId = recordOf(value)?.["pointerId"];
+  return typeof pointerId === "number" && Number.isInteger(pointerId) ? pointerId : null;
+}
+
+function boundsOf(value: unknown): ViewportBounds | null {
+  const record = recordOf(value);
+  const left = record?.["left"];
+  const right = record?.["right"];
+  const top = record?.["top"];
+  const bottom = record?.["bottom"];
+  return typeof left === "number" && Number.isFinite(left)
+    && typeof right === "number" && Number.isFinite(right)
+    && typeof top === "number" && Number.isFinite(top)
+    && typeof bottom === "number" && Number.isFinite(bottom)
+    ? { left, right, top, bottom }
+    : null;
 }
 
 export type MachineGraphEventName = keyof typeof graphEvents;
 
 export type MachineGraphPhase = "empty" | "drawing";
 
+export type ViewportPoint = { readonly x: number; readonly y: number };
+export type ViewportBounds = { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number };
+export type ViewportMetrics = {
+  readonly width: number;
+  readonly height: number;
+  readonly bounds: ViewportBounds;
+  readonly origin: ViewportPoint;
+};
+
 export type GraphRenderer = {
   draw(graphs: readonly MachineGraph[]): boolean | void;
   destroy(): void;
   applyViewport?(data: unknown): void;
+  viewportMetrics?(): ViewportMetrics | null;
+  focusBounds?(machineName: string): ViewportBounds | null;
 };
 
 export type MachineGraphSnapshot = {
@@ -89,7 +137,19 @@ function destroyGraph(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Eve
 }
 
 function applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  controllerOf(instance)?.applyViewport(event.data);
+  controllerOf(instance)?.applyViewport(event.name, event.data);
+}
+
+function beginPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  controllerOf(instance)?.beginPan(event.data);
+}
+
+function endPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  controllerOf(instance)?.endPan(event.data);
+}
+
+function canEndPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+  return controllerOf(instance)?.canEndPan(event.data) ?? true;
 }
 
 function ignoreViewport(): void {
@@ -106,7 +166,9 @@ const machineGraphModel = hsm.define(
     hsm.transition(hsm.on("graph.set"), hsm.target("../drawing"), hsm.effect(rememberGraph)),
     hsm.transition(hsm.on("viewport.fit"), hsm.effect(ignoreViewport)),
     hsm.transition(hsm.on("viewport.focus"), hsm.effect(ignoreViewport)),
+    hsm.transition(hsm.on("viewport.pan.start"), hsm.effect(ignoreViewport)),
     hsm.transition(hsm.on("viewport.pan"), hsm.effect(ignoreViewport)),
+    hsm.transition(hsm.on("viewport.pan.end"), hsm.effect(ignoreViewport)),
     hsm.transition(hsm.on("viewport.zoom"), hsm.effect(ignoreViewport)),
   ),
   hsm.state(
@@ -117,15 +179,17 @@ const machineGraphModel = hsm.define(
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
     hsm.transition(hsm.on("viewport.fit"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.focus"), hsm.effect(applyViewport)),
-    hsm.transition(hsm.on("viewport.pan.start"), hsm.target("../panning")),
+    hsm.transition(hsm.on("viewport.pan.start"), hsm.target("../panning"), hsm.effect(beginPan)),
     hsm.transition(hsm.on("viewport.zoom"), hsm.effect(applyViewport)),
   ),
   hsm.state(
     "panning",
     hsm.transition(hsm.on("graph.set"), hsm.target("."), hsm.effect(rememberGraph)),
     hsm.transition(hsm.on("graph.clear"), hsm.target("../empty"), hsm.effect(clearGraph)),
+    hsm.transition(hsm.on("viewport.pan.start"), hsm.effect(beginPan)),
     hsm.transition(hsm.on("viewport.pan"), hsm.effect(applyViewport)),
-    hsm.transition(hsm.on("viewport.pan.end"), hsm.target("../drawing")),
+    hsm.transition(hsm.on("viewport.pan.end"), hsm.guard(canEndPan), hsm.target("../drawing"), hsm.effect(endPan)),
+    hsm.transition(hsm.on("viewport.pan.end"), hsm.effect(endPan)),
     hsm.transition(hsm.on("viewport.fit"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.focus"), hsm.effect(applyViewport)),
     hsm.transition(hsm.on("viewport.zoom"), hsm.effect(applyViewport)),
@@ -153,6 +217,13 @@ export class MachineGraphController {
   #dispatchTail: Promise<void> = Promise.resolve();
   #stopping = false;
   #stopPromise: Promise<void> | null = null;
+  #scale = 1;
+  #pan: ViewportPoint = { x: 0, y: 0 };
+  #focusedMachine: string | undefined;
+  #hasRealDimensions = false;
+  #pointers = new Map<number, ViewportPoint>();
+  #dragStart: { pointerId: number; point: ViewportPoint; pan: ViewportPoint } | null = null;
+  #pinchStart: { distance: number; scale: number } | null = null;
 
   constructor(options: MachineGraphControllerOptions = {}) {
     this.#renderer = options.renderer ?? null;
@@ -193,12 +264,17 @@ export class MachineGraphController {
     }
     await this.#machine.dispatch(namedEvent(graphEvents[eventName].name, data));
     this.#emit();
-    if (this.#initialViewPending) {
+    const shouldRefocus = eventName === "graph.set" && this.#focusedMachine !== undefined;
+    if (this.#initialViewPending || shouldRefocus) {
       this.#initialViewPending = false;
       const renderer = this.#renderer;
       queueMicrotask(() => {
         if (!this.#stopping && this.#renderer === renderer && renderer !== null) {
-          void this.dispatch("viewport.fit").catch((error: unknown) => {
+          const eventName = this.#focusedMachine === undefined ? "viewport.fit" : "viewport.focus";
+          const data = this.#focusedMachine === undefined
+            ? { reason: "initial" }
+            : { machineName: this.#focusedMachine };
+          void this.dispatch(eventName, data).catch((error: unknown) => {
             if (!isExpectedControllerStop(error)) throw error;
           });
         }
@@ -207,8 +283,58 @@ export class MachineGraphController {
     return this.snapshot();
   }
 
-  applyViewport(data: unknown): void {
-    this.#renderer?.applyViewport?.(data);
+  applyViewport(eventName: string, data: unknown): void {
+    const renderer = this.#renderer;
+    const metrics = renderer?.viewportMetrics === undefined ? undefined : renderer.viewportMetrics();
+    if (eventName === "viewport.fit") {
+      if (metrics === undefined) {
+        renderer?.applyViewport?.(data);
+        return;
+      }
+      if (metrics === null) return;
+      const reason = recordOf(data)?.["reason"];
+      if (reason === "resize" || reason === "initial") {
+        const firstDimensions = !this.#hasRealDimensions;
+        this.#hasRealDimensions = true;
+        if (this.#focusedMachine !== undefined && this.#applyFocusedViewport(metrics, data)) return;
+        if (reason === "initial" || firstDimensions) this.#fitBounds(metrics.bounds, metrics);
+        return;
+      }
+      this.#focusedMachine = undefined;
+      this.#hasRealDimensions = true;
+      this.#fitBounds(metrics.bounds, metrics);
+      return;
+    }
+    if (eventName === "viewport.focus") {
+      if (metrics === undefined) {
+        renderer?.applyViewport?.(data);
+        return;
+      }
+      if (metrics !== null) this.#applyFocusedViewport(metrics, data);
+      return;
+    }
+    if (eventName === "viewport.pan") {
+      this.#applyPan(data);
+      return;
+    }
+    if (eventName === "viewport.zoom") {
+      this.#applyZoom(data);
+    }
+  }
+
+  fit(): void {
+    this.#focusedMachine = undefined;
+    this.#requestViewport("viewport.fit");
+  }
+
+  focusMachine(machineName: string): boolean {
+    const renderer = this.#renderer;
+    if (renderer?.focusBounds === undefined || renderer.focusBounds(machineName) === null) {
+      return false;
+    }
+    this.#focusedMachine = machineName;
+    this.#requestViewport("viewport.focus", { machineName });
+    return true;
   }
 
   stop(): Promise<void> {
@@ -228,6 +354,7 @@ export class MachineGraphController {
 
   rememberGraphs(graphs: readonly MachineGraph[]): void {
     this.#graphs = graphs;
+    if (graphs.length === 0) this.#focusedMachine = undefined;
     this.#emit();
   }
 
@@ -245,6 +372,151 @@ export class MachineGraphController {
   destroyRenderer(): void {
     this.#renderer?.destroy();
     this.#initialViewPending = false;
+    this.#pointers.clear();
+    this.#dragStart = null;
+    this.#pinchStart = null;
+    this.#applyPanning(false);
+  }
+
+  beginPan(data: unknown): void {
+    const pointerId = pointerIdOf(data);
+    const point = pointOf(recordOf(data)?.["point"]);
+    if (pointerId === null || point === null) return;
+    this.#pointers.set(pointerId, point);
+    if (this.#pointers.size === 1) {
+      this.#dragStart = { pointerId, point, pan: { ...this.#pan } };
+      this.#applyPanning(true);
+      return;
+    }
+    this.#dragStart = null;
+    const points = [...this.#pointers.values()];
+    const first = points[0];
+    const second = points[1];
+    if (first !== undefined && second !== undefined) {
+      this.#pinchStart = {
+        distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+        scale: this.#scale,
+      };
+    }
+    this.#applyPanning(false);
+  }
+
+  canEndPan(data: unknown): boolean {
+    const pointerId = pointerIdOf(data);
+    return pointerId === null || (this.#pointers.has(pointerId) && this.#pointers.size <= 1);
+  }
+
+  endPan(data: unknown): void {
+    const pointerId = pointerIdOf(data);
+    if (pointerId !== null) this.#pointers.delete(pointerId);
+    if (this.#pointers.size < 2) this.#pinchStart = null;
+    if (this.#pointers.size === 0) this.#dragStart = null;
+    this.#applyPanning(this.#dragStart !== null);
+  }
+
+  #requestViewport(eventName: MachineGraphEventName, data?: unknown): void {
+    void this.dispatch(eventName, data).catch((error: unknown) => {
+      if (!isExpectedControllerStop(error)) throw error;
+    });
+  }
+
+  #applyFocusedViewport(metrics: ViewportMetrics, data: unknown): boolean {
+    const record = recordOf(data);
+    const machineName = typeof record?.["machineName"] === "string" ? record["machineName"] : this.#focusedMachine;
+    const bounds = boundsOf(record?.["bounds"])
+      ?? (machineName === undefined ? null : this.#renderer?.focusBounds?.(machineName) ?? null);
+    if (bounds === null) return false;
+    if (machineName !== undefined) this.#focusedMachine = machineName;
+    this.#fitBounds(bounds, metrics);
+    return true;
+  }
+
+  #fitBounds(bounds: ViewportBounds, metrics: ViewportMetrics): void {
+    const width = Math.max(1, bounds.right - bounds.left + FIT_PADDING * 2);
+    const height = Math.max(1, bounds.bottom - bounds.top + FIT_PADDING * 2);
+    const scale = Math.min(
+      MAX_FIT_ZOOM,
+      Math.max(MIN_ZOOM, Math.min(metrics.width / width, metrics.height / height)),
+    );
+    const center = {
+      x: (bounds.left + bounds.right) / 2 + metrics.origin.x,
+      y: (bounds.top + bounds.bottom) / 2 + metrics.origin.y,
+    };
+    this.#setTransform(scale, {
+      x: metrics.width / 2 - center.x * scale,
+      y: metrics.height / 2 - center.y * scale,
+    });
+  }
+
+  #applyPan(data: unknown): void {
+    const record = recordOf(data);
+    const directPan = pointOf(record?.["pan"]);
+    if (directPan !== null) {
+      const scale = typeof record?.["scale"] === "number" ? record["scale"] : this.#scale;
+      this.#setTransform(scale, directPan);
+      return;
+    }
+    const pointerId = pointerIdOf(data);
+    const point = pointOf(record?.["point"]);
+    if (pointerId === null || point === null) return;
+    if (!this.#pointers.has(pointerId)) return;
+    this.#pointers.set(pointerId, point);
+    if (this.#pointers.size >= 2 && this.#pinchStart !== null) {
+      const points = [...this.#pointers.values()];
+      const first = points[0];
+      const second = points[1];
+      if (first !== undefined && second !== undefined) {
+        const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+        const scale = this.#pinchStart.scale
+          * Math.hypot(second.x - first.x, second.y - first.y)
+          / this.#pinchStart.distance;
+        this.#setZoom(scale, midpoint);
+      }
+      return;
+    }
+    if (this.#dragStart?.pointerId === pointerId) {
+      this.#setTransform(this.#scale, {
+        x: this.#dragStart.pan.x + point.x - this.#dragStart.point.x,
+        y: this.#dragStart.pan.y + point.y - this.#dragStart.point.y,
+      });
+    }
+  }
+
+  #applyZoom(data: unknown): void {
+    const record = recordOf(data);
+    const scale = typeof record?.["scale"] === "number"
+      ? record["scale"]
+      : typeof record?.["deltaY"] === "number" ? this.#scale * Math.exp(-record["deltaY"] * ZOOM_STEP) : null;
+    if (scale === null) return;
+    const point = pointOf(record?.["point"]);
+    if (point === null) {
+      this.#setTransform(scale, this.#pan);
+      return;
+    }
+    this.#setZoom(scale, point);
+  }
+
+  #setZoom(scale: number, point: ViewportPoint): void {
+    const worldPoint = {
+      x: (point.x - this.#pan.x) / this.#scale,
+      y: (point.y - this.#pan.y) / this.#scale,
+    };
+    this.#setTransform(scale, {
+      x: point.x - worldPoint.x * scale,
+      y: point.y - worldPoint.y * scale,
+    });
+  }
+
+  #setTransform(scale: number, pan: ViewportPoint): void {
+    this.#scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
+    this.#pan = { ...pan };
+    this.#renderer?.applyViewport?.({ scale: this.#scale, pan: this.#pan });
+  }
+
+  #applyPanning(panning: boolean): void {
+    if (this.#renderer?.viewportMetrics !== undefined) {
+      this.#renderer.applyViewport?.({ panning });
+    }
   }
 
   #emit(): void {

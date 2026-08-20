@@ -46,12 +46,12 @@ export class BotMachineGraph extends HTMLElement {
 
   fit(): void {
     this.#pendingFocus = undefined;
-    this.#renderer?.fit();
+    this.#controller?.fit();
   }
 
   focusMachine(machineName: string): void {
     this.#pendingFocus = machineName;
-    this.#renderer?.focusMachine(machineName);
+    if (this.#controller?.focusMachine(machineName) === true) this.#pendingFocus = undefined;
   }
 
   connectedCallback(): void {
@@ -111,7 +111,7 @@ export class BotMachineGraph extends HTMLElement {
       throw error;
     }
     if (!isCurrent()) return;
-    if (this.#pendingFocus !== undefined && this.#renderer?.focusMachine(this.#pendingFocus)) {
+    if (this.#pendingFocus !== undefined && this.#controller?.focusMachine(this.#pendingFocus) === true) {
       this.#pendingFocus = undefined;
     }
   }

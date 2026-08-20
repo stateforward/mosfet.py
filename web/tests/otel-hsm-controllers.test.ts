@@ -126,6 +126,47 @@ describe("companion-style HSM controllers", () => {
     await graph.stop();
   });
 
+  test("normalized viewport intents update controller-owned transform and gesture state", async () => {
+    const applied: unknown[] = [];
+    const graph = new MachineGraphController({
+      renderer: {
+        draw: () => false,
+        destroy: () => undefined,
+        viewportMetrics: () => ({
+          width: 1000,
+          height: 600,
+          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+          origin: { x: 0, y: 0 },
+        }),
+        focusBounds: (machineName) => machineName === "/Demo" ? { left: 0, right: 96, top: 0, bottom: 96 } : null,
+        applyViewport: (data) => {
+          applied.push(data);
+        },
+      },
+    });
+    const valid = {
+      name: "/Demo",
+      componentName: "Demo",
+      currentState: "/Demo/idle",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
+      edges: [],
+    };
+
+    await graph.dispatch("graph.set", { graphs: [valid] });
+    await graph.dispatch("viewport.fit", { reason: "initial" });
+    const panning = await graph.dispatch("viewport.pan.start", { pointerId: 1, point: { x: 10, y: 10 } });
+    assert.match(panning.statePath, /\/panning$/);
+    await graph.dispatch("viewport.pan", { pointerId: 1, point: { x: 30, y: 24 } });
+    await graph.dispatch("viewport.pan.end", { pointerId: 1 });
+    const drawing = await graph.dispatch("viewport.zoom", { deltaY: -100, point: { x: 30, y: 24 } });
+    assert.match(drawing.statePath, /\/drawing$/);
+    await graph.dispatch("viewport.focus", { machineName: "/Demo" });
+    assert.deepEqual(applied.at(-1), { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
+    await graph.stop();
+  });
+
   test("stopping a graph controller gates queued admission before the HSM stops", async () => {
     let draws = 0;
     const graph = new MachineGraphController({
