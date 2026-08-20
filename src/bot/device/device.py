@@ -183,13 +183,26 @@ class Device(hsm.Instance, attachment.Attachment):
         # One resolved scope for the whole set, so a bare ``ctx`` cannot leave each machine in an
         # instance map of its own — attaching across those would read as a foreign environment.
         scope = Environment.from_context(ctx)
+        parent_model = data if isinstance(data, hsm.Model) else type(self).model
+        if parent_model is None:
+            raise RuntimeError(f"{type(self).__name__} has no lifecycle model.")
+        import bot
+
         for peripheral in Device._powered_peripherals(self):
             if lifecycle.is_started(peripheral):
                 continue
-            model = type(peripheral).model
-            if model is None:
+            peripheral_model = type(peripheral).model
+            if peripheral_model is None:
                 raise RuntimeError(f"{type(peripheral).__name__} has no lifecycle model.")
-            _ = await hsm.started(scope, peripheral, model)
+            runtime_name = f"{parent_model.qualified_name.removeprefix('/')}{type(peripheral).__name__}"
+            runtime_model = hsm.redefine(peripheral_model, runtime_name)
+            _ = await bot.started(
+                scope,
+                peripheral,
+                runtime_model,
+                config=hsm.Config(data=runtime_model),
+                owner=parent_model.qualified_name,
+            )
         instance = await super().start(scope, data)
         # Presence is a property of being started in an environment, not of being owned by a bot.
         # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both

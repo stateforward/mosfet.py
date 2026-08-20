@@ -1204,9 +1204,27 @@ async def main() -> None:
     instances = environment.value(hsm.Keys.Instances)
     assert alice.context().value(hsm.Keys.Instances) is instances
     assert bob.context().value(hsm.Keys.Instances) is instances
+    assert environment._placements[alice] == alice_placement
+    assert environment._placements[bob] == bob_placement
     assert {payload["name"] for payload in published if payload["name"] in {"/Alice", "/Bob"}} == {"/Alice", "/Bob"}
-    children = [payload for payload in published if payload["name"].endswith("Phone")]
-    assert {payload["owner"] for payload in children} == {"/Alice", "/Bob"}
+    assert alice_placement.position.distance_to(bob_placement.position) >= 100
+    children = [
+        payload
+        for payload in published
+        if payload["name"] in {"/AlicePhone", "/BobPhone", "/AlicePhoneMicrophone", "/BobPhoneMicrophone"}
+    ]
+    assert {payload["name"] for payload in children} == {
+        "/AlicePhone",
+        "/BobPhone",
+        "/AlicePhoneMicrophone",
+        "/BobPhoneMicrophone",
+    }
+    assert len({payload["name"] for payload in children}) == len(children)
+    assert {
+        payload["owner"]
+        for payload in children
+        if payload["name"].endswith("Microphone")
+    } == {"/AlicePhone", "/BobPhone"}
 
 
 asyncio.run(main())

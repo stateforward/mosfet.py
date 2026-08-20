@@ -1112,7 +1112,13 @@ class Bot(hsm.Instance, abc.ABC):
                 require_environment_scope(environment, device, participant="Device")
                 model = instance._model_for_device(device)
                 try:
-                    _ = await bot.started(environment, device, model, owner=instance)
+                    _ = await bot.started(
+                        environment,
+                        device,
+                        model,
+                        hsm.Config(data=model),
+                        owner=instance,
+                    )
                 except Exception as error:
                     if not _is_already_running_error(error):
                         raise
