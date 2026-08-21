@@ -1361,6 +1361,91 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("meta or ctrl node click is additive and copies the clicked node", async () => {
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const originLeft = 0;
+    const originTop = 0;
+    const secondLeft = 120;
+    const buttonsReleased = 0;
+    const nodeA = { id: "a", position: { x: originLeft, y: originTop }, data: { label: "A" }, width: nodeWidth, height: nodeHeight };
+    const nodeB = { id: "b", position: { x: secondLeft, y: originTop }, data: { label: "B" }, width: nodeWidth, height: nodeHeight };
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [nodeA, nodeB];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const selectedIds: string[][] = [];
+    const clicks: CustomEvent[] = [];
+    graph.addEventListener("flow-selection-change", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail) || !Array.isArray(event.detail["nodes"])) return;
+      selectedIds.push(event.detail["nodes"].map((node: { id?: string }) => String(node.id ?? "")));
+    });
+    graph.addEventListener("flow-node-click", (event: Event) => {
+      if (event instanceof CustomEvent) clicks.push(event);
+    });
+    const hitA = { kind: "node" as const, node: nodeA };
+    const hitB = { kind: "node" as const, node: nodeB };
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: hitA,
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      buttons: buttonsReleased,
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: hitA,
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      metaKey: true,
+      origin: { x: secondLeft, y: originTop },
+      client: { x: secondLeft, y: originTop },
+      hit: hitB,
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      metaKey: true,
+      buttons: buttonsReleased,
+      origin: { x: secondLeft, y: originTop },
+      client: { x: secondLeft, y: originTop },
+      hit: hitB,
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      ctrlKey: true,
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: hitA,
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      ctrlKey: true,
+      buttons: buttonsReleased,
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: hitA,
+    }) }));
+    await flush();
+    const twoNodes = 2;
+    const oneNode = 1;
+    const atLeastTwoClicks = 2;
+    assert.ok(clicks.length >= atLeastTwoClicks);
+    assert.ok(selectedIds.some((ids) => ids.length === oneNode && ids[0] === nodeA.id));
+    assert.ok(selectedIds.some((ids) => ids.length === twoNodes && ids.includes(nodeA.id) && ids.includes(nodeB.id)));
+    assert.ok(selectedIds.some((ids) => ids.length === oneNode && ids[0] === nodeB.id));
+    const click = clicks[clicks.length - 1];
+    assert.ok(click instanceof CustomEvent);
+    const detail = click.detail as { node: { position: { x: number } } };
+    const priorX = graph.nodes[1]?.position.x;
+    const mutatedX = 999;
+    detail.node.position.x = mutatedX;
+    assert.equal(graph.nodes[1]?.position.x, priorX);
+    assert.notEqual(graph.nodes[1]?.position.x, mutatedX);
+    graph.remove();
+  });
 });
 
 describe("flow-controls", () => {

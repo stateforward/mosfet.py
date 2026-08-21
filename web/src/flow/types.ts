@@ -76,9 +76,11 @@ export type NodeActivateData = {
  * Detail of the `flow-node-click` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
  * Postcondition: the click already ran on the graph — exclusive selection of
- * the clicked node is already requested, and `node` is a copy. Listeners
- * observe; they do not apply the click. `preventDefault()` has no effect
- * because the event cannot be canceled.
+ * the clicked node is already requested unless the originating pointer sample
+ * is meta/ctrl additive, in which case membership of that node is toggled, and
+ * `node` is a copy (mutating `detail.node` does not mutate `graph.nodes`).
+ * Listeners observe; they do not apply the click. `preventDefault()` has no
+ * effect because the event cannot be canceled.
  */
 export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
 /**
