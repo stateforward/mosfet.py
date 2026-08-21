@@ -335,6 +335,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodesDraggable(value: boolean) {
+    this.#nodesDraggable = value;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
   }
 
@@ -343,6 +344,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set panOnDrag(value: boolean) {
+    this.#panOnDrag = value;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
   }
 
@@ -434,6 +436,13 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     instance.#startActors();
     instance.#listen();
+    instance.#live(hsm.typedEvent({
+      event: FlowGraph.setPolicyEvent,
+      data: {
+        nodesDraggable: instance.#nodesDraggable,
+        panOnDrag: instance.#panOnDrag,
+      },
+    }));
     instance.#send({ machine: instance.#renderer, event: hsm.typedEvent({ event: Renderer.markDirtyEvent }) });
   }
 
@@ -460,46 +469,44 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "handle" && handleKindOf(sample.hit) === "source";
+    return pointerSampleFieldsPresent(event.data) && handleHitIs({ hit: hitField(event.data), handleKind: "source" });
   }
 
   static isConnectComplete(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "handle" && handleKindOf(sample.hit) === "target";
+    return pointerSampleFieldsPresent(event.data) && handleHitIs({ hit: hitField(event.data), handleKind: "target" });
   }
 
   static isBoxStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.shiftKey && sample.hit.kind === "empty";
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    return event.data["shiftKey"] === true && hitKindIs({ hit: hitField(event.data), kind: "empty" });
   }
 
   static isNodePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "node";
+    return pointerSampleFieldsPresent(event.data) && hitKindIs({ hit: hitField(event.data), kind: "node" });
   }
 
   static isEdgePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "edge";
+    return pointerSampleFieldsPresent(event.data) && hitKindIs({ hit: hitField(event.data), kind: "edge" });
   }
 
   static isPanStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "empty" && !sample.shiftKey;
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    return event.data["shiftKey"] === false && hitKindIs({ hit: hitField(event.data), kind: "empty" });
   }
 
   static isDragFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#nodesDraggable) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && pointerMovedPastClick(sample) && sample.hit.kind === "node";
+    return pointerSampleFieldsPresent(event.data)
+      && pointerMovedPastClickData(event.data)
+      && hitKindIs({ hit: hitField(event.data), kind: "node" });
   }
 
   static isPanFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && pointerMovedPastClick(sample) && !(instance.#nodesDraggable && sample.hit.kind === "node");
+    return pointerSampleFieldsPresent(event.data)
+      && pointerMovedPastClickData(event.data)
+      && !(instance.#nodesDraggable && hitKindIs({ hit: hitField(event.data), kind: "node" }));
   }
 
   static beginConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1258,10 +1265,6 @@ function isPoint(value: unknown): value is { x: number; y: number } {
   return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y);
 }
 
-const DEFAULT_POINTER_BUTTONS = 0;
-const DEFAULT_POINTER_BUTTON = 0;
-const DEFAULT_POINTER_TYPE = "mouse";
-
 function isPointerEventType(value: unknown): value is PointerSampleData["eventType"] {
   return value === "pointerdown" || value === "pointermove" || value === "pointerup" || value === "pointercancel";
 }
@@ -1272,6 +1275,27 @@ function isHandleKind(value: unknown): value is HandleKind {
 
 function isHandlePosition(value: unknown): value is HandlePosition {
   return value === "top" || value === "right" || value === "bottom" || value === "left";
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNode(value: unknown): value is Node {
+  if (!hsm.isRecord(value) || typeof value["id"] !== "string" || !hsm.isRecord(value["position"]) || !hsm.isRecord(value["data"])) {
+    return false;
+  }
+  if (!isFiniteNumber(value["position"]["x"]) || !isFiniteNumber(value["position"]["y"])) return false;
+  if (value["width"] !== undefined && !isFiniteNumber(value["width"])) return false;
+  if (value["height"] !== undefined && !isFiniteNumber(value["height"])) return false;
+  return true;
+}
+
+function isEdge(value: unknown): value is Edge {
+  return hsm.isRecord(value)
+    && typeof value["id"] === "string"
+    && typeof value["source"] === "string"
+    && typeof value["target"] === "string";
 }
 
 function pointOf(value: unknown): XYPosition | null {
@@ -1314,77 +1338,98 @@ function hitOf(value: unknown): PointerHit | null {
   return null;
 }
 
-function handleKindOf(hit: PointerHit): HandleKind {
-  return hit.kind === "handle" ? hit.handleKind : "source";
+function hitField(data: unknown): unknown {
+  return hsm.isRecord(data) ? data["hit"] : undefined;
 }
 
-function pointerMovedPastClick(sample: PointerSampleData): boolean {
-  return Math.hypot(sample.client.x - sample.origin.x, sample.client.y - sample.origin.y) > CLICK_THRESHOLD;
+function hitKindIs(args: { hit: unknown; kind: PointerHit["kind"] }): boolean {
+  return hsm.isRecord(args.hit) && args.hit["kind"] === args.kind;
+}
+
+function handleHitIs(args: { hit: unknown; handleKind: HandleKind }): boolean {
+  if (!hsm.isRecord(args.hit) || args.hit["kind"] !== "handle") return false;
+  if (args.hit["handleKind"] !== args.handleKind || !isNode(args.hit["node"])) return false;
+  return isHandlePosition(args.hit["position"]);
+}
+
+function pointerSampleFieldsPresent(data: unknown): boolean {
+  if (!hsm.isRecord(data)) return false;
+  if (!isFiniteNumber(data["pointerId"]) || !isPointerEventType(data["eventType"])) return false;
+  if (!isPoint(data["client"]) || !isPoint(data["viewport"]) || !isPoint(data["world"]) || !isPoint(data["origin"])) {
+    return false;
+  }
+  if (!hsm.isRecord(data["hit"])) return false;
+  if (!isPointerOriginData(data["originalEvent"])) return false;
+  if (!isFiniteNumber(data["buttons"]) || !isFiniteNumber(data["button"])) return false;
+  if (typeof data["pointerType"] !== "string") return false;
+  return typeof data["shiftKey"] === "boolean"
+    && typeof data["metaKey"] === "boolean"
+    && typeof data["ctrlKey"] === "boolean";
+}
+
+function isPointerOriginData(value: unknown): boolean {
+  if (!hsm.isRecord(value)) return false;
+  return isFiniteNumber(value["pointerId"])
+    && isFiniteNumber(value["clientX"])
+    && isFiniteNumber(value["clientY"])
+    && isPointerEventType(value["type"]);
+}
+
+function pointerMovedPastClickData(data: unknown): boolean {
+  if (!hsm.isRecord(data)) return false;
+  const client = data["client"];
+  const origin = data["origin"];
+  if (!isPoint(client) || !isPoint(origin)) return false;
+  return Math.hypot(client.x - origin.x, client.y - origin.y) > CLICK_THRESHOLD;
 }
 
 function pointerOf(value: unknown): PointerSampleData | null {
-  if (!hsm.isRecord(value)) return null;
-  const pointerId = value["pointerId"];
-  const eventType = value["eventType"];
+  if (!pointerSampleFieldsPresent(value) || !hsm.isRecord(value)) return null;
   const client = pointOf(value["client"]);
   const viewport = pointOf(value["viewport"]);
   const world = pointOf(value["world"]);
   const origin = pointOf(value["origin"]);
   const hit = hitOf(value["hit"]);
   const originalEvent = originOf(value["originalEvent"]);
-  if (
-    typeof pointerId !== "number"
-    || !Number.isFinite(pointerId)
-    || !isPointerEventType(eventType)
-    || client === null
-    || viewport === null
-    || world === null
-    || origin === null
-    || hit === null
-    || originalEvent === null
-  ) {
+  if (client === null || viewport === null || world === null || origin === null || hit === null || originalEvent === null) {
     return null;
   }
+  const pointerId = value["pointerId"];
+  const eventType = value["eventType"];
   const buttons = value["buttons"];
   const button = value["button"];
   const pointerType = value["pointerType"];
+  const shiftKey = value["shiftKey"];
+  const metaKey = value["metaKey"];
+  const ctrlKey = value["ctrlKey"];
+  if (
+    !isFiniteNumber(pointerId)
+    || !isPointerEventType(eventType)
+    || !isFiniteNumber(buttons)
+    || !isFiniteNumber(button)
+    || typeof pointerType !== "string"
+    || typeof shiftKey !== "boolean"
+    || typeof metaKey !== "boolean"
+    || typeof ctrlKey !== "boolean"
+  ) {
+    return null;
+  }
   return {
     pointerId,
     client,
     viewport,
     world,
-    buttons: typeof buttons === "number" && Number.isFinite(buttons) ? buttons : DEFAULT_POINTER_BUTTONS,
-    button: typeof button === "number" && Number.isFinite(button) ? button : DEFAULT_POINTER_BUTTON,
-    pointerType: typeof pointerType === "string" ? pointerType : DEFAULT_POINTER_TYPE,
-    shiftKey: value["shiftKey"] === true,
-    metaKey: value["metaKey"] === true,
-    ctrlKey: value["ctrlKey"] === true,
+    buttons,
+    button,
+    pointerType,
+    shiftKey,
+    metaKey,
+    ctrlKey,
     origin,
     hit,
     eventType,
     originalEvent,
   };
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isNode(value: unknown): value is Node {
-  if (!hsm.isRecord(value) || typeof value["id"] !== "string" || !hsm.isRecord(value["position"]) || !hsm.isRecord(value["data"])) {
-    return false;
-  }
-  if (!isFiniteNumber(value["position"]["x"]) || !isFiniteNumber(value["position"]["y"])) return false;
-  if (value["width"] !== undefined && !isFiniteNumber(value["width"])) return false;
-  if (value["height"] !== undefined && !isFiniteNumber(value["height"])) return false;
-  return true;
-}
-
-function isEdge(value: unknown): value is Edge {
-  return hsm.isRecord(value)
-    && typeof value["id"] === "string"
-    && typeof value["source"] === "string"
-    && typeof value["target"] === "string";
 }
 
 function actorsFromEvent(event: hsm.Event): object[] {

@@ -332,22 +332,47 @@ describe("flow-graph", () => {
     document.body.append(graph);
     const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
     graph.nodes = [source];
-    const pointerId = 1;
-    const eventType = "pointerdown";
-    const origin = { x: 10, y: 10 };
+    const completeWithoutPosition = {
+      ...pointerData(),
+      hit: { kind: "handle", node: source, handleKind: "source" },
+    };
     await graph.dispatch(hsm.typedEvent({
       event: FlowGraph.pointerDownEvent,
-      data: {
-        pointerId,
-        eventType,
-        client: origin,
-        viewport: origin,
-        world: origin,
-        origin,
-        hit: { kind: "handle", node: source, handleKind: "source" },
-      },
+      data: completeWithoutPosition,
     }));
     assert.doesNotMatch(graph.state(), /\/connect$/);
+    graph.remove();
+  });
+
+  test("handle pointer_down missing buttons does not enter connect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [source];
+    const sample = pointerData({
+      hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
+    });
+    const { buttons: _omittedButtons, ...withoutButtons } = sample;
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: withoutButtons,
+    }));
+    assert.doesNotMatch(graph.state(), /\/connect$/);
+    graph.remove();
+  });
+
+  test("complete handle pointer_down enters connect without reconstructing in the guard", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [source];
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: pointerData({
+        hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
+      }),
+    }));
+    assert.match(graph.state(), /\/connect$/);
     graph.remove();
   });
 
