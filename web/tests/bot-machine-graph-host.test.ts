@@ -64,11 +64,13 @@ describe("bot-machine-graph flow host", () => {
         ? originalDispatch(eventOrCtx as hsm.Event)
         : originalDispatch(eventOrCtx as hsm.Context, maybeEvent);
     }) as BotMachineGraph["dispatch"];
+    const flow = host.shadowRoot?.querySelector("flow-graph");
+    assert.ok(flow instanceof FlowGraph);
     let fitBoundsCount = 0;
-    const originalFitBounds = FlowGraph.prototype.fitBounds;
-    FlowGraph.prototype.fitBounds = function (this: FlowGraph, bounds) {
+    const originalFitBounds = flow.fitBounds.bind(flow);
+    flow.fitBounds = (bounds) => {
       fitBoundsCount += 1;
-      return originalFitBounds.call(this, bounds);
+      originalFitBounds(bounds);
     };
     try {
       host.focusMachine("/Phone");
@@ -80,7 +82,7 @@ describe("bot-machine-graph flow host", () => {
       assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
     } finally {
       host.dispatch = originalDispatch;
-      FlowGraph.prototype.fitBounds = originalFitBounds;
+      flow.fitBounds = originalFitBounds;
     }
     host.graphs = [{
       name: "/Empty",
