@@ -387,10 +387,10 @@ describe("companion-style HSM controllers", () => {
       reports.push(error);
     };
     try {
-      assert.throws(() => hsm.reportFailure(new Error("dispatch requires a started HSM")), hsm.HostDropError);
+      assert.throws(() => hsm.reportFailure({ error: new Error("dispatch requires a started HSM") }), hsm.HostDropError);
       hsm.catchFailure()(new Error("dispatch requires a started HSM"));
       const unexpected = new Error("unexpected HSM failure");
-      hsm.reportFailure(unexpected);
+      hsm.reportFailure({ error: unexpected });
       assert.deepEqual(reports, [unexpected]);
     } finally {
       if (previous === undefined) {

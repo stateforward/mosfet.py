@@ -215,13 +215,13 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
  * Concurrency: synchronous. Failure modes: missing/non-EventTarget host skips
  * `host-drop`; non-drop errors go to `reportError` when present, else throw.
  */
-export function reportFailure(error: unknown, host?: EventTarget): Error {
-  const drop = hostDropFrom(error);
+export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
+  const drop = hostDropFrom(args.error);
   if (drop !== null) {
-    emitDrop(host, drop);
+    emitDrop(args.host, drop);
     throw drop;
   }
-  const err = toError(error);
+  const err = toError(args.error);
   const reportError = (globalThis as typeof globalThis & { reportError?: (value: unknown) => void }).reportError;
   if (typeof reportError === "function") {
     reportError(err);
@@ -247,7 +247,7 @@ export function catchFailure(host?: EventTarget): (error: unknown) => void {
       emitDrop(host, drop);
       return;
     }
-    reportFailure(error, host);
+    reportFailure({ error, ...(host !== undefined ? { host } : {}) });
   };
 }
 

@@ -1169,8 +1169,8 @@ export class BotDashboard extends Dashboard {
     }
   }
 
-  #applyVisibilityAction(action: VisibilityAction): void {
-    void this.dispatch("dashboard.visibility.action", { action }).catch(catchFailure(this));
+  #applyVisibilityAction(args: { action: VisibilityAction }): void {
+    void this.dispatch("dashboard.visibility.action", { action: args.action }).catch(catchFailure(this));
   }
 
   #setMachineVisibility(args: { machineName: string; visible: boolean }): void {
@@ -1255,7 +1255,7 @@ export class BotDashboard extends Dashboard {
     }
     const actionControl = target.closest("[data-dashboard-action]");
     if (actionControl instanceof HTMLElement && isVisibilityAction(actionControl.dataset["dashboardAction"])) {
-      this.#applyVisibilityAction(actionControl.dataset["dashboardAction"]);
+      this.#applyVisibilityAction({ action: actionControl.dataset["dashboardAction"] });
       return;
     }
     const control = target.closest("[data-event]");

@@ -71,6 +71,8 @@ export type CommandPost = (command: {
   signal?: AbortSignal;
 }) => Promise<CommandResult>;
 
+export type VisibilityAction = "show-all" | "hide-all" | "hide-unobserved";
+
 export type DashboardEventName = keyof typeof dashboardCommands;
 
 export type DashboardPhase = "idle" | "live" | "error";
@@ -265,7 +267,10 @@ function applyPrefill(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Even
   if (eventName === null) {
     return;
   }
-  controllerOf(instance)?.applyPrefill(eventName, stringField({ event, key: "dataJson" }) ?? "");
+  controllerOf(instance)?.applyPrefill({
+    eventName,
+    dataJson: stringField({ event, key: "dataJson" }) ?? "",
+  });
 }
 
 function modelsFromEvent(event: hsm.Event): PublishedModel[] | null {
@@ -343,7 +348,7 @@ function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
 function applyVisibilityAction(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   const action = stringField({ event, key: "action" });
   if (action !== "show-all" && action !== "hide-all" && action !== "hide-unobserved") return;
-  controllerOf(instance)?.applyVisibilityAction(action);
+  controllerOf(instance)?.applyVisibilityAction({ action });
 }
 
 function clearView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -864,19 +869,36 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  applyVisibilityAction(action: "show-all" | "hide-all" | "hide-unobserved"): void {
+  /**
+   * Apply a bulk visibility action to every machine in the current document.
+   *
+   * Inputs: `action` show-all | hide-all | hide-unobserved.
+   * Outputs: snapshot `visibleMachines`. Ownership: this dashboard.
+   * Lifetime: until `clearView`/stop. Concurrency: runtime-safe.
+   * Failure modes: no document => no-op.
+   * Classification: runtime-safe.
+   */
+  applyVisibilityAction(args: { action: VisibilityAction }): void {
     const document = this.#document;
     if (document === null) return;
     for (const machine of document.machines) {
-      const visible = action === "show-all" || (action === "hide-unobserved" && machine.observationCount > 0);
+      const visible = args.action === "show-all" || (args.action === "hide-unobserved" && machine.observationCount > 0);
       this.#visibleMachines.set(machine.name, visible);
     }
     this.#emit();
   }
 
-  applyPrefill(eventName: string, dataJson: string): void {
-    this.#commandEventName = eventName;
-    this.#commandDataJson = dataJson;
+  /**
+   * Prefill the command compose fields.
+   *
+   * Inputs: `eventName`, `dataJson`. Outputs: snapshot command fields.
+   * Ownership: this dashboard. Lifetime: until send/clearView/stop.
+   * Concurrency: runtime-safe. Failure modes: none; strings are stored as given.
+   * Classification: runtime-safe.
+   */
+  applyPrefill(args: { eventName: string; dataJson: string }): void {
+    this.#commandEventName = args.eventName;
+    this.#commandDataJson = args.dataJson;
     this.#emit();
   }
 
