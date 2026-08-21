@@ -56,10 +56,14 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
         "drawn",
         hsm.transition(
           hsm.guard(BotMachineGraph.needsFit),
-          hsm.target("ready"),
-          hsm.effect(BotMachineGraph.applyDrawnAndFit),
+          hsm.target("fitting"),
+          hsm.effect(BotMachineGraph.applyDrawn),
         ),
         hsm.transition(hsm.target("ready"), hsm.effect(BotMachineGraph.applyDrawn)),
+      ),
+      hsm.choice(
+        "fitting",
+        hsm.transition(hsm.target("ready"), hsm.effect(BotMachineGraph.applyFit)),
       ),
     ),
     hsm.state(
@@ -188,11 +192,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     const graphs = graphsFromEvent(event);
     if (graphs === null) return;
     instance.#applyDrawn(graphs);
-  }
-
-  static applyDrawnAndFit(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    BotMachineGraph.applyDrawn(ctx, instance, event);
-    BotMachineGraph.applyFit(ctx, instance, event);
   }
 
   static applyCleared(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {

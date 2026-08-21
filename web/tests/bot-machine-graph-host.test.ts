@@ -49,6 +49,7 @@ describe("bot-machine-graph flow host", () => {
     const phoneNodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
     await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
     assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
+    assert.match(host.state(), /\/ready$/);
     assert.equal(host.focusMachine("/Phone"), true);
     assert.equal(host.focusMachine("/Missing"), false);
     host.graphs = [{
