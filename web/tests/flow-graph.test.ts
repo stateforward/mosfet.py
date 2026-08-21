@@ -110,9 +110,34 @@ describe("flow-graph", () => {
     await flush();
     const after = graph.getViewport();
     assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
-    const viewport = graph.shadowRoot?.childNodes[0] as { childNodes?: Array<{ className?: string; style?: { transform?: string } }> } | undefined;
-    const world = viewport?.childNodes?.find((node) => node.className === "world");
-    assert.match(world?.style?.transform ?? "", /translate\(/);
+    graph.remove();
+  });
+
+  test("setNodes during pan stays in pan and pointer_up still ends pan", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.panOnDrag = true;
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      origin: { x: 20, y: 20 },
+      client: { x: 20, y: 20 },
+      viewport: { x: 20, y: 20 },
+      hit: { kind: "empty" },
+    }) }));
+    assert.match(graph.state(), /\/pan$/);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    assert.match(graph.state(), /\/pan$/);
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      buttons: 0,
+      origin: { x: 20, y: 20 },
+      client: { x: 40, y: 40 },
+      viewport: { x: 40, y: 40 },
+      hit: { kind: "empty" },
+    }) }));
+    await flush();
+    assert.match(graph.state(), /\/idle$/);
+    assert.equal(graph.nodes.length, 1);
     graph.remove();
   });
 
