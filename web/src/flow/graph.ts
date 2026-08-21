@@ -26,12 +26,16 @@ import {
   type Edge,
   type EdgeClickDetail,
   type ActivationOrigin,
+  type HandleKind,
+  type HandlePosition,
   type KeyboardOrigin,
   type Node,
   type NodeActivateData,
   type NodeClickDetail,
   type PointerHit,
+  type PointerOrigin,
   type PointerSampleData,
+  type XYPosition,
   type SelectionChangeDetail,
   type Viewport,
   type ViewportBounds,
@@ -1254,18 +1258,64 @@ function isPoint(value: unknown): value is { x: number; y: number } {
   return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y);
 }
 
-function isPointerHit(value: unknown): value is PointerHit {
-  if (!hsm.isRecord(value)) return false;
-  const kind = value["kind"];
-  if (kind === "empty") return true;
-  if (kind === "node") return isNode(value["node"]);
-  if (kind === "edge") return isEdge(value["edge"]);
-  if (kind === "handle") return isNode(value["node"]);
-  return false;
+const DEFAULT_POINTER_BUTTONS = 0;
+const DEFAULT_POINTER_BUTTON = 0;
+const DEFAULT_POINTER_TYPE = "mouse";
+
+function isPointerEventType(value: unknown): value is PointerSampleData["eventType"] {
+  return value === "pointerdown" || value === "pointermove" || value === "pointerup" || value === "pointercancel";
 }
 
-function handleKindOf(hit: PointerHit): "source" | "target" {
-  return hit.kind === "handle" && hit.handleKind === "target" ? "target" : "source";
+function isHandleKind(value: unknown): value is HandleKind {
+  return value === "source" || value === "target";
+}
+
+function isHandlePosition(value: unknown): value is HandlePosition {
+  return value === "top" || value === "right" || value === "bottom" || value === "left";
+}
+
+function pointOf(value: unknown): XYPosition | null {
+  if (!isPoint(value)) return null;
+  return { x: value.x, y: value.y };
+}
+
+function originOf(value: unknown): PointerOrigin | null {
+  if (!hsm.isRecord(value)) return null;
+  const pointerId = value["pointerId"];
+  const clientX = value["clientX"];
+  const clientY = value["clientY"];
+  const type = value["type"];
+  if (typeof pointerId !== "number" || !Number.isFinite(pointerId)) return null;
+  if (typeof clientX !== "number" || !Number.isFinite(clientX)) return null;
+  if (typeof clientY !== "number" || !Number.isFinite(clientY)) return null;
+  if (!isPointerEventType(type)) return null;
+  return { pointerId, clientX, clientY, type };
+}
+
+function hitOf(value: unknown): PointerHit | null {
+  if (!hsm.isRecord(value)) return null;
+  const kind = value["kind"];
+  if (kind === "empty") return { kind: "empty" };
+  if (kind === "node" && isNode(value["node"])) return { kind: "node", node: value["node"] };
+  if (kind === "edge" && isEdge(value["edge"])) return { kind: "edge", edge: value["edge"] };
+  if (kind === "handle" && isNode(value["node"])) {
+    const handleKind = value["handleKind"];
+    const position = value["position"];
+    if (!isHandleKind(handleKind) || !isHandlePosition(position)) return null;
+    const id = value["id"];
+    return {
+      kind: "handle",
+      node: value["node"],
+      handleKind,
+      position,
+      ...(typeof id === "string" ? { id } : {}),
+    };
+  }
+  return null;
+}
+
+function handleKindOf(hit: PointerHit): HandleKind {
+  return hit.kind === "handle" ? hit.handleKind : "source";
 }
 
 function pointerMovedPastClick(sample: PointerSampleData): boolean {
@@ -1276,18 +1326,44 @@ function pointerOf(value: unknown): PointerSampleData | null {
   if (!hsm.isRecord(value)) return null;
   const pointerId = value["pointerId"];
   const eventType = value["eventType"];
+  const client = pointOf(value["client"]);
+  const viewport = pointOf(value["viewport"]);
+  const world = pointOf(value["world"]);
+  const origin = pointOf(value["origin"]);
+  const hit = hitOf(value["hit"]);
+  const originalEvent = originOf(value["originalEvent"]);
   if (
     typeof pointerId !== "number"
-    || (eventType !== "pointerdown" && eventType !== "pointermove" && eventType !== "pointerup" && eventType !== "pointercancel")
-    || !isPoint(value["client"])
-    || !isPoint(value["viewport"])
-    || !isPoint(value["world"])
-    || !isPoint(value["origin"])
-    || !isPointerHit(value["hit"])
+    || !Number.isFinite(pointerId)
+    || !isPointerEventType(eventType)
+    || client === null
+    || viewport === null
+    || world === null
+    || origin === null
+    || hit === null
+    || originalEvent === null
   ) {
     return null;
   }
-  return value as PointerSampleData;
+  const buttons = value["buttons"];
+  const button = value["button"];
+  const pointerType = value["pointerType"];
+  return {
+    pointerId,
+    client,
+    viewport,
+    world,
+    buttons: typeof buttons === "number" && Number.isFinite(buttons) ? buttons : DEFAULT_POINTER_BUTTONS,
+    button: typeof button === "number" && Number.isFinite(button) ? button : DEFAULT_POINTER_BUTTON,
+    pointerType: typeof pointerType === "string" ? pointerType : DEFAULT_POINTER_TYPE,
+    shiftKey: value["shiftKey"] === true,
+    metaKey: value["metaKey"] === true,
+    ctrlKey: value["ctrlKey"] === true,
+    origin,
+    hit,
+    eventType,
+    originalEvent,
+  };
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -1314,13 +1390,6 @@ function isEdge(value: unknown): value is Edge {
 function actorsFromEvent(event: hsm.Event): object[] {
   if (!hsm.isRecord(event.data) || !Array.isArray(event.data["actors"])) return [];
   return event.data["actors"].filter((actor): actor is object => typeof actor === "object" && actor !== null);
-}
-
-function pointOf(value: unknown): { x: number; y: number } | null {
-  if (!hsm.isRecord(value)) return null;
-  const x = value["x"];
-  const y = value["y"];
-  return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y) ? { x, y } : null;
 }
 
 function viewportOf(value: unknown): Viewport | null {
