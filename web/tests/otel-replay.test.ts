@@ -165,11 +165,18 @@ describe("OTEL replay", () => {
     await dashboard.dispatch("dashboard.replay.next");
     assert.deepEqual(dashboard.focused, ["/PhoneBot"]);
 
+    const phonePosition = 3;
+    await dashboard.dispatch("dashboard.replay.seek", { position: phonePosition });
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone"]);
+
+    await dashboard.dispatch("dashboard.replay.previous");
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot"]);
+
     await dashboard.dispatch("dashboard.replay.seek", { position: seekPosition });
-    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/PhoneBot"]);
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot", "/PhoneBot"]);
 
     await dashboard.dispatch("dashboard.replay.play");
-    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/PhoneBot", "/PhoneBot"]);
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot", "/PhoneBot", "/PhoneBot"]);
     await dashboard.stop();
   });
 });
