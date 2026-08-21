@@ -25,15 +25,15 @@ export const graphStyles = `
 .state-node:not(.compound) { z-index: 4; }
 .state-node.active-path { border-color: #2dd4bf; border-width: 2px; color: #d5dbe8; font-weight: 650; }
 .state-node.current { border-color: #2dd4bf; border-width: 3px; color: #d5dbe8; font-weight: 800; box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.13); }
-flow-node::part(badge), .state-node::part(badge) {
+.state-node::part(badge), flow-node::part(badge) {
   max-width: calc(100% - 12px); padding: 2px 5px; overflow: hidden; color: inherit;
   background: #161b22; border-radius: 5px; text-overflow: ellipsis; white-space: nowrap;
 }
-.state-node.compound .label, .state-node.machine-shell .label {
+.state-node.compound::part(badge), .state-node.machine-shell::part(badge) {
   position: absolute; top: -13px; left: 12px; max-width: calc(100% - 24px);
   border: 1px solid currentColor; background: #0b0d12; letter-spacing: 0.01em;
 }
-.state-node.current .label { background: #123b3a; }
+.state-node.current::part(badge) { background: #123b3a; }
 .initial-node {
   position: absolute; width: ${INITIAL_SIZE}px; height: ${INITIAL_SIZE}px; box-sizing: border-box;
   border: ${INITIAL_BORDER_WIDTH}px solid ${INITIAL_BORDER}; border-radius: 50%;
