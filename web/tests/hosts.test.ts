@@ -919,7 +919,7 @@ describe("companion-style HSM controllers", () => {
         }
         signal?.addEventListener("abort", fail);
       });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     abort.abort();
     try {
       const result = await postCommandHttp({
@@ -939,7 +939,7 @@ describe("companion-style HSM controllers", () => {
       return {
         json: async () => ({ result: "canceled", detail: "gateway canceled" }),
       };
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     try {
       const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
       assert.equal(result.result, "canceled");
