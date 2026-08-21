@@ -90,6 +90,24 @@ describe("bot-dashboard inspector focus", () => {
     host.remove();
   });
 
+  test("data-node-count stays the held graph total after machine selection", async () => {
+    const host = await bootDashboard();
+    await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
+    await host.dispatch("dashboard.model.published", publishedModel("/PhoneBot"));
+    const graph = host.querySelector("bot-machine-graph");
+    assert.ok(graph instanceof BotMachineGraph);
+    await waitFor(() => graph.graphs.length === 2);
+    const heldTotal = graph.graphs.reduce((count, item) => count + item.nodes.length, 0);
+    const phoneBot = graph.graphs.find((item) => item.name === "/PhoneBot");
+    assert.ok(phoneBot !== undefined);
+    assert.notEqual(phoneBot.nodes.length, heldTotal);
+    await waitFor(() => graph.getAttribute("data-node-count") === String(heldTotal));
+    await host.dispatch("dashboard.machine.selected", { machineName: "/PhoneBot" });
+    assert.equal(graph.getAttribute("data-node-count"), String(heldTotal));
+    assert.notEqual(graph.getAttribute("data-node-count"), String(phoneBot.nodes.length));
+    host.remove();
+  });
+
   test("empty control names are not restored", async () => {
     const host = await bootDashboard();
     await host.dispatch("dashboard.model.published", publishedModel("/Phone"));

@@ -8,6 +8,8 @@ import { flowModelFromGraphs, focusBoundsForMachine, type FlowGraphModel } from 
 import { graphStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "bot-machine-graph";
+/** Public attribute. This host is the only writer; value is `graphNodeCount(#held)`. */
+const NODE_COUNT_ATTR = "data-node-count";
 
 export type GraphZoomDetail = { zoom: number };
 export type GraphEdgeDetail = { eventName: string };
@@ -199,7 +201,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.#model = null;
     instance.#flow.nodes = [];
     instance.#flow.edges = [];
-    instance.setAttribute("data-node-count", "0");
+    instance.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(instance.#held)));
   }
 
   static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -239,7 +241,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#model = model;
     this.#flow.nodes = model.nodes;
     this.#flow.edges = model.edges;
-    this.setAttribute("data-node-count", String(this.#held.reduce((count, graph) => count + graph.nodes.length, 0)));
+    this.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(this.#held)));
   }
 
   #onNodeClick = (event: Event): void => {

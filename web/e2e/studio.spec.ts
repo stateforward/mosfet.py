@@ -253,6 +253,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "8");
 
   await page.getByLabel("Observed machine").selectOption("/PhoneBot");
+  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "8");
   await expect(page.getByTestId("canvas")).toHaveAttribute(
     "data-current-state",
     "/PhoneBot/active/processing",

@@ -10,6 +10,18 @@ import { registerBotMachineGraph } from "../src/elements/bot-machine-graph/index
 registerFlowElements();
 registerBotMachineGraph();
 
+const YIELD_MS = 0;
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+  }
+  throw new Error("timed out waiting for bot-machine-graph");
+}
+
 function graphFor(name: string) {
   return {
     name,
@@ -34,6 +46,9 @@ describe("bot-machine-graph flow host", () => {
     host.graphs = graphs;
     assert.equal(host.graphs.length, 1);
     assert.equal(host.graphs[0]?.name, "/Phone");
+    const phoneNodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
     assert.equal(host.focusMachine("/Phone"), true);
     assert.equal(host.focusMachine("/Missing"), false);
     host.graphs = [{
@@ -45,6 +60,8 @@ describe("bot-machine-graph flow host", () => {
       nodes: [],
       edges: [],
     }];
+    await waitUntil(() => host.getAttribute("data-node-count") === "0");
+    assert.equal(host.getAttribute("data-node-count"), "0");
     assert.equal(host.focusMachine("/Empty"), false);
     await host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName: "/Phone",

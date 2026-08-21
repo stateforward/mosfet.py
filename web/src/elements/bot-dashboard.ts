@@ -1273,9 +1273,9 @@ export class BotDashboard extends Dashboard {
     this.#path.append(crumbRow, full);
   }
 
+  /** Dashboard-owned `data-current-state`. `data-node-count` is not written here. */
   #writeGraphHooks(selected: MachineGraph | null): void {
     this.#graph.setAttribute("data-current-state", selected?.currentState ?? "");
-    this.#graph.setAttribute("data-node-count", selected === null ? "0" : String(selected.nodes.length));
   }
 
   readonly #onSource = (event: Event): void => {
