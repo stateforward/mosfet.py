@@ -90,7 +90,7 @@ export class Graph extends hsm.Instance {
   }
 }
 
-function parseGraphs(value: unknown): MachineGraph[] | null {
+export function parseGraphs(value: unknown): MachineGraph[] | null {
   if (!Array.isArray(value)) return null;
   const graphs: MachineGraph[] = [];
   for (const item of value) {
@@ -101,10 +101,9 @@ function parseGraphs(value: unknown): MachineGraph[] | null {
   return graphs;
 }
 
-function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
-  const data = event.data;
-  if (typeof data !== "object" || data === null) return null;
-  return parseGraphs((data as Record<string, unknown>)["graphs"]);
+export function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
+  if (!hsm.isRecord(event.data)) return null;
+  return parseGraphs(event.data["graphs"]);
 }
 
 function copyGraph(graph: MachineGraph): MachineGraph {

@@ -1,7 +1,7 @@
 import * as hsm from "../../hsm.ts";
 
 import { FlowGraph, type NodeClickDetail } from "../../flow/index.ts";
-import { copyGraphs, Graph } from "../../machine-graph.ts";
+import { copyGraphs, Graph, graphsFromEvent } from "../../machine-graph.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
 import { replaceStyles } from "../styles.ts";
 import { flowModelFromGraphs, focusBoundsForMachine, type FlowGraphModel } from "./flow-model.ts";
@@ -174,18 +174,18 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   static needsFit(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-    if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data) || !Array.isArray(event.data["graphs"])) {
-      return false;
-    }
+    if (!(instance instanceof BotMachineGraph)) return false;
+    const graphs = graphsFromEvent(event);
+    if (graphs === null) return false;
     if (instance.#model === null) return true;
-    return graphNodeCount(instance.#held) !== graphNodeCount(event.data["graphs"] as readonly MachineGraph[]);
+    return graphNodeCount(instance.#held) !== graphNodeCount(graphs);
   }
 
   static applyDrawn(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data) || !Array.isArray(event.data["graphs"])) {
-      return;
-    }
-    instance.#applyDrawn(event.data["graphs"] as readonly MachineGraph[]);
+    if (!(instance instanceof BotMachineGraph)) return;
+    const graphs = graphsFromEvent(event);
+    if (graphs === null) return;
+    instance.#applyDrawn(graphs);
   }
 
   static applyDrawnAndFit(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {

@@ -51,6 +51,11 @@ describe("bot-machine-graph flow host", () => {
       path: "/Phone/ready",
       bounds: { left: 0, right: 40, top: 0, bottom: 20 },
     } }));
+    host.dispatch(hsm.typedEvent({
+      event: { name: "graph.drawn", kind: hsm.Kinds.Event },
+      data: { graphs: [{ not: "a graph" }] },
+    }));
+    assert.equal(host.graphs[0]?.name, "/Empty");
     assert.match(host.state(), /\/connected/);
     host.dispatchEvent(new CustomEvent("flow-node-click", { detail: { node: {} }, bubbles: true, composed: true }));
     host.dispatchEvent(new CustomEvent("flow-node-click", {
