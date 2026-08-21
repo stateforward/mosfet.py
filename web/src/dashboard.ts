@@ -425,6 +425,11 @@ function failCollectorUrl(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm
   controllerOf(instance)?.applyError("collector url is not allowed");
 }
 
+function applyStreamCanceled(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const reason = stringField({ event, key: "reason" });
+  controllerOf(instance)?.applyError(reason === "stale" ? "stream canceled" : (reason ?? "stream canceled"));
+}
+
 function replayStep(): number {
   return 700;
 }
@@ -456,6 +461,7 @@ const dashboardModel = hsm.define(
       "live",
       hsm.initial(hsm.target("sourceCheck")),
       hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
+      hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../error"), hsm.effect(applyError)),
       hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
       hsm.choice(
@@ -469,6 +475,11 @@ const dashboardModel = hsm.define(
         hsm.activity(streamLive),
         hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
         hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
+        hsm.transition(
+          hsm.on("dashboard.stream.canceled"),
+          hsm.target("../../error"),
+          hsm.effect(applyStreamCanceled),
+        ),
       ),
       hsm.state(
         "replay",
