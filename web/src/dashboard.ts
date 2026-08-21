@@ -460,6 +460,12 @@ const dashboardModel = hsm.define(
       hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
       hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      hsm.transition(
+        hsm.on("dashboard.replay.play"),
+        hsm.guard(hasPlayableReplay),
+        hsm.target("replay/playing"),
+        hsm.effect(playReplay),
+      ),
       hsm.choice(
         "sourceCheck",
         hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
@@ -471,12 +477,6 @@ const dashboardModel = hsm.define(
         hsm.activity(streamLive),
         hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
         hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
-        hsm.transition(
-          hsm.on("dashboard.replay.play"),
-          hsm.guard(hasPlayableReplay),
-          hsm.target("../replay/playing"),
-          hsm.effect(playReplay),
-        ),
       ),
       hsm.state(
         "replay",
@@ -487,14 +487,14 @@ const dashboardModel = hsm.define(
         hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
         hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
         hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
+        hsm.transition(
+          hsm.on("dashboard.replay.play"),
+          hsm.guard(hasPlayableReplay),
+          hsm.target("playing"),
+          hsm.effect(playReplay),
+        ),
         hsm.state(
           "paused",
-          hsm.transition(
-            hsm.on("dashboard.replay.play"),
-            hsm.guard(hasPlayableReplay),
-            hsm.target("../playing"),
-            hsm.effect(playReplay),
-          ),
           hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
         ),
         hsm.state(
