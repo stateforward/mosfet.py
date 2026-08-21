@@ -27,7 +27,7 @@ function badgeOf(host: BotOtelSource): Element {
 }
 
 function errorOf(host: BotOtelSource): Element {
-  const error = host.shadowRoot?.querySelector("p");
+  const error = host.shadowRoot?.querySelector("[data-testid=\"collector-status\"]");
   if (error === null || error === undefined) {
     throw new Error("error status missing");
   }
