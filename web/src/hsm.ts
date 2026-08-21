@@ -44,7 +44,17 @@ export type Host = {
   takeSnapshot(): library.Snapshot;
 };
 
-/** TypeScript mixin constructors require a rest parameter of type `any[]`. Isolated here. */
+/**
+ * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any.
+ * Owner: web/src/hsm.ts. Isolated mixin constructor rest parameter required by
+ * TypeScript's `new (...args: any[]) => T` mixin pattern; `unknown[]` is not
+ * assignable to that constructor constraint.
+ * Risk tests: web/tests/from.test.ts.
+ * Expiration: TypeScript mixin constructors accept `unknown[]`, or the library
+ * exports a custom-element host mixin.
+ * Removal plan: switch `from()` to the library mixin or type the rest parameter
+ * as `unknown[]` and delete this alias.
+ */
 type MixinRest = any[];
 type HostConstructor<T = object> = new (...args: MixinRest) => T;
 
@@ -140,6 +150,7 @@ function isDispatchable(value: unknown): value is library.Dispatchable {
  * miss. Concurrency: synchronous and side-effect free. Failure modes: never
  * throws; undefined means `catchFailure`/`reportFailure` cannot dispatch
  * `host-drop` (HostDropError is still classified).
+ * Classification: runtime-safe.
  */
 export function ownerTarget(instance: library.Instance): EventTarget | undefined {
   const owner = instance.context().Value(library.Keys.Owner);
@@ -214,6 +225,7 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
  * `host` must still be able to `dispatchEvent` (undefined host skips emit).
  * Concurrency: synchronous. Failure modes: missing/non-EventTarget host skips
  * `host-drop`; non-drop errors go to `reportError` when present, else throw.
+ * Classification: runtime-safe.
  */
 export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
   const drop = hostDropFrom(args.error);
@@ -239,6 +251,7 @@ export function reportFailure(args: { error: unknown; host?: EventTarget }): Err
  * `reportFailure`. Ownership/lifetime/concurrency: same as `reportFailure`.
  * Failure modes: undefined host means host-drop is classified but not
  * dispatched; non-drop errors still report or throw.
+ * Classification: runtime-safe.
  */
 export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {

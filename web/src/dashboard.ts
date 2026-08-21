@@ -859,6 +859,15 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
+  /**
+   * Apply one machine's visibility flag and its owned subtree.
+   *
+   * Inputs: `machineName`, `visible`. Outputs: snapshot `visibleMachines`.
+   * Ownership: this dashboard owns the map. Lifetime: until `clearView`/stop.
+   * Concurrency: runtime-safe on the dashboard dispatch thread.
+   * Failure modes: unknown names are still recorded on the map.
+   * Classification: runtime-safe.
+   */
   applyVisibility(args: { machineName: string; visible: boolean }): void {
     const document = this.#document;
     const names = document === null
@@ -902,6 +911,19 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
+  /**
+   * Viewing activity: connect the stream named on the entering event.
+   *
+   * Inputs: activity `ctx` and the `dashboard.source.selected` /
+   * `dashboard.replay.live` event whose data already contains `source` and
+   * `origin` (producer-stamped; this method does not read instance fields).
+   * Outputs: `dashboard.load.completed` / `dashboard.model.published` products,
+   * `dashboard.load.failed` for stream errors, or `dashboard.stream.canceled`
+   * when the activity is canceled. Ownership: this dashboard owns the
+   * subscription and closes it on activity exit. Lifetime: one viewing
+   * activity. Concurrency: one stream per viewing; overlapping viewing is
+   * prevented by topology. Classification: external-system.
+   */
   async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
     const source = sourceFromEvent(args.event);
     const origin = stringField({ event: args.event, key: "origin" });
