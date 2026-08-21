@@ -500,9 +500,20 @@ describe("flow-graph", () => {
 
   test("viewport is an application landmark", async () => {
     const graph = document.createElement("flow-graph");
+    assert.equal(graph.hasAttribute("role"), false);
     document.body.append(graph);
     assert.equal(graph.getAttribute("role"), "application");
     assert.equal(graph.getAttribute("aria-label"), "Machine graph");
+    graph.remove();
+  });
+
+  test("author accessible name survives connect defaults", async () => {
+    const graph = document.createElement("flow-graph");
+    graph.setAttribute("aria-label", "Custom graph");
+    graph.setAttribute("role", "group");
+    document.body.append(graph);
+    assert.equal(graph.getAttribute("aria-label"), "Custom graph");
+    assert.equal(graph.getAttribute("role"), "group");
     graph.remove();
   });
 

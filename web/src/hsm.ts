@@ -122,6 +122,12 @@ function isDispatchable(value: unknown): value is library.Dispatchable {
     && typeof (value as { context?: unknown }).context === "function";
 }
 
+/** Owning host when it is an EventTarget; used so host-drop is not silent. */
+export function ownerTarget(instance: library.Instance): EventTarget | undefined {
+  const owner = instance.context().Value(library.Keys.Owner);
+  return owner instanceof EventTarget ? owner : undefined;
+}
+
 /** Dispatch `event` on `instance` and, when parented, on the owning host. Waiters see rejection. */
 export function notifyOwner(args: { instance: library.Instance; event: library.DispatchEvent }): library.Completion {
   const child = Promise.resolve(args.instance.dispatch(args.event));

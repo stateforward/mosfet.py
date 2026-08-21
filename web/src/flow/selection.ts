@@ -148,7 +148,7 @@ export class Selection extends hsm.Instance {
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Selection.changedEvent, data: this.snapshot() }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 }
 

@@ -249,9 +249,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     replaceStyles(this.#root, graphStyles);
-    this.tabIndex = 0;
-    this.setAttribute("role", "application");
-    this.setAttribute("aria-label", "Machine graph");
     this.#viewport = document.createElement("div");
     this.#viewport.className = "viewport";
     this.#viewport.part.add("viewport");
@@ -338,6 +335,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   connectedCallback(): void {
+    if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
+    if (!this.hasAttribute("role")) this.setAttribute("role", "application");
+    if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start(this, FlowGraph.model);
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }

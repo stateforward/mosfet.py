@@ -81,12 +81,12 @@ export class Graph extends hsm.Instance {
     void hsm.notifyOwner({
       instance,
       event: hsm.typedEvent({ event: Graph.drawnEvent, data: { graphs: copyGraphs(instance.#graphs) } }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
   static notifyCleared(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Graph)) return;
-    void hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Graph.clearedEvent }) }).catch(hsm.catchFailure());
+    void hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Graph.clearedEvent }) }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 }
 

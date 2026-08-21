@@ -56,7 +56,7 @@ export class Dragger extends hsm.Instance {
           y: position.y - instance.#offset.y,
         },
       } }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {

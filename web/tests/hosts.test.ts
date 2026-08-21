@@ -749,6 +749,114 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
   });
 
+  test("in-flight command stop records canceled not error", async () => {
+    let started = false;
+    const seen: DashboardSnapshot[] = [];
+    const kinds: unknown[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        started = true;
+        return await new Promise((_resolve, reject) => {
+          const fail = (): void => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (command.signal?.aborted === true) {
+            fail();
+            return;
+          }
+          command.signal?.addEventListener("abort", fail);
+        });
+      },
+    });
+    dashboard.onSnapshot = (snapshot) => {
+      seen.push(snapshot);
+    };
+    const inner = dashboard.dispatch.bind(dashboard) as Dashboard["dispatch"];
+    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
+      if (typeof eventOrContext === "object" && eventOrContext !== null && "name" in eventOrContext) {
+        kinds.push((eventOrContext as { name: string }).name);
+      }
+      return inner(eventOrContext as never, data);
+    }) as Dashboard["dispatch"];
+    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+    await waitFor(() => started);
+    await dashboard.stop();
+    const canceled = seen.find((snapshot) => snapshot.commandResult?.result === "canceled");
+    assert.ok(canceled !== undefined);
+    assert.equal(canceled.commandResult?.result, "canceled");
+    assert.equal(canceled.commandResult?.detail, "command canceled");
+    assert.equal(kinds.includes("dashboard.command.failed"), false);
+  });
+
+  test("stale aborted send cannot cancel the successor send", async () => {
+    const holds: Array<{
+      resolve: (result: { result: "accepted"; detail: string }) => void;
+    }> = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        return await new Promise((resolve, reject) => {
+          const fail = (): void => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (command.signal?.aborted === true) {
+            fail();
+            return;
+          }
+          command.signal?.addEventListener("abort", fail);
+          holds.push({ resolve });
+        });
+      },
+    });
+    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "1" });
+    await waitFor(() => holds.length === 1);
+    const second = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "2" });
+    await waitFor(() => holds.length === 2);
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+    assert.notEqual(dashboard.snapshot().commandResult?.result, "canceled");
+    holds[1]?.resolve({ result: "accepted", detail: "second" });
+    await waitFor(() => dashboard.snapshot().commandResult?.detail === "second");
+    await second;
+    assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
+    assert.equal(dashboard.snapshot().commandResult?.detail, "second");
+    await dashboard.stop();
+  });
+
+  test("replay live without a stream fails sourceCheck", async () => {
+    const dashboard = bootDashboard();
+    await dashboard.dispatch("dashboard.replay.enter");
+    assert.equal(dashboard.snapshot().replay.active, true);
+    const after = await dashboard.dispatch("dashboard.replay.live");
+    assert.equal(after.phase, "error");
+    assert.match(after.errorMessage ?? "", /no otel stream selected/);
+    await dashboard.stop();
+  });
+
+  test("replay live with a stream re-enters viewing through sourceCheck", async () => {
+    let connects = 0;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    assert.equal(dashboard.snapshot().phase, "live");
+    assert.equal(connects, 1);
+    await dashboard.dispatch("dashboard.replay.enter");
+    const after = await dashboard.dispatch("dashboard.replay.live");
+    assert.equal(after.phase, "live");
+    assert.equal(after.replay.active, false);
+    assert.match(after.statePath, /\/viewing$/);
+    await waitFor(() => connects === 2);
+    await dashboard.stop();
+  });
+
   test("otel source connect completions keep declared kinds", async () => {
     const kinds: unknown[] = [];
     const source = bootSource();

@@ -258,7 +258,7 @@ export class Panner extends hsm.Instance {
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Panner.transformEvent, data: this.viewport }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 
   #setPanning(panning: boolean): void {

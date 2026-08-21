@@ -125,7 +125,7 @@ export class Connection extends hsm.Instance {
     void hsm.notifyOwner({
       instance,
       event: hsm.typedEvent({ event: Connection.finishedEvent, data: completed }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
     instance.#emitDraft();
   }
 
@@ -139,7 +139,7 @@ export class Connection extends hsm.Instance {
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Connection.draftEvent, data: this.#draft }),
-    }).catch(hsm.catchFailure());
+    }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 }
 

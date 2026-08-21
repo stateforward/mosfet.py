@@ -640,3 +640,69 @@ test("queued graph gestures do not reject when the element disconnects", async (
   expect(pageErrors).toEqual([]);
   await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
 });
+
+test("flow-graph host is an application landmark with keyboard viewport control", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openStudio(page);
+  const response = await request.post("/v1/models", { data: publishedModel("/Keyboard", null) });
+  expect(response.ok()).toBeTruthy();
+  await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
+
+  const before = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement) || !("getViewport" in flow) || typeof flow.getViewport !== "function") {
+      throw new Error("flow-graph public viewport is unavailable");
+    }
+    flow.focus();
+    return {
+      role: flow.getAttribute("role"),
+      name: flow.getAttribute("aria-label"),
+      viewport: (flow as HTMLElement & { getViewport: () => { x: number; y: number; zoom: number } }).getViewport(),
+    };
+  });
+  expect(before.role).toBe("application");
+  expect(before.name).toBe("Machine graph");
+
+  await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement)) throw new Error("flow-graph is unavailable");
+    flow.focus();
+    flow.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true }));
+  });
+  const zoomed = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement) || !("getViewport" in flow) || typeof flow.getViewport !== "function") {
+      throw new Error("flow-graph public viewport is unavailable");
+    }
+    return (flow as HTMLElement & { getViewport: () => { x: number; y: number; zoom: number } }).getViewport();
+  });
+  expect(zoomed.zoom).toBeGreaterThan(before.viewport.zoom);
+
+  await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement)) throw new Error("flow-graph is unavailable");
+    flow.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  });
+  const panned = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement) || !("getViewport" in flow) || typeof flow.getViewport !== "function") {
+      throw new Error("flow-graph public viewport is unavailable");
+    }
+    return (flow as HTMLElement & { getViewport: () => { x: number; y: number; zoom: number } }).getViewport();
+  });
+  expect(panned.x).not.toBe(zoomed.x);
+
+  await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement)) throw new Error("flow-graph is unavailable");
+    flow.dispatchEvent(new KeyboardEvent("keydown", { key: "f", bubbles: true }));
+  });
+  const fitted = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    if (!(flow instanceof HTMLElement) || !("getViewport" in flow) || typeof flow.getViewport !== "function") {
+      throw new Error("flow-graph public viewport is unavailable");
+    }
+    return (flow as HTMLElement & { getViewport: () => { x: number; y: number; zoom: number } }).getViewport();
+  });
+  expect(fitted.zoom).not.toBe(panned.zoom);
+});

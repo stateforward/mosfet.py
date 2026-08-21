@@ -92,6 +92,10 @@ class FakeElement {
     return this.attributes.get(name) ?? null;
   }
 
+  hasAttribute(name: string): boolean {
+    return this.attributes.has(name);
+  }
+
   toggleAttribute(name: string, force?: boolean): void {
     if (force === false) this.attributes.delete(name);
     else this.attributes.set(name, "");
