@@ -736,10 +736,45 @@ export class Dashboard extends hsm.from(HTMLElement) {
     hsm.start(this, dashboardModel);
   }
 
+  /**
+   * Request host attach.
+   *
+   * Inputs: none. Dispatches `dashboard.host.attach`.
+   * Outputs: none directly. Topology moves `disconnected` to `connected` only
+   * when the host is already disconnected. Attach is ignored unless
+   * disconnected, and deferred while stopping so reconnect cannot start until
+   * `dashboard.host.stopped` has cleared the previous Command actor.
+   * Ownership: this dashboard owns the dispatch and the Command actor it later
+   * attaches under `session`. Lifetime: one attach request; the connected
+   * session lasts until detach/stop.
+   * Concurrency: runtime-safe. Overlapping attach while connected is ignored
+   * (no transition). While stopping, attach is deferred, not dropped.
+   * Failure modes: dispatch rejection is classified by `catchFailure` as a
+   * host-drop when the runtime is unstarted or stopped; otherwise reported.
+   * Units: none.
+   * Classification: runtime-safe.
+   */
   requestAttach(): void {
     void super.dispatch(hsm.typedEvent({ event: dashboardCommands["dashboard.host.attach"] })).catch(hsm.catchFailure(this));
   }
 
+  /**
+   * Request host detach through stopping.
+   *
+   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command` set to
+   * the live Command actor (or `null`). Detach stamps that actor on the event
+   * so `stopCommandActor` stops the payload, not a field lookup.
+   * Outputs: none directly. Topology moves `connected` to `stopping`, then
+   * `disconnected` on `dashboard.host.stopped`.
+   * Ownership: this dashboard owns the dispatch; the stamped Command actor is
+   * stopped by the stopping activity and nulled by `clearCommandActor`.
+   * Lifetime: one detach request; stopping lasts until `dashboard.host.stopped`.
+   * Concurrency: runtime-safe. Detach while already disconnected is ignored.
+   * Failure modes: dispatch rejection is classified by `catchFailure` as a
+   * host-drop when the runtime is unstarted or stopped; otherwise reported.
+   * Units: none.
+   * Classification: runtime-safe.
+   */
   requestDetach(): void {
     void super.dispatch(hsm.typedEvent({
       event: dashboardCommands["dashboard.host.detach"],
@@ -747,6 +782,16 @@ export class Dashboard extends hsm.from(HTMLElement) {
     })).catch(hsm.catchFailure(this));
   }
 
+  /**
+   * Null the Command actor after host stop.
+   *
+   * Inputs: none. Invoked from the `dashboard.host.stopped` effect.
+   * Outputs: `#command` is `null`. Ownership: declaring Dashboard class only.
+   * Lifetime: until the next `session` entry attaches a new Command actor.
+   * Concurrency: runtime-safe; called once on the stopped transition.
+   * Failure modes: none. Units: none.
+   * Classification: runtime-safe.
+   */
   clearCommandActor(): void {
     this.#command = null;
   }
