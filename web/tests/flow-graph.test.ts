@@ -1326,6 +1326,41 @@ describe("flow-graph", () => {
     assert.equal(viewport.zoom, viewportZoom);
     graph.remove();
   });
+
+  test("nodes write after stop emits host-drop stopped and drops the write", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const priorNodeId = "a";
+    const rejectedNodeId = "b";
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    graph.nodes = [{ id: priorNodeId, position: { x: 0, y: 0 }, data: {} }];
+    await waitUntil(() => graph.nodes[0]?.id === priorNodeId);
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({
+          cancelable: event.cancelable,
+          bubbles: event.bubbles,
+          composed: event.composed,
+          reason: event.detail["reason"],
+        });
+      }
+    });
+    await hsm.stop(graph);
+    graph.nodes = [{ id: rejectedNodeId, position: { x: 1, y: 1 }, data: {} }];
+    await flush();
+    assert.equal(graph.nodes[0]?.id, priorNodeId);
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+    }
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+  });
+
 });
 
 describe("flow-controls", () => {

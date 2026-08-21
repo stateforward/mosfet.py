@@ -106,4 +106,62 @@ describe("hsm.from(HTMLElement)", () => {
     assert.ok(drops.some((drop) => drop.reason === unstarted));
     host.remove();
   });
+
+  test("stop then dispatch on a from host emits host-drop stopped and drops the write", async () => {
+    class StopDropHost extends hsm.from(HTMLElement) {
+      static readonly pingEvent = { name: "ping", kind: hsm.Kinds.Event } as const;
+      static readonly model = hsm.define(
+        "StopDropHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+          "idle",
+          hsm.transition(hsm.on(StopDropHost.pingEvent.name), hsm.target("../active")),
+        ),
+        hsm.state("active"),
+      );
+
+      requestPing(): void {
+        void this.dispatch(hsm.typedEvent({ event: StopDropHost.pingEvent })).catch(hsm.catchFailure(this));
+      }
+    }
+
+    if (customElements.get("test-stop-drop-host") === undefined) {
+      customElements.define("test-stop-drop-host", StopDropHost);
+    }
+    const host = document.createElement("test-stop-drop-host");
+    assert.ok(host instanceof StopDropHost);
+    const publicEventCancelable = false;
+    const publicEventBubbles = true;
+    const publicEventComposed = true;
+    const atLeastOneDrop = 1;
+    const stopped = "stopped";
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail) || typeof event.detail["reason"] !== "string") return;
+      drops.push({
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+        reason: event.detail["reason"],
+      });
+    });
+    document.body.append(host);
+    hsm.start(host, StopDropHost.model);
+    await host.dispatch(hsm.typedEvent({ event: StopDropHost.pingEvent }));
+    assert.match(host.state(), /\/active$/);
+    await hsm.stop(host);
+    assert.equal(host.state(), "");
+    host.requestPing();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+    }
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    assert.equal(host.state(), "");
+    host.remove();
+  });
 });

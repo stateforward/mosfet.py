@@ -143,8 +143,9 @@ export function from<TBase extends HostConstructor>(
 }
 
 const BIND = Symbol("hsm-bind");
+const WAS_STARTED = Symbol("hsm-was-started");
 
-type BoundHost = { [BIND]?: true };
+type BoundHost = { [BIND]?: true; [WAS_STARTED]?: true };
 
 /**
  * Bind library runtime onto `instance` and enter the model.
@@ -182,6 +183,7 @@ export function start<I extends object, M>(
     ? libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object)
     : libraryStart(ctxOrInstance as object, instanceOrModel as object);
   (started as BoundHost)[BIND] = true;
+  (started as BoundHost)[WAS_STARTED] = true;
   return started as I & Host;
 }
 
@@ -268,11 +270,18 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error), { cause: error });
 }
 
-export function hostDropFrom(error: unknown): HostDropError | null {
+export function hostDropFrom(error: unknown, host?: object): HostDropError | null {
   if (error instanceof HostDropError) return error;
   if (!(error instanceof Error) || !error.message.endsWith("requires a started HSM")) return null;
   const operation = error.message.replace(/ requires a started HSM$/, "");
-  return new HostDropError({ reason: "unstarted", operation, cause: error });
+  const reason = hostWasStopped(host) ? "stopped" : "unstarted";
+  return new HostDropError({ reason, operation, cause: error });
+}
+
+function hostWasStopped(host: object | undefined): boolean {
+  if (host === undefined) return false;
+  const bound = host as BoundHost;
+  return bound[WAS_STARTED] === true && bound[BIND] !== true;
 }
 
 function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
@@ -298,7 +307,7 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
  * Classification: runtime-safe.
  */
 export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
-  const drop = hostDropFrom(args.error);
+  const drop = hostDropFrom(args.error, args.host);
   if (drop !== null) {
     emitDrop(args.host, drop);
     throw drop;
@@ -325,7 +334,7 @@ export function reportFailure(args: { error: unknown; host?: EventTarget }): Err
  */
 export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {
-    const drop = hostDropFrom(error);
+    const drop = hostDropFrom(error, host);
     if (drop !== null) {
       emitDrop(host, drop);
       return;
