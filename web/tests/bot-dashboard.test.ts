@@ -101,6 +101,35 @@ describe("bot-dashboard inspector focus", () => {
     host.remove();
   });
 
+  test("inspector machine select stamps one event and focuses the graph", async () => {
+    const host = await bootDashboard();
+    await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
+    const select = host.querySelector('button[data-machine-name="/Phone"]');
+    assert.ok(select instanceof HTMLButtonElement);
+    const selectedEvent = "dashboard.machine.selected";
+    assert.equal(select.dataset["event"], selectedEvent);
+    const graph = host.querySelector("bot-machine-graph");
+    assert.ok(graph instanceof BotMachineGraph);
+    const names: string[] = [];
+    const original = graph.dispatch.bind(graph);
+    const spy = ((eventOrCtx: hsm.Event | hsm.Context, maybeEvent?: hsm.Event) => {
+      const event = maybeEvent ?? (eventOrCtx instanceof hsm.Context ? undefined : eventOrCtx);
+      if (event !== undefined && event.name === BotMachineGraph.focusEvent.name && hsm.isRecord(event.data)) {
+        const machineName = event.data["machineName"];
+        if (typeof machineName === "string") names.push(machineName);
+      }
+      return maybeEvent === undefined
+        ? original(eventOrCtx as hsm.Event)
+        : original(eventOrCtx as hsm.Context, maybeEvent);
+    }) as BotMachineGraph["dispatch"];
+    graph.dispatch = spy;
+    const machineName = "/Phone";
+    await host.dispatch(selectedEvent, { machineName });
+    assert.deepEqual(names, [machineName]);
+    graph.dispatch = original;
+    host.remove();
+  });
+
   test("machine-kind graph focus does not steal inspector control focus", async () => {
     const host = await bootDashboard();
     await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
