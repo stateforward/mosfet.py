@@ -46,6 +46,7 @@ const dashboardCommands = {
 const dashboardCompletions = {
   "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
+  "dashboard.stream.dropped": { name: "dashboard.stream.dropped", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
@@ -440,6 +441,10 @@ function failCollectorUrl(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm
   controllerOf(instance)?.applyError("collector url is not allowed");
 }
 
+function consumeStreamDropped(_ctx: hsm.Context, _instance: hsm.Instance, _event: hsm.Event): void {
+  return;
+}
+
 function commandActorFromEvent(event: hsm.Event): Command | null {
   if (!hsm.isRecord(event.data) || !(event.data["command"] instanceof Command)) return null;
   return event.data["command"];
@@ -501,6 +506,7 @@ const dashboardModel = hsm.define(
         hsm.initial(hsm.target("sourceCheck")),
         hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
         hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../error"), hsm.effect(applyError)),
+        hsm.transition(hsm.on("dashboard.stream.dropped"), hsm.effect(consumeStreamDropped)),
         hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
         hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
         hsm.choice(
@@ -1046,6 +1052,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Outputs: `dashboard.load.completed` / `dashboard.model.published` products
    * and `dashboard.load.failed` for stream errors. Leaving viewing (replay.enter,
    * reset, detach, new source) cancels the stream by exiting this activity.
+   * Late callbacks after that exit dispatch `dashboard.stream.dropped` on live;
+   * they do not apply products or `load.failed`.
    * Ownership: this dashboard owns the subscription and closes it on activity
    * exit. Lifetime: one viewing activity. Concurrency: one stream per viewing;
    * overlapping viewing is prevented by topology. Classification: external-system.
@@ -1085,27 +1093,44 @@ export class Dashboard extends hsm.from(HTMLElement) {
         onDone();
       }
     });
+    const dropLate = (): void => {
+      void this.dispatch(hsm.typedEvent({
+        event: dashboardCompletions["dashboard.stream.dropped"],
+      })).catch(hsm.catchFailure(this));
+    };
     subscription = this.connectStream(url, {
       onSnapshot: (batch) => {
-        if (ctx.done) return;
+        if (ctx.done) {
+          dropLate();
+          return;
+        }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "replace",
         } })).catch(hsm.catchFailure(this));
       },
       onSpans: (batch) => {
-        if (ctx.done) return;
+        if (ctx.done) {
+          dropLate();
+          return;
+        }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "append",
         } })).catch(hsm.catchFailure(this));
       },
       onModels: (models) => {
-        if (ctx.done) return;
+        if (ctx.done) {
+          dropLate();
+          return;
+        }
         void this.dispatch("dashboard.model.published", { models }).catch(hsm.catchFailure(this));
       },
       onError: (message) => {
-        if (ctx.done) return;
+        if (ctx.done) {
+          dropLate();
+          return;
+        }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.failed"], data: {
           message,
         } })).catch(hsm.catchFailure(this));

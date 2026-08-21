@@ -1067,8 +1067,12 @@ describe("companion-style HSM controllers", () => {
     await Promise.resolve();
     const streamCanceled = false;
     const loadFailed = false;
+    const streamDropped = true;
+    const productsDispatched = false;
     assert.equal(kinds.includes("dashboard.stream.canceled"), streamCanceled);
     assert.equal(kinds.includes("dashboard.load.failed"), loadFailed);
+    assert.equal(kinds.includes("dashboard.stream.dropped"), streamDropped);
+    assert.equal(kinds.includes("dashboard.load.completed"), productsDispatched);
     assert.match(dashboard.snapshot().statePath, /\/replay\//);
     await dashboard.stop();
   });
