@@ -96,6 +96,14 @@ class FakeElement {
     return this.attributes.has(name);
   }
 
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+    if (name.startsWith("data-")) {
+      const key = name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+      delete this.dataset[key];
+    }
+  }
+
   toggleAttribute(name: string, force?: boolean): void {
     if (force === false) this.attributes.delete(name);
     else this.attributes.set(name, "");

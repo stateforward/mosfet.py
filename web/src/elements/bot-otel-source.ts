@@ -79,9 +79,11 @@ export class BotOtelSource extends OtelSource {
     this.#badge.part.add("live-badge");
     this.#badge.setAttribute("data-testid", "live-badge");
     this.#badge.dataset["event"] = "source.connect.requested";
-    this.#badge.setAttribute("aria-label", "Collector status");
     this.#error = document.createElement("p");
+    this.#error.id = "collector-error";
     this.#error.className = "error";
+    this.#error.setAttribute("role", "status");
+    this.#error.setAttribute("aria-live", "polite");
     this.#root.append(this.#badge, this.#error);
   }
 
@@ -118,7 +120,14 @@ export class BotOtelSource extends OtelSource {
   #render(snapshot: OtelSourceSnapshot): void {
     this.#badge.dataset["phase"] = snapshot.phase;
     this.#badge.textContent = snapshot.phase;
-    this.#error.textContent = snapshot.errorMessage ?? "";
+    this.#badge.setAttribute("aria-label", snapshot.phase);
+    const errorMessage = snapshot.errorMessage ?? "";
+    this.#error.textContent = errorMessage;
+    if (errorMessage.length > 0) {
+      this.#badge.setAttribute("aria-describedby", this.#error.id);
+    } else {
+      this.#badge.removeAttribute("aria-describedby");
+    }
   }
 
   readonly #onClick = (event: Event): void => {
