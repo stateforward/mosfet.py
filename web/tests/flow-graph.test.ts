@@ -5,9 +5,6 @@ import { describe, test } from "node:test";
 import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
-import { registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
-
-registerBotOtelSource();
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
   FIT_PADDING_RATIO,
@@ -21,6 +18,15 @@ import {
 registerFlowElements();
 
 const YIELD_MS = 0;
+const publicEventBubbles = true;
+const publicEventComposed = true;
+const publicEventCancelable = false;
+
+function assertPublicCustomEvent(event: Event): void {
+  assert.equal(event.cancelable, publicEventCancelable);
+  assert.equal(event.bubbles, publicEventBubbles);
+  assert.equal(event.composed, publicEventComposed);
+}
 
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -545,16 +551,30 @@ describe("flow-graph", () => {
 
   test("nodes write before connect emits host-drop", async () => {
     const graph = document.createElement("flow-graph");
-    const drops: string[] = [];
+    const noNodes = 0;
+    const atLeastOneDrop = 1;
+    const unstarted = "unstarted";
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
     graph.addEventListener("host-drop", (event: Event) => {
       if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
-        drops.push(event.detail["reason"]);
+        drops.push({
+          cancelable: event.cancelable,
+          bubbles: event.bubbles,
+          composed: event.composed,
+          reason: event.detail["reason"],
+        });
       }
     });
     graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: {} }];
     await flush();
-    assert.equal(graph.nodes.length, 0);
-    assert.ok(drops.includes("unstarted") || drops.length >= 1);
+    assert.equal(graph.nodes.length, noNodes);
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+    }
+    assert.ok(drops.some((drop) => drop.reason === unstarted));
   });
 
   test("set nodes while disconnected apply after reconnect", async () => {
@@ -1124,28 +1144,33 @@ describe("flow-graph", () => {
     const handleSourceX = 80;
     const handleY = 20;
     const buttonsReleased = 0;
+    const oneNode = 1;
+    const noEdges = 0;
+    const atLeastOne = 1;
+    const priorNodeId = "a";
+    const connectPair = "a->b";
 
     // flow-admit-rejected: non-finite node coordinates reject as invalid.
+    // Postcondition: the prior graph remains committed.
     const rejectedGraph = document.createElement("flow-graph");
     document.body.append(rejectedGraph);
     const rejected: string[] = [];
     rejectedGraph.addEventListener("flow-admit-rejected", (event: Event) => {
       if (event instanceof CustomEvent && hsm.isRecord(event.detail)) {
         rejected.push(String(event.detail["reason"] ?? ""));
-        assert.equal(event.cancelable, false);
-        assert.equal(event.bubbles, true);
-        assert.equal(event.composed, true);
+        assertPublicCustomEvent(event);
       }
     });
-    const validNode = { id: "a", position: { x: nodeY, y: nodeY }, data: { label: "A" }, width: nodeWidth, height: nodeHeight };
+    const validNode = { id: priorNodeId, position: { x: nodeY, y: nodeY }, data: { label: "A" }, width: nodeWidth, height: nodeHeight };
     rejectedGraph.nodes = [validNode];
-    assert.equal(rejectedGraph.nodes.length, 1);
+    assert.equal(rejectedGraph.nodes.length, oneNode);
     const invalidNode = { id: "nan", position: { x: Number.NaN, y: nodeY }, data: {} };
     rejectedGraph.nodes = [invalidNode];
-    assert.equal(rejectedGraph.nodes.length, 1);
+    assert.equal(rejectedGraph.nodes.length, oneNode);
+    assert.equal(rejectedGraph.nodes[0]?.id, priorNodeId);
     assert.deepEqual(rejected, ["invalid"]);
 
-    // flow-selection-change: box select with no hit reports an empty change set.
+    // flow-selection-change: box select covering a node commits that node.
     const selectGraph = document.createElement("flow-graph");
     document.body.append(selectGraph);
     const selected: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; nodeCount: number }> = [];
@@ -1182,15 +1207,16 @@ describe("flow-graph", () => {
       hit: { kind: "empty" },
     }) }));
     await flush();
-    assert.ok(selected.length >= 1);
+    assert.ok(selected.length >= atLeastOne);
     for (const seen of selected) {
-      assert.equal(seen.cancelable, false);
-      assert.equal(seen.bubbles, true);
-      assert.equal(seen.composed, true);
+      assert.equal(seen.cancelable, publicEventCancelable);
+      assert.equal(seen.bubbles, publicEventBubbles);
+      assert.equal(seen.composed, publicEventComposed);
     }
-    assert.ok(selected.some((seen) => seen.nodeCount === 1));
+    assert.ok(selected.some((seen) => seen.nodeCount === oneNode));
 
     // flow-connect: pointer down on a source handle, up on a target handle.
+    // Postcondition: the dispatcher does not add an edge.
     const connectGraph = document.createElement("flow-graph");
     document.body.append(connectGraph);
     connectGraph.nodes = [
@@ -1234,40 +1260,98 @@ describe("flow-graph", () => {
       hit: { kind: "handle", node: targetNode, handleKind: "target", position: "left" },
     }) }));
     await flush();
-    assert.deepEqual(connected.map((item) => item.pair), ["a->b"]);
-    assert.ok(connected.every((item) => item.cancelable === false && item.bubbles === true && item.composed === true));
-
-    // host-drop: an admitted write on an unstarted graph classifies as unstarted.
-    const dropGraph = document.createElement("flow-graph");
-    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
-    dropGraph.addEventListener("host-drop", (event: Event) => {
-      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
-        drops.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed, reason: event.detail["reason"] });
-      }
-    });
-    dropGraph.nodes = [validNode];
-    await flush();
-    assert.ok(drops.length >= 1);
-    assert.ok(drops.every((drop) => drop.cancelable === false && drop.bubbles === true && drop.composed === true));
-    assert.ok(drops.some((drop) => drop.reason === "unstarted"));
-
-    // bot-otel-source: ready emits the non-cancelable public event.
-    const sourceHost = document.createElement("bot-otel-source");
-    const ready: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean }> = [];
-    sourceHost.addEventListener("bot-otel-source", (event: Event) => {
-      if (event instanceof CustomEvent) {
-        ready.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed });
-      }
-    });
-    document.body.append(sourceHost);
-    await waitUntil(() => sourceHost.snapshot().phase === "live");
-    assert.ok(ready.length >= 1);
-    assert.ok(ready.every((item) => item.cancelable === false && item.bubbles === true && item.composed === true));
+    assert.deepEqual(connected.map((item) => item.pair), [connectPair]);
+    assert.equal(connectGraph.edges.length, noEdges);
+    for (const item of connected) {
+      assert.equal(item.cancelable, publicEventCancelable);
+      assert.equal(item.bubbles, publicEventBubbles);
+      assert.equal(item.composed, publicEventComposed);
+    }
 
     rejectedGraph.remove();
     selectGraph.remove();
     connectGraph.remove();
-    dropGraph.remove();
-    sourceHost.remove();
+  });
+
+  test("node click, edge click, and viewport change CustomEvents are non-cancelable", async () => {
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const originLeft = 0;
+    const originTop = 0;
+    const targetNodeX = 200;
+    const buttonsReleased = 0;
+    const viewportX = 12;
+    const viewportY = 8;
+    const viewportZoom = 1.1;
+    const atLeastOne = 1;
+    const nodeId = "a";
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const sourceNode = { id: nodeId, position: { x: originLeft, y: originTop }, data: { label: "A" }, width: nodeWidth, height: nodeHeight };
+    const targetNode = { id: "b", position: { x: targetNodeX, y: originTop }, data: { label: "B" }, width: nodeWidth, height: nodeHeight };
+    const edge = { id: "a-b", source: nodeId, target: "b", type: "bezier" as const };
+    graph.nodes = [sourceNode, targetNode];
+    graph.edges = [edge];
+    const clicks: Event[] = [];
+    const edgeClicks: Event[] = [];
+    const viewports: Event[] = [];
+    graph.addEventListener("flow-node-click", (event) => clicks.push(event));
+    graph.addEventListener("flow-edge-click", (event) => edgeClicks.push(event));
+    graph.addEventListener("flow-viewport-change", (event) => viewports.push(event));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateClickEvent, data: { nodeId } }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: { kind: "edge", edge },
+    }) }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      buttons: buttonsReleased,
+      origin: { x: originLeft, y: originTop },
+      client: { x: originLeft, y: originTop },
+      hit: { kind: "edge", edge },
+    }) }));
+    graph.setViewport({ x: viewportX, y: viewportY, zoom: viewportZoom });
+    await flush();
+    assert.ok(clicks.length >= atLeastOne);
+    assert.ok(edgeClicks.length >= atLeastOne);
+    assert.ok(viewports.length >= atLeastOne);
+    for (const event of [...clicks, ...edgeClicks, ...viewports]) {
+      assertPublicCustomEvent(event);
+    }
+    const viewport = graph.getViewport();
+    assert.equal(viewport.x, viewportX);
+    assert.equal(viewport.y, viewportY);
+    assert.equal(viewport.zoom, viewportZoom);
+    graph.remove();
+  });
+});
+
+describe("flow-controls", () => {
+  test("clicking a control emits non-cancelable flow-control without applying zoom", async () => {
+    const zoomIn = "zoom-in";
+    const oneAction = 1;
+    const controls = document.createElement("flow-controls");
+    const actions: string[] = [];
+    const events: Event[] = [];
+    controls.addEventListener("flow-control", (event: Event) => {
+      events.push(event);
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["action"] === "string") {
+        actions.push(event.detail["action"]);
+      }
+    });
+    document.body.append(controls);
+    const button = controls.shadowRoot?.querySelector(`[data-action="${zoomIn}"]`);
+    assert.ok(button instanceof HTMLButtonElement);
+    const clickBubbles = true;
+    const clickComposed = true;
+    button.dispatchEvent(new Event("click", { bubbles: clickBubbles, composed: clickComposed }));
+    assert.equal(actions.length, oneAction);
+    assert.equal(actions[0], zoomIn);
+    for (const event of events) {
+      assertPublicCustomEvent(event);
+    }
+    controls.remove();
   });
 });

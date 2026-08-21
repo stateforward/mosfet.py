@@ -18,7 +18,37 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("timed out waiting for bot-otel-source");
 }
 
+const publicEventBubbles = true;
+const publicEventComposed = true;
+const publicEventCancelable = false;
+const atLeastOneReady = 1;
+
 describe("bot-otel-source", () => {
+  test("ready CustomEvent is non-cancelable and shares the host source handle", async () => {
+    const host = document.createElement("bot-otel-source");
+    assert.ok(host instanceof BotOtelSource);
+    const ready: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; source: unknown }> = [];
+    host.addEventListener("bot-otel-source", (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      ready.push({
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+        source: event.detail?.source,
+      });
+    });
+    document.body.append(host);
+    await waitFor(() => host.snapshot().phase === "live");
+    assert.ok(ready.length >= atLeastOneReady);
+    for (const event of ready) {
+      assert.equal(event.cancelable, publicEventCancelable);
+      assert.equal(event.bubbles, publicEventBubbles);
+      assert.equal(event.composed, publicEventComposed);
+      assert.equal(event.source, host.snapshot().source);
+    }
+    host.remove();
+  });
+
   test("accessible name tracks collector phase", async () => {
     const host = document.createElement("bot-otel-source");
     assert.ok(host instanceof BotOtelSource);

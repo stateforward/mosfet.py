@@ -157,4 +157,68 @@ describe("bot-machine-graph flow host", () => {
       FlowGraph.prototype.fitView = originalFitView;
     }
   });
+
+  test("echoes viewport zoom and edge clicks as non-cancelable host events", async () => {
+    const host = document.createElement("bot-machine-graph");
+    assert.ok(host instanceof BotMachineGraph);
+    const publicEventCancelable = false;
+    const publicEventBubbles = true;
+    const publicEventComposed = true;
+    const publicEventInit = {
+      bubbles: publicEventBubbles,
+      composed: publicEventComposed,
+      cancelable: publicEventCancelable,
+    };
+    const originX = 0;
+    const originY = 0;
+    const zoom = 1.25;
+    const eventName = "ping";
+    const atLeastOne = 1;
+    const zooms: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; zoom: number }> = [];
+    const edges: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; eventName: string }> = [];
+    host.addEventListener("bot-machine-graph-zoom", (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail?.zoom !== "number") return;
+      zooms.push({
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+        zoom: event.detail.zoom,
+      });
+    });
+    host.addEventListener("bot-machine-graph-edge", (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail?.eventName !== "string") return;
+      edges.push({
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+        eventName: event.detail.eventName,
+      });
+    });
+    document.body.append(host);
+    await waitUntil(() => host.state().includes("/connected"));
+    host.dispatchEvent(new CustomEvent("flow-viewport-change", {
+      ...publicEventInit,
+      detail: { viewport: { x: originX, y: originY, zoom } },
+    }));
+    host.dispatchEvent(new CustomEvent("flow-edge-click", {
+      ...publicEventInit,
+      detail: { edge: { id: "e", source: "a", target: "b", data: { eventName } } },
+    }));
+    await waitUntil(() => zooms.length >= atLeastOne && edges.length >= atLeastOne);
+    assert.ok(zooms.length >= atLeastOne);
+    assert.ok(edges.length >= atLeastOne);
+    for (const seen of zooms) {
+      assert.equal(seen.cancelable, publicEventCancelable);
+      assert.equal(seen.bubbles, publicEventBubbles);
+      assert.equal(seen.composed, publicEventComposed);
+      assert.equal(seen.zoom, zoom);
+    }
+    for (const seen of edges) {
+      assert.equal(seen.cancelable, publicEventCancelable);
+      assert.equal(seen.bubbles, publicEventBubbles);
+      assert.equal(seen.composed, publicEventComposed);
+      assert.equal(seen.eventName, eventName);
+    }
+    host.remove();
+  });
 });

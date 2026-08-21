@@ -54,4 +54,56 @@ describe("hsm.from(HTMLElement)", () => {
     // @ts-expect-error -- members-only objects are not define() results
     hsm.submachineState({ name: "region", machine: { members: {} } });
   });
+
+  test("unstarted dispatch on a from host emits non-cancelable host-drop", async () => {
+    class DropHost extends hsm.from(HTMLElement) {
+      static readonly pingEvent = { name: "ping", kind: hsm.Kinds.Event } as const;
+      static readonly model = hsm.define(
+        "DropHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+          "idle",
+          hsm.transition(hsm.on(DropHost.pingEvent.name), hsm.target("../active")),
+        ),
+        hsm.state("active"),
+      );
+
+      requestPing(): void {
+        void this.dispatch(hsm.typedEvent({ event: DropHost.pingEvent })).catch(hsm.catchFailure(this));
+      }
+    }
+
+    if (customElements.get("test-drop-host") === undefined) {
+      customElements.define("test-drop-host", DropHost);
+    }
+    const host = document.createElement("test-drop-host");
+    assert.ok(host instanceof DropHost);
+    const publicEventCancelable = false;
+    const publicEventBubbles = true;
+    const publicEventComposed = true;
+    const atLeastOneDrop = 1;
+    const unstarted = "unstarted";
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail) || typeof event.detail["reason"] !== "string") return;
+      drops.push({
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+        reason: event.detail["reason"],
+      });
+    });
+    document.body.append(host);
+    host.requestPing();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+    }
+    assert.ok(drops.some((drop) => drop.reason === unstarted));
+    host.remove();
+  });
 });
