@@ -6,6 +6,7 @@ import * as hsm from "../src/hsm.ts";
 import { BotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
+import { FlowGraph } from "../src/flow/index.ts";
 
 registerFlowElements();
 registerBotMachineGraph();
@@ -91,5 +92,66 @@ describe("bot-machine-graph flow host", () => {
       composed: true,
     }));
     host.remove();
+  });
+
+  test("first admit on an empty model ends ready and runs fitView", async () => {
+    const host = document.createElement("bot-machine-graph");
+    assert.ok(host instanceof BotMachineGraph);
+    let fitViewCount = 0;
+    const originalFitView = FlowGraph.prototype.fitView;
+    const countFitView = function (this: unknown) {
+      fitViewCount += 1;
+      originalFitView.call(this);
+    };
+    FlowGraph.prototype.fitView = countFitView;
+    try {
+      document.body.append(host);
+      await waitUntil(() => host.state().includes("/connected"));
+      const graphs = [graphFor("/Phone")];
+      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+      host.graphs = graphs;
+      const readyState = "/ready";
+      await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
+      assert.ok(host.state().endsWith(readyState));
+      const oneFit = 1;
+      assert.equal(fitViewCount, oneFit);
+      host.remove();
+    } finally {
+      FlowGraph.prototype.fitView = originalFitView;
+    }
+  });
+
+  test("second admit with the same node count ends ready without another fitView", async () => {
+    const host = document.createElement("bot-machine-graph");
+    assert.ok(host instanceof BotMachineGraph);
+    let fitViewCount = 0;
+    const originalFitView = FlowGraph.prototype.fitView;
+    const countFitView = function (this: unknown) {
+      fitViewCount += 1;
+      originalFitView.call(this);
+    };
+    FlowGraph.prototype.fitView = countFitView;
+    try {
+      document.body.append(host);
+      await waitUntil(() => host.state().includes("/connected"));
+      const graphs = [graphFor("/Phone")];
+      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+      host.graphs = graphs;
+      const readyState = "/ready";
+      await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
+      const oneFit = 1;
+      assert.equal(fitViewCount, oneFit);
+      const again = [graphFor("/Phone2")];
+      const againNodeCount = again.reduce((count, graph) => count + graph.nodes.length, 0);
+      assert.equal(againNodeCount, nodeCount);
+      host.graphs = again;
+      const admittedAgain = "/Phone2";
+      await waitUntil(() => host.graphs[0]?.name === admittedAgain && host.state().endsWith(readyState));
+      assert.ok(host.state().endsWith(readyState));
+      assert.equal(fitViewCount, oneFit);
+      host.remove();
+    } finally {
+      FlowGraph.prototype.fitView = originalFitView;
+    }
   });
 });

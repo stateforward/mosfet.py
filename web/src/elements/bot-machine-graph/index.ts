@@ -10,8 +10,21 @@ import { graphStyles } from "./styles.ts";
 const ELEMENT_NAME = "bot-machine-graph";
 /** Public attribute. This host is the only writer; value is `graphNodeCount(#held)`. */
 const NODE_COUNT_ATTR = "data-node-count";
+const FIT_REQUESTED = true;
 
+/**
+ * Detail of the `bot-machine-graph-zoom` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type GraphZoomDetail = { zoom: number };
+/**
+ * Detail of the `bot-machine-graph-edge` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type GraphEdgeDetail = { eventName: string };
 
 type GraphsAdmitData = { readonly graphs: readonly MachineGraph[] };
@@ -26,6 +39,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static readonly fitEvent = { name: "fit_view", kind: hsm.Kinds.Event } as const;
   static readonly nodeClickEvent = { name: "node_click", kind: hsm.Kinds.Event } as const;
   static readonly resizeEvent = { name: "host_resize", kind: hsm.Kinds.Event } as const;
+  static readonly drawnAppliedEvent = { name: "drawn_applied", kind: hsm.Kinds.CompletionEvent } as const;
+  static readonly fitDoneEvent = { name: "fit_done", kind: hsm.Kinds.CompletionEvent } as const;
 
   static readonly model = hsm.define(
     "BotMachineGraph",
@@ -52,18 +67,20 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.state("ready"),
-      hsm.choice(
+      hsm.state(
         "drawn",
-        hsm.transition(
-          hsm.guard(BotMachineGraph.needsFit),
-          hsm.target("fitting"),
-          hsm.effect(BotMachineGraph.applyDrawn),
-        ),
-        hsm.transition(hsm.target("ready"), hsm.effect(BotMachineGraph.applyDrawn)),
+        hsm.entry(BotMachineGraph.applyDrawnThenSignal),
+        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../afterDraw")),
       ),
       hsm.choice(
+        "afterDraw",
+        hsm.transition(hsm.guard(BotMachineGraph.fitRequested), hsm.target("fitting")),
+        hsm.transition(hsm.target("ready")),
+      ),
+      hsm.state(
         "fitting",
-        hsm.transition(hsm.target("ready"), hsm.effect(BotMachineGraph.applyFit)),
+        hsm.entry(BotMachineGraph.applyFitThenSignal),
+        hsm.transition(hsm.on(BotMachineGraph.fitDoneEvent.name), hsm.target("../ready")),
       ),
     ),
     hsm.state(
@@ -187,6 +204,24 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     return graphNodeCount(instance.#held) !== graphNodeCount(graphs);
   }
 
+  static fitRequested(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    if (!hsm.isRecord(event.data)) return false;
+    return event.data["fit"] === FIT_REQUESTED;
+  }
+
+  static applyDrawnThenSignal(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof BotMachineGraph)) return;
+    const fit = BotMachineGraph.needsFit(ctx, instance, event);
+    BotMachineGraph.applyDrawn(ctx, instance, event);
+    void instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.drawnAppliedEvent, data: { fit } })).catch(hsm.catchFailure(instance));
+  }
+
+  static applyFitThenSignal(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof BotMachineGraph)) return;
+    BotMachineGraph.applyFit(ctx, instance, event);
+    void instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.fitDoneEvent })).catch(hsm.catchFailure(instance));
+  }
+
   static applyDrawn(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph)) return;
     const graphs = graphsFromEvent(event);
@@ -270,6 +305,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       detail: { eventName },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   };
 
@@ -286,6 +322,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       detail: { zoom },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   };
 
