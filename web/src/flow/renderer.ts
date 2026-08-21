@@ -72,7 +72,9 @@ export class Renderer extends hsm.Instance {
     const machineCtx = instance.context();
     const onMachineDone = (): void => {
       machineCtx.removeEventListener("done", onMachineDone);
-      void instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
+      void instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent })).catch(
+        hsm.catchFailure(hsm.ownerTarget(instance)),
+      );
     };
     machineCtx.addEventListener("done", onMachineDone);
     if (machineCtx.done) onMachineDone();
@@ -92,6 +94,7 @@ export class Renderer extends hsm.Instance {
     try {
       await hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Renderer.paintEvent }) });
     } catch (error) {
+      if (instance.context().done) return;
       await instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }
   }
@@ -109,8 +112,9 @@ export class Renderer extends hsm.Instance {
  * deferred while rendering.
  * Failure modes: owner paint notify rejection while still painting enters
  * `/failed` via `ErrorEvent`. Parent-owned cancel of the renderer context
- * emits `render_canceled` on `rendering` and returns to `/clean`. Units: none.
- * Classification: runtime-safe.
+ * emits `render_canceled` on `rendering` and returns to `/clean`. Paint
+ * notify rejection after that cancel does not dispatch `ErrorEvent`.
+ * Units: none. Classification: runtime-safe.
  */
 export function startRenderer(args: {
   ctx: hsm.Context;
