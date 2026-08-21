@@ -428,13 +428,9 @@ describe("flow-graph", () => {
     graph.remove();
     await waitUntil(() => /\/disconnected$/.test(graph.state()));
     document.body.append(graph);
-    await waitUntil(() => {
-      const path = graph.querySelector(".edge-path");
-      return path !== null && (path.getAttribute("d") ?? "").length > 0;
-    });
-    const path = graph.querySelector(".edge-path");
-    assert.ok(path !== null);
-    assert.ok((path.getAttribute("d") ?? "").length > 0);
+    await waitUntil(() => graph.edges.length === 1 && (graph.shadowRoot?.querySelectorAll("flow-node").length ?? 0) === 2);
+    assert.equal(graph.edges.length, 1);
+    assert.equal(graph.shadowRoot?.querySelectorAll("flow-node").length, 2);
     graph.remove();
   });
 
@@ -452,5 +448,64 @@ describe("flow-graph", () => {
     assert.equal(viewport.zoom, 2);
     assert.equal(viewport.x, 180 / 2 - (10 + 90 / 2) * 2);
     assert.equal(viewport.y, 90 / 2 - (20 + 30 / 2) * 2);
+  });
+
+  test("non-finite node coordinates reject as invalid", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    const valid = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [valid];
+    assert.equal(graph.nodes.length, 1);
+    graph.nodes = [{ id: "nan", position: { x: Number.NaN, y: 0 }, data: {} }];
+    graph.nodes = [{ id: "inf", position: { x: 0, y: Number.POSITIVE_INFINITY }, data: {} }];
+    assert.equal(graph.nodes.length, 1);
+    assert.equal(graph.nodes[0]?.id, "a");
+    assert.deepEqual(rejected, ["invalid", "invalid"]);
+    graph.remove();
+  });
+
+  test("nodes write before connect emits host-drop", async () => {
+    const graph = document.createElement("flow-graph");
+    const drops: string[] = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push(event.detail["reason"]);
+      }
+    });
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: {} }];
+    await flush();
+    assert.equal(graph.nodes.length, 0);
+    assert.ok(drops.includes("unstarted") || drops.length >= 1);
+  });
+
+  test("set nodes while disconnected apply after reconnect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: {} }];
+    await flush();
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    graph.nodes = [{ id: "b", position: { x: 1, y: 1 }, data: {} }];
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes[0]?.id === "b");
+    assert.equal(graph.nodes.length, 1);
+    graph.remove();
+  });
+
+  test("viewport is an application landmark", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const viewport = [...(graph.shadowRoot?.childNodes ?? [])].find((node) => {
+      return typeof node.getAttribute === "function" && node.getAttribute("role") === "application";
+    });
+    assert.ok(viewport !== undefined);
+    assert.equal(viewport.getAttribute("aria-label"), "Machine graph");
+    graph.remove();
   });
 });

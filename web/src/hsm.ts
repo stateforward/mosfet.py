@@ -124,12 +124,15 @@ function isDispatchable(value: unknown): value is library.Dispatchable {
 
 /** Dispatch `event` on `instance` and, when parented, on the owning host. */
 export function notifyOwner(args: { instance: library.Instance; event: library.DispatchEvent }): library.Completion {
-  args.instance.dispatch(args.event);
+  const host = args.instance instanceof EventTarget ? args.instance : undefined;
+  const child = Promise.resolve(args.instance.dispatch(args.event)).catch(catchFailure(host));
   const owner = args.instance.context().Value(library.Keys.Owner);
   if (isDispatchable(owner) && owner !== args.instance) {
-    return library.dispatch(owner, args.event);
+    const ownerHost = owner instanceof EventTarget ? owner : host;
+    const parent = Promise.resolve(library.dispatch(owner, args.event)).catch(catchFailure(ownerHost));
+    return Promise.all([child, parent]).then(() => undefined);
   }
-  return Promise.resolve();
+  return child;
 }
 
 export function typedEvent<T>(event: { readonly name: string; readonly kind: library.DispatchEvent["kind"] }, data?: T): library.DispatchEvent {
@@ -137,13 +140,6 @@ export function typedEvent<T>(event: { readonly name: string; readonly kind: lib
     return { name: event.name, kind: event.kind };
   }
   return { name: event.name, data, kind: event.kind };
-}
-
-export function namedEvent<T>(name: string, data?: T): library.DispatchEvent {
-  if (data === undefined) {
-    return { name, kind: library.EventKind };
-  }
-  return { name, data, kind: library.EventKind };
 }
 
 export class HostDropError extends Error {

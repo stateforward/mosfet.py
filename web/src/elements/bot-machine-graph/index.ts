@@ -107,11 +107,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   focusMachine(machineName: string): boolean {
-    const model = this.#model ?? flowModelFromGraphs(this.graphs);
-    const bounds = focusBoundsForMachine(this.graphs, machineName, model);
-    if (bounds === null) return false;
     this.#live(hsm.typedEvent(BotMachineGraph.focusEvent, { machineName } satisfies FocusData));
-    return true;
+    return this.#held.some((graph) => graph.name === machineName);
   }
 
   connectedCallback(): void {
@@ -124,11 +121,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    try {
-      this.dispatch(event);
-    } catch (error) {
-      hsm.catchFailure(this)(error);
-    }
+    void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 
   static onConnected(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -167,16 +160,15 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   static admitGraphs(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph) || instance.#graph === null || !hsm.isRecord(event.data)) return;
-    const graphs = event.data["graphs"];
-    instance.#graph.admit(graphs);
+    void instance.#graph.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: event.data["graphs"] })).catch(hsm.catchFailure(instance));
   }
 
   static needsFit(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data) || !Array.isArray(event.data["graphs"])) {
       return false;
     }
-    const model = flowModelFromGraphs(event.data["graphs"] as readonly MachineGraph[]);
-    return instance.#model === null || instance.#model.nodes.length !== model.nodes.length;
+    if (instance.#model === null) return true;
+    return graphNodeCount(instance.#held) !== graphNodeCount(event.data["graphs"] as readonly MachineGraph[]);
   }
 
   static applyDrawn(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -306,6 +298,12 @@ function eventNameFromEdgeDetail(value: unknown): string | null {
   const data = value["edge"]["data"];
   if (!hsm.isRecord(data) || typeof data["eventName"] !== "string" || data["eventName"].length === 0) return null;
   return data["eventName"];
+}
+
+function graphNodeCount(graphs: readonly MachineGraph[]): number {
+  let count = 0;
+  for (const graph of graphs) count += graph.nodes.length;
+  return count;
 }
 
 function boundsOf(value: unknown): { left: number; right: number; top: number; bottom: number } | null {

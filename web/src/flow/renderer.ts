@@ -4,6 +4,7 @@ export class Renderer extends hsm.Instance {
   static readonly markDirtyEvent = { name: "mark_dirty", kind: hsm.Kinds.Event } as const;
   static readonly paintEvent = { name: "paint", kind: hsm.Kinds.Event } as const;
   static readonly renderCompleteEvent = { name: "render_complete", kind: hsm.Kinds.CompletionEvent } as const;
+  static readonly renderCanceledEvent = { name: "render_canceled", kind: hsm.Kinds.CompletionEvent } as const;
 
   static readonly model = hsm.define(
     "Renderer",
@@ -23,6 +24,7 @@ export class Renderer extends hsm.Instance {
       hsm.defer(Renderer.markDirtyEvent.name),
       hsm.activity(Renderer.performRender),
       hsm.transition(hsm.on(Renderer.renderCompleteEvent.name), hsm.target("../clean")),
+      hsm.transition(hsm.on(Renderer.renderCanceledEvent.name), hsm.target("../clean")),
       hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../failed")),
     ),
     hsm.state(
@@ -57,16 +59,27 @@ export class Renderer extends hsm.Instance {
   }
 
   static async performRender(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
-    if (!(instance instanceof Renderer) || ctx.done) return;
+    if (!(instance instanceof Renderer)) return;
+    const cancel = (): hsm.Completion => instance.dispatch(hsm.typedEvent(Renderer.renderCanceledEvent));
+    if (ctx.done) {
+      await cancel();
+      return;
+    }
     try {
       await Promise.resolve();
       await Promise.resolve();
-      if (ctx.done) return;
+      if (ctx.done) {
+        await cancel();
+        return;
+      }
       await hsm.notifyOwner({ instance, event: hsm.typedEvent(Renderer.paintEvent) });
-      if (ctx.done) return;
-      instance.dispatch(hsm.typedEvent(Renderer.renderCompleteEvent));
+      if (ctx.done) {
+        await cancel();
+        return;
+      }
+      await instance.dispatch(hsm.typedEvent(Renderer.renderCompleteEvent));
     } catch (error) {
-      instance.dispatch({ ...hsm.ErrorEvent, data: error });
+      await instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }
   }
 }

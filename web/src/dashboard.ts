@@ -327,12 +327,12 @@ function returnToLive(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Eve
   controllerOf(instance)?.returnToLive();
 }
 
-async function streamLive(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+async function streamLive(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
     return;
   }
-  await controller.streamSource(ctx);
+  await controller.streamSource(ctx, event);
 }
 
 function replayStep(): number {
@@ -481,17 +481,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    if (eventName === "dashboard.command.send") {
-      const record = hsm.isRecord(data) ? data : {};
-      await this.sendCommand({
-        ctx: this.context(),
-        eventName: typeof record["eventName"] === "string" ? record["eventName"] : null,
-        dataJson: typeof record["dataJson"] === "string" ? record["dataJson"] : null,
-      });
-      this.#emit();
-      return this.snapshot();
-    }
-    await super.dispatch(hsm.namedEvent(dashboardCommands[eventName].name, data));
+    await super.dispatch(hsm.typedEvent(dashboardCommands[eventName], data));
     this.#emit();
     return this.snapshot();
   }
@@ -656,11 +646,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
     const id = this.#commandSeq + 1;
     this.#commandSeq = id;
     const fail = (detail: string): void => {
-      this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.failed"].name, {
+      void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.failed"], {
         result: "error",
         detail,
         id,
-      }));
+      })).catch(hsm.catchFailure(this));
     };
     if (name.length === 0) {
       fail("event_name is required");
@@ -680,10 +670,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
       const result = await this.postCommand({ eventName: name, dataJson: payload, signal: abort.signal });
       if (args.ctx.done || abort.signal.aborted) return;
       if (result.result === "error") {
-        this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.failed"].name, { ...result, id }));
+        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.failed"], { ...result, id })).catch(hsm.catchFailure(this));
         return;
       }
-      this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.completed"].name, { ...result, id }));
+      void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.completed"], { ...result, id })).catch(hsm.catchFailure(this));
     } catch (error) {
       if (args.ctx.done || abort.signal.aborted) return;
       if (error instanceof Error && error.name === "AbortError") return;
@@ -693,17 +683,17 @@ export class Dashboard extends hsm.from(HTMLElement) {
     }
   }
 
-  async streamSource(ctx: hsm.Context): Promise<void> {
-    const source = this.#source;
+  async streamSource(ctx: hsm.Context, event: hsm.Event): Promise<void> {
+    const source = sourceFromEvent(event) ?? this.#source;
     if (source === null || source.kind !== "stream") {
-      await this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+      await this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
         message: "no otel stream selected",
       }));
       return;
     }
     const url = collectorUrl({ requested: source.url, origin: this.origin });
     if (url === null) {
-      await this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+      await this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
         message: "collector url is not allowed",
       }));
       return;
@@ -723,7 +713,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.completed"].name, {
+        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.completed"], {
           ...batch,
           mode: "replace",
         })).catch(hsm.catchFailure(this));
@@ -732,7 +722,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.completed"].name, {
+        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.completed"], {
           ...batch,
           mode: "append",
         })).catch(hsm.catchFailure(this));
@@ -747,7 +737,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
           message,
         })).catch(hsm.catchFailure(this));
       },

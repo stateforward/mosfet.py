@@ -134,8 +134,7 @@ export class BotOtelSource extends OtelSource {
     if (eventName === undefined || !isOtelSourceEventName(eventName)) {
       return;
     }
-    void this.dispatch(eventName, eventName === "source.connect.requested" ? { origin: documentOrigin(this) } : undefined)
-      .catch(catchFailure(this));
+    void this.dispatch(eventName, { origin: documentOrigin(this) }).catch(catchFailure(this));
   };
 }
 

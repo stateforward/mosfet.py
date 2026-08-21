@@ -80,9 +80,7 @@ does not require `instanceof Instance`. Start in `connectedCallback`, stop in
 
 The graph library lives in `src/flow/` and ports React Flow's public surface as
 custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,
-`flow-background`, `flow-controls`, `flow-minimap`, `flow-panel`,
-`flow-node-resizer`, `flow-node-toolbar`, `flow-edge-toolbar`, `flow-edge-text`,
-`flow-viewport-portal`). Sibling HSMs own orthogonal behavior:
+`flow-background`, `flow-controls`, `flow-minimap`). Sibling HSMs own orthogonal behavior:
 
 - `Renderer` (`clean` / `dirty` / `rendering`) coalesces paints
 - `Panner` (`fixed` / `panning`) writes CSS `translate+scale` synchronously

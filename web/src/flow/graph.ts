@@ -4,7 +4,7 @@ import { applyStyles, replaceStyles } from "../elements/styles.ts";
 import { Connection, startConnection, type ConnectionDraft } from "./connection.ts";
 import { Dragger, startDragger } from "./dragger.ts";
 import { FlowEdge } from "./edge.ts";
-import { startFocuser, type FocusTarget } from "./focuser.ts";
+import { Focuser, startFocuser, type FocusTarget } from "./focuser.ts";
 import { FlowNode } from "./node.ts";
 import { Panner, startPanner } from "./panner.ts";
 import { edgePath, getNodesBounds, getViewportForBounds } from "./path.ts";
@@ -55,8 +55,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly zoomInEvent = { name: "zoom_in", kind: hsm.Kinds.Event } as const;
   static readonly zoomOutEvent = { name: "zoom_out", kind: hsm.Kinds.Event } as const;
   static readonly setViewportEvent = { name: "set_viewport", kind: hsm.Kinds.Event } as const;
-  static readonly nodesChangedEvent = { name: "nodes_changed", kind: hsm.Kinds.Event } as const;
-  static readonly edgesChangedEvent = { name: "edges_changed", kind: hsm.Kinds.Event } as const;
   static readonly setNodesEvent = { name: "nodes_set", kind: hsm.Kinds.Event } as const;
   static readonly setEdgesEvent = { name: "edges_set", kind: hsm.Kinds.Event } as const;
   static readonly setPolicyEvent = { name: "policy_set", kind: hsm.Kinds.Event } as const;
@@ -90,10 +88,18 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.zoomOutEvent.name), hsm.effect(FlowGraph.applyZoomOut)),
       hsm.transition(hsm.on(FlowGraph.setViewportEvent.name), hsm.effect(FlowGraph.applySetViewport)),
       hsm.transition(hsm.on(FlowGraph.wheelEvent.name), hsm.effect(FlowGraph.applyWheel)),
-      hsm.transition(hsm.on(FlowGraph.nodesChangedEvent.name), hsm.effect(FlowGraph.requestPaint)),
-      hsm.transition(hsm.on(FlowGraph.edgesChangedEvent.name), hsm.effect(FlowGraph.requestPaint)),
-      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.applySetNodes)),
-      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.applySetEdges)),
+      hsm.transition(
+        hsm.on(FlowGraph.setNodesEvent.name),
+        hsm.guard(FlowGraph.nodesAdmissible),
+        hsm.effect(FlowGraph.applyAdmittedNodes),
+      ),
+      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.rejectNodes)),
+      hsm.transition(
+        hsm.on(FlowGraph.setEdgesEvent.name),
+        hsm.guard(FlowGraph.edgesAdmissible),
+        hsm.effect(FlowGraph.applyAdmittedEdges),
+      ),
+      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
       hsm.transition(hsm.on(FlowGraph.setPolicyEvent.name), hsm.effect(FlowGraph.applySetPolicy)),
       hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
       hsm.transition(hsm.on(Selection.changedEvent.name), hsm.effect(FlowGraph.rememberSelection)),
@@ -206,6 +212,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     hsm.state(
       "stopping",
       hsm.defer(FlowGraph.attachEvent.name),
+      hsm.defer(FlowGraph.setNodesEvent.name),
+      hsm.defer(FlowGraph.setEdgesEvent.name),
+      hsm.defer(FlowGraph.setPolicyEvent.name),
       hsm.activity(FlowGraph.stopActors),
       hsm.transition(hsm.on(FlowGraph.stoppedEvent.name), hsm.target("../disconnected")),
     ),
@@ -337,11 +346,16 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    try {
-      this.dispatch(event);
-    } catch (error) {
-      hsm.catchFailure(this)(error);
-    }
+    void this.dispatch(event).catch(hsm.catchFailure(this));
+  }
+
+  #send(machine: hsm.Instance | null, event: hsm.DispatchEvent): void {
+    if (machine === null) return;
+    void machine.dispatch(event).catch(hsm.catchFailure(this));
+  }
+
+  #dirty(): void {
+    this.#send(this.#renderer, hsm.typedEvent(Renderer.markDirtyEvent));
   }
 
   #emitRejected(detail: AdmitRejectedDetail): void {
@@ -356,7 +370,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     instance.#startActors();
     instance.#listen();
-    instance.#renderer?.markDirty();
+    instance.#send(instance.#renderer, hsm.typedEvent(Renderer.markDirtyEvent));
   }
 
   static onConnectedExit(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -435,12 +449,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "handle") return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#connection?.beginFrom({
+    instance.#send(instance.#connection, hsm.typedEvent(Connection.startEvent, {
       source: sample.hit.node.id,
       sourcePosition: sample.hit.position,
       start: sample.world,
       ...(sample.hit.id !== undefined ? { sourceHandle: sample.hit.id } : {}),
-    });
+    }));
   }
 
   static beginBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -448,7 +462,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample === null) return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#selection?.boxStart(sample.viewport);
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxStartEvent, sample.viewport));
   }
 
   static beginPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -456,93 +470,93 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample === null) return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#panner?.panStart({ pointerId: sample.pointerId, point: sample.viewport });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.panStartEvent, { pointerId: sample.pointerId, point: sample.viewport }));
   }
 
   static beginDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "node") return;
-    instance.#dragger?.dragStart({
+    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragStartEvent, {
       nodeId: sample.hit.node.id,
       offset: {
         x: sample.world.x - sample.hit.node.position.x,
         y: sample.world.y - sample.hit.node.position.y,
       },
-    });
+    }));
   }
 
   static movePan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#panner?.cursorMove({ pointerId: sample.pointerId, point: sample.viewport });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.cursorMoveEvent, { pointerId: sample.pointerId, point: sample.viewport }));
   }
 
   static endPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#panner?.panEnd({ pointerId: sample.pointerId });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.panEndEvent, { pointerId: sample.pointerId }));
   }
 
   static moveDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#dragger?.dragMove({ position: sample.world });
+    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragMoveEvent, { position: sample.world }));
   }
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#dragger?.dragEnd();
+    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragEndEvent));
   }
 
   static moveBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#selection?.boxMove(sample.viewport);
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxMoveEvent, sample.viewport));
   }
 
   static endBox(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const box = instance.#box;
     const ids = box === null ? [] : instance.#nodes.filter((node) => nodeHitsBox(node, box, instance.#view)).map((node) => node.id);
-    instance.#selection?.boxEnd(ids);
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxEndEvent, { ids }));
   }
 
   static moveConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#connection?.cursorMove(sample.world);
+    instance.#send(instance.#connection, hsm.typedEvent(Connection.moveEvent, sample.world));
   }
 
   static completeConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "handle") return;
-    instance.#connection?.complete({
+    instance.#send(instance.#connection, hsm.typedEvent(Connection.completeEvent, {
       target: sample.hit.node.id,
       ...(sample.hit.id !== undefined ? { targetHandle: sample.hit.id } : {}),
-    });
+    }));
   }
 
   static cancelConnect(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#connection?.cancel();
+    instance.#send(instance.#connection, hsm.typedEvent(Connection.cancelEvent));
   }
 
   static emitNodeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.eventType !== "pointerup" || sample.hit.kind !== "node") return;
-    instance.#selection?.click({
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.clickEvent, {
       id: sample.hit.node.id,
       kind: "node",
       additive: sample.metaKey || sample.ctrlKey,
-    });
+    }));
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
       detail: { node: copyNode(sample.hit.node), originalEvent: sample.originalEvent },
       bubbles: true,
@@ -554,11 +568,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.eventType !== "pointerup" || sample.hit.kind !== "edge") return;
-    instance.#selection?.click({
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.clickEvent, {
       id: sample.hit.edge.id,
       kind: "edge",
       additive: sample.metaKey || sample.ctrlKey,
-    });
+    }));
     instance.dispatchEvent(new CustomEvent<EdgeClickDetail>("flow-edge-click", {
       detail: { edge: copyEdge(sample.hit.edge), originalEvent: sample.originalEvent },
       bubbles: true,
@@ -570,7 +584,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.metaKey || sample.ctrlKey) return;
-    instance.#selection?.clear();
+    instance.#send(instance.#selection, hsm.typedEvent(Selection.clearEvent));
   }
 
   static applyFitView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -583,24 +597,24 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const bounds = boundsOf(event.data["bounds"]);
     const metrics = instance.#metrics();
     if (bounds === null || metrics === null) return;
-    instance.#panner?.fit({ bounds, metrics });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.fitEvent, { bounds, metrics }));
   }
 
   static applyZoomIn(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#panner?.zoom({ scale: instance.#view.zoom * ZOOM_FACTOR });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { scale: instance.#view.zoom * ZOOM_FACTOR }));
   }
 
   static applyZoomOut(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#panner?.zoom({ scale: instance.#view.zoom / ZOOM_FACTOR });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { scale: instance.#view.zoom / ZOOM_FACTOR }));
   }
 
   static applySetViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
-    instance.#panner?.setViewport(viewport);
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.viewportEvent, viewport));
   }
 
   static applyWheel(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -608,12 +622,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const deltaY = event.data["deltaY"];
     const point = pointOf(event.data["point"]);
     if (typeof deltaY !== "number" || point === null) return;
-    instance.#panner?.zoom({ deltaY, point });
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { deltaY, point }));
   }
 
-  static requestPaint(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph)) return;
-    instance.#renderer?.markDirty();
+  static nodesAdmissible(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return hsm.isRecord(event.data) && nodesAreAdmissible(event.data["nodes"]);
+  }
+
+  static edgesAdmissible(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return hsm.isRecord(event.data) && edgesAreAdmissible(event.data["edges"]);
   }
 
   static paintNow(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -621,26 +638,30 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#paint();
   }
 
-  static applySetNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  static applyAdmittedNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
     const admitted = admitNodes(event.data["nodes"]);
-    if (admitted.rejected !== null) {
-      instance.#emitRejected(admitted.rejected);
-      return;
-    }
+    if (admitted.rejected !== null) return;
     instance.#nodes = admitted.nodes;
-    instance.#renderer?.markDirty();
+    instance.#dirty();
   }
 
-  static applySetEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  static rejectNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    instance.#emitRejected(nodesRejectDetail(event.data["nodes"]));
+  }
+
+  static applyAdmittedEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
     const admitted = admitEdges(event.data["edges"]);
-    if (admitted.rejected !== null) {
-      instance.#emitRejected(admitted.rejected);
-      return;
-    }
+    if (admitted.rejected !== null) return;
     instance.#edges = admitted.edges;
-    instance.#renderer?.markDirty();
+    instance.#dirty();
+  }
+
+  static rejectEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    instance.#emitRejected(edgesRejectDetail(event.data["edges"]));
   }
 
   static applySetPolicy(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -676,7 +697,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       bubbles: true,
       composed: true,
     }));
-    instance.#renderer?.markDirty();
+    instance.#dirty();
   }
 
   static applyNodeMoved(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -685,7 +706,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const position = pointOf(event.data["position"]);
     if (typeof nodeId !== "string" || position === null) return;
     instance.#nodes = instance.#nodes.map((node) => node.id === nodeId ? { ...node, position } : node);
-    instance.#renderer?.markDirty();
+    instance.#dirty();
   }
 
   static paintDraft(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -717,14 +738,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
     const metrics = instance.#metrics();
     if (bounds === null || metrics === null) return;
-    instance.#focuser?.focus({
+    instance.#send(instance.#focuser, hsm.typedEvent(Focuser.focusEvent, {
       kind: "machine",
       bounds,
       ...(hsm.isRecord(event.data) && typeof event.data["machineName"] === "string"
         ? { machineName: event.data["machineName"] }
         : {}),
-    });
-    instance.#panner?.fit({ bounds, metrics });
+    }));
+    instance.#send(instance.#panner, hsm.typedEvent(Panner.fitEvent, { bounds, metrics }));
   }
 
   #startActors(): void {
@@ -802,16 +823,16 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     };
     this.addEventListener("pointerdown", onPointerDown);
     this.addEventListener("pointermove", onPointerMove);
-    this.addEventListener("pointerup", onPointerUp, true);
-    this.addEventListener("pointercancel", onPointerUp, true);
+    this.addEventListener("pointerup", onPointerUp, { capture: true });
+    this.addEventListener("pointercancel", onPointerUp, { capture: true });
     this.addEventListener("wheel", onWheel, { passive: false });
     this.#viewport.addEventListener("keydown", onKey);
     this.addEventListener("flow-control", onControl);
     this.#unlisten = () => {
       this.removeEventListener("pointerdown", onPointerDown);
       this.removeEventListener("pointermove", onPointerMove);
-      this.removeEventListener("pointerup", onPointerUp, true);
-      this.removeEventListener("pointercancel", onPointerUp, true);
+      this.removeEventListener("pointerup", onPointerUp, { capture: true });
+      this.removeEventListener("pointercancel", onPointerUp, { capture: true });
       this.removeEventListener("wheel", onWheel);
       this.#viewport.removeEventListener("keydown", onKey);
       this.removeEventListener("flow-control", onControl);
@@ -915,7 +936,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (metrics === null || nodes.length === 0) return;
     const box = getNodesBounds(nodes);
     const viewport = getViewportForBounds(box, metrics.width, metrics.height, MIN_ZOOM, MAX_ZOOM, FIT_PADDING_RATIO);
-    this.#panner?.setViewport(viewport);
+    this.#send(this.#panner, hsm.typedEvent(Panner.viewportEvent, viewport));
   }
 
   #worldPoint(client: { x: number; y: number }): { x: number; y: number } {
@@ -1052,10 +1073,18 @@ function hitOf(value: unknown): PointerHit | null {
   return null;
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function isNode(value: unknown): value is Node {
-  return hsm.isRecord(value) && typeof value["id"] === "string" && hsm.isRecord(value["position"])
-    && typeof value["position"]["x"] === "number" && typeof value["position"]["y"] === "number"
-    && hsm.isRecord(value["data"]);
+  if (!hsm.isRecord(value) || typeof value["id"] !== "string" || !hsm.isRecord(value["position"]) || !hsm.isRecord(value["data"])) {
+    return false;
+  }
+  if (!isFiniteNumber(value["position"]["x"]) || !isFiniteNumber(value["position"]["y"])) return false;
+  if (value["width"] !== undefined && !isFiniteNumber(value["width"])) return false;
+  if (value["height"] !== undefined && !isFiniteNumber(value["height"])) return false;
+  return true;
 }
 
 function isEdge(value: unknown): value is Edge {
@@ -1104,7 +1133,10 @@ function boxOf(value: unknown): SelectionBox | null {
   const top = value["top"];
   const right = value["right"];
   const bottom = value["bottom"];
-  return typeof left === "number" && typeof top === "number" && typeof right === "number" && typeof bottom === "number"
+  return typeof left === "number" && Number.isFinite(left)
+    && typeof top === "number" && Number.isFinite(top)
+    && typeof right === "number" && Number.isFinite(right)
+    && typeof bottom === "number" && Number.isFinite(bottom)
     ? { left, top, right, bottom }
     : null;
 }
@@ -1148,6 +1180,34 @@ function nodeHitsBox(node: Node, box: SelectionBox, viewport: Viewport): boolean
   const right = left + width * viewport.zoom;
   const bottom = top + height * viewport.zoom;
   return left < box.right && right > box.left && top < box.bottom && bottom > box.top;
+}
+
+function nodesAreAdmissible(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_FLOW_NODES) return false;
+  for (const item of value) {
+    if (!isNode(item)) return false;
+  }
+  return true;
+}
+
+function edgesAreAdmissible(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_FLOW_EDGES) return false;
+  for (const item of value) {
+    if (!isEdge(item)) return false;
+  }
+  return true;
+}
+
+function nodesRejectDetail(value: unknown): AdmitRejectedDetail {
+  if (!Array.isArray(value)) return { reason: "invalid", nodeCount: 0, edgeCount: 0 };
+  if (value.length > MAX_FLOW_NODES) return { reason: "too_many_nodes", nodeCount: value.length, edgeCount: 0 };
+  return { reason: "invalid", nodeCount: value.length, edgeCount: 0 };
+}
+
+function edgesRejectDetail(value: unknown): AdmitRejectedDetail {
+  if (!Array.isArray(value)) return { reason: "invalid", nodeCount: 0, edgeCount: 0 };
+  if (value.length > MAX_FLOW_EDGES) return { reason: "too_many_edges", nodeCount: 0, edgeCount: value.length };
+  return { reason: "invalid", nodeCount: 0, edgeCount: value.length };
 }
 
 function admitNodes(value: unknown): { nodes: Node[]; rejected: AdmitRejectedDetail | null } {

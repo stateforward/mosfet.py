@@ -48,12 +48,12 @@ export class Graph extends hsm.Instance {
     return {
       phase: statePath.endsWith("/drawing") ? "drawing" : "empty",
       statePath,
-      graphs: this.graphs,
+      graphs: copyGraphs(this.graphs),
     };
   }
 
   admit(value: unknown): MachineGraphSnapshot {
-    this.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: value }));
+    void this.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: value })).catch(hsm.catchFailure());
     return this.snapshot();
   }
 
@@ -69,7 +69,7 @@ export class Graph extends hsm.Instance {
       instance.graphs = [];
       return;
     }
-    instance.graphs = graphs;
+    instance.graphs = copyGraphs(graphs);
   }
 
   static clear(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -81,7 +81,7 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph) || instance.graphs.length === 0) return;
     hsm.notifyOwner({
       instance,
-      event: hsm.typedEvent(Graph.drawnEvent, { graphs: instance.graphs }),
+      event: hsm.typedEvent(Graph.drawnEvent, { graphs: copyGraphs(instance.graphs) }),
     });
   }
 
@@ -106,4 +106,16 @@ function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
   const data = event.data;
   if (typeof data !== "object" || data === null) return null;
   return parseGraphs((data as Record<string, unknown>)["graphs"]);
+}
+
+function copyGraph(graph: MachineGraph): MachineGraph {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => ({ ...node })),
+    edges: graph.edges.map((edge) => ({ ...edge })),
+  };
+}
+
+function copyGraphs(graphs: readonly MachineGraph[]): MachineGraph[] {
+  return graphs.map(copyGraph);
 }

@@ -35,16 +35,6 @@ function sourceFromEvent(event: hsm.Event): StreamSource | null {
   return event.data["source"];
 }
 
-function rememberConnectArgs(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  if (!(instance instanceof OtelSource) || !hsm.isRecord(event.data) || typeof event.data["origin"] !== "string") {
-    return;
-  }
-  instance.rememberConnect({
-    origin: event.data["origin"],
-    ...(typeof event.data["url"] === "string" ? { requested: event.data["url"] } : {}),
-  });
-}
-
 function rememberReadySource(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   const source = sourceFromEvent(event);
   if (source === null) {
@@ -93,7 +83,7 @@ const otelSourceModel = hsm.define(
   ),
   hsm.choice(
     "validate",
-    hsm.transition(hsm.guard(urlAllowed), hsm.target("connecting"), hsm.effect(rememberConnectArgs)),
+    hsm.transition(hsm.guard(urlAllowed), hsm.target("connecting")),
     hsm.transition(hsm.target("error"), hsm.effect(rememberConnectFailure)),
   ),
   hsm.state(
@@ -134,7 +124,6 @@ export function isOtelSourceEventName(value: string): value is OtelSourceEventNa
 export class OtelSource extends hsm.from(HTMLElement) {
   #source: StreamSource | null = null;
   #errorMessage: string | null = null;
-  #connectArgs: { origin: string; requested?: string } | null = null;
   onSnapshot: ((snapshot: OtelSourceSnapshot) => void) | null = null;
   onReady: ((source: StreamSource) => void) | null = null;
 
@@ -169,17 +158,13 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    await super.dispatch(hsm.namedEvent(sourceCommands[eventName].name, data));
+    await super.dispatch(hsm.typedEvent(sourceCommands[eventName], data));
     this.#emit();
     return this.snapshot();
   }
 
   override async stop(): Promise<void> {
     await hsm.stop(this);
-  }
-
-  rememberConnect(args: { origin: string; requested?: string }): void {
-    this.#connectArgs = args;
   }
 
   rememberSource(source: StreamSource | null): void {
@@ -202,17 +187,25 @@ export class OtelSource extends hsm.from(HTMLElement) {
     this.onReady?.(source);
   }
 
-  async connect(_event: hsm.Event): Promise<void> {
-    const args = this.#connectArgs;
-    this.#connectArgs = null;
-    if (args === null) return;
+  async connect(event: hsm.Event): Promise<void> {
+    const fail = (message: string): hsm.Completion => {
+      return this.dispatch(hsm.typedEvent(sourceCompletions["source.connect.failed"], { message }));
+    };
+    if (!hsm.isRecord(event.data) || typeof event.data["origin"] !== "string") {
+      await fail("connect failed");
+      return;
+    }
+    const requested = typeof event.data["url"] === "string" ? event.data["url"] : undefined;
     const url = collectorUrl({
-      origin: args.origin,
-      ...(args.requested !== undefined ? { requested: args.requested } : {}),
+      origin: event.data["origin"],
+      ...(requested !== undefined ? { requested } : {}),
     });
-    if (url === null) return;
+    if (url === null) {
+      await fail("collector url is not allowed");
+      return;
+    }
     const source = streamSource(url);
-    await this.dispatch(hsm.namedEvent(sourceCompletions["source.connected"].name, { source }));
+    await this.dispatch(hsm.typedEvent(sourceCompletions["source.connected"], { source }));
   }
 
   #emit(): void {

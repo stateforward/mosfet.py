@@ -127,18 +127,6 @@ button {
 }
 `;
 
-export const panelStyles = `
-:host {
-  position: absolute;
-  z-index: 6;
-  display: block;
-}
-:host([position="top-left"]) { top: 0.6rem; left: 0.6rem; }
-:host([position="top-right"]) { top: 0.6rem; right: 0.6rem; }
-:host([position="bottom-left"]) { bottom: 0.6rem; left: 0.6rem; }
-:host([position="bottom-right"]) { bottom: 0.6rem; right: 0.6rem; }
-`;
-
 export const minimapStyles = `
 :host {
   position: absolute;
@@ -153,37 +141,4 @@ export const minimapStyles = `
   overflow: hidden;
 }
 canvas { width: 100%; height: 100%; display: block; }
-`;
-
-export const toolbarStyles = `
-:host {
-  position: absolute;
-  z-index: 7;
-  display: none;
-  padding: 0.2rem 0.35rem;
-  border: 1px solid #2a3140;
-  border-radius: 0.3rem;
-  background: #161922;
-  color: #e8eaef;
-  font-size: 0.72rem;
-}
-:host([visible]) { display: block; }
-`;
-
-export const resizerStyles = `
-:host {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.control {
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  background: #2dd4bf;
-  pointer-events: auto;
-}
-.control[data-dir="right"] { right: -4px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
-.control[data-dir="bottom"] { bottom: -4px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
-.control[data-dir="bottom-right"] { right: -4px; bottom: -4px; cursor: nwse-resize; }
 `;

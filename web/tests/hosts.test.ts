@@ -188,6 +188,9 @@ describe("companion-style HSM controllers", () => {
 
     assert.deepEqual(signals.draws, [["/A"], ["/B"], ["/C"]]);
     assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
+    const snap = graph.snapshot();
+    (snap.graphs as unknown as Array<{ name: string }>).push({ name: "/hijack" });
+    assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
     await hsm.stop(panner);
     await hsm.stop(graph);
   });
@@ -387,8 +390,12 @@ describe("companion-style HSM controllers", () => {
         snapshots.push(snapshot);
       },
     });
-    dashboard.applySpans({ spans: parsed.spans, skipped: 0, mode: "replace", replay: false });
     await dashboard.dispatch("dashboard.replay.enter");
+    await dispatchLoad(dashboard, {
+      mode: "replace",
+      skipped: parsed.skipped,
+      observeSpans: parsed.spans,
+    });
     await dashboard.dispatch("dashboard.replay.play");
     assert.ok(dashboard.snapshot().replay.total > 0);
     assert.equal(dashboard.snapshot().replay.playing, true);
@@ -647,5 +654,77 @@ describe("companion-style HSM controllers", () => {
     assert.deepEqual(opened, []);
     assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
     await dashboard.stop();
+  });
+
+  test("typed dashboard.command.send posts through the modeled event", async () => {
+    const posted: string[] = [];
+    const kinds: unknown[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted.push(command.eventName);
+        return { result: "accepted", detail: "ok" };
+      },
+    });
+    const inner = dashboard.dispatch.bind(dashboard) as (event: unknown, data?: unknown) => unknown;
+    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
+      if (typeof eventOrContext === "object" && eventOrContext !== null && "kind" in eventOrContext) {
+        kinds.push((eventOrContext as { kind: unknown }).kind);
+      }
+      return inner(eventOrContext, data);
+    }) as unknown as Dashboard["dispatch"];
+    await dashboard.dispatch(hsm.typedEvent({ name: "dashboard.command.send", kind: hsm.Kinds.Event }, {
+      eventName: "phone.ring",
+      dataJson: "",
+    }));
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
+    assert.deepEqual(posted, ["phone.ring"]);
+    assert.ok(kinds.includes(hsm.Kinds.CompletionEvent));
+    await dashboard.stop();
+  });
+
+  test("overlapping command sends ignore stale completion ids", async () => {
+    let releaseFirst = (): void => {
+      return;
+    };
+    const firstHold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let calls = 0;
+    const dashboard = bootDashboard({
+      postCommand: async () => {
+        calls += 1;
+        if (calls === 1) {
+          await firstHold;
+          return { result: "accepted", detail: "first" };
+        }
+        return { result: "accepted", detail: "second" };
+      },
+    });
+    const first = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "1" });
+    await waitFor(() => calls === 1);
+    const second = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "2" });
+    await waitFor(() => dashboard.snapshot().commandResult?.detail === "second");
+    releaseFirst();
+    await first;
+    await second;
+    assert.equal(dashboard.snapshot().commandResult?.detail, "second");
+    await dashboard.stop();
+  });
+
+  test("otel source connect completions keep declared kinds", async () => {
+    const kinds: unknown[] = [];
+    const source = bootSource();
+    const inner = source.dispatch.bind(source) as (event: unknown, data?: unknown) => unknown;
+    source.dispatch = ((eventOrContext: unknown, data?: unknown) => {
+      if (typeof eventOrContext === "object" && eventOrContext !== null && "kind" in eventOrContext) {
+        kinds.push((eventOrContext as { kind: unknown }).kind);
+      }
+      return inner(eventOrContext, data);
+    }) as unknown as OtelSource["dispatch"];
+    await source.dispatch("source.connect.requested", { origin: "http://localhost" });
+    await waitFor(() => source.snapshot().phase === "live" || source.snapshot().phase === "error");
+    assert.equal(source.snapshot().phase, "live");
+    assert.ok(kinds.includes(hsm.Kinds.CompletionEvent));
+    await source.stop();
   });
 });
