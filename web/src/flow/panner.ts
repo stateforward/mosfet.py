@@ -207,6 +207,9 @@ export class Panner extends hsm.Instance {
     const bounds = boundsOf(record?.["bounds"]) ?? metrics?.bounds ?? null;
     if (metrics === null || bounds === null) return;
     instance.#fitBounds(bounds, metrics);
+    if (instance.#dragStart !== null) {
+      instance.#dragStart = { ...instance.#dragStart, pan: { ...instance.pan } };
+    }
   }
 
   static applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {

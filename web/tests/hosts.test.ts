@@ -239,6 +239,34 @@ describe("companion-style HSM controllers", () => {
     await hsm.stop(panner);
   });
 
+  test("fit during pan rebases the next cursor delta from the fitted pan", async () => {
+    const panner = hsm.start(new Panner(), Panner.model);
+    const pointerId = 1;
+    const startPoint = { x: 10, y: 10 };
+    const midPoint = { x: 30, y: 24 };
+    const endPoint = { x: 50, y: 44 };
+    const metricsWidth = 1000;
+    const metricsHeight = 600;
+    const bounds = { left: 0, right: 96, top: 0, bottom: 96 };
+    const metrics = {
+      width: metricsWidth,
+      height: metricsHeight,
+      bounds: { left: 0, right: metricsWidth, top: 0, bottom: metricsHeight },
+      origin: { x: 0, y: 0 },
+    };
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId, point: startPoint } }));
+    assert.match(panner.state(), /\/single$/);
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: midPoint } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }));
+    const fitted = panner.viewport;
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: endPoint } }));
+    const continued = panner.viewport;
+    assert.equal(continued.x, fitted.x + (endPoint.x - startPoint.x));
+    assert.equal(continued.y, fitted.y + (endPoint.y - startPoint.y));
+    assert.equal(continued.zoom, fitted.zoom);
+    await hsm.stop(panner);
+  });
+
   test("node viewport focus uses exact bounds and stays focused across resize", async () => {
     const panner = hsm.start(new Panner(), Panner.model);
     let focusKind = "";
