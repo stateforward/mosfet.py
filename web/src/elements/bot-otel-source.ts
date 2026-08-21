@@ -10,11 +10,16 @@ import { applyStyles } from "./styles.ts";
 /**
  * Detail of the `bot-otel-source` CustomEvent emitted when the source is ready.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the source is already live and committed on the host; the
+ * event only announces readiness. `source` is the host's live shared handle,
+ * not a copy: it is the same object `snapshot().source` returns, owned by the
+ * host for the host's lifetime. Listeners may read it but must not assume
+ * transfer or exclusive mutation, and must not mutate or retain it beyond
+ * their own scope in a way that outlives the host's ownership. `preventDefault()`
+ * has no effect because the event cannot be canceled.
  */
 export type OtelSourceDetail = {
-  source: StreamSource;
+  readonly source: StreamSource;
 };
 
 const ELEMENT_NAME = "bot-otel-source";

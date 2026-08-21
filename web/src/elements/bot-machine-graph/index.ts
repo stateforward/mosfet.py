@@ -14,17 +14,20 @@ const NODE_COUNT_ATTR = "data-node-count";
 /**
  * Detail of the `bot-machine-graph-zoom` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the viewport zoom is already applied on the inner graph; the
+ * host only echoes the committed `zoom` out, so listeners observe and cannot
+ * intervene (`preventDefault()` has no effect, the event cannot be canceled).
  */
-export type GraphZoomDetail = { zoom: number };
+export type GraphZoomDetail = { readonly zoom: number };
 /**
  * Detail of the `bot-machine-graph-edge` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the click did not mutate the graph. The host only re-exposes
+ * the clicked edge's `eventName` from its detail; selecting or following the
+ * edge is the listener's job, if it chooses to. `preventDefault()` has no
+ * effect because the event cannot be canceled.
  */
-export type GraphEdgeDetail = { eventName: string };
+export type GraphEdgeDetail = { readonly eventName: string };
 
 type GraphsAdmitData = { readonly graphs: readonly MachineGraph[] };
 type FocusData = { readonly machineName: string };

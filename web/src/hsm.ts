@@ -252,8 +252,12 @@ export class HostDropError extends Error {
 /**
  * Detail of the `host-drop` CustomEvent emitted by `reportFailure`/`catchFailure`.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the dropped write was NOT applied. `reason` is `"unstarted"`
+ * or `"stopped"`: the runtime rejected `operation` because the machine had
+ * not started or had already stopped, so no state was admitted and nothing is
+ * in flight. Listeners only observe the drop; retrying the operation is their
+ * choice, and `preventDefault()` has no effect because the event cannot be
+ * canceled.
  */
 export type HostDropDetail = {
   readonly reason: "unstarted" | "stopped";

@@ -7,8 +7,10 @@ const ELEMENT_NAME = "flow-controls";
 /**
  * Detail of the `flow-control` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the control host does NOT zoom or fit. The click is reported
+ * here with its `action`; applying zoom-in, zoom-out, or fit is the listener's
+ * job, if it chooses to. `preventDefault()` has no effect because the event
+ * cannot be canceled.
  */
 export type FlowControlDetail = { readonly action: "zoom-in" | "zoom-out" | "fit" };
 

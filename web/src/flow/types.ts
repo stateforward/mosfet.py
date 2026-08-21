@@ -75,29 +75,37 @@ export type NodeActivateData = {
 /**
  * Detail of the `flow-node-click` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the click already ran on the graph — exclusive selection of
+ * the clicked node is already requested, and `node` is a copy. Listeners
+ * observe; they do not apply the click. `preventDefault()` has no effect
+ * because the event cannot be canceled.
  */
 export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
 /**
  * Detail of the `flow-edge-click` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the click already ran on the graph — selection of the
+ * clicked edge is already requested, and `edge` is a copy. The graph
+ * topology is unchanged. `preventDefault()` has no effect because the event
+ * cannot be canceled.
  */
 export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };
 /**
  * Detail of the `flow-viewport-change` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the viewport is already applied on the graph (the committed
+ * transform and `getViewport()` value). Listeners observe the outcome; they
+ * neither apply nor roll back the change. `preventDefault()` has no effect
+ * because the event cannot be canceled.
  */
 export type ViewportChangeDetail = { readonly viewport: Viewport };
 /**
  * Detail of the `flow-connect` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the dispatcher does NOT add an edge. The finished connection
+ * gesture is reported here with its `source`/`target` handles; persisting a
+ * new edge is the listener's job, if it chooses to. `preventDefault()` has no
+ * effect because the event cannot be canceled.
  */
 export type ConnectDetail = {
   readonly source: string;
@@ -108,8 +116,11 @@ export type ConnectDetail = {
 /**
  * Detail of the `flow-selection-change` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the selection is already committed when this event is
+ * dispatched — the graph has already replaced its selected node/edge sets,
+ * and `nodes`/`edges` are copies of the committed selection. Listeners observe
+ * the outcome; they neither apply nor roll back the change, and
+ * `preventDefault()` has no effect because the event cannot be canceled.
  */
 export type SelectionChangeDetail = {
   readonly nodes: readonly Node[];
@@ -161,8 +172,12 @@ export type ViewportBounds = {
 /**
  * Detail of the `flow-admit-rejected` CustomEvent.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Side-effect owner: the listener; the dispatcher does not interpret
- * `preventDefault()` and the event cannot be canceled.
+ * Postcondition: the rejected write was NOT applied — the graph's prior
+ * `nodes`/`edges` are unchanged and remain committed. `reason` identifies why
+ * the write was dropped, and `nodeCount`/`edgeCount` describe the rejected
+ * write, not the committed graph. Listeners only observe; there is nothing to
+ * roll back, and `preventDefault()` has no effect because the event cannot be
+ * canceled.
  */
 export type AdmitRejectedDetail = {
   readonly reason: "too_many_nodes" | "too_many_edges" | "invalid";
