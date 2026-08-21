@@ -69,8 +69,17 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly setNodesEvent = { name: "nodes_set", kind: hsm.Kinds.Event } as const;
   static readonly setEdgesEvent = { name: "edges_set", kind: hsm.Kinds.Event } as const;
   static readonly setPolicyEvent = { name: "policy_set", kind: hsm.Kinds.Event } as const;
-  static readonly focusEvent = { name: "focus_target", kind: hsm.Kinds.Event } as const;
-  static readonly activateNodeEvent = { name: "node_activate", kind: hsm.Kinds.Event } as const;
+  static readonly focusNodeEvent = { name: "focus_node", kind: hsm.Kinds.Event } as const;
+  static readonly focusViewportEvent = { name: "focus_viewport", kind: hsm.Kinds.Event } as const;
+  static readonly focusMachineEvent = { name: "focus_machine", kind: hsm.Kinds.Event } as const;
+  static readonly activateClickEvent = { name: "node_activate_click", kind: hsm.Kinds.Event } as const;
+  static readonly activateKeyEvent = { name: "node_activate_key", kind: hsm.Kinds.Event } as const;
+  static readonly pointerRegion = "pointer";
+  static readonly focusEvents = {
+    node: FlowGraph.focusNodeEvent,
+    viewport: FlowGraph.focusViewportEvent,
+    machine: FlowGraph.focusMachineEvent,
+  } as const;
 
   static readonly pointerModel = hsm.define(
     "Pointer",
@@ -187,7 +196,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.defer(FlowGraph.zoomInEvent.name),
       hsm.defer(FlowGraph.zoomOutEvent.name),
       hsm.defer(FlowGraph.setViewportEvent.name),
-      hsm.defer(FlowGraph.focusEvent.name),
+      hsm.defer(FlowGraph.focusNodeEvent.name),
+      hsm.defer(FlowGraph.focusViewportEvent.name),
+      hsm.defer(FlowGraph.focusMachineEvent.name),
       hsm.defer(FlowGraph.setNodesEvent.name),
       hsm.defer(FlowGraph.setEdgesEvent.name),
       hsm.defer(FlowGraph.setPolicyEvent.name),
@@ -231,37 +242,21 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
-      hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.target("focusKind")),
-      hsm.choice(
-        "focusKind",
-        hsm.transition(
-          hsm.guard(FlowGraph.isNodeFocus),
-          hsm.target("pointer"),
-          hsm.effect(FlowGraph.applyNodeFocus),
-        ),
-        hsm.transition(
-          hsm.guard(FlowGraph.isViewportFocus),
-          hsm.target("pointer"),
-          hsm.effect(FlowGraph.applyViewportFocus),
-        ),
-        hsm.transition(hsm.target("pointer"), hsm.effect(FlowGraph.applyMachineFocus)),
-      ),
-      hsm.transition(hsm.on(FlowGraph.activateNodeEvent.name), hsm.target("activateKind")),
-      hsm.choice(
-        "activateKind",
-        hsm.transition(
-          hsm.guard(FlowGraph.isActivateClick),
-          hsm.target("pointer"),
-          hsm.effect(FlowGraph.emitNodeActivateClick),
-        ),
-        hsm.transition(
-          hsm.guard(FlowGraph.isActivateKey),
-          hsm.target("pointer"),
-          hsm.effect(FlowGraph.emitNodeActivateKey),
-        ),
-        hsm.transition(hsm.target("pointer")),
-      ),
-      hsm.submachineState("pointer", FlowGraph.pointerModel),
+      hsm.transition(hsm.on(FlowGraph.focusNodeEvent.name), hsm.effect(FlowGraph.applyNodeFocus)),
+      hsm.transition(hsm.on(FlowGraph.focusViewportEvent.name), hsm.effect(FlowGraph.applyViewportFocus)),
+      hsm.transition(hsm.on(FlowGraph.focusMachineEvent.name), hsm.effect(FlowGraph.applyMachineFocus)),
+      hsm.transition(hsm.on(FlowGraph.activateClickEvent.name), hsm.effect(FlowGraph.emitNodeActivateClick)),
+      hsm.transition(hsm.on(FlowGraph.activateKeyEvent.name), hsm.effect(FlowGraph.emitNodeActivateKey)),
+      /**
+       * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any and
+       * CORE-GEN-001 at `submachineState` `Model.id`. Owner: web/src/flow/graph.ts.
+       * Rationale: library `Model` requires `id: string` while `define()` returns a
+       * TypedModel whose `id` is optional under `exactOptionalPropertyTypes`.
+       * Isolated to this nesting call. Risk tests: web/tests/flow-graph.test.ts.
+       * Expiration: library `Model.id` is optional, or `define()` stamps `id`.
+       * Removal plan: pass `pointerModel` into `submachineState` without assertion.
+       */
+      hsm.submachineState(FlowGraph.pointerRegion, FlowGraph.pointerModel as never),
     ),
     hsm.state(
       "stopping",
@@ -404,7 +399,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Classification: runtime-safe.
    */
   focusTarget(target: FocusTarget): void {
-    this.#live(hsm.typedEvent({ event: FlowGraph.focusEvent, data: target }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.focusEvents[target.kind], data: target }));
   }
 
   connectedCallback(): void {
@@ -634,9 +629,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Activate a painted node from a click-origin `node_activate`.
+   * Activate a painted node from a click-origin `node_activate_click`.
    *
-   * Inputs: `nodeId` after `isActivateClick`. Outputs: exclusive Selection
+   * Inputs: `nodeId` on `node_activate_click`. Outputs: exclusive Selection
    * click and `flow-node-click` with `{ type: "click" }`.
    * Ownership: this graph. Lifetime: one activation.
    * Concurrency: runtime-safe on the graph dispatch thread.
@@ -651,9 +646,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Activate a painted node from an Enter/Space `node_activate`.
+   * Activate a painted node from an Enter/Space `node_activate_key`.
    *
-   * Inputs: `nodeId` and `key` after `isActivateKey`. Outputs: exclusive
+   * Inputs: `nodeId` and `key` on `node_activate_key`. Outputs: exclusive
    * Selection click and `flow-node-click` with `{ type: "keydown", key }`.
    * Ownership: this graph. Lifetime: one activation.
    * Concurrency: runtime-safe on the graph dispatch thread.
@@ -864,24 +859,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }));
   }
 
-  static isNodeFocus(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return hsm.isRecord(event.data) && event.data["kind"] === "node";
-  }
-
-  static isViewportFocus(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return hsm.isRecord(event.data) && event.data["kind"] === "viewport";
-  }
-
-  static isActivateClick(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const payload = nodeActivateOf(event);
-    return payload !== null && payload.key === undefined;
-  }
-
-  static isActivateKey(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const payload = nodeActivateOf(event);
-    return payload !== null && activateKeyOf(payload.key) !== null;
-  }
-
   static applyNodeFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     if (!instance.#applyFocusPan({ event, kind: "node" })) return;
@@ -1018,7 +995,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       }
       if (!fromButton) return;
       this.#live(hsm.typedEvent({
-        event: FlowGraph.activateNodeEvent,
+        event: FlowGraph.activateClickEvent,
         data: { nodeId: node.node.id },
       }));
     };
