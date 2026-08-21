@@ -1143,17 +1143,17 @@ export class BotDashboard extends Dashboard {
    *
    * Inputs: `machineName` from the dashboard `dashboard.graph.focus` transition,
    * from `dashboard.machine.selected` which shares the same `machineName`
-   * payload, and from replay play/previous/next/seek after that transition
-   * stamps `machineName` and applies focus locally.
+   * payload, and from replay play/previous/next/seek after those effects
+   * dispatch `dashboard.graph.focus` with the cursor `machineName`.
    * Outputs: `BotMachineGraph` consumes `focus_machine`. Snapshot render does
    * not call this. Inspector machine buttons dispatch `dashboard.machine.selected`;
    * graph focus is a modeled effect on that transition. DOM gestures do not
-   * stamp `dashboard.graph.focus`. Replay steps do not raise `dashboard.graph.focus`.
+   * stamp `dashboard.graph.focus`. Replay steps raise `dashboard.graph.focus`.
    * Ownership: this host owns `#graph`. Lifetime: one focus request.
    * Concurrency: runtime-safe on this host's dispatch thread.
    * Failure modes: empty or non-string names never reach this method;
    * the `dashboard.graph.focus` and `dashboard.machine.selected` guards drop
-   * them, and replay steps skip when `replayGraphName()` is empty. Dispatch
+   * them, including empty names stamped by replay cursor steps. Dispatch
    * rejection is `catchFailure` host-drop or report.
    * Classification: runtime-safe.
    */

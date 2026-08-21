@@ -378,6 +378,7 @@ function enterReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Even
 
 function playReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.playReplay();
+  raiseGraphFocus(instance);
 }
 
 function pauseReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -386,10 +387,12 @@ function pauseReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Even
 
 function previousReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.previousReplay();
+  raiseGraphFocus(instance);
 }
 
 function nextReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.nextReplay();
+  raiseGraphFocus(instance);
 }
 
 function seekReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -397,6 +400,7 @@ function seekReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event)
   if (position !== null) {
     controllerOf(instance)?.seekReplay({ position });
   }
+  raiseGraphFocus(instance);
 }
 
 function returnToLive(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -414,11 +418,12 @@ function applyGraphFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
   controllerOf(instance)?.applyGraphFocus({ machineName });
 }
 
-function applyReplayGraphFocus(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const machineName = controllerOf(instance)?.replayGraphName();
-  if (typeof machineName !== "string" || machineName.length === 0) return;
-  const data = hsm.isRecord(event.data) ? { ...event.data, machineName } : { machineName };
-  applyGraphFocus(ctx, instance, { name: event.name, kind: event.kind, data });
+function raiseGraphFocus(instance: hsm.Instance): void {
+  const machineName = controllerOf(instance)?.replayGraphName() ?? "";
+  void instance.dispatch(hsm.typedEvent({
+    event: dashboardCommands["dashboard.graph.focus"],
+    data: { machineName },
+  })).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
 }
 
 function raiseReplayNext(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -537,7 +542,7 @@ const dashboardModel = hsm.define(
           hsm.on("dashboard.replay.play"),
           hsm.guard(hasPlayableReplay),
           hsm.target("../live/replay/playing"),
-          hsm.effect(playReplay, applyReplayGraphFocus),
+          hsm.effect(playReplay),
         ),
       ),
       hsm.state(
@@ -564,15 +569,15 @@ const dashboardModel = hsm.define(
           hsm.initial(hsm.target("paused")),
           hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansReplay)),
           hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsReplay)),
-          hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay, applyReplayGraphFocus)),
-          hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay, applyReplayGraphFocus)),
-          hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay, applyReplayGraphFocus)),
+          hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
+          hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
+          hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
           hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
           hsm.transition(
             hsm.on("dashboard.replay.play"),
             hsm.guard(hasPlayableReplay),
             hsm.target("playing"),
-            hsm.effect(playReplay, applyReplayGraphFocus),
+            hsm.effect(playReplay),
           ),
           hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("paused"), hsm.effect(pauseReplay)),
           hsm.state("paused"),
@@ -1022,15 +1027,15 @@ export class Dashboard extends hsm.from(HTMLElement) {
    *
    * Inputs: `machineName` from `dashboard.graph.focus` after the non-empty
    * string guard, from `dashboard.machine.selected` which also carries
-   * `machineName`, and from replay play/previous/next/seek after the cursor
-   * step stamps `machineName` on that same transition.
+   * `machineName`, and from replay play/previous/next/seek after those
+   * effects dispatch `dashboard.graph.focus` with the cursor `machineName`.
    * Outputs: none on this dashboard. Hosts that own a `BotMachineGraph`
    * dispatch `focus_machine`. Snapshot render must not call this.
    * Ownership: this dashboard. Lifetime: one focus request.
    * Concurrency: runtime-safe on the dashboard dispatch thread.
    * Failure modes: empty or non-string names never reach this method;
    * the `dashboard.graph.focus` and `dashboard.machine.selected` guards drop
-   * them, and replay steps skip when `replayGraphName()` is empty.
+   * them, including empty names stamped by replay cursor steps.
    * Classification: runtime-safe.
    */
   applyGraphFocus(_args: { machineName: string }): void {
@@ -1045,8 +1050,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * or null when the cursor is at 0 or the attribute is missing or empty.
    * Ownership: this dashboard. Lifetime: until the next replay step or clear.
    * Concurrency: runtime-safe on the dashboard dispatch thread.
-   * Failure modes: missing or empty names return null; replay-step
-   * `applyReplayGraphFocus` then skips `applyGraphFocus`.
+   * Failure modes: missing or empty names return null; the replay step then
+   * dispatches `dashboard.graph.focus` with an empty name, which
+   * `hasGraphFocusName` drops.
    * Classification: runtime-safe.
    */
   replayGraphName(): string | null {

@@ -196,7 +196,8 @@ describe("OTEL replay", () => {
 
     await dashboard.dispatch("dashboard.replay.play");
     assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot", "/PhoneBot", "/PhoneBot"]);
-    assert.equal(dashboard.graphFocusRaises, noneFocused);
+    const replayFocusRaises = 5;
+    assert.equal(dashboard.graphFocusRaises, replayFocusRaises);
     await dashboard.stop();
   });
 });
