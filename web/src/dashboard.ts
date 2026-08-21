@@ -19,7 +19,7 @@ import {
   type OtelSource,
   type OtelStreamConnect,
 } from "./otel/source.ts";
-import { collectorUrl } from "./otel-source.ts";
+import { collectorUrl, stampUrlAllowed } from "./otel-source.ts";
 import { type ObserveSpan } from "./otel/span.ts";
 import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } from "./otel/replay.ts";
 
@@ -450,17 +450,13 @@ function hasPlayableReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hs
 
 function streamUrlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
   const source = sourceFromEvent(event);
-  const origin = stringField({ event, key: "origin" });
-  if (source === null || source.kind !== "stream" || origin === null) return false;
-  return collectorUrl({ requested: source.url, origin }) !== null;
+  return source !== null && source.kind === "stream" && hsm.isRecord(event.data) && event.data["urlAllowed"] === true;
 }
 
 function streamUrlDisallowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
   const source = sourceFromEvent(event);
   if (source === null || source.kind !== "stream") return false;
-  const origin = stringField({ event, key: "origin" });
-  if (origin === null) return true;
-  return collectorUrl({ requested: source.url, origin }) === null;
+  return !hsm.isRecord(event.data) || event.data["urlAllowed"] !== true;
 }
 
 function failNoStream(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -623,8 +619,7 @@ export function isDashboardEventName(value: string): value is DashboardEventName
 
 function commandNameLegal(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
   if (!hsm.isRecord(event.data) || typeof event.data["eventName"] !== "string") return false;
-  const name = event.data["eventName"].trim();
-  return name.length > 0 && COMMAND_EVENT_NAME.test(name);
+  return COMMAND_EVENT_NAME.test(event.data["eventName"]);
 }
 
 class Command extends hsm.Instance {
@@ -882,10 +877,13 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
+    const admitted = eventName === "dashboard.source.selected" || eventName === "dashboard.replay.live"
+      ? stampUrlAllowed(data)
+      : data;
     await super.dispatch(
-      data === undefined
+      admitted === undefined
         ? hsm.typedEvent({ event: dashboardCommands[eventName] })
-        : hsm.typedEvent({ event: dashboardCommands[eventName], data }),
+        : hsm.typedEvent({ event: dashboardCommands[eventName], data: admitted }),
     );
     this.#emit();
     return this.snapshot();

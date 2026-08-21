@@ -457,44 +457,46 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample?.hit.kind === "handle" && sample.hit.handleKind === "source";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerHitKind(data) === "handle" && pointerHandleKind(data) === "source";
   }
 
   static isConnectComplete(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample?.hit.kind === "handle" && sample.hit.handleKind === "target";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerHitKind(data) === "handle" && pointerHandleKind(data) === "target";
   }
 
   static isBoxStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.shiftKey && sample.hit.kind === "empty";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerShiftKey(data) && pointerHitKind(data) === "empty";
   }
 
   static isNodePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerOf(event.data)?.hit.kind === "node";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerHitKind(data) === "node";
   }
 
   static isEdgePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerOf(event.data)?.hit.kind === "edge";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerHitKind(data) === "edge";
   }
 
   static isPanStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "empty" && !sample.shiftKey;
+    const data = pointerRecord(event.data);
+    return data !== null && pointerHitKind(data) === "empty" && !pointerShiftKey(data);
   }
 
   static isDragFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#nodesDraggable) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && movedPastClick(sample) && sample.hit.kind === "node";
+    const data = pointerRecord(event.data);
+    return data !== null && pointerMovedPastClick(data) && pointerHitKind(data) === "node";
   }
 
   static isPanFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
-    const sample = pointerOf(event.data);
-    return sample !== null && movedPastClick(sample) && !(instance.#nodesDraggable && sample.hit.kind === "node");
+    const data = pointerRecord(event.data);
+    return data !== null && pointerMovedPastClick(data) && !(instance.#nodesDraggable && pointerHitKind(data) === "node");
   }
 
   static beginConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1246,6 +1248,47 @@ function activateKeyOf(value: unknown): KeyboardOrigin["key"] | null {
   return value === ENTER_KEY || value === SPACE_KEY ? value : null;
 }
 
+function pointerRecord(value: unknown): Record<string, unknown> | null {
+  if (!hsm.isRecord(value) || typeof value["pointerId"] !== "number") return null;
+  const eventType = value["eventType"];
+  if (eventType !== "pointerdown" && eventType !== "pointermove" && eventType !== "pointerup" && eventType !== "pointercancel") {
+    return null;
+  }
+  return value;
+}
+
+function pointerHitKind(data: Record<string, unknown>): string | null {
+  if (!hsm.isRecord(data["hit"])) return null;
+  const kind = data["hit"]["kind"];
+  return typeof kind === "string" ? kind : null;
+}
+
+function pointerHandleKind(data: Record<string, unknown>): "source" | "target" | null {
+  if (!hsm.isRecord(data["hit"]) || pointerHitKind(data) !== "handle") return null;
+  return data["hit"]["handleKind"] === "target" ? "target" : "source";
+}
+
+function pointerShiftKey(data: Record<string, unknown>): boolean {
+  return data["shiftKey"] === true;
+}
+
+function pointerMovedPastClick(data: Record<string, unknown>): boolean {
+  if (!hsm.isRecord(data["client"]) || !hsm.isRecord(data["origin"])) return false;
+  const clientX = data["client"]["x"];
+  const clientY = data["client"]["y"];
+  const originX = data["origin"]["x"];
+  const originY = data["origin"]["y"];
+  if (
+    typeof clientX !== "number" || !Number.isFinite(clientX)
+    || typeof clientY !== "number" || !Number.isFinite(clientY)
+    || typeof originX !== "number" || !Number.isFinite(originX)
+    || typeof originY !== "number" || !Number.isFinite(originY)
+  ) {
+    return false;
+  }
+  return Math.hypot(clientX - originX, clientY - originY) > CLICK_THRESHOLD;
+}
+
 function pointerOf(value: unknown): PointerSampleData | null {
   if (!hsm.isRecord(value)) return null;
   const pointerId = value["pointerId"];
@@ -1423,10 +1466,6 @@ function draftOf(value: unknown): ConnectionDraft | null {
     cursor,
     ...(typeof sourceHandle === "string" ? { sourceHandle } : {}),
   };
-}
-
-function movedPastClick(sample: PointerSampleData): boolean {
-  return Math.hypot(sample.client.x - sample.origin.x, sample.client.y - sample.origin.y) > CLICK_THRESHOLD;
 }
 
 function nodeHitsBox(node: Node, box: SelectionBox, viewport: Viewport): boolean {

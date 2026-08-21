@@ -69,12 +69,7 @@ async function connectCollector(_ctx: hsm.Context, instance: hsm.Instance, event
 }
 
 function urlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-  if (!hsm.isRecord(event.data) || typeof event.data["origin"] !== "string") return false;
-  const requested = typeof event.data["url"] === "string" ? event.data["url"] : undefined;
-  return collectorUrl({
-    origin: event.data["origin"],
-    ...(requested !== undefined ? { requested } : {}),
-  }) !== null;
+  return hsm.isRecord(event.data) && event.data["urlAllowed"] === true;
 }
 
 async function stopHost(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
@@ -221,10 +216,11 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
+    const admitted = eventName === "source.connect.requested" ? stampUrlAllowed(data) : data;
     await super.dispatch(
-      data === undefined
+      admitted === undefined
         ? hsm.typedEvent({ event: sourceCommands[eventName] })
-        : hsm.typedEvent({ event: sourceCommands[eventName], data }),
+        : hsm.typedEvent({ event: sourceCommands[eventName], data: admitted }),
     );
     this.#emit();
     return this.snapshot();
@@ -290,6 +286,31 @@ export function collectorUrl(args: { readonly requested?: string; readonly origi
   } catch {
     return null;
   }
+}
+
+/**
+ * Stamp `urlAllowed` on connect/source ingress so choice guards compare a
+ * precomputed boolean and never construct `URL` objects.
+ *
+ * Inputs: the command payload (`origin`, optional `url` or `source.url`).
+ * Outputs: a record with `urlAllowed: boolean` plus the original fields.
+ * Ownership: returns a new record; does not retain the input. Lifetime:
+ * consumed by the following dispatch. Concurrency: synchronous.
+ * Failure modes: missing/invalid origin or URL yields `urlAllowed: false`.
+ * Classification: initialization-only (ingress admission).
+ */
+export function stampUrlAllowed(data: unknown): Record<string, unknown> {
+  const record = hsm.isRecord(data) ? { ...data } : {};
+  const origin = typeof record["origin"] === "string" ? record["origin"] : "";
+  const requestedFromUrl = typeof record["url"] === "string" ? record["url"] : undefined;
+  const source = record["source"];
+  const requestedFromSource = hsm.isRecord(source) && typeof source["url"] === "string" ? source["url"] : undefined;
+  const requested = requestedFromUrl ?? requestedFromSource;
+  record["urlAllowed"] = origin.length > 0 && collectorUrl({
+    origin,
+    ...(requested !== undefined ? { requested } : {}),
+  }) !== null;
+  return record;
 }
 
 
