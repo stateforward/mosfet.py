@@ -17,11 +17,20 @@ export type ConnectionComplete = {
   readonly targetHandle?: string;
 };
 
+export type ConnectStartData = {
+  readonly source: string;
+  readonly sourceHandle?: string;
+  readonly sourcePosition: HandlePosition;
+  readonly start: XYPosition;
+};
+
 export class Connection extends hsm.Instance {
   static readonly startEvent = { name: "connect_start", kind: hsm.Kinds.Event } as const;
   static readonly moveEvent = { name: "connect_move", kind: hsm.Kinds.Event } as const;
   static readonly completeEvent = { name: "connect_complete", kind: hsm.Kinds.Event } as const;
   static readonly cancelEvent = { name: "connect_cancel", kind: hsm.Kinds.Event } as const;
+  static readonly draftEvent = { name: "connect_draft", kind: hsm.Kinds.Event } as const;
+  static readonly finishedEvent = { name: "connect_finished", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Connection",
@@ -50,9 +59,9 @@ export class Connection extends hsm.Instance {
     ),
   );
 
-  draft: ConnectionDraft | null = null;
   readonly onDraft: ((draft: ConnectionDraft | null) => void) | null;
   readonly onComplete: ((connection: ConnectionComplete) => boolean) | null;
+  #draft: ConnectionDraft | null = null;
 
   constructor(
     hooks: {
@@ -65,25 +74,20 @@ export class Connection extends hsm.Instance {
     this.onComplete = hooks.onComplete ?? null;
   }
 
-  beginFrom(data: {
-    source: string;
-    sourceHandle?: string;
-    sourcePosition: HandlePosition;
-    start: XYPosition;
-  }): void {
-    this.dispatch(hsm.namedEvent(Connection.startEvent.name, data));
+  beginFrom(data: ConnectStartData): void {
+    this.dispatch(hsm.typedEvent(Connection.startEvent, data));
   }
 
   cursorMove(point: XYPosition): void {
-    this.dispatch(hsm.namedEvent(Connection.moveEvent.name, point));
+    this.dispatch(hsm.typedEvent(Connection.moveEvent, point));
   }
 
   complete(data: { target: string; targetHandle?: string; kind?: HandleKind }): void {
-    this.dispatch(hsm.namedEvent(Connection.completeEvent.name, data));
+    this.dispatch(hsm.typedEvent(Connection.completeEvent, data));
   }
 
   cancel(): void {
-    this.dispatch(hsm.namedEvent(Connection.cancelEvent.name));
+    this.dispatch(hsm.typedEvent(Connection.cancelEvent));
   }
 
   static begin(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -99,40 +103,40 @@ export class Connection extends hsm.Instance {
     const y = start["y"];
     if (typeof x !== "number" || typeof y !== "number") return;
     const sourceHandle = event.data["sourceHandle"];
-    instance.draft = {
+    instance.#draft = {
       source,
       sourcePosition,
       start: { x, y },
       cursor: { x, y },
       ...(typeof sourceHandle === "string" ? { sourceHandle } : {}),
     };
-    instance.onDraft?.(instance.draft);
+    instance.onDraft?.(instance.#draft);
   }
 
   static move(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof Connection) || instance.draft === null || !hsm.isRecord(event.data)) return;
+    if (!(instance instanceof Connection) || instance.#draft === null || !hsm.isRecord(event.data)) return;
     const x = event.data["x"];
     const y = event.data["y"];
     if (typeof x !== "number" || typeof y !== "number") return;
-    instance.draft = { ...instance.draft, cursor: { x, y } };
-    instance.onDraft?.(instance.draft);
+    instance.#draft = { ...instance.#draft, cursor: { x, y } };
+    instance.onDraft?.(instance.#draft);
   }
 
   static finish(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof Connection) || instance.draft === null || !hsm.isRecord(event.data)) {
+    if (!(instance instanceof Connection) || instance.#draft === null || !hsm.isRecord(event.data)) {
       if (instance instanceof Connection) Connection.reset(_ctx, instance, event);
       return;
     }
     const target = event.data["target"];
-    if (typeof target !== "string" || target === instance.draft.source) {
+    if (typeof target !== "string" || target === instance.#draft.source) {
       Connection.reset(_ctx, instance, event);
       return;
     }
     const targetHandle = event.data["targetHandle"];
     const completed: ConnectionComplete = {
-      source: instance.draft.source,
+      source: instance.#draft.source,
       target,
-      ...(instance.draft.sourceHandle !== undefined ? { sourceHandle: instance.draft.sourceHandle } : {}),
+      ...(instance.#draft.sourceHandle !== undefined ? { sourceHandle: instance.#draft.sourceHandle } : {}),
       ...(typeof targetHandle === "string" ? { targetHandle } : {}),
     };
     const valid = instance.onComplete?.(completed) ?? true;
@@ -140,23 +144,24 @@ export class Connection extends hsm.Instance {
       Connection.reset(_ctx, instance, event);
       return;
     }
-    instance.draft = null;
+    instance.#draft = null;
     instance.onDraft?.(null);
   }
 
   static reset(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Connection)) return;
-    instance.draft = null;
+    instance.#draft = null;
     instance.onDraft?.(null);
   }
 }
 
-export function startConnection(
-  ctx: hsm.Context,
-  hooks: {
-    onDraft?: (draft: ConnectionDraft | null) => void;
-    onComplete?: (connection: ConnectionComplete) => boolean;
-  } = {},
-): Connection {
-  return hsm.start(ctx, new Connection(hooks), Connection.model);
+export function startConnection(args: {
+  ctx: hsm.Context;
+  onDraft?: (draft: ConnectionDraft | null) => void;
+  onComplete?: (connection: ConnectionComplete) => boolean;
+}): Connection {
+  return hsm.start(args.ctx, new Connection({
+    ...(args.onDraft !== undefined ? { onDraft: args.onDraft } : {}),
+    ...(args.onComplete !== undefined ? { onComplete: args.onComplete } : {}),
+  }), Connection.model);
 }

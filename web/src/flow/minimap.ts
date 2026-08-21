@@ -1,4 +1,3 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { getNodesBounds } from "./path.ts";
@@ -6,14 +5,10 @@ import { minimapStyles } from "./styles.ts";
 import type { Node } from "./types.ts";
 
 const ELEMENT_NAME = "flow-minimap";
+const MINIMAP_WIDTH = 128;
+const MINIMAP_HEIGHT = 88;
 
-export class FlowMinimap extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowMinimap",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowMinimap extends HTMLElement {
   readonly #canvas: HTMLCanvasElement;
 
   constructor() {
@@ -24,18 +19,10 @@ export class FlowMinimap extends hsm.from(HTMLElement) {
     root.append(this.#canvas);
   }
 
-  connectedCallback(): void {
-    hsm.start(this, FlowMinimap.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
-  }
-
   draw(nodes: readonly Node[]): void {
     const bounds = getNodesBounds(nodes);
-    const width = Math.max(1, this.#canvas.clientWidth || 128);
-    const height = Math.max(1, this.#canvas.clientHeight || 88);
+    const width = Math.max(1, this.#canvas.clientWidth || MINIMAP_WIDTH);
+    const height = Math.max(1, this.#canvas.clientHeight || MINIMAP_HEIGHT);
     this.#canvas.width = width;
     this.#canvas.height = height;
     const ctx = this.#canvas.getContext("2d");

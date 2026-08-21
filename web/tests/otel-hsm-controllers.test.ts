@@ -157,7 +157,7 @@ describe("companion-style HSM controllers", () => {
       },
     });
     panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
-    assert.match(panner.state(), /\/panning$/);
+    assert.match(panner.state(), /\/single$/);
     assert.match(graph.state(), /\/drawing$/);
     panner.cursorMove({ pan: { x: 12, y: 8 } });
     panner.zoom({ scale: 1.1, point: { x: 20, y: 20 } });
@@ -182,7 +182,7 @@ describe("companion-style HSM controllers", () => {
     graph.setGraphs([graphFor("/A")]);
     graph.setGraphs([graphFor("/B")]);
     panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
-    assert.match(panner.state(), /\/panning$/);
+    assert.match(panner.state(), /\/single$/);
     graph.setGraphs([graphFor("/C")]);
 
     assert.deepEqual(drawn, [["/A"], ["/B"], ["/C"]]);
@@ -203,7 +203,7 @@ describe("companion-style HSM controllers", () => {
 
     panner.fit({ reason: "initial", bounds: metrics.bounds, metrics });
     panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
-    assert.match(panner.state(), /\/panning$/);
+    assert.match(panner.state(), /\/single$/);
     panner.cursorMove({ pointerId: 1, point: { x: 30, y: 24 } });
     panner.panEnd({ pointerId: 1 });
     panner.zoom({ deltaY: -100, point: { x: 30, y: 24 } });
@@ -339,8 +339,8 @@ describe("companion-style HSM controllers", () => {
     };
     process.on("unhandledRejection", onUnhandled);
     try {
-      const sourceDispatch = source.dispatch("source.connect.requested").catch(hsm.reportHsmFailure);
-      const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(hsm.reportHsmFailure);
+      const sourceDispatch = source.dispatch("source.connect.requested").catch(hsm.catchFailure(source));
+      const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(hsm.catchFailure(dashboard));
       await Promise.all([source.stop(), dashboard.stop()]);
       await Promise.all([sourceDispatch, dashboardDispatch]);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -350,7 +350,7 @@ describe("companion-style HSM controllers", () => {
     assert.deepEqual(unhandled, []);
   });
 
-  test("HSM failure reporting suppresses shutdown and reports unexpected errors", () => {
+  test("failure reporting surfaces unstarted dispatch as HostDropError", () => {
     const reports: unknown[] = [];
     const globalWithReportError = globalThis as typeof globalThis & {
       reportError?: (value: unknown) => void;
@@ -360,9 +360,10 @@ describe("companion-style HSM controllers", () => {
       reports.push(error);
     };
     try {
-      hsm.reportHsmFailure(new Error("dispatch requires a started HSM"));
+      assert.throws(() => hsm.reportFailure(new Error("dispatch requires a started HSM")), hsm.HostDropError);
+      hsm.catchFailure()(new Error("dispatch requires a started HSM"));
       const unexpected = new Error("unexpected HSM failure");
-      hsm.reportHsmFailure(unexpected);
+      hsm.reportFailure(unexpected);
       assert.deepEqual(reports, [unexpected]);
     } finally {
       if (previous === undefined) {
@@ -384,8 +385,8 @@ describe("companion-style HSM controllers", () => {
       },
     });
     dashboard.applySpans(parsed.spans, 0, "replace");
-    dashboard.enterReplay();
-    dashboard.playReplay();
+    await dashboard.dispatch("dashboard.replay.enter");
+    await dashboard.dispatch("dashboard.replay.play");
     assert.ok(dashboard.snapshot().replay.total > 0);
     assert.equal(dashboard.snapshot().replay.playing, true);
     const snapshotsBeforeStop = snapshots.length;

@@ -6,11 +6,13 @@ import * as hsm from "../src/hsm.ts";
 import { Renderer } from "../src/flow/renderer.ts";
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("timed out waiting for renderer");
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, 0);
+    });
   }
+  throw new Error("timed out waiting for renderer");
 }
 
 describe("Renderer dirty coalescing", () => {

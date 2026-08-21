@@ -1,17 +1,10 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { panelStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-panel";
 
-export class FlowPanel extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowPanel",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowPanel extends HTMLElement {
   constructor() {
     super();
     const root = this.attachShadow({ mode: "open" });
@@ -21,11 +14,6 @@ export class FlowPanel extends hsm.from(HTMLElement) {
 
   connectedCallback(): void {
     if (this.getAttribute("position") === null) this.setAttribute("position", "top-left");
-    hsm.start(this, FlowPanel.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 }
 

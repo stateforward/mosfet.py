@@ -3,6 +3,7 @@ import * as library from "@stateforward/hsm.ts";
 export {
   activity,
   after,
+  choice,
   Context,
   defer,
   define,
@@ -25,75 +26,160 @@ export {
 
 export type { Completion, DispatchEvent, Event, Snapshot } from "@stateforward/hsm.ts";
 
-const EXPECTED_HSM_SHUTDOWN_ERRORS = new Set([
-  "dispatch requires a started HSM",
-  "take snapshot requires a started HSM",
-  "set requires a started HSM",
-  "operation requires a started HSM",
-  "restart requires a started HSM",
-]);
-
-type HostConstructor<T = object> = new () => T;
-
-export function from<TBase extends HostConstructor>(
-  Base: TBase,
-): new () => InstanceType<TBase> & library.Instance {
-  const Super = Base as HostConstructor;
-  class HsmHost extends Super {}
-  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(library.Instance.prototype))) {
-    if (key === "constructor") continue;
-    Object.defineProperty(HsmHost.prototype, key, descriptor);
-  }
-  return HsmHost as unknown as new () => InstanceType<TBase> & library.Instance;
-}
-
-export const From = from;
-
-type StartFn = {
-  (runtime: object, defined: object): object;
-  (ctx: library.Context, runtime: object, defined: object): object;
+/**
+ * Host protocol after `start(this, model)`.
+ * The host remains a custom element. It is not `instanceof Instance`.
+ * `start` binds the library runtime onto `this`.
+ */
+export type Host = {
+  dispatch(event: library.DispatchEvent): library.Completion;
+  dispatch(ctx: library.Context, event: library.DispatchEvent): library.Completion;
+  state(): string;
+  context(): library.Context;
+  clock(): ReturnType<library.Instance["clock"]>;
+  stop(): Promise<void>;
+  takeSnapshot(): library.Snapshot;
 };
 
-const libraryStart = library.start as unknown as StartFn;
+/** TypeScript mixin constructors require a rest parameter of type `any[]`. Isolated here. */
+type MixinRest = any[];
+type HostConstructor<T = object> = new (...args: MixinRest) => T;
 
-export function start<I extends object, M>(instance: I, model: M): I & library.Instance;
-export function start<I extends object, M>(ctx: library.Context, instance: I, model: M): I & library.Instance;
+const startedHosts = new WeakSet<object>();
+
+/**
+ * Mixin: subclass stays a custom element; call `start(this, model)` after `super()`.
+ *
+ * CORE-EXC-001: copies `Instance.prototype` method descriptors because
+ * `@stateforward/hsm.ts` does not export a custom-element mixin. Isolated to
+ * this module. Do not add `from` to the published package. Owner: web/src/hsm.ts.
+ * Tests: web/tests/hsm-from.test.ts.
+ *
+ * CORE-EXC-001 (OTEL): this package has no OpenTelemetry SDK (dependency not
+ * approved). Control outcomes are HSM events and DOM CustomEvents with bounded
+ * names (machine, event kind, stage, outcome).
+ */
+export function from<TBase extends HostConstructor>(
+  Base: TBase,
+): new () => InstanceType<TBase> & Host {
+  class HostElement extends Base {
+    constructor(...args: MixinRest) {
+      super(...args);
+    }
+  }
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(library.Instance.prototype))) {
+    if (key === "constructor") continue;
+    Object.defineProperty(HostElement.prototype, key, descriptor);
+  }
+  return HostElement as unknown as new () => InstanceType<TBase> & Host;
+}
+
+export function start<I extends object, M>(instance: I, model: M): I & Host;
+export function start<I extends object, M>(ctx: library.Context, instance: I, model: M): I & Host;
 export function start<I extends object, M>(
   ctxOrInstance: library.Context | I,
   instanceOrModel: I | M,
   maybeModel?: M,
-): I & library.Instance {
-  if (maybeModel !== undefined) {
-    return libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object) as I & library.Instance;
+): I & Host {
+  const instance = (maybeModel !== undefined ? instanceOrModel : ctxOrInstance) as object;
+  if (startedHosts.has(instance)) {
+    return instance as I & Host;
   }
-  return libraryStart(ctxOrInstance as object, instanceOrModel as object) as I & library.Instance;
+  type LibraryStart = {
+    (runtime: object, defined: object): object;
+    (ctx: library.Context, runtime: object, defined: object): object;
+  };
+  const libraryStart = library.start as unknown as LibraryStart;
+  const started = maybeModel !== undefined
+    ? libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object)
+    : libraryStart(ctxOrInstance as object, instanceOrModel as object);
+  startedHosts.add(started);
+  return started as I & Host;
 }
 
 export async function stop(machine: object): Promise<void> {
-  await library.Instance.prototype.stop.call(machine);
+  try {
+    await library.Instance.prototype.stop.call(machine);
+  } finally {
+    startedHosts.delete(machine);
+  }
 }
 
-export function namedEvent(name: string, data?: unknown): library.DispatchEvent {
+export function typedEvent<T>(event: { readonly name: string; readonly kind: library.DispatchEvent["kind"] }, data?: T): library.DispatchEvent {
+  if (data === undefined) {
+    return { name: event.name, kind: event.kind };
+  }
+  return { name: event.name, data, kind: event.kind };
+}
+
+export function namedEvent<T>(name: string, data?: T): library.DispatchEvent {
   if (data === undefined) {
     return { name, kind: library.EventKind };
   }
   return { name, data, kind: library.EventKind };
 }
 
-export function reportHsmFailure(error: unknown): void {
-  if (error instanceof Error && EXPECTED_HSM_SHUTDOWN_ERRORS.has(error.message)) {
-    return;
+export class HostDropError extends Error {
+  readonly reason: "unstarted" | "stopped";
+  readonly operation: string;
+
+  constructor(args: { reason: "unstarted" | "stopped"; operation: string; cause?: unknown }) {
+    super(`${args.operation} dropped: host ${args.reason}`, args.cause !== undefined ? { cause: args.cause } : undefined);
+    this.name = "HostDropError";
+    this.reason = args.reason;
+    this.operation = args.operation;
   }
-  const reportError = (globalThis as typeof globalThis & {
-    reportError?: (value: unknown) => void;
-  }).reportError;
-  if (reportError !== undefined) {
-    reportError(error);
-    return;
+}
+
+export type HostDropDetail = {
+  readonly reason: "unstarted" | "stopped";
+  readonly operation: string;
+};
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error), { cause: error });
+}
+
+export function hostDropFrom(error: unknown): HostDropError | null {
+  if (error instanceof HostDropError) return error;
+  if (!(error instanceof Error) || !error.message.endsWith("requires a started HSM")) return null;
+  const operation = error.message.replace(/ requires a started HSM$/, "");
+  return new HostDropError({ reason: "unstarted", operation, cause: error });
+}
+
+function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
+  if (host === undefined || typeof host.dispatchEvent !== "function") return;
+  host.dispatchEvent(new CustomEvent<HostDropDetail>("host-drop", {
+    detail: { reason: drop.reason, operation: drop.operation },
+    bubbles: true,
+    composed: true,
+  }));
+}
+
+export function reportFailure(error: unknown, host?: EventTarget): Error {
+  const drop = hostDropFrom(error);
+  if (drop !== null) {
+    emitDrop(host, drop);
+    throw drop;
   }
-  setTimeout(() => {
-    throw error;
-  }, 0);
+  const err = toError(error);
+  const reportError = (globalThis as typeof globalThis & { reportError?: (value: unknown) => void }).reportError;
+  if (typeof reportError === "function") {
+    reportError(err);
+    return err;
+  }
+  throw err;
+}
+
+export function catchFailure(host?: EventTarget): (error: unknown) => void {
+  return (error: unknown): void => {
+    const drop = hostDropFrom(error);
+    if (drop !== null) {
+      emitDrop(host, drop);
+      return;
+    }
+    reportFailure(error, host);
+  };
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

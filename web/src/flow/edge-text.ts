@@ -1,25 +1,12 @@
-import * as hsm from "../hsm.ts";
-
 const ELEMENT_NAME = "flow-edge-text";
 
-export class FlowEdgeText extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowEdgeText",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowEdgeText extends HTMLElement {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" }).append(document.createElement("slot"));
-  }
-
-  connectedCallback(): void {
-    hsm.start(this, FlowEdgeText.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
+    const root = this.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = ":host { display: block; }";
+    root.append(style, document.createElement("slot"));
   }
 }
 

@@ -7,12 +7,22 @@ export type SelectionBox = {
   readonly bottom: number;
 };
 
+export type SelectionClickData = { readonly id: string; readonly kind: "node" | "edge"; readonly additive: boolean };
+export type SelectionPointData = { readonly x: number; readonly y: number };
+export type SelectionBoxEndData = { readonly ids: readonly string[] };
+export type SelectionSnapshot = {
+  readonly nodeIds: readonly string[];
+  readonly edgeIds: readonly string[];
+  readonly box: SelectionBox | null;
+};
+
 export class Selection extends hsm.Instance {
   static readonly clickEvent = { name: "selection_click", kind: hsm.Kinds.Event } as const;
   static readonly boxStartEvent = { name: "box_start", kind: hsm.Kinds.Event } as const;
   static readonly boxMoveEvent = { name: "box_move", kind: hsm.Kinds.Event } as const;
   static readonly boxEndEvent = { name: "box_end", kind: hsm.Kinds.Event } as const;
   static readonly clearEvent = { name: "selection_clear", kind: hsm.Kinds.Event } as const;
+  static readonly changedEvent = { name: "selection_changed", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Selection",
@@ -60,35 +70,43 @@ export class Selection extends hsm.Instance {
     ),
   );
 
-  nodeIds = new Set<string>();
-  edgeIds = new Set<string>();
-  box: SelectionBox | null = null;
-  readonly onChange: (() => void) | null;
+  #nodeIds = new Set<string>();
+  #edgeIds = new Set<string>();
+  #box: SelectionBox | null = null;
+  readonly onChange: ((snapshot: SelectionSnapshot) => void) | null;
   #boxOrigin: { x: number; y: number } | null = null;
 
-  constructor(onChange: (() => void) | null = null) {
+  constructor(onChange: ((snapshot: SelectionSnapshot) => void) | null = null) {
     super();
     this.onChange = onChange;
   }
 
-  click(data: { id: string; kind: "node" | "edge"; additive: boolean }): void {
-    this.dispatch(hsm.namedEvent(Selection.clickEvent.name, data));
+  snapshot(): SelectionSnapshot {
+    return {
+      nodeIds: [...this.#nodeIds],
+      edgeIds: [...this.#edgeIds],
+      box: this.#box,
+    };
   }
 
-  boxStart(point: { x: number; y: number }): void {
-    this.dispatch(hsm.namedEvent(Selection.boxStartEvent.name, point));
+  click(data: SelectionClickData): void {
+    this.dispatch(hsm.typedEvent(Selection.clickEvent, data));
   }
 
-  boxMove(point: { x: number; y: number }): void {
-    this.dispatch(hsm.namedEvent(Selection.boxMoveEvent.name, point));
+  boxStart(point: SelectionPointData): void {
+    this.dispatch(hsm.typedEvent(Selection.boxStartEvent, point));
+  }
+
+  boxMove(point: SelectionPointData): void {
+    this.dispatch(hsm.typedEvent(Selection.boxMoveEvent, point));
   }
 
   boxEnd(ids: readonly string[]): void {
-    this.dispatch(hsm.namedEvent(Selection.boxEndEvent.name, { ids }));
+    this.dispatch(hsm.typedEvent(Selection.boxEndEvent, { ids }));
   }
 
   clear(): void {
-    this.dispatch(hsm.namedEvent(Selection.clearEvent.name));
+    this.dispatch(hsm.typedEvent(Selection.clearEvent));
   }
 
   static applyClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -97,17 +115,17 @@ export class Selection extends hsm.Instance {
     const kind = event.data["kind"];
     const additive = event.data["additive"] === true;
     if (typeof id !== "string" || (kind !== "node" && kind !== "edge")) return;
-    const bucket = kind === "node" ? instance.nodeIds : instance.edgeIds;
+    const bucket = kind === "node" ? instance.#nodeIds : instance.#edgeIds;
     if (!additive) {
-      instance.nodeIds.clear();
-      instance.edgeIds.clear();
+      instance.#nodeIds.clear();
+      instance.#edgeIds.clear();
       bucket.add(id);
     } else if (bucket.has(id)) {
       bucket.delete(id);
     } else {
       bucket.add(id);
     }
-    instance.onChange?.();
+    instance.#emit();
   }
 
   static startBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -116,8 +134,8 @@ export class Selection extends hsm.Instance {
     const y = event.data["y"];
     if (typeof x !== "number" || typeof y !== "number") return;
     instance.#boxOrigin = { x, y };
-    instance.box = { left: x, top: y, right: x, bottom: y };
-    instance.onChange?.();
+    instance.#box = { left: x, top: y, right: x, bottom: y };
+    instance.#emit();
   }
 
   static moveBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -125,35 +143,42 @@ export class Selection extends hsm.Instance {
     const x = event.data["x"];
     const y = event.data["y"];
     if (typeof x !== "number" || typeof y !== "number") return;
-    instance.box = {
+    instance.#box = {
       left: Math.min(instance.#boxOrigin.x, x),
       top: Math.min(instance.#boxOrigin.y, y),
       right: Math.max(instance.#boxOrigin.x, x),
       bottom: Math.max(instance.#boxOrigin.y, y),
     };
-    instance.onChange?.();
+    instance.#emit();
   }
 
   static endBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Selection)) return;
     instance.#boxOrigin = null;
-    instance.box = null;
+    instance.#box = null;
     if (hsm.isRecord(event.data) && Array.isArray(event.data["ids"])) {
-      instance.nodeIds = new Set(event.data["ids"].filter((id): id is string => typeof id === "string"));
+      instance.#nodeIds = new Set(event.data["ids"].filter((id): id is string => typeof id === "string"));
     }
-    instance.onChange?.();
+    instance.#emit();
   }
 
   static clearAll(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Selection)) return;
-    instance.nodeIds.clear();
-    instance.edgeIds.clear();
-    instance.box = null;
+    instance.#nodeIds.clear();
+    instance.#edgeIds.clear();
+    instance.#box = null;
     instance.#boxOrigin = null;
-    instance.onChange?.();
+    instance.#emit();
+  }
+
+  #emit(): void {
+    this.onChange?.(this.snapshot());
   }
 }
 
-export function startSelection(ctx: hsm.Context, onChange: (() => void) | null = null): Selection {
-  return hsm.start(ctx, new Selection(onChange), Selection.model);
+export function startSelection(args: {
+  ctx: hsm.Context;
+  onChange?: ((snapshot: SelectionSnapshot) => void) | null;
+}): Selection {
+  return hsm.start(args.ctx, new Selection(args.onChange ?? null), Selection.model);
 }

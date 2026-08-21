@@ -1,17 +1,12 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { controlsStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-controls";
 
-export class FlowControls extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowControls",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
+export type FlowControlDetail = { readonly action: "zoom-in" | "zoom-out" | "fit" };
 
+export class FlowControls extends HTMLElement {
   constructor() {
     super();
     const root = this.attachShadow({ mode: "open" });
@@ -26,22 +21,18 @@ export class FlowControls extends hsm.from(HTMLElement) {
 
   connectedCallback(): void {
     if (this.getAttribute("position") === null) this.setAttribute("position", "bottom-left");
-    hsm.start(this, FlowControls.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 
   #onClick = (event: Event): void => {
     const target = event.target;
     if (!(target instanceof HTMLButtonElement)) return;
     const action = target.dataset["action"];
-    const graph = this.closest("flow-graph") ?? (this.getRootNode() as ShadowRoot).host;
-    if (!(graph instanceof HTMLElement) || action === undefined) return;
-    if (action === "zoom-in" && "zoomIn" in graph && typeof graph.zoomIn === "function") graph.zoomIn();
-    if (action === "zoom-out" && "zoomOut" in graph && typeof graph.zoomOut === "function") graph.zoomOut();
-    if (action === "fit" && "fitView" in graph && typeof graph.fitView === "function") graph.fitView();
+    if (action !== "zoom-in" && action !== "zoom-out" && action !== "fit") return;
+    this.dispatchEvent(new CustomEvent<FlowControlDetail>("flow-control", {
+      detail: { action },
+      bubbles: true,
+      composed: true,
+    }));
   };
 }
 

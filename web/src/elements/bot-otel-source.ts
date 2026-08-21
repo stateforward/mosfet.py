@@ -3,7 +3,7 @@ import {
   OtelSource,
   type OtelSourceSnapshot,
 } from "../otel-source-hsm.ts";
-import { reportHsmFailure } from "../hsm.ts";
+import { catchFailure } from "../hsm.ts";
 import { type OtelSource as StreamSource } from "../otel/source.ts";
 import { applyStyles } from "./styles.ts";
 
@@ -107,7 +107,7 @@ export class BotOtelSource extends OtelSource {
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.snapshot());
     if (this.snapshot().phase === "idle") {
-      void this.dispatch("source.connect.requested").catch(reportHsmFailure);
+      void this.dispatch("source.connect.requested").catch(catchFailure(this));
       return;
     }
     if (this.snapshot().phase === "live") {
@@ -118,7 +118,7 @@ export class BotOtelSource extends OtelSource {
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    void this.stop().catch(reportHsmFailure);
+    void this.stop().catch(catchFailure(this));
   }
 
   #render(snapshot: OtelSourceSnapshot): void {
@@ -140,7 +140,7 @@ export class BotOtelSource extends OtelSource {
     if (eventName === undefined || !isOtelSourceEventName(eventName)) {
       return;
     }
-    void this.dispatch(eventName).catch(reportHsmFailure);
+    void this.dispatch(eventName).catch(catchFailure(this));
   };
 }
 

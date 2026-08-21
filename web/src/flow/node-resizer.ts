@@ -1,17 +1,10 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { resizerStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node-resizer";
 
-export class FlowNodeResizer extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowNodeResizer",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowNodeResizer extends HTMLElement {
   constructor() {
     super();
     const root = this.attachShadow({ mode: "open" });
@@ -22,14 +15,6 @@ export class FlowNodeResizer extends hsm.from(HTMLElement) {
       control.dataset["dir"] = dir;
       root.append(control);
     }
-  }
-
-  connectedCallback(): void {
-    hsm.start(this, FlowNodeResizer.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 }
 

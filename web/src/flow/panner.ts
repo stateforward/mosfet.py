@@ -1,6 +1,8 @@
 import * as hsm from "../hsm.ts";
 
-export type ViewportPoint = { readonly x: number; readonly y: number };
+import { MAX_ZOOM, MIN_ZOOM, type Viewport, type XYPosition } from "./types.ts";
+
+export type ViewportPoint = XYPosition;
 export type ViewportBounds = {
   readonly left: number;
   readonly right: number;
@@ -14,11 +16,24 @@ export type ViewportMetrics = {
   readonly origin: ViewportPoint;
 };
 export type ViewportTransform = { readonly scale: number; readonly pan: ViewportPoint };
-export type Viewport = { readonly x: number; readonly y: number; readonly zoom: number };
+
+export type PanPointerData = {
+  readonly pointerId: number;
+  readonly point: ViewportPoint;
+};
+export type ZoomData = {
+  readonly scale?: number;
+  readonly deltaY?: number;
+  readonly point?: ViewportPoint;
+};
+export type FitData = {
+  readonly bounds: ViewportBounds;
+  readonly metrics: ViewportMetrics;
+  readonly reason?: string;
+};
+export type ViewportData = Viewport;
 
 const FIT_PADDING = 28;
-const MIN_ZOOM = 0.12;
-const MAX_ZOOM = 2.4;
 const MAX_FIT_ZOOM = 1.2;
 const ZOOM_STEP = 0.0015;
 
@@ -28,33 +43,47 @@ export class Panner extends hsm.Instance {
   static readonly panEndEvent = { name: "pan_end", kind: hsm.Kinds.Event } as const;
   static readonly zoomEvent = { name: "zoom", kind: hsm.Kinds.Event } as const;
   static readonly fitEvent = { name: "fit", kind: hsm.Kinds.Event } as const;
+  static readonly viewportEvent = { name: "viewport_set", kind: hsm.Kinds.Event } as const;
+  static readonly transformEvent = { name: "transform_changed", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Panner",
-    hsm.initial(hsm.target("fixed")),
+    hsm.initial(hsm.target("ready")),
     hsm.state(
-      "fixed",
-      hsm.transition(
-        hsm.on(Panner.panStartEvent.name),
-        hsm.target("../panning"),
-        hsm.effect(Panner.startPan),
-      ),
+      "ready",
+      hsm.initial(hsm.target("fixed")),
       hsm.transition(hsm.on(Panner.zoomEvent.name), hsm.effect(Panner.applyZoom)),
       hsm.transition(hsm.on(Panner.fitEvent.name), hsm.effect(Panner.applyFit)),
-    ),
-    hsm.state(
-      "panning",
-      hsm.transition(hsm.on(Panner.panStartEvent.name), hsm.effect(Panner.startPan)),
+      hsm.transition(hsm.on(Panner.viewportEvent.name), hsm.effect(Panner.applyViewport)),
       hsm.transition(hsm.on(Panner.cursorMoveEvent.name), hsm.effect(Panner.updatePan)),
-      hsm.transition(
-        hsm.on(Panner.panEndEvent.name),
-        hsm.guard(Panner.canEndPan),
-        hsm.target("../fixed"),
-        hsm.effect(Panner.endPan),
+      hsm.state(
+        "fixed",
+        hsm.transition(
+          hsm.on(Panner.panStartEvent.name),
+          hsm.target("../single"),
+          hsm.effect(Panner.startPan),
+        ),
       ),
-      hsm.transition(hsm.on(Panner.panEndEvent.name), hsm.effect(Panner.endPan)),
-      hsm.transition(hsm.on(Panner.zoomEvent.name), hsm.effect(Panner.applyZoom)),
-      hsm.transition(hsm.on(Panner.fitEvent.name), hsm.effect(Panner.applyFit)),
+      hsm.state(
+        "single",
+        hsm.transition(hsm.on(Panner.panStartEvent.name), hsm.target("../pinch"), hsm.effect(Panner.startPan)),
+        hsm.transition(hsm.on(Panner.panEndEvent.name), hsm.target("../fixed"), hsm.effect(Panner.endPan)),
+      ),
+      hsm.state(
+        "pinch",
+        hsm.transition(hsm.on(Panner.panStartEvent.name), hsm.effect(Panner.startPan)),
+        hsm.transition(hsm.on(Panner.panEndEvent.name), hsm.target("../ending"), hsm.effect(Panner.endPan)),
+      ),
+      hsm.choice(
+        "ending",
+        hsm.transition(hsm.guard(Panner.hasTwoPointers), hsm.target("pinch")),
+        hsm.transition(
+          hsm.guard(Panner.hasOnePointer),
+          hsm.target("single"),
+          hsm.effect(Panner.resumeSingle),
+        ),
+        hsm.transition(hsm.target("fixed")),
+      ),
     ),
   );
 
@@ -85,38 +114,37 @@ export class Panner extends hsm.Instance {
     return { x: this.pan.x, y: this.pan.y, zoom: this.scale };
   }
 
-  panStart(data: unknown): void {
-    this.dispatch(hsm.namedEvent(Panner.panStartEvent.name, data));
+  panStart(data: PanPointerData): void {
+    this.dispatch(hsm.typedEvent(Panner.panStartEvent, data));
   }
 
-  cursorMove(data: unknown): void {
-    this.dispatch(hsm.namedEvent(Panner.cursorMoveEvent.name, data));
+  cursorMove(data: PanPointerData | { pan: ViewportPoint; scale?: number }): void {
+    this.dispatch(hsm.typedEvent(Panner.cursorMoveEvent, data));
   }
 
-  panEnd(data: unknown): void {
-    this.dispatch(hsm.namedEvent(Panner.panEndEvent.name, data));
+  panEnd(data: { pointerId: number }): void {
+    this.dispatch(hsm.typedEvent(Panner.panEndEvent, data));
   }
 
-  zoom(data: unknown): void {
-    this.dispatch(hsm.namedEvent(Panner.zoomEvent.name, data));
+  zoom(data: ZoomData): void {
+    this.dispatch(hsm.typedEvent(Panner.zoomEvent, data));
   }
 
-  fit(data: unknown): void {
-    this.dispatch(hsm.namedEvent(Panner.fitEvent.name, data));
+  fit(data: FitData): void {
+    this.dispatch(hsm.typedEvent(Panner.fitEvent, data));
   }
 
-  setViewport(viewport: Viewport): void {
-    this.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
+  setViewport(viewport: ViewportData): void {
+    this.dispatch(hsm.typedEvent(Panner.viewportEvent, viewport));
   }
 
   static startPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Panner)) return;
-    const pointerId = pointerIdOf(event.data);
-    const point = pointOf(recordOf(event.data)?.["point"]);
-    if (pointerId === null || point === null) return;
-    instance.#pointers.set(pointerId, point);
+    const pointer = panPointerOf(event.data);
+    if (pointer === null) return;
+    instance.#pointers.set(pointer.pointerId, pointer.point);
     if (instance.#pointers.size === 1) {
-      instance.#dragStart = { pointerId, point, pan: { ...instance.pan } };
+      instance.#dragStart = { pointerId: pointer.pointerId, point: pointer.point, pan: { ...instance.pan } };
       instance.#setPanning(true);
       return;
     }
@@ -142,11 +170,9 @@ export class Panner extends hsm.Instance {
       instance.#setTransform(scale, directPan);
       return;
     }
-    const pointerId = pointerIdOf(event.data);
-    const point = pointOf(record?.["point"]);
-    if (pointerId === null || point === null) return;
-    if (!instance.#pointers.has(pointerId)) return;
-    instance.#pointers.set(pointerId, point);
+    const pointer = panPointerOf(event.data);
+    if (pointer === null || !instance.#pointers.has(pointer.pointerId)) return;
+    instance.#pointers.set(pointer.pointerId, pointer.point);
     if (instance.#pointers.size >= 2 && instance.#pinchStart !== null) {
       const points = [...instance.#pointers.values()];
       const first = points[0];
@@ -160,18 +186,20 @@ export class Panner extends hsm.Instance {
       }
       return;
     }
-    if (instance.#dragStart?.pointerId === pointerId) {
+    if (instance.#dragStart?.pointerId === pointer.pointerId) {
       instance.#setTransform(instance.scale, {
-        x: instance.#dragStart.pan.x + point.x - instance.#dragStart.point.x,
-        y: instance.#dragStart.pan.y + point.y - instance.#dragStart.point.y,
+        x: instance.#dragStart.pan.x + pointer.point.x - instance.#dragStart.point.x,
+        y: instance.#dragStart.pan.y + pointer.point.y - instance.#dragStart.point.y,
       });
     }
   }
 
-  static canEndPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-    if (!(instance instanceof Panner)) return true;
-    const pointerId = pointerIdOf(event.data);
-    return pointerId === null || (instance.#pointers.has(pointerId) && instance.#pointers.size <= 1);
+  static hasTwoPointers(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): boolean {
+    return instance instanceof Panner && instance.#pointers.size >= 2;
+  }
+
+  static hasOnePointer(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): boolean {
+    return instance instanceof Panner && instance.#pointers.size === 1;
   }
 
   static endPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -179,8 +207,18 @@ export class Panner extends hsm.Instance {
     const pointerId = pointerIdOf(event.data);
     if (pointerId !== null) instance.#pointers.delete(pointerId);
     if (instance.#pointers.size < 2) instance.#pinchStart = null;
-    if (instance.#pointers.size === 0) instance.#dragStart = null;
-    instance.#setPanning(instance.#dragStart !== null);
+    if (instance.#pointers.size === 0) {
+      instance.#dragStart = null;
+      instance.#setPanning(false);
+    }
+  }
+
+  static resumeSingle(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof Panner) || instance.#pointers.size !== 1) return;
+    const [pointerId, point] = [...instance.#pointers.entries()][0] ?? [];
+    if (pointerId === undefined || point === undefined) return;
+    instance.#dragStart = { pointerId, point, pan: { ...instance.pan } };
+    instance.#setPanning(true);
   }
 
   static applyZoom(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -205,6 +243,16 @@ export class Panner extends hsm.Instance {
     const bounds = boundsOf(record?.["bounds"]) ?? metrics?.bounds ?? null;
     if (metrics === null || bounds === null) return;
     instance.#fitBounds(bounds, metrics);
+  }
+
+  static applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof Panner)) return;
+    const viewport = viewportOf(event.data);
+    if (viewport === null) return;
+    instance.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
+    if (instance.#dragStart !== null) {
+      instance.#dragStart = { ...instance.#dragStart, pan: { ...instance.pan } };
+    }
   }
 
   #fitBounds(bounds: ViewportBounds, metrics: ViewportMetrics): void {
@@ -248,12 +296,16 @@ export class Panner extends hsm.Instance {
   }
 }
 
-export function startPanner(
-  ctx: hsm.Context,
-  world: HTMLElement,
-  options: { frame?: HTMLElement; onTransform?: (transform: ViewportTransform) => void } = {},
-): Panner {
-  return hsm.start(ctx, new Panner(world, options), Panner.model);
+export function startPanner(args: {
+  ctx: hsm.Context;
+  world: HTMLElement;
+  frame?: HTMLElement;
+  onTransform?: (transform: ViewportTransform) => void;
+}): Panner {
+  return hsm.start(args.ctx, new Panner(args.world, {
+    ...(args.frame !== undefined ? { frame: args.frame } : {}),
+    ...(args.onTransform !== undefined ? { onTransform: args.onTransform } : {}),
+  }), Panner.model);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -272,6 +324,25 @@ function pointOf(value: unknown): ViewportPoint | null {
 function pointerIdOf(value: unknown): number | null {
   const pointerId = recordOf(value)?.["pointerId"];
   return typeof pointerId === "number" && Number.isInteger(pointerId) ? pointerId : null;
+}
+
+function panPointerOf(value: unknown): PanPointerData | null {
+  const pointerId = pointerIdOf(value);
+  const point = pointOf(recordOf(value)?.["point"]);
+  if (pointerId === null || point === null) return null;
+  return { pointerId, point };
+}
+
+function viewportOf(value: unknown): Viewport | null {
+  const record = recordOf(value);
+  const x = record?.["x"];
+  const y = record?.["y"];
+  const zoom = record?.["zoom"];
+  return typeof x === "number" && Number.isFinite(x)
+    && typeof y === "number" && Number.isFinite(y)
+    && typeof zoom === "number" && Number.isFinite(zoom)
+    ? { x, y, zoom }
+    : null;
 }
 
 function boundsOf(value: unknown): ViewportBounds | null {

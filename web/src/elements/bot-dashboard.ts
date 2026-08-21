@@ -3,12 +3,11 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
-import { reportHsmFailure } from "../hsm.ts";
+import { catchFailure } from "../hsm.ts";
 import {
   environmentWorkspaceGraphs,
   environmentRootGraphs,
   graphsForVisibility,
-  machineNamesInOwnedSubtree,
 } from "../dashboard-graphs.ts";
 import { type MachineGraph } from "../otel/machines.ts";
 import { isOtelSource } from "../otel/source.ts";
@@ -681,7 +680,6 @@ export class BotDashboard extends Dashboard {
   readonly #replayPrevious: HTMLButtonElement;
   readonly #replayNext: HTMLButtonElement;
   readonly #replayLive: HTMLButtonElement;
-  #visibleMachines = new Map<string, boolean>();
   #abort: AbortController | null = null;
 
   constructor() {
@@ -995,7 +993,7 @@ export class BotDashboard extends Dashboard {
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    void this.stop().catch(reportHsmFailure);
+    void this.stop().catch(catchFailure(this));
   }
 
   #render(snapshot: DashboardSnapshot): void {
@@ -1017,10 +1015,10 @@ export class BotDashboard extends Dashboard {
     this.#machines.replaceChildren();
     this.#eventList.replaceChildren();
     const view = snapshot.document;
+    const visibleMachines = visibilityMap(snapshot);
     if (view === null || view.machines.length === 0) {
-      this.#visibleMachines.clear();
       this.#memberCount.textContent = "0 loaded";
-      this.#writeVisibilityStats([]);
+      this.#writeVisibilityStats([], visibleMachines);
       this.#writeEvents([], null);
       this.#writeCurrentState(null);
       this.#lastEvent.textContent = "—";
@@ -1030,29 +1028,10 @@ export class BotDashboard extends Dashboard {
       return;
     }
     const workspaceMachines = environmentWorkspaceGraphs(view.machines);
-    const machineNames = new Set(workspaceMachines.map((machine) => machine.name));
     const memberMachines = environmentRootGraphs(workspaceMachines);
     const selectedMachine = workspaceMachines.some((machine) => machine.name === view.selectedMachine)
       ? view.selectedMachine
       : memberMachines[0]?.name ?? null;
-    for (const machine of view.machines) {
-      if (machineNames.has(machine.name) && !this.#visibleMachines.has(machine.name)) {
-        this.#visibleMachines.set(machine.name, true);
-      }
-    }
-    for (const machineName of this.#visibleMachines.keys()) {
-      if (!machineNames.has(machineName)) {
-        this.#visibleMachines.delete(machineName);
-      }
-    }
-    for (const root of memberMachines) {
-      if (this.#visibleMachines.get(root.name) === true) {
-        continue;
-      }
-      for (const machineName of machineNamesInOwnedSubtree(view.machines, root.name)) {
-        this.#visibleMachines.set(machineName, false);
-      }
-    }
     for (const machine of workspaceMachines) {
       const option = document.createElement("option");
       option.value = machine.name;
@@ -1085,13 +1064,13 @@ export class BotDashboard extends Dashboard {
       state.dataset["empty"] = machine.currentState.length === 0 ? "true" : "false";
       state.textContent = machine.currentState.length === 0 ? "No current state" : machine.currentState;
       select.append(name, component, observes, state);
-      item.dataset["visible"] = String(this.#visibleMachines.get(machine.name) === true);
+      item.dataset["visible"] = String(visibleMachines.get(machine.name) === true);
       const visibilityLabel = document.createElement("label");
       visibilityLabel.className = "machine-visibility";
       visibilityLabel.title = `Show or hide ${machine.name} graph`;
       const visibility = document.createElement("input");
       visibility.type = "checkbox";
-      visibility.checked = this.#visibleMachines.get(machine.name) === true;
+      visibility.checked = visibleMachines.get(machine.name) === true;
       visibility.setAttribute("aria-label", `Show ${machine.name} graph`);
       visibility.dataset["machineVisibility"] = machine.name;
       visibility.setAttribute("data-testid", "machine-visibility");
@@ -1103,7 +1082,7 @@ export class BotDashboard extends Dashboard {
       this.#machines.append(item);
     }
     this.#memberCount.textContent = `${String(memberMachines.length)} loaded`;
-    this.#writeVisibilityStats(workspaceMachines);
+    this.#writeVisibilityStats(workspaceMachines, visibleMachines);
     this.#writeEvents(workspaceMachines, selectedMachine);
     const selected = selectedMachine === null
       ? null
@@ -1120,7 +1099,7 @@ export class BotDashboard extends Dashboard {
     this.#lastEvent.textContent = selected.lastEventName;
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
-    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
+    this.#graph.graphs = graphsForVisibility(workspaceMachines, visibleMachines);
     if (snapshot.replay.active && snapshot.replay.current !== null) {
       this.#graph.focusMachine(snapshot.replay.current.attributes["hsm.machine.name"]);
     }
@@ -1145,8 +1124,8 @@ export class BotDashboard extends Dashboard {
       : `Live · ${String(replay.total)} events`;
   }
 
-  #writeVisibilityStats(machines: readonly MachineGraph[]): void {
-    const shown = machines.filter((machine) => this.#visibleMachines.get(machine.name) === true).length;
+  #writeVisibilityStats(machines: readonly MachineGraph[], visibleMachines: ReadonlyMap<string, boolean>): void {
+    const shown = machines.filter((machine) => visibleMachines.get(machine.name) === true).length;
     const observed = machines.filter((machine) => machine.observationCount > 0).length;
     this.#shownCount.textContent = String(shown);
     this.#hiddenCount.textContent = String(machines.length - shown);
@@ -1188,54 +1167,12 @@ export class BotDashboard extends Dashboard {
     }
   }
 
-  #syncMachineControls(): void {
-    for (const visibility of this.#machines.querySelectorAll<HTMLInputElement>("input[data-machine-visibility]")) {
-      const machineName = visibility.dataset["machineVisibility"];
-      if (machineName === undefined) {
-        continue;
-      }
-      const visible = this.#visibleMachines.get(machineName) === true;
-      visibility.checked = visible;
-      visibility.closest(".machine")?.setAttribute("data-visible", String(visible));
-    }
-  }
-
   #applyVisibilityAction(action: VisibilityAction): void {
-    const view = this.snapshot().document;
-    if (view === null || view === undefined) {
-      return;
-    }
-    const workspaceMachines = environmentWorkspaceGraphs(view.machines);
-    for (const machine of workspaceMachines) {
-      const visible = action === "show-all" || (action === "hide-unobserved" && machine.observationCount > 0);
-      this.#visibleMachines.set(machine.name, visible);
-    }
-    for (const root of environmentRootGraphs(workspaceMachines)) {
-      if (this.#visibleMachines.get(root.name) === true) {
-        continue;
-      }
-      for (const machineName of machineNamesInOwnedSubtree(workspaceMachines, root.name)) {
-        this.#visibleMachines.set(machineName, false);
-      }
-    }
-    this.#syncMachineControls();
-    this.#writeVisibilityStats(workspaceMachines);
-    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
+    void this.dispatch("dashboard.visibility.action", { action }).catch(catchFailure(this));
   }
 
   #setMachineVisibility(machineName: string, visible: boolean): void {
-    const document = this.snapshot().document;
-    if (document === null || document === undefined) {
-      this.#graph.graphs = [];
-      return;
-    }
-    const workspaceMachines = environmentWorkspaceGraphs(document.machines);
-    for (const name of machineNamesInOwnedSubtree(workspaceMachines, machineName)) {
-      this.#visibleMachines.set(name, visible);
-    }
-    this.#syncMachineControls();
-    this.#writeVisibilityStats(workspaceMachines);
-    this.#graph.graphs = graphsForVisibility(workspaceMachines, this.#visibleMachines);
+    void this.dispatch("dashboard.visibility.set", { machineName, visible }).catch(catchFailure(this));
   }
 
   #writeCurrentState(currentState: string | null): void {
@@ -1286,14 +1223,14 @@ export class BotDashboard extends Dashboard {
     if (!isSourceDetail(event.detail)) {
       return;
     }
-    void this.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(reportHsmFailure);
+    void this.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(catchFailure(this));
   };
 
   readonly #onEdge = (event: Event): void => {
     if (!(event instanceof CustomEvent) || !isEdgeDetail(event.detail)) {
       return;
     }
-    void this.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(reportHsmFailure);
+    void this.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(catchFailure(this));
   };
 
   readonly #onZoom = (event: Event): void => {
@@ -1330,25 +1267,29 @@ export class BotDashboard extends Dashboard {
       if (!(control instanceof HTMLSelectElement)) {
         this.#graph.focusMachine(machineName);
       }
-      void this.dispatch(eventName, { machineName }).catch(reportHsmFailure);
+      void this.dispatch(eventName, { machineName }).catch(catchFailure(this));
       return;
     }
     if (eventName === "dashboard.command.send") {
       void this.dispatch(eventName, {
         eventName: this.#eventName.value,
         dataJson: this.#eventData.value,
-      }).catch(reportHsmFailure);
+      }).catch(catchFailure(this));
       return;
     }
     if (eventName === "dashboard.replay.seek") {
       const position = control instanceof HTMLInputElement ? Number(control.value) : Number.NaN;
       if (Number.isFinite(position)) {
-        void this.dispatch(eventName, { position }).catch(reportHsmFailure);
+        void this.dispatch(eventName, { position }).catch(catchFailure(this));
       }
       return;
     }
-    void this.dispatch(eventName).catch(reportHsmFailure);
+    void this.dispatch(eventName).catch(catchFailure(this));
   };
+}
+
+function visibilityMap(snapshot: DashboardSnapshot): Map<string, boolean> {
+  return new Map(Object.entries(snapshot.visibleMachines));
 }
 
 function isSourceDetail(value: unknown): value is OtelSourceDetail {

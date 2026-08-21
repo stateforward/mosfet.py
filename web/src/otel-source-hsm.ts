@@ -19,10 +19,7 @@ export type OtelSourceSnapshot = {
   readonly errorMessage: string | null;
 };
 
-export type OtelSourceOptions = {
-  readonly onSnapshot?: (snapshot: OtelSourceSnapshot) => void;
-  readonly onReady?: (source: StreamSource) => void;
-};
+const ALLOWED_COLLECTOR_PATH = "/v1/traces/stream";
 
 function controllerOf(instance: hsm.Instance): OtelSource | null {
   return instance instanceof OtelSource ? instance : null;
@@ -118,7 +115,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   boot(): void {
-    if (this.state() === "") hsm.start(this, otelSourceModel);
+    hsm.start(this, otelSourceModel);
   }
 
   snapshot(): OtelSourceSnapshot {
@@ -175,15 +172,37 @@ export class OtelSource extends hsm.from(HTMLElement) {
 
   async connect(event: hsm.Event): Promise<void> {
     const requested = hsm.isRecord(event.data) && typeof event.data["url"] === "string" ? event.data["url"] : undefined;
-    const source = streamSource(requested);
-    if (source.url.length === 0) {
-      await this.dispatch("source.connect.failed", { message: "missing OTLP stream url" });
+    const url = collectorUrl(requested);
+    if (url === null) {
+      await this.dispatch("source.connect.failed", { message: "collector url is not allowed" });
       return;
     }
+    const source = streamSource(url);
     await this.dispatch("source.connected", { source });
   }
 
   #emit(): void {
     this.onSnapshot?.(this.snapshot());
   }
+}
+
+export function collectorUrl(requested: string | undefined): string | null {
+  const value = requested === undefined || requested.length === 0 ? ALLOWED_COLLECTOR_PATH : requested;
+  if (value === ALLOWED_COLLECTOR_PATH || value.startsWith(`${ALLOWED_COLLECTOR_PATH}?`)) {
+    return value;
+  }
+  if (!value.startsWith("/")) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+      const origin = globalThis.location?.origin;
+      if (typeof origin === "string" && origin.length > 0 && url.origin !== origin) return null;
+      if (url.pathname !== ALLOWED_COLLECTOR_PATH) return null;
+      return `${url.pathname}${url.search}`;
+    } catch {
+      return null;
+    }
+  }
+  if (!value.startsWith(ALLOWED_COLLECTOR_PATH)) return null;
+  return value;
 }

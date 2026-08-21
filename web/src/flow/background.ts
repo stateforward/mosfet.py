@@ -1,17 +1,10 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { backgroundStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-background";
 
-export class FlowBackground extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowBackground",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowBackground extends HTMLElement {
   static get observedAttributes(): string[] {
     return ["variant"];
   }
@@ -27,14 +20,6 @@ export class FlowBackground extends hsm.from(HTMLElement) {
 
   set variant(value: "dots" | "lines") {
     this.setAttribute("variant", value);
-  }
-
-  connectedCallback(): void {
-    hsm.start(this, FlowBackground.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 }
 

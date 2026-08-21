@@ -1,4 +1,3 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import { DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node } from "./types.ts";
@@ -6,13 +5,7 @@ import { nodeStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node";
 
-export class FlowNode extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowNode",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowNode extends HTMLElement {
   readonly #root: ShadowRoot;
   readonly #label: HTMLSpanElement;
   #node: Node | null = null;
@@ -21,10 +14,9 @@ export class FlowNode extends hsm.from(HTMLElement) {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     applyStyles(this.#root, nodeStyles);
-    this.#root.append(document.createElement("slot"));
     this.#label = document.createElement("span");
     this.#label.className = "label node-badge";
-    this.append(this.#label);
+    this.#root.append(document.createElement("slot"), this.#label);
   }
 
   get node(): Node | null {
@@ -37,12 +29,7 @@ export class FlowNode extends hsm.from(HTMLElement) {
   }
 
   connectedCallback(): void {
-    hsm.start(this, FlowNode.model);
     this.#sync();
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 
   #sync(): void {

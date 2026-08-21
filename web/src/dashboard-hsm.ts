@@ -1,5 +1,9 @@
 import * as hsm from "./hsm.ts";
 import {
+  environmentWorkspaceGraphs,
+  machineNamesInOwnedSubtree,
+} from "./dashboard-graphs.ts";
+import {
   documentFromSpans,
   machineByName,
   mergePublishedModel,
@@ -34,6 +38,10 @@ const dashboardEvents = {
   "dashboard.replay.next": { name: "dashboard.replay.next", kind: hsm.Kinds.Event },
   "dashboard.replay.seek": { name: "dashboard.replay.seek", kind: hsm.Kinds.Event },
   "dashboard.replay.live": { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
+  "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
+  "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
+  "dashboard.visibility.set": { name: "dashboard.visibility.set", kind: hsm.Kinds.Event },
+  "dashboard.visibility.action": { name: "dashboard.visibility.action", kind: hsm.Kinds.Event },
 } as const;
 
 export type CommandResult = {
@@ -66,13 +74,10 @@ export type DashboardSnapshot = {
   readonly commandDataJson: string;
   readonly commandResult: CommandResult | null;
   readonly replay: DashboardReplaySnapshot;
+  readonly visibleMachines: Readonly<Record<string, boolean>>;
 };
 
-export type DashboardOptions = {
-  readonly onSnapshot?: (snapshot: DashboardSnapshot) => void;
-  readonly connectStream?: OtelStreamConnect;
-  readonly postCommand?: CommandPost;
-};
+export const COMMAND_EVENT_NAME = /^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$/;
 
 function controllerOf(instance: hsm.Instance): Dashboard | null {
   return instance instanceof Dashboard ? instance : null;
@@ -129,10 +134,13 @@ function replayPositionFromEvent(event: hsm.Event): number | null {
 }
 
 export async function postCommandHttp(command: { eventName: string; dataJson: string }): Promise<CommandResult> {
+  if (!COMMAND_EVENT_NAME.test(command.eventName)) {
+    return { result: "error", detail: "event_name is not an allowed command" };
+  }
   try {
     const response = await fetch("/v1/commands", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-requested-with": "bot-dashboard" },
       body: JSON.stringify({ event_name: command.eventName, data_json: command.dataJson }),
     });
     const payload: unknown = await response.json();
@@ -209,9 +217,21 @@ function applySend(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event):
   if (controller === null) {
     return;
   }
-  void controller
-    .sendCommand(stringField(event, "eventName"), stringField(event, "dataJson"))
-    .catch(hsm.reportHsmFailure);
+  controller.queueSend(stringField(event, "eventName"), stringField(event, "dataJson"));
+}
+
+function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  if (!hsm.isRecord(event.data)) return;
+  const machineName = event.data["machineName"];
+  const visible = event.data["visible"];
+  if (typeof machineName !== "string" || typeof visible !== "boolean") return;
+  controllerOf(instance)?.applyVisibility(machineName, visible);
+}
+
+function applyVisibilityAction(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const action = stringField(event, "action");
+  if (action !== "show-all" && action !== "hide-all" && action !== "hide-unobserved") return;
+  controllerOf(instance)?.applyVisibilityAction(action);
 }
 
 function clearView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -257,52 +277,76 @@ async function streamLive(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.
   await controller.streamSource(ctx);
 }
 
+function replayStep(): number {
+  return 700;
+}
+
 const dashboardModel = hsm.define(
   "Dashboard",
-  hsm.initial(hsm.target("idle")),
+  hsm.initial(hsm.target("session")),
   hsm.state(
-    "idle",
-    hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
+    "session",
+    hsm.initial(hsm.target("idle")),
     hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
     hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
     hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
-    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live"), hsm.effect(enterReplay)),
-  ),
-  hsm.state(
-    "live",
-    hsm.activity(streamLive),
-    hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpans)),
-    hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
-    hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("."), hsm.effect(rememberSource)),
-    hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
-    hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
-    hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
-    hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
-    hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
-    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.effect(enterReplay)),
-    hsm.transition(hsm.on("dashboard.replay.play"), hsm.effect(playReplay)),
-    hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
-    hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
-    hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
-    hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
-    hsm.transition(hsm.on("dashboard.replay.live"), hsm.effect(returnToLive)),
-  ),
-  hsm.state(
-    "error",
-    hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
-    hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
-    hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
-    hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
-    hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
-    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live"), hsm.effect(enterReplay)),
+    hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
+    hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
+    hsm.state(
+      "idle",
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live/replay_paused"), hsm.effect(enterReplay)),
+      hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../live/replay_playing"), hsm.effect(playReplay)),
+    ),
+    hsm.state(
+      "live",
+      hsm.initial(hsm.target("viewing")),
+      hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpans)),
+      hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("."), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
+      hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      hsm.state(
+        "viewing",
+        hsm.activity(streamLive),
+        hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../replay_paused"), hsm.effect(enterReplay)),
+        hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../replay_playing"), hsm.effect(playReplay)),
+      ),
+      hsm.state(
+        "replay_paused",
+        hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../replay_playing"), hsm.effect(playReplay)),
+        hsm.transition(hsm.on("dashboard.replay.enter"), hsm.effect(enterReplay)),
+        hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
+        hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
+        hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
+        hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../viewing"), hsm.effect(returnToLive)),
+        hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
+      ),
+      hsm.state(
+        "replay_playing",
+        hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay)),
+        hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("../replay_paused"), hsm.effect(pauseReplay)),
+        hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../replay_paused"), hsm.effect(enterReplay)),
+        hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
+        hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
+        hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
+        hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../viewing"), hsm.effect(returnToLive)),
+      ),
+    ),
+    hsm.state(
+      "error",
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live"), hsm.effect(enterReplay)),
+    ),
   ),
 );
 
 function phaseFromStatePath(statePath: string): DashboardPhase {
-  if (statePath.endsWith("/live")) {
+  if (statePath.includes("/live")) {
     return "live";
   }
-  if (statePath.endsWith("/error")) {
+  if (statePath.includes("/error")) {
     return "error";
   }
   return "idle";
@@ -316,10 +360,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
   #source: OtelSource | null = null;
   #spans: ObserveSpan[] = [];
   #replayEvents: ReplayEvent[] = [];
-  #replayActive = false;
-  #replayPlaying = false;
   #replayPosition = 0;
-  #replayTimer: ReturnType<typeof setTimeout> | null = null;
+  #replaying = false;
   #models: PublishedModel[] = [];
   #skipped = 0;
   #document: OtelDocument | null = null;
@@ -327,7 +369,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
   #commandEventName = "";
   #commandDataJson = "";
   #commandResult: CommandResult | null = null;
-  #pendingSend: Promise<void> | null = null;
+  #visibleMachines = new Map<string, boolean>();
+  #queuedSend: Promise<void> | null = null;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
   postCommand: CommandPost = postCommandHttp;
@@ -337,7 +380,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   boot(): void {
-    if (this.state() === "") hsm.start(this, dashboardModel);
+    hsm.start(this, dashboardModel);
   }
 
   snapshot(): DashboardSnapshot {
@@ -354,12 +397,13 @@ export class Dashboard extends hsm.from(HTMLElement) {
       commandDataJson: this.#commandDataJson,
       commandResult: this.#commandResult,
       replay: {
-        active: this.#replayActive,
-        playing: this.#replayPlaying,
+        active: statePath.includes("/replay_"),
+        playing: statePath.endsWith("/replay_playing"),
         position: this.#replayPosition,
         total: this.#replayEvents.length,
-        current: this.#replayActive ? this.#replayEvents[this.#replayPosition - 1]?.span ?? null : null,
+        current: statePath.includes("/replay_") ? this.#replayEvents[this.#replayPosition - 1]?.span ?? null : null,
       },
+      visibleMachines: Object.fromEntries(this.#visibleMachines),
     };
   }
 
@@ -377,15 +421,19 @@ export class Dashboard extends hsm.from(HTMLElement) {
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
     await super.dispatch(hsm.namedEvent(dashboardEvents[eventName].name, data));
-    if (this.#pendingSend !== null) {
-      await this.#pendingSend;
+    if (this.#queuedSend !== null) {
+      await this.#queuedSend;
+      this.#queuedSend = null;
     }
     this.#emit();
     return this.snapshot();
   }
 
+  queueSend(eventName: string | null, dataJson: string | null): void {
+    this.#queuedSend = this.sendCommand(eventName, dataJson);
+  }
+
   override async stop(): Promise<void> {
-    this.#stopReplayTimer();
     await hsm.stop(this);
   }
 
@@ -436,13 +484,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   clearView(): void {
-    this.#stopReplayTimer();
     this.#source = null;
     this.#spans = [];
     this.#replayEvents = [];
-    this.#replayActive = false;
-    this.#replayPlaying = false;
     this.#replayPosition = 0;
+    this.#replaying = false;
     this.#models = [];
     this.#skipped = 0;
     this.#document = null;
@@ -450,75 +496,74 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#commandEventName = "";
     this.#commandDataJson = "";
     this.#commandResult = null;
+    this.#visibleMachines.clear();
     this.#emit();
   }
 
   enterReplay(): void {
-    this.#stopReplayTimer();
+    this.#replaying = true;
     this.#replayEvents = replayEvents(this.#spans);
-    this.#replayActive = true;
-    this.#replayPlaying = false;
     this.#replayPosition = 0;
     this.#rebuildDocument();
     this.#emit();
   }
 
   playReplay(): void {
-    if (!this.#replayActive) {
+    if (this.#replayEvents.length === 0) {
       this.enterReplay();
     }
     if (this.#replayEvents.length === 0 || this.#replayPosition >= this.#replayEvents.length) {
       return;
     }
-    this.#replayPlaying = true;
-    this.#scheduleReplayStep();
     this.#emit();
   }
 
   pauseReplay(): void {
-    this.#stopReplayTimer();
     this.#emit();
   }
 
   previousReplay(): void {
-    if (!this.#replayActive) {
-      return;
-    }
-    this.#stopReplayTimer();
     this.#replayPosition = clampReplayPosition(this.#replayPosition - 1, this.#replayEvents.length);
     this.#rebuildDocument();
     this.#emit();
   }
 
   nextReplay(): void {
-    if (!this.#replayActive) {
-      return;
-    }
     this.#replayPosition = clampReplayPosition(this.#replayPosition + 1, this.#replayEvents.length);
-    if (this.#replayPosition >= this.#replayEvents.length) {
-      this.#stopReplayTimer();
-    }
     this.#rebuildDocument();
     this.#emit();
   }
 
   seekReplay(position: number): void {
-    if (!this.#replayActive) {
-      return;
-    }
     this.#replayPosition = clampReplayPosition(position, this.#replayEvents.length);
-    if (this.#replayPosition >= this.#replayEvents.length) {
-      this.#stopReplayTimer();
-    }
     this.#rebuildDocument();
     this.#emit();
   }
 
   returnToLive(): void {
-    this.#stopReplayTimer();
-    this.#replayActive = false;
+    this.#replaying = false;
     this.#replayPosition = this.#replayEvents.length;
     this.#rebuildDocument();
+    this.#emit();
+  }
+
+  applyVisibility(machineName: string, visible: boolean): void {
+    const document = this.#document;
+    const names = document === null
+      ? [machineName]
+      : [...machineNamesInOwnedSubtree(environmentWorkspaceGraphs(document.machines), machineName)];
+    if (names.length === 0) names.push(machineName);
+    for (const name of names) this.#visibleMachines.set(name, visible);
+    this.#emit();
+  }
+
+  applyVisibilityAction(action: "show-all" | "hide-all" | "hide-unobserved"): void {
+    const document = this.#document;
+    if (document === null) return;
+    for (const machine of document.machines) {
+      const visible = action === "show-all" || (action === "hide-unobserved" && machine.observationCount > 0);
+      this.#visibleMachines.set(machine.name, visible);
+    }
     this.#emit();
   }
 
@@ -529,24 +574,17 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   async sendCommand(eventName: string | null, dataJson: string | null): Promise<void> {
-    const work = this.#send(eventName, dataJson);
-    this.#pendingSend = work;
-    try {
-      await work;
-    } finally {
-      if (this.#pendingSend === work) {
-        this.#pendingSend = null;
-      }
-    }
-  }
-
-  async #send(eventName: string | null, dataJson: string | null): Promise<void> {
     const name = (eventName ?? this.#commandEventName).trim();
     const payload = dataJson ?? this.#commandDataJson;
     this.#commandEventName = name;
     this.#commandDataJson = payload;
     if (name.length === 0) {
       this.#commandResult = { result: "error", detail: "event_name is required" };
+      this.#emit();
+      return;
+    }
+    if (!COMMAND_EVENT_NAME.test(name)) {
+      this.#commandResult = { result: "error", detail: "event_name is not an allowed command" };
       this.#emit();
       return;
     }
@@ -575,25 +613,25 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "replace" }).catch(hsm.reportHsmFailure);
+        void this.dispatch("dashboard.load.completed", { ...batch, mode: "replace" }).catch(hsm.catchFailure(this));
       },
       onSpans: (batch) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "append" }).catch(hsm.reportHsmFailure);
+        void this.dispatch("dashboard.load.completed", { ...batch, mode: "append" }).catch(hsm.catchFailure(this));
       },
       onModels: (models) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.model.published", { models }).catch(hsm.reportHsmFailure);
+        void this.dispatch("dashboard.model.published", { models }).catch(hsm.catchFailure(this));
       },
       onError: (message) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.failed", { message }).catch(hsm.reportHsmFailure);
+        void this.dispatch("dashboard.load.failed", { message }).catch(hsm.catchFailure(this));
       },
     });
     try {
@@ -605,41 +643,22 @@ export class Dashboard extends hsm.from(HTMLElement) {
 
   #rebuildDocument(): void {
     const previous = this.#document?.selectedMachine ?? null;
-    const spans = this.#replayActive
+    const replaying = this.#replaying;
+    const spans = replaying
       ? replayPrefix(this.#spans, this.#replayEvents, this.#replayPosition)
       : this.#spans;
     const currentMachine = this.#replayEvents[this.#replayPosition - 1]?.span.attributes["hsm.machine.name"] ?? null;
     this.#document = documentFromSpans(
       spans,
-      this.#replayActive ? 0 : this.#skipped,
-      this.#replayActive ? currentMachine : previous,
+      replaying ? 0 : this.#skipped,
+      replaying ? currentMachine : previous,
       this.#models,
     );
-  }
-
-  #scheduleReplayStep(): void {
-    if (this.#replayTimer !== null) {
-      clearTimeout(this.#replayTimer);
-      this.#replayTimer = null;
-    }
-    if (!this.#replayPlaying) {
-      return;
-    }
-    this.#replayTimer = setTimeout(() => {
-      this.#replayTimer = null;
-      this.nextReplay();
-      if (this.#replayPlaying) {
-        this.#scheduleReplayStep();
+    if (this.#document !== null) {
+      for (const machine of this.#document.machines) {
+        if (!this.#visibleMachines.has(machine.name)) this.#visibleMachines.set(machine.name, true);
       }
-    }, 700);
-  }
-
-  #stopReplayTimer(): void {
-    if (this.#replayTimer !== null) {
-      clearTimeout(this.#replayTimer);
-      this.#replayTimer = null;
     }
-    this.#replayPlaying = false;
   }
 
   #emit(): void {

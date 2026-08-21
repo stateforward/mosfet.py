@@ -1,20 +1,12 @@
 import * as hsm from "../hsm.ts";
-import { applyStyles } from "../elements/styles.ts";
 
 import { edgePath } from "./path.ts";
-import { edgeStyles } from "./styles.ts";
 import type { Edge, Node } from "./types.ts";
 
 const ELEMENT_NAME = "flow-edge";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-export class FlowEdge extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowEdge",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowEdge extends HTMLElement {
   readonly path: SVGPathElement;
   readonly hit: SVGPathElement;
   readonly label: SVGTextElement;
@@ -22,8 +14,7 @@ export class FlowEdge extends hsm.from(HTMLElement) {
 
   constructor() {
     super();
-    const root = this.attachShadow({ mode: "open" });
-    applyStyles(root, edgeStyles);
+    this.style.display = "contents";
     this.path = document.createElementNS(SVG_NS, "path");
     this.path.classList.add("edge-path");
     this.hit = document.createElementNS(SVG_NS, "path");
@@ -40,15 +31,10 @@ export class FlowEdge extends hsm.from(HTMLElement) {
     this.#edge = value;
   }
 
-  connectedCallback(): void {
-    hsm.start(this, FlowEdge.model);
-  }
-
   disconnectedCallback(): void {
     this.path.remove();
     this.hit.remove();
     this.label.remove();
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 
   paint(source: Node, target: Node): void {

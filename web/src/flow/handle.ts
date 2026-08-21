@@ -1,4 +1,3 @@
-import * as hsm from "../hsm.ts";
 import { applyStyles } from "../elements/styles.ts";
 
 import type { HandleKind, HandlePosition } from "./types.ts";
@@ -6,17 +5,10 @@ import { handleStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-handle";
 
-export class FlowHandle extends hsm.from(HTMLElement) {
-  static readonly model = hsm.define(
-    "FlowHandle",
-    hsm.initial(hsm.target("idle")),
-    hsm.state("idle"),
-  );
-
+export class FlowHandle extends HTMLElement {
   constructor() {
     super();
-    const root = this.attachShadow({ mode: "open" });
-    applyStyles(root, handleStyles);
+    applyStyles(this.attachShadow({ mode: "open" }), handleStyles);
   }
 
   get handleKind(): HandleKind {
@@ -34,14 +26,6 @@ export class FlowHandle extends hsm.from(HTMLElement) {
 
   set handlePosition(value: HandlePosition) {
     this.setAttribute("position", value);
-  }
-
-  connectedCallback(): void {
-    hsm.start(this, FlowHandle.model);
-  }
-
-  disconnectedCallback(): void {
-    void hsm.stop(this).catch(hsm.reportHsmFailure);
   }
 }
 

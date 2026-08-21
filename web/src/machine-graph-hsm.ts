@@ -2,7 +2,7 @@ import * as hsm from "./hsm.ts";
 import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 
 export function reportMachineGraphFailure(error: unknown): void {
-  hsm.reportHsmFailure(error);
+  hsm.catchFailure()(error);
 }
 
 export type MachineGraphPhase = "empty" | "drawing";

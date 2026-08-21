@@ -38,4 +38,6 @@ export type {
   ViewportChangeDetail,
   ConnectDetail,
   SelectionChangeDetail,
+  PointerSampleData,
+  AdmitRejectedDetail,
 } from "./types.ts";

@@ -25,15 +25,16 @@ function graphFor(name: string) {
 }
 
 describe("bot-machine-graph flow host", () => {
-  test("admits graphs and focuses a machine", () => {
-    const host = new BotMachineGraph();
-    host.connectedCallback();
+  test("admits graphs and focuses a machine on a defined element", () => {
+    const host = document.createElement("bot-machine-graph");
+    assert.ok(host instanceof BotMachineGraph);
+    document.body.append(host);
     const graphs = [graphFor("/Phone")];
     host.graphs = graphs;
     assert.equal(host.graphs.length, 1);
     assert.equal(host.graphs[0]?.name, "/Phone");
     assert.equal(host.focusMachine("/Phone"), true);
     assert.equal(host.focusMachine("/Missing"), false);
-    host.disconnectedCallback();
+    host.remove();
   });
 });

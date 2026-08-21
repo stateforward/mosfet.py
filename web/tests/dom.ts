@@ -59,6 +59,8 @@ class FakeElement {
       if (typeof node === "string") child.textContent = node;
       child.parentNode = this;
       this.childNodes.push(child);
+      const connected = (child as FakeElement & { connectedCallback?: () => void }).connectedCallback;
+      if (typeof connected === "function") connected.call(child);
     }
   }
 
@@ -84,16 +86,60 @@ class FakeElement {
     else this.attributes.set(name, "");
   }
 
-  addEventListener(_type: string, _listener: unknown, _options?: unknown): void {
-    return;
+  #listeners = new Map<string, Set<(event: FakeEvent) => void>>();
+
+  addEventListener(type: string, listener: unknown, _options?: unknown): void {
+    if (typeof listener !== "function") return;
+    const bucket = this.#listeners.get(type) ?? new Set();
+    bucket.add(listener as (event: FakeEvent) => void);
+    this.#listeners.set(type, bucket);
   }
 
-  removeEventListener(_type: string, _listener: unknown, _options?: unknown): void {
-    return;
+  removeEventListener(type: string, listener: unknown, _options?: unknown): void {
+    if (typeof listener !== "function") return;
+    this.#listeners.get(type)?.delete(listener as (event: FakeEvent) => void);
   }
 
-  dispatchEvent(_event: unknown): boolean {
+  dispatchEvent(event: FakeEvent): boolean {
+    event.target = this;
+    for (const listener of this.#listeners.get(event.type) ?? []) listener(event);
     return true;
+  }
+
+  composedPath(): FakeElement[] {
+    const path: FakeElement[] = [];
+    let current: FakeElement | null = this;
+    while (current !== null) {
+      path.push(current);
+      current = current.parentNode;
+    }
+    return path;
+  }
+
+  getRootNode(): FakeElement {
+    return this.shadowRoot ?? this;
+  }
+
+  setPointerCapture(_pointerId: number): void {
+    return;
+  }
+
+  hasPointerCapture(_pointerId: number): boolean {
+    return false;
+  }
+
+  remove(): void {
+    const parent = this.parentNode;
+    if (parent === null) return;
+    const index = parent.childNodes.indexOf(this);
+    if (index >= 0) parent.childNodes.splice(index, 1);
+    this.parentNode = null;
+    const disconnected = (this as FakeElement & { disconnectedCallback?: () => void }).disconnectedCallback;
+    if (typeof disconnected === "function") disconnected.call(this);
+  }
+
+  get isConnected(): boolean {
+    return this.parentNode !== null;
   }
 
   closest(selector: string): FakeElement | null {
@@ -143,6 +189,8 @@ class FakeHTMLElement extends FakeElement {
 }
 
 class FakeDocument {
+  readonly body = new FakeElement("body");
+
   createElement(tag: string): FakeElement {
     const ctor = registry.get(tag);
     if (ctor !== undefined) return new ctor();
@@ -192,6 +240,8 @@ class FakeEvent {
     this.composed = init.composed === true;
   }
   composedPath(): unknown[] {
+    const target = this.target;
+    if (target instanceof FakeElement) return target.composedPath();
     return [];
   }
 }
@@ -204,6 +254,65 @@ class FakeCustomEvent extends FakeEvent {
   }
 }
 
+class FakePointerEvent extends FakeEvent {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly pointerId: number;
+  readonly button: number;
+  readonly buttons: number;
+  readonly pointerType: string;
+  readonly shiftKey: boolean;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  constructor(type: string, init: {
+    clientX?: number;
+    clientY?: number;
+    pointerId?: number;
+    button?: number;
+    buttons?: number;
+    pointerType?: string;
+    shiftKey?: boolean;
+    metaKey?: boolean;
+    ctrlKey?: boolean;
+    bubbles?: boolean;
+    composed?: boolean;
+  } = {}) {
+    super(type, init);
+    this.clientX = init.clientX ?? 0;
+    this.clientY = init.clientY ?? 0;
+    this.pointerId = init.pointerId ?? 1;
+    this.button = init.button ?? 0;
+    this.buttons = init.buttons ?? (type === "pointerup" || type === "pointercancel" ? 0 : 1);
+    this.pointerType = init.pointerType ?? "mouse";
+    this.shiftKey = init.shiftKey === true;
+    this.metaKey = init.metaKey === true;
+    this.ctrlKey = init.ctrlKey === true;
+  }
+}
+
+class FakeWheelEvent extends FakeEvent {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly deltaY: number;
+  constructor(type: string, init: { clientX?: number; clientY?: number; deltaY?: number; bubbles?: boolean; composed?: boolean } = {}) {
+    super(type, init);
+    this.clientX = init.clientX ?? 0;
+    this.clientY = init.clientY ?? 0;
+    this.deltaY = init.deltaY ?? 0;
+  }
+  preventDefault(): void {
+    return;
+  }
+}
+
+class FakeKeyboardEvent extends FakeEvent {
+  readonly key: string;
+  constructor(type: string, init: { key?: string; bubbles?: boolean; composed?: boolean } = {}) {
+    super(type, init);
+    this.key = init.key ?? "";
+  }
+}
+
 if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined" || !(globalThis as { document?: { createElement?: unknown } }).document?.createElement) {
   Object.assign(globalThis, {
     HTMLElement: FakeHTMLElement,
@@ -213,5 +322,15 @@ if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined"
     ResizeObserver: FakeResizeObserver,
     CustomEvent: FakeCustomEvent,
     Event: FakeEvent,
+    PointerEvent: FakePointerEvent,
+    WheelEvent: FakeWheelEvent,
+    KeyboardEvent: FakeKeyboardEvent,
+    requestAnimationFrame: (callback: (time: number) => void): number => {
+      const handle = globalThis.setTimeout(() => callback(0), 0);
+      return typeof handle === "number" ? handle : 0;
+    },
+    cancelAnimationFrame: (id: number): void => {
+      globalThis.clearTimeout(id);
+    },
   });
 }

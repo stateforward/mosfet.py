@@ -63,11 +63,11 @@ export class Focuser extends hsm.Instance {
   }
 
   focus(target: FocusTarget): void {
-    this.dispatch(hsm.namedEvent(Focuser.focusEvent.name, target));
+    this.dispatch(hsm.typedEvent(Focuser.focusEvent, target));
   }
 
   clear(): void {
-    this.dispatch(hsm.namedEvent(Focuser.clearEvent.name));
+    this.dispatch(hsm.typedEvent(Focuser.clearEvent));
   }
 
   static setFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -93,12 +93,16 @@ export class Focuser extends hsm.Instance {
   }
 }
 
-export function startFocuser(
-  ctx: hsm.Context,
-  host: HTMLElement | null,
-  config: { onFocus?: (target: FocusTarget) => void; onClear?: () => void } = {},
-): Focuser {
-  return hsm.start(ctx, new Focuser(host, config), Focuser.model);
+export function startFocuser(args: {
+  ctx: hsm.Context;
+  host?: HTMLElement | null;
+  onFocus?: (target: FocusTarget) => void;
+  onClear?: () => void;
+}): Focuser {
+  return hsm.start(args.ctx, new Focuser(args.host ?? null, {
+    ...(args.onFocus !== undefined ? { onFocus: args.onFocus } : {}),
+    ...(args.onClear !== undefined ? { onClear: args.onClear } : {}),
+  }), Focuser.model);
 }
 
 function focusTargetOf(value: unknown): FocusTarget | null {

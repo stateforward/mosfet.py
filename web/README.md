@@ -109,7 +109,7 @@ Machines:
 
 Package exports (TypeScript source):
 
-- `./hsm` — `@stateforward/hsm.ts` plus `from` / `From` / wrapped `start`
+- `./hsm` — `@stateforward/hsm.ts` plus `from` / wrapped `start` (custom-element host protocol; not `instanceof Instance`)
 - `./flow` — flow custom-element library
 - `./elements` — studio element registration
 
