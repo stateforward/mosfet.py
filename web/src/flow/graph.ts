@@ -752,10 +752,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   #startActors(): void {
     const ctx = this.context();
-    this.#renderer = startRenderer({
-      ctx,
-      host: this,
-    });
+    this.#renderer = startRenderer({ ctx });
     this.#panner = startPanner({
       ctx,
       world: this.#world,

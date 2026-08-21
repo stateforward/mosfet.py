@@ -27,7 +27,7 @@ describe("Renderer dirty coalescing", () => {
       return inner(event);
     }) as Renderer["dispatch"];
     void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
-    await waitFor(() => /\/rendering$/.test(renderer.state()) || paints >= 1);
+    await waitFor(() => /\/rendering(?:\/|$)/.test(renderer.state()) || paints >= 1);
     void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     await waitFor(() => paints >= 1 && /\/clean$/.test(renderer.state()));
@@ -39,7 +39,7 @@ describe("Renderer dirty coalescing", () => {
     const renderer = hsm.start(new Renderer(), Renderer.model);
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
-      if (event.name === Renderer.renderCompleteEvent.name && /\/rendering$/.test(renderer.state())) {
+      if (event.name === Renderer.renderCompleteEvent.name && /\/rendering(?:\/|$)/.test(renderer.state())) {
         return inner({ ...hsm.ErrorEvent, data: new Error("paint failed") });
       }
       return inner(event);
@@ -66,7 +66,7 @@ describe("Renderer dirty coalescing", () => {
       return inner(event);
     }) as Renderer["dispatch"];
     void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
-    await waitFor(() => /\/rendering$/.test(renderer.state()));
+    await waitFor(() => /\/painting$/.test(renderer.state()));
     await hsm.stop(renderer);
     await waitFor(() => canceled >= 1);
     assert.ok(canceled >= 1);
