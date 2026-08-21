@@ -259,11 +259,39 @@ describe("companion-style HSM controllers", () => {
     await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: midPoint } }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }));
     const fitted = panner.viewport;
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: midPoint } }));
+    const held = panner.viewport;
+    const pixelTolerance = 1e-9;
+    assert.ok(Math.abs(held.x - fitted.x) < pixelTolerance);
+    assert.ok(Math.abs(held.y - fitted.y) < pixelTolerance);
+    assert.equal(held.zoom, fitted.zoom);
     await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: endPoint } }));
     const continued = panner.viewport;
-    assert.equal(continued.x, fitted.x + (endPoint.x - startPoint.x));
-    assert.equal(continued.y, fitted.y + (endPoint.y - startPoint.y));
+    assert.equal(continued.x, fitted.x + (endPoint.x - midPoint.x));
+    assert.equal(continued.y, fitted.y + (endPoint.y - midPoint.y));
     assert.equal(continued.zoom, fitted.zoom);
+    await hsm.stop(panner);
+  });
+
+  test("viewport_set during pan rebases the next cursor delta from the set pan", async () => {
+    const panner = hsm.start(new Panner(), Panner.model);
+    const pointerId = 1;
+    const startPoint = { x: 10, y: 10 };
+    const midPoint = { x: 30, y: 24 };
+    const endPoint = { x: 50, y: 44 };
+    const setViewport = { x: 12, y: 8, zoom: 1.1 };
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId, point: startPoint } }));
+    assert.match(panner.state(), /\/single$/);
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: midPoint } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.viewportEvent, data: setViewport }));
+    assert.deepEqual(panner.viewport, setViewport);
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: midPoint } }));
+    assert.deepEqual(panner.viewport, setViewport);
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId, point: endPoint } }));
+    const continued = panner.viewport;
+    assert.equal(continued.x, setViewport.x + (endPoint.x - midPoint.x));
+    assert.equal(continued.y, setViewport.y + (endPoint.y - midPoint.y));
+    assert.equal(continued.zoom, setViewport.zoom);
     await hsm.stop(panner);
   });
 

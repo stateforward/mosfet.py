@@ -195,9 +195,10 @@ export class Panner extends hsm.Instance {
     const point = pointOf(record?.["point"]);
     if (point === null) {
       instance.#setTransform(scale, instance.pan);
-      return;
+    } else {
+      instance.#setZoom(scale, point);
     }
-    instance.#setZoom(scale, point);
+    instance.#rebaseGestureOrigin();
   }
 
   static applyFit(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -207,9 +208,7 @@ export class Panner extends hsm.Instance {
     const bounds = boundsOf(record?.["bounds"]) ?? metrics?.bounds ?? null;
     if (metrics === null || bounds === null) return;
     instance.#fitBounds(bounds, metrics);
-    if (instance.#dragStart !== null) {
-      instance.#dragStart = { ...instance.#dragStart, pan: { ...instance.pan } };
-    }
+    instance.#rebaseGestureOrigin();
   }
 
   static applyViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -217,9 +216,27 @@ export class Panner extends hsm.Instance {
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
     instance.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
-    if (instance.#dragStart !== null) {
-      instance.#dragStart = { ...instance.#dragStart, pan: { ...instance.pan } };
+    instance.#rebaseGestureOrigin();
+  }
+
+  #rebaseGestureOrigin(): void {
+    if (this.#dragStart !== null) {
+      const live = this.#pointers.get(this.#dragStart.pointerId);
+      this.#dragStart = {
+        pointerId: this.#dragStart.pointerId,
+        point: live ?? this.#dragStart.point,
+        pan: { ...this.pan },
+      };
     }
+    if (this.#pinchStart === null) return;
+    const points = [...this.#pointers.values()];
+    const first = points[0];
+    const second = points[1];
+    if (first === undefined || second === undefined) return;
+    this.#pinchStart = {
+      distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+      scale: this.scale,
+    };
   }
 
   #fitBounds(bounds: ViewportBounds, metrics: ViewportMetrics): void {
