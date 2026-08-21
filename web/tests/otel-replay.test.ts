@@ -16,6 +16,24 @@ const fixturePath = path.join(
   "fixtures",
   "hsm-observe-spans.otlp.json",
 );
+const YIELD_MS = 0;
+const HOST_STOPPED = "stopped";
+const STARTED_RUNTIME_ERROR = new Error("dispatch requires a started HSM");
+
+async function waitUntilUnbound(host: object): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host })?.reason === HOST_STOPPED) return;
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+  }
+  throw new Error("timed out waiting for dashboard unbind");
+}
+
+async function stopDashboard(dashboard: Dashboard): Promise<void> {
+  void dashboard.stop();
+  await waitUntilUnbound(dashboard);
+}
 
 function fixtureSpans() {
   const parsed = parseExportTraceServiceRequest(JSON.parse(readFileSync(fixturePath, "utf8")));
@@ -130,7 +148,7 @@ describe("OTEL replay", () => {
     });
     assert.equal(live.replay.active, false);
     assert.equal(live.document?.observeCount, 7);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("replay enter next seek and play stamp graph focus without snapshot command", async () => {
@@ -198,6 +216,6 @@ describe("OTEL replay", () => {
     assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot", "/PhoneBot", "/PhoneBot"]);
     const replayFocusRaises = 5;
     assert.equal(dashboard.graphFocusRaises, replayFocusRaises);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 });

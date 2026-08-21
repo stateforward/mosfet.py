@@ -516,43 +516,37 @@ function consumeStreamDropped(_ctx: hsm.Context, _instance: hsm.Instance, _event
   return;
 }
 
+const UNBIND_HOST = true;
+
 function commandActorFromEvent(event: hsm.Event): Command | null {
   if (!hsm.isRecord(event.data) || !(event.data["command"] instanceof Command)) return null;
   return event.data["command"];
 }
 
-const hostStopWaiters = new WeakMap<object, Array<() => void>>();
-const hostStopRuns = new WeakMap<object, Promise<void>>();
-
-function addHostStopWaiter(instance: object, waiter: () => void): void {
-  const waiters = hostStopWaiters.get(instance) ?? [];
-  waiters.push(waiter);
-  hostStopWaiters.set(instance, waiters);
-}
-
-function announceHostStopped(instance: hsm.Instance): void {
-  const waiters = hostStopWaiters.get(instance);
-  if (waiters === undefined) return;
-  hostStopWaiters.delete(instance);
-  for (const waiter of waiters) waiter();
+function hostUnbindRequested(event: hsm.Event): boolean {
+  return hsm.isRecord(event.data) && event.data["unbind"] === UNBIND_HOST;
 }
 
 async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const command = commandActorFromEvent(event);
+  const unbind = hostUnbindRequested(event);
   try {
     if (command !== null) await hsm.stop(command);
   } finally {
-    await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
+    await instance.dispatch(hsm.typedEvent({
+      event: dashboardCompletions["dashboard.host.stopped"],
+      data: { unbind },
+    }));
   }
 }
 
 function clearCommandActor(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.clearCommandActor();
-  announceHostStopped(instance);
 }
 
-function signalHostAlreadyStopped(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-  announceHostStopped(instance);
+function unbindDashboard(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  if (!hostUnbindRequested(event)) return;
+  void hsm.stop(instance);
 }
 
 function replayStep(): number {
@@ -569,7 +563,7 @@ const dashboardModel = hsm.define(
     hsm.defer("dashboard.replay.play"),
     hsm.defer("dashboard.replay.enter"),
     hsm.transition(hsm.on("dashboard.host.attach"), hsm.target("../connected")),
-    hsm.transition(hsm.on("dashboard.host.detach"), hsm.effect(signalHostAlreadyStopped)),
+    hsm.transition(hsm.on("dashboard.host.detach"), hsm.effect(unbindDashboard)),
   ),
   hsm.state(
     "connected",
@@ -662,14 +656,13 @@ const dashboardModel = hsm.define(
   hsm.state(
     "stopping",
     hsm.defer("dashboard.host.attach"),
-    hsm.defer("dashboard.host.detach"),
     hsm.defer("dashboard.source.selected"),
     hsm.defer("dashboard.command.send"),
     hsm.activity(stopCommandActor),
     hsm.transition(
       hsm.on("dashboard.host.stopped"),
       hsm.target("../disconnected"),
-      hsm.effect(clearCommandActor),
+      hsm.effect(clearCommandActor, unbindDashboard),
     ),
   ),
 );
@@ -888,7 +881,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Ownership: this dashboard owns the dispatch; the stamped Command actor is
    * stopped by the stopping activity and nulled by `clearCommandActor`.
    * Lifetime: one detach request; stopping lasts until `dashboard.host.stopped`.
-   * Concurrency: runtime-safe. Detach while already disconnected is ignored.
+   * Concurrency: runtime-safe. Detach while stopping is ignored. Detach while
+   * disconnected unbinds only when `data.unbind` is stamped (public `stop()`).
    * Failure modes: dispatch rejection is classified by `catchFailure` as a
    * host-drop when the runtime is unstarted or stopped; otherwise reported.
    * Units: none.
@@ -939,6 +933,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
     };
   }
 
+  /**
+   * Admit Event-path and controller payloads. Only SourceConnect-shaped data
+   * (`origin` string or `urlAllowed` boolean) is restamped through
+   * `sourceConnectFrom`; other payloads keep their fields.
+   */
   override dispatch(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot>;
   override dispatch(event: hsm.Event): hsm.Completion;
   override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
@@ -963,53 +962,27 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Stop through modeled detach, then unbind.
+   * Request host stop by dispatching detach. Does not wait.
    *
-   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command`.
-   * Topology moves connected → stopping → disconnected on
-   * `dashboard.host.stopped`. Public `stop()` waits for that modeled
-   * completion, then module `hsm.stop(this)`.
-   * Outputs: host unbound. Ownership: this dashboard. Lifetime: one stop.
-   * Concurrency: overlapping `stop()` awaits the in-flight run and does not
-   * unbind while `stopCommandActor` is in flight. Detach while stopping is
-   * deferred; detach while disconnected announces the already-stopped host.
-   * Failure modes: host-drop detach is already stopped; other dispatch
-   * rejections unbind then throw an `Error`.
+   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command` set
+   * to the live Command actor (or `null`) and `data.unbind` so topology
+   * stops that actor in `stopping`, then module `hsm.stop(this)` from the
+   * `dashboard.host.stopped` effect.
+   * Outputs: none directly. Observe `dashboard.host.stopped` and later
+   * `host-drop` on dispatch after unbind.
+   * Ownership: this dashboard owns the dispatch; unbind is topology-owned.
+   * Lifetime: one detach request. Overlapping `stop()` is another detach;
+   * topology ignores detach while already stopping.
+   * Failure modes: host-drop detach is already unbound; other dispatch
+   * rejections are classified by `catchFailure`.
    * Classification: runtime-safe.
    */
-  override async stop(): Promise<void> {
-    const inflight = hostStopRuns.get(this);
-    if (inflight !== undefined) {
-      await inflight;
-      return;
-    }
-    const run = (async (): Promise<void> => {
-      const done = new Promise<void>((resolve, reject) => {
-        addHostStopWaiter(this, resolve);
-        void this.dispatch(hsm.typedEvent({
-          event: dashboardCommands["dashboard.host.detach"],
-          data: { command: this.#command },
-        })).then(() => undefined, (error: unknown) => {
-          const drop = hsm.hostDropFrom({ error, host: this });
-          if (drop !== null) {
-            resolve();
-            return;
-          }
-          reject(error instanceof Error ? error : new Error(String(error), { cause: error }));
-        });
-      });
-      try {
-        await done;
-      } finally {
-        await hsm.stop(this);
-      }
-    })();
-    hostStopRuns.set(this, run);
-    try {
-      await run;
-    } finally {
-      hostStopRuns.delete(this);
-    }
+  override stop(): Promise<void> {
+    void this.dispatch(hsm.typedEvent({
+      event: dashboardCommands["dashboard.host.detach"],
+      data: { command: this.#command, unbind: UNBIND_HOST },
+    })).catch(hsm.catchFailure(this));
+    return Promise.resolve();
   }
 
   attachCommand(): void {

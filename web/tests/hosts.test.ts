@@ -18,7 +18,13 @@ import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
-import { collectorUrl, OtelSource } from "../src/otel-source.ts";
+import {
+  collectorUrl,
+  eventWithSourceConnect,
+  isSourceConnectPayload,
+  OtelSource,
+  sourceConnectFrom,
+} from "../src/otel-source.ts";
 
 const fixturePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -43,6 +49,9 @@ function viewportForFit(args: {
   });
 }
 
+const HOST_STOPPED = "stopped";
+const STARTED_RUNTIME_ERROR = new Error("dispatch requires a started HSM");
+
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 50; i += 1) {
     if (predicate()) return;
@@ -51,6 +60,15 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     });
   }
   throw new Error("timed out waiting for dashboard stream update");
+}
+
+async function waitUntilUnbound(host: object): Promise<void> {
+  await waitFor(() => hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host })?.reason === HOST_STOPPED);
+}
+
+async function stopDashboard(dashboard: Dashboard): Promise<void> {
+  void dashboard.stop();
+  await waitUntilUnbound(dashboard);
 }
 
 function streamView(source = streamSource(), origin = "http://localhost"): {
@@ -494,7 +512,7 @@ describe("companion-style HSM controllers", () => {
     try {
       const sourceDispatch = source.dispatch("source.connect.requested", { origin: "http://localhost" }).catch(hsm.catchFailure(source));
       const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(hsm.catchFailure(dashboard));
-      await Promise.all([source.stop(), dashboard.stop()]);
+      await Promise.all([source.stop(), stopDashboard(dashboard)]);
       await Promise.all([sourceDispatch, dashboardDispatch]);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     } finally {
@@ -561,7 +579,7 @@ describe("companion-style HSM controllers", () => {
     assert.equal(dashboard.snapshot().replay.playing, true);
     const snapshotsBeforeStop = snapshots.length;
 
-    await dashboard.stop();
+    await stopDashboard(dashboard);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -618,7 +636,7 @@ describe("companion-style HSM controllers", () => {
     assert.ok(draws.includes("/Phone,/PhoneBot/active/processing"));
     assert.equal(afterDraw.graphs.length, 2);
 
-    await dashboard.stop();
+    await stopDashboard(dashboard);
     await source.stop();
     await emitting.stop();
     await hsm.stop(graph);
@@ -666,7 +684,7 @@ describe("companion-style HSM controllers", () => {
     assert.ok(phone !== undefined);
     assert.equal(phone.currentState, "/PhoneBot/active/processing");
 
-    await live.stop();
+    await stopDashboard(live);
     assert.ok(closed >= 1);
   });
 
@@ -733,7 +751,7 @@ describe("companion-style HSM controllers", () => {
     });
     assert.equal(afterObserve.selectedGraph?.currentState, "/Demo/run");
     assert.ok(afterObserve.selectedGraph?.nodes.some((node) => node.path === "/Demo/idle"));
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("replay play without events stays idle", async () => {
@@ -742,7 +760,7 @@ describe("companion-style HSM controllers", () => {
     const replayNotPlaying = false;
     assert.equal(after.replay.playing, replayNotPlaying);
     assert.match(after.statePath, /\/idle$/);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("dashboard stop detaches through host.stopped before unbind", async () => {
@@ -758,7 +776,7 @@ describe("companion-style HSM controllers", () => {
       if (event !== undefined && typeof event.name === "string") names.push(event.name);
       return inner(eventOrCtx as never, maybeEvent as never);
     }) as Dashboard["dispatch"];
-    await dashboard.stop();
+    await stopDashboard(dashboard);
     const detach = "dashboard.host.detach";
     const stopped = "dashboard.host.stopped";
     assert.ok(names.includes(detach));
@@ -768,12 +786,25 @@ describe("companion-style HSM controllers", () => {
 
   test("overlapping dashboard stop both complete without hanging", async () => {
     const dashboard = bootDashboard();
-    const first = dashboard.stop();
-    const second = dashboard.stop();
-    await Promise.all([first, second]);
-    const startedRuntimeError = new Error("dispatch requires a started HSM");
-    const stopped = "stopped";
-    assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host: dashboard })?.reason, stopped);
+    const names: string[] = [];
+    const inner = dashboard.dispatch.bind(dashboard);
+    dashboard.dispatch = ((eventOrCtx: hsm.Event | hsm.Context | string, maybeEvent?: unknown) => {
+      const event = typeof eventOrCtx === "string"
+        ? undefined
+        : eventOrCtx instanceof hsm.Context
+          ? maybeEvent as hsm.Event | undefined
+          : eventOrCtx;
+      if (event !== undefined && typeof event.name === "string") names.push(event.name);
+      return inner(eventOrCtx as never, maybeEvent as never);
+    }) as Dashboard["dispatch"];
+    void dashboard.stop();
+    void dashboard.stop();
+    await waitUntilUnbound(dashboard);
+    const detach = "dashboard.host.detach";
+    const stoppedEvent = "dashboard.host.stopped";
+    assert.ok(names.includes(detach));
+    assert.ok(names.includes(stoppedEvent));
+    assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
   });
 
   test("command event-name charset rejects empty, whitespace, overlong, and non-letter start", async () => {
@@ -785,12 +816,14 @@ describe("companion-style HSM controllers", () => {
     const leadingSpace = " phone.ring";
     const trailingSpace = "phone.ring ";
     const digitFirst = "1phone";
-    assert.equal(commandEventNameLegal(""), false);
-    assert.equal(commandEventNameLegal(legalMax), true);
-    assert.equal(commandEventNameLegal(tooLong), false);
-    assert.equal(commandEventNameLegal(leadingSpace), false);
-    assert.equal(commandEventNameLegal(trailingSpace), false);
-    assert.equal(commandEventNameLegal(digitFirst), false);
+    const nameIllegal = false;
+    const nameLegal = true;
+    assert.equal(commandEventNameLegal(""), nameIllegal);
+    assert.equal(commandEventNameLegal(legalMax), nameLegal);
+    assert.equal(commandEventNameLegal(tooLong), nameIllegal);
+    assert.equal(commandEventNameLegal(leadingSpace), nameIllegal);
+    assert.equal(commandEventNameLegal(trailingSpace), nameIllegal);
+    assert.equal(commandEventNameLegal(digitFirst), nameIllegal);
   });
 
   test("empty command name fails without posting", async () => {
@@ -805,7 +838,7 @@ describe("companion-style HSM controllers", () => {
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, []);
     assert.equal(dashboard.snapshot().commandResult?.detail, "event_name is required");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("whitespace and digit-first command names fail as not allowed, not required", async () => {
@@ -828,7 +861,7 @@ describe("companion-style HSM controllers", () => {
     const httpSpace = await postCommandHttp({ eventName: " ", dataJson: "" });
     assert.equal(httpEmpty.detail, "event_name is required");
     assert.equal(httpSpace.detail, notAllowed);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("send event posts the named command and records the gateway result", async () => {
@@ -848,7 +881,7 @@ describe("companion-style HSM controllers", () => {
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, [{ eventName: "phone.ring", dataJson: "" }]);
     assert.equal(dashboard.snapshot().commandResult?.result, "no_subscriber");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("command send failures complete through dashboard.command.failed", async () => {
@@ -861,7 +894,7 @@ describe("companion-style HSM controllers", () => {
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.equal(dashboard.snapshot().commandResult?.result, "error");
     assert.equal(dashboard.snapshot().commandResult?.detail, "gateway down");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("error.replay.enter enters replay paused", async () => {
@@ -878,7 +911,7 @@ describe("companion-style HSM controllers", () => {
     await dashboard.dispatch("dashboard.replay.enter");
     assert.match(dashboard.snapshot().statePath, /\/replay\/paused$/);
     assert.equal(dashboard.snapshot().replay.active, true);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("collectorUrl admits only the exact same-origin stream path", () => {
@@ -910,7 +943,7 @@ describe("companion-style HSM controllers", () => {
     await waitFor(() => dashboard.snapshot().phase === "error");
     assert.deepEqual(opened, []);
     assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("typed dashboard.command.send posts through the modeled event", async () => {
@@ -937,7 +970,7 @@ describe("companion-style HSM controllers", () => {
     assert.deepEqual(posted, ["phone.ring"]);
     assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
     assert.ok(kinds.includes(hsm.Kinds.Event));
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("overlapping command sends ignore stale completion ids", async () => {
@@ -966,7 +999,7 @@ describe("companion-style HSM controllers", () => {
     await first;
     await second;
     assert.equal(dashboard.snapshot().commandResult?.detail, "second");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("resolved accepted command is not relabeled canceled by later stop", async () => {
@@ -979,7 +1012,7 @@ describe("companion-style HSM controllers", () => {
     };
     await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
     await waitFor(() => dashboard.snapshot().commandResult?.result === "accepted");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
     assert.equal(seen.some((snapshot) => snapshot.commandResult?.result === "canceled"), false);
     assert.equal(seen.some((snapshot) => snapshot.commandResult?.detail === "committed"), true);
   });
@@ -1009,7 +1042,7 @@ describe("companion-style HSM controllers", () => {
     holds[0]?.resolve({ result: "accepted", detail: "first" });
     assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
     assert.equal(dashboard.snapshot().commandResult?.detail, "second");
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("replay live without a stream fails sourceCheck", async () => {
@@ -1019,7 +1052,7 @@ describe("companion-style HSM controllers", () => {
     const after = await dashboard.dispatch("dashboard.replay.live");
     assert.equal(after.phase, "error");
     assert.match(after.errorMessage ?? "", /no otel stream selected/);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("replay live with a stream re-enters viewing through sourceCheck", async () => {
@@ -1040,7 +1073,7 @@ describe("companion-style HSM controllers", () => {
     assert.equal(after.replay.active, replayInactive);
     assert.match(after.statePath, /\/viewing$/);
     await waitFor(() => connects === 2);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("postCommandHttp maps abort to canceled", async () => {
@@ -1201,7 +1234,7 @@ describe("companion-style HSM controllers", () => {
     try {
       void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
       await waitFor(() => entered);
-      await dashboard.stop();
+      await stopDashboard(dashboard);
       await waitFor(() => posted !== undefined);
       assert.equal(posted?.result, "error");
       assert.equal(posted?.detail, "command reply interrupted");
@@ -1227,7 +1260,7 @@ describe("companion-style HSM controllers", () => {
     try {
       void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
       await waitFor(() => fetched && results.some((result) => result?.result === "accepted"));
-      await dashboard.stop();
+      await stopDashboard(dashboard);
       const accepted = results.find((result) => result?.result === "accepted");
       assert.equal(accepted?.result, "accepted");
       assert.equal(accepted?.detail, "http committed");
@@ -1244,7 +1277,7 @@ describe("companion-style HSM controllers", () => {
     const after = await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
     assert.equal(after.phase, "error");
     assert.match(after.errorMessage ?? "", /collector url is not allowed/);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("dashboard detach then attach still admits a stream", async () => {
@@ -1264,7 +1297,7 @@ describe("companion-style HSM controllers", () => {
     await dashboard.dispatch("dashboard.source.selected", streamView());
     assert.equal(dashboard.snapshot().phase, "live");
     assert.ok(connects >= 2);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("late stream batches after leaving viewing do not dispatch stream canceled", async () => {
@@ -1297,7 +1330,7 @@ describe("companion-style HSM controllers", () => {
     assert.equal(kinds.includes("dashboard.stream.dropped"), streamDropped);
     assert.equal(kinds.includes("dashboard.load.completed"), productsDispatched);
     assert.match(dashboard.snapshot().statePath, /\/replay\//);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("replay play while viewing stays in viewing", async () => {
@@ -1318,7 +1351,7 @@ describe("companion-style HSM controllers", () => {
     assert.match(dashboard.snapshot().statePath, /\/viewing$/);
     const replayNotPlaying = false;
     assert.equal(dashboard.snapshot().replay.playing, replayNotPlaying);
-    await dashboard.stop();
+    await stopDashboard(dashboard);
   });
 
   test("event-path connect without origin fails closed instead of staying connecting", async () => {
