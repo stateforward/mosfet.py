@@ -2,6 +2,7 @@ import "./dom.ts";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import * as hsm from "../src/hsm.ts";
 import { BotDashboard, registerBotDashboard } from "../src/elements/bot-dashboard.ts";
 import { BotMachineGraph, registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
 import { registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
@@ -111,6 +112,35 @@ describe("bot-dashboard inspector focus", () => {
     const machineFound = true;
     assert.equal(graph.focusMachine("/Phone"), machineFound);
     assert.equal(host.shadowRoot?.activeElement, select);
+    host.remove();
+  });
+
+  test("empty graph focus names are not forwarded to the machine graph", async () => {
+    const host = await bootDashboard();
+    await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
+    const graph = host.querySelector("bot-machine-graph");
+    assert.ok(graph instanceof BotMachineGraph);
+    const names: string[] = [];
+    const original = graph.dispatch.bind(graph);
+    const spy = ((eventOrCtx: hsm.Event | hsm.Context, maybeEvent?: hsm.Event) => {
+      const event = maybeEvent ?? (eventOrCtx instanceof hsm.Context ? undefined : eventOrCtx);
+      if (event !== undefined && event.name === BotMachineGraph.focusEvent.name && hsm.isRecord(event.data)) {
+        const machineName = event.data["machineName"];
+        if (typeof machineName === "string") names.push(machineName);
+      }
+      return maybeEvent === undefined
+        ? original(eventOrCtx as hsm.Event)
+        : original(eventOrCtx as hsm.Context, maybeEvent);
+    }) as BotMachineGraph["dispatch"];
+    graph.dispatch = spy;
+    const emptyName = "";
+    await host.dispatch("dashboard.graph.focus", { machineName: emptyName });
+    const noneFocused = 0;
+    assert.equal(names.length, noneFocused);
+    const machineName = "/Phone";
+    await host.dispatch("dashboard.graph.focus", { machineName });
+    assert.deepEqual(names, [machineName]);
+    graph.dispatch = original;
     host.remove();
   });
 });

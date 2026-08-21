@@ -136,21 +136,23 @@ describe("OTEL replay", () => {
   test("replay enter next seek and play stamp graph focus without snapshot command", async () => {
     class FocusHost extends Dashboard {
       readonly focused: string[] = [];
-      override focusGraph(machineName: string): void {
-        this.focused.push(machineName);
+      override applyGraphFocus(args: { machineName: string }): void {
+        this.focused.push(args.machineName);
       }
     }
     const dashboard = new FocusHost();
     dashboard.origin = "http://localhost";
     dashboard.connectStream = () => ({ close(): void { return; } });
     dashboard.boot();
+    const skippedNone = 0;
+    const seekPosition = 1;
     await dashboard.dispatch("dashboard.source.selected", { source: streamSource(), origin: "http://localhost" });
     await dashboard.dispatch(hsm.typedEvent({ event: {
       name: "dashboard.load.completed",
       kind: hsm.Kinds.CompletionEvent,
     }, data: {
       mode: "replace",
-      skipped: 0,
+      skipped: skippedNone,
       observeSpans: fixtureSpans(),
     } }));
 
@@ -163,7 +165,7 @@ describe("OTEL replay", () => {
     await dashboard.dispatch("dashboard.replay.next");
     assert.deepEqual(dashboard.focused, ["/PhoneBot"]);
 
-    await dashboard.dispatch("dashboard.replay.seek", { position: 1 });
+    await dashboard.dispatch("dashboard.replay.seek", { position: seekPosition });
     assert.deepEqual(dashboard.focused, ["/PhoneBot", "/PhoneBot"]);
 
     await dashboard.dispatch("dashboard.replay.play");

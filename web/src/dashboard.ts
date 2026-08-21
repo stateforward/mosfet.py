@@ -39,6 +39,7 @@ const dashboardCommands = {
   "dashboard.replay.live": { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
   "dashboard.visibility.set": { name: "dashboard.visibility.set", kind: hsm.Kinds.Event },
   "dashboard.visibility.action": { name: "dashboard.visibility.action", kind: hsm.Kinds.Event },
+  "dashboard.graph.focus": { name: "dashboard.graph.focus", kind: hsm.Kinds.Event },
   "dashboard.host.attach": { name: "dashboard.host.attach", kind: hsm.Kinds.Event },
   "dashboard.host.detach": { name: "dashboard.host.detach", kind: hsm.Kinds.Event },
 } as const;
@@ -402,6 +403,17 @@ function returnToLive(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Eve
   controllerOf(instance)?.returnToLive();
 }
 
+function hasGraphFocusName(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  const machineName = machineNameFromEvent(event);
+  return machineName !== null && machineName.length > 0;
+}
+
+function applyGraphFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const machineName = machineNameFromEvent(event);
+  if (machineName === null || machineName.length === 0) return;
+  controllerOf(instance)?.applyGraphFocus({ machineName });
+}
+
 async function streamLive(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
@@ -490,6 +502,11 @@ const dashboardModel = hsm.define(
       hsm.transition(hsm.on("dashboard.command.canceled"), hsm.effect(applyCommandCanceled)),
       hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
       hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
+      hsm.transition(
+        hsm.on("dashboard.graph.focus"),
+        hsm.guard(hasGraphFocusName),
+        hsm.effect(applyGraphFocus),
+      ),
       hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("live/sourceCheck"), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("live/replay/paused"), hsm.effect(enterReplay)),
       hsm.state(
@@ -951,12 +968,12 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = 0;
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#focusReplayGraph();
+    this.#dispatchReplayGraphFocus();
   }
 
   playReplay(): void {
     this.#emit();
-    this.#focusReplayGraph();
+    this.#dispatchReplayGraphFocus();
   }
 
   pauseReplay(): void {
@@ -967,35 +984,38 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = clampReplayPosition(this.#replayPosition - 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#focusReplayGraph();
+    this.#dispatchReplayGraphFocus();
   }
 
   nextReplay(): void {
     this.#replayPosition = clampReplayPosition(this.#replayPosition + 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#focusReplayGraph();
+    this.#dispatchReplayGraphFocus();
   }
 
   seekReplay(args: { position: number }): void {
     this.#replayPosition = clampReplayPosition(args.position, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#focusReplayGraph();
+    this.#dispatchReplayGraphFocus();
   }
 
   /**
-   * Dispatch a typed graph-focus command for a replay machine.
+   * Forward a modeled `dashboard.graph.focus` command to a host-owned graph.
    *
-   * Inputs: `machineName` from the current replay event's `hsm.machine.name`.
-   * Outputs: none on this dashboard. Hosts override to dispatch `focus_machine`
-   * to `BotMachineGraph`. Snapshot render must not call this.
-   * Ownership: this dashboard. Lifetime: one replay step.
+   * Inputs: `machineName` from `dashboard.graph.focus` after the non-empty
+   * string guard. Outputs: none on this dashboard. Hosts that own a
+   * `BotMachineGraph` dispatch `focus_machine`. Snapshot render must not call
+   * this.
+   * Ownership: this dashboard. Lifetime: one focus request.
    * Concurrency: runtime-safe on the dashboard dispatch thread.
-   * Failure modes: missing names are not forwarded.
+   * Failure modes: empty or non-string names never reach this method; the
+   * `dashboard.graph.focus` guard drops them. Missing replay names are not
+   * dispatched by `#dispatchReplayGraphFocus`.
    * Classification: runtime-safe.
    */
-  focusGraph(_machineName: string): void {
+  applyGraphFocus(_args: { machineName: string }): void {
     return;
   }
 
@@ -1004,10 +1024,21 @@ export class Dashboard extends hsm.from(HTMLElement) {
     return typeof name === "string" && name.length > 0 ? name : null;
   }
 
-  #focusReplayGraph(): void {
+  /**
+   * Dispatch `dashboard.graph.focus` for the current replay machine.
+   *
+   * Inputs: `#replayMachineName()`. Outputs: a typed `dashboard.graph.focus`
+   * event when the name is a non-empty string.
+   * Failure modes: missing or empty names are not dispatched.
+   * Classification: runtime-safe.
+   */
+  #dispatchReplayGraphFocus(): void {
     const machineName = this.#replayMachineName();
     if (machineName === null) return;
-    this.focusGraph(machineName);
+    void super.dispatch(hsm.typedEvent({
+      event: dashboardCommands["dashboard.graph.focus"],
+      data: { machineName },
+    })).catch(hsm.catchFailure(this));
   }
 
   returnToLive(): void {

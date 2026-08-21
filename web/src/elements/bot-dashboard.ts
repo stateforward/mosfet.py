@@ -1139,16 +1139,22 @@ export class BotDashboard extends Dashboard {
   }
 
   /**
-   * Forward replay focus as a typed `focus_machine` event.
+   * Forward modeled `dashboard.graph.focus` as typed `focus_machine`.
    *
-   * Inputs: `machineName` stamped by Dashboard replay enter/next/seek/play
-   * effects. Outputs: `BotMachineGraph` consumes `focus_machine`.
-   * Snapshot render does not call this.
+   * Inputs: `machineName` from the dashboard `dashboard.graph.focus` transition.
+   * Outputs: `BotMachineGraph` consumes `focus_machine`. Snapshot render does
+   * not call this. Inspector machine buttons dispatch the same dashboard event
+   * instead of calling `focusMachine()`.
+   * Ownership: this host owns `#graph`. Lifetime: one focus request.
+   * Concurrency: runtime-safe on this host's dispatch thread.
+   * Failure modes: empty names are dropped by the dashboard guard before this
+   * method; dispatch rejection is `catchFailure` host-drop or report.
+   * Classification: runtime-safe.
    */
-  override focusGraph(machineName: string): void {
+  override applyGraphFocus(args: { machineName: string }): void {
     void this.#graph.dispatch(typedEvent({
       event: BotMachineGraph.focusEvent,
-      data: { machineName },
+      data: { machineName: args.machineName },
     })).catch(catchFailure(this));
   }
 
@@ -1318,7 +1324,7 @@ export class BotDashboard extends Dashboard {
         return;
       }
       if (!(control instanceof HTMLSelectElement)) {
-        this.#graph.focusMachine(machineName);
+        void this.dispatch("dashboard.graph.focus", { machineName }).catch(catchFailure(this));
       }
       void this.dispatch(eventName, { machineName }).catch(catchFailure(this));
       return;

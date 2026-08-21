@@ -73,8 +73,9 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  * events and DOM CustomEvents (machine, event kind, stage, outcome) on:
  * command completed/failed/canceled; stream load.failed / stream.dropped; host-drop; coalesce
  * timer flush via Scheduler; renderer paint / render_canceled
- * / ErrorEvent; FlowGraph nodes/edges admit and reject; Panner transform_changed
- * / panning_changed; Focuser focus_changed.
+ * / ErrorEvent; FlowGraph nodes/edges admit and reject; node_activate /
+ * flow-node-click click origin; Panner transform_changed
+ * / panning_changed; Focuser focus_changed; dashboard.graph.focus.
  * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts,
  * web/tests/flow-renderer.test.ts, web/tests/flow-graph.test.ts.
  * Expiration: an OpenTelemetry API or SDK dependency is user-approved for web/.
