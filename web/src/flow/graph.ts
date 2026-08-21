@@ -103,6 +103,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
       hsm.transition(hsm.on(FlowGraph.setPolicyEvent.name), hsm.effect(FlowGraph.applySetPolicy)),
       hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
+      hsm.transition(hsm.on(Panner.panningEvent.name), hsm.effect(FlowGraph.applyPanning)),
+      hsm.transition(hsm.on(Renderer.renderingStartedEvent.name), hsm.effect(FlowGraph.addRenderingClass)),
+      hsm.transition(hsm.on(Renderer.renderingStoppedEvent.name), hsm.effect(FlowGraph.removeRenderingClass)),
+      hsm.transition(hsm.on(Focuser.changedEvent.name), hsm.effect(FlowGraph.applyFocusClass)),
       hsm.transition(hsm.on(Selection.changedEvent.name), hsm.effect(FlowGraph.rememberSelection)),
       hsm.transition(hsm.on(Dragger.movedEvent.name), hsm.effect(FlowGraph.applyNodeMoved)),
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
@@ -677,11 +681,34 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
     instance.#view = viewport;
+    instance.#world.style.transformOrigin = "0 0";
+    instance.#world.style.transform = `translate(${String(viewport.x)}px, ${String(viewport.y)}px) scale(${String(viewport.zoom)})`;
     instance.dispatchEvent(new CustomEvent<ViewportChangeDetail>("flow-viewport-change", {
       detail: { viewport },
       bubbles: true,
       composed: true,
     }));
+  }
+
+  static applyPanning(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    if (typeof event.data["panning"] !== "boolean") return;
+    instance.#viewport.classList.toggle("is-dragging", event.data["panning"]);
+  }
+
+  static addRenderingClass(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.classList.add("is-rendering");
+  }
+
+  static removeRenderingClass(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.classList.remove("is-rendering");
+  }
+
+  static applyFocusClass(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    instance.classList.toggle("is-focused", event.data["focused"] === true);
   }
 
   static rememberSelection(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -753,13 +780,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #startActors(): void {
     const ctx = this.context();
     this.#renderer = startRenderer({ ctx });
-    this.#panner = startPanner({
-      ctx,
-      world: this.#world,
-      frame: this.#viewport,
-    });
+    this.#panner = startPanner({ ctx });
     this.#dragger = startDragger({ ctx });
-    this.#focuser = startFocuser({ ctx, host: this });
+    this.#focuser = startFocuser({ ctx });
     this.#selection = startSelection({ ctx });
     this.#connection = startConnection({ ctx });
   }

@@ -45,6 +45,7 @@ export class Panner extends hsm.Instance {
   static readonly fitEvent = { name: "fit", kind: hsm.Kinds.Event } as const;
   static readonly viewportEvent = { name: "viewport_set", kind: hsm.Kinds.Event } as const;
   static readonly transformEvent = { name: "transform_changed", kind: hsm.Kinds.Event } as const;
+  static readonly panningEvent = { name: "panning_changed", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Panner",
@@ -88,18 +89,14 @@ export class Panner extends hsm.Instance {
     ),
   );
 
-  readonly world: HTMLElement;
-  readonly frame: HTMLElement | null;
   scale = 1;
   pan: ViewportPoint = { x: 0, y: 0 };
   #pointers = new Map<number, ViewportPoint>();
   #dragStart: { pointerId: number; point: ViewportPoint; pan: ViewportPoint } | null = null;
   #pinchStart: { distance: number; scale: number } | null = null;
 
-  constructor(args: { world: HTMLElement; frame?: HTMLElement }) {
+  constructor() {
     super();
-    this.world = args.world;
-    this.frame = args.frame ?? null;
   }
 
   get transform(): ViewportTransform {
@@ -253,8 +250,6 @@ export class Panner extends hsm.Instance {
   #setTransform(scale: number, pan: ViewportPoint): void {
     this.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
     this.pan = { ...pan };
-    this.world.style.transformOrigin = "0 0";
-    this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.scale})`;
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Panner.transformEvent, data: this.viewport }),
@@ -262,19 +257,17 @@ export class Panner extends hsm.Instance {
   }
 
   #setPanning(panning: boolean): void {
-    this.frame?.classList.toggle("is-dragging", panning);
+    void hsm.notifyOwner({
+      instance: this,
+      event: hsm.typedEvent({ event: Panner.panningEvent, data: { panning } }),
+    }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 }
 
 export function startPanner(args: {
   ctx: hsm.Context;
-  world: HTMLElement;
-  frame?: HTMLElement;
 }): Panner {
-  return hsm.start(args.ctx, new Panner({
-    world: args.world,
-    ...(args.frame !== undefined ? { frame: args.frame } : {}),
-  }), Panner.model);
+  return hsm.start(args.ctx, new Panner(), Panner.model);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {

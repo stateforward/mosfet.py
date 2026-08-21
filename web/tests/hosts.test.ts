@@ -35,14 +35,6 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("timed out waiting for dashboard stream update");
 }
 
-function fakeWorld(): HTMLElement {
-  const style = { transform: "", transformOrigin: "" };
-  return {
-    style,
-    classList: { toggle(): void { return; } },
-  } as unknown as HTMLElement;
-}
-
 function streamView(source = streamSource(), origin = "http://localhost"): {
   source: ReturnType<typeof streamSource>;
   origin: string;
@@ -158,8 +150,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("panner writes transform synchronously and stays off the graph model", async () => {
-    const world = fakeWorld();
-    const panner = hsm.start(new Panner({ world }), Panner.model);
+    const panner = hsm.start(new Panner(), Panner.model);
     const graph = startAdmittedGraph();
 
     const drawing = await admitGraphs(graph, [graphFor("/Demo")]);
@@ -181,14 +172,13 @@ describe("companion-style HSM controllers", () => {
     await panner.dispatch(hsm.typedEvent({ event: Panner.zoomEvent, data: { scale: 1.1, point: { x: 20, y: 20 } } }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: 1 } }));
     assert.match(panner.state(), /\/fixed$/);
-    assert.match(world.style.transform, /translate\(/);
+    assert.ok(Number.isFinite(panner.transform.scale));
     await hsm.stop(panner);
     await hsm.stop(graph);
   });
 
   test("graph updates repaint while the viewport is panning", async () => {
-    const world = fakeWorld();
-    const panner = hsm.start(new Panner({ world }), Panner.model);
+    const panner = hsm.start(new Panner(), Panner.model);
     const graph = startAdmittedGraph();
     const signals = countGraphSignals(graph);
 
@@ -217,8 +207,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("normalized viewport intents update panner-owned transform", async () => {
-    const world = fakeWorld();
-    const panner = hsm.start(new Panner({ world }), Panner.model);
+    const panner = hsm.start(new Panner(), Panner.model);
     const metrics = {
       width: 1000,
       height: 600,
@@ -238,8 +227,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("node viewport focus uses exact bounds and stays focused across resize", async () => {
-    const world = fakeWorld();
-    const panner = hsm.start(new Panner({ world }), Panner.model);
+    const panner = hsm.start(new Panner(), Panner.model);
     let focusKind = "";
     let focusPath = "";
     const focuser = hsm.start(new Focuser(), Focuser.model);
@@ -287,8 +275,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("clearing focus fits the remaining graphs", async () => {
-    const world = fakeWorld();
-    const panner = hsm.start(new Panner({ world }), Panner.model);
+    const panner = hsm.start(new Panner(), Panner.model);
     const focuser = hsm.start(new Focuser(), Focuser.model);
     const metrics = {
       width: 1000,

@@ -18,6 +18,7 @@ export type ViewportBounds = {
 export class Focuser extends hsm.Instance {
   static readonly focusEvent = { name: "focus", kind: hsm.Kinds.Event } as const;
   static readonly clearEvent = { name: "clear", kind: hsm.Kinds.Event } as const;
+  static readonly changedEvent = { name: "focus_changed", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Focuser",
@@ -46,12 +47,10 @@ export class Focuser extends hsm.Instance {
     ),
   );
 
-  readonly host: HTMLElement | null;
   current: FocusTarget | null = null;
 
-  constructor(host: HTMLElement | null = null) {
+  constructor() {
     super();
-    this.host = host;
   }
 
   static setFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -66,20 +65,25 @@ export class Focuser extends hsm.Instance {
 
   static onFocusedEntry(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Focuser) || instance.current === null) return;
-    instance.host?.classList.add("is-focused");
+    void hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent({ event: Focuser.changedEvent, data: { focused: true } }),
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
   static onFocusedExit(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Focuser)) return;
-    instance.host?.classList.remove("is-focused");
+    void hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent({ event: Focuser.changedEvent, data: { focused: false } }),
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 }
 
 export function startFocuser(args: {
   ctx: hsm.Context;
-  host?: HTMLElement | null;
 }): Focuser {
-  return hsm.start(args.ctx, new Focuser(args.host ?? null), Focuser.model);
+  return hsm.start(args.ctx, new Focuser(), Focuser.model);
 }
 
 function focusTargetOf(value: unknown): FocusTarget | null {

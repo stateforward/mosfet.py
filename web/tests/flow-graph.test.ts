@@ -110,6 +110,9 @@ describe("flow-graph", () => {
     await flush();
     const after = graph.getViewport();
     assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
+    const viewport = graph.shadowRoot?.childNodes[0] as { childNodes?: Array<{ className?: string; style?: { transform?: string } }> } | undefined;
+    const world = viewport?.childNodes?.find((node) => node.className === "world");
+    assert.match(world?.style?.transform ?? "", /translate\(/);
     graph.remove();
   });
 
