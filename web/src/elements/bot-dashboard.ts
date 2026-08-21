@@ -2,7 +2,7 @@ import {
   Dashboard,
   isDashboardEventName,
   type DashboardSnapshot,
-} from "../dashboard-hsm.ts";
+} from "../dashboard.ts";
 import { catchFailure } from "../hsm.ts";
 import {
   environmentWorkspaceGraphs,

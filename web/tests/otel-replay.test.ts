@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./dom.ts";
-import { Dashboard } from "../src/dashboard-hsm.ts";
+import { Dashboard } from "../src/dashboard.ts";
 import { replayEvents, replayPrefix } from "../src/otel/replay.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource } from "../src/otel/source.ts";

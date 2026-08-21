@@ -17,6 +17,12 @@ Customized built-in elements require an explicit compatibility exception for the
 
 Custom element names MUST be stable, kebab-case, include a project or package prefix, and contain a hyphen.
 
+Custom element tags, host classes, and defining modules MUST be named for the domain they represent.
+
+They MUST NOT use `hsm` as a prefix or suffix in any casing or separator form (`hsm-`, `-hsm`, `Hsm`, `foo-hsm`, `hsm-from`).
+
+The HSM library import (`hsm.ts` / `@stateforward/hsm.ts`) is the framework boundary, not a component name.
+
 # WC-REG-001 MUST Make Registration Idempotent
 
 Custom element registration MUST be centralized or otherwise discoverable.

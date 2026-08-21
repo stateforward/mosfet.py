@@ -2,7 +2,7 @@ import {
   isOtelSourceEventName,
   OtelSource,
   type OtelSourceSnapshot,
-} from "../otel-source-hsm.ts";
+} from "../otel-source.ts";
 import { catchFailure } from "../hsm.ts";
 import { type OtelSource as StreamSource } from "../otel/source.ts";
 import { applyStyles } from "./styles.ts";

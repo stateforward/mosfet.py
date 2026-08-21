@@ -1,7 +1,7 @@
 import * as hsm from "../../hsm.ts";
 
 import { FlowGraph, type EdgeClickDetail, type NodeClickDetail, type ViewportChangeDetail } from "../../flow/index.ts";
-import { Graph } from "../../machine-graph-hsm.ts";
+import { Graph } from "../../machine-graph.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
 import { replaceStyles } from "../styles.ts";
 import { flowModelFromGraphs, focusBoundsForMachine, type FlowGraphModel } from "./flow-model.ts";

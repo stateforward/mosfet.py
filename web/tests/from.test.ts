@@ -20,10 +20,10 @@ describe("hsm.from(HTMLElement)", () => {
       );
     }
 
-    if (customElements.get("test-hsm-host") === undefined) {
-      customElements.define("test-hsm-host", Host);
+    if (customElements.get("test-host") === undefined) {
+      customElements.define("test-host", Host);
     }
-    const host = document.createElement("test-hsm-host");
+    const host = document.createElement("test-host");
     assert.ok(host instanceof Host);
     assert.equal(host instanceof library.Instance, false);
     hsm.start(host, Host.model);

@@ -53,7 +53,7 @@ const startedHosts = new WeakSet<object>();
  * CORE-EXC-001: copies `Instance.prototype` method descriptors because
  * `@stateforward/hsm.ts` does not export a custom-element mixin. Isolated to
  * this module. Do not add `from` to the published package. Owner: web/src/hsm.ts.
- * Tests: web/tests/hsm-from.test.ts.
+ * Tests: web/tests/from.test.ts.
  *
  * CORE-EXC-001 (OTEL): this package has no OpenTelemetry SDK (dependency not
  * approved). Control outcomes are HSM events and DOM CustomEvents with bounded

@@ -6,16 +6,16 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as hsm from "../src/hsm.ts";
 
-import { Dashboard, type DashboardSnapshot } from "../src/dashboard-hsm.ts";
+import { Dashboard, type DashboardSnapshot } from "../src/dashboard.ts";
 import { Focuser } from "../src/flow/focuser.ts";
 import { Panner } from "../src/flow/panner.ts";
 import { Renderer } from "../src/flow/renderer.ts";
-import { Graph } from "../src/machine-graph-hsm.ts";
+import { Graph } from "../src/machine-graph.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
-import { OtelSource } from "../src/otel-source-hsm.ts";
+import { OtelSource } from "../src/otel-source.ts";
 
 const fixturePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
