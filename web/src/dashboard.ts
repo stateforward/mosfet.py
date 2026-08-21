@@ -951,10 +951,12 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = 0;
     this.#rebuildDocument({ replay: true });
     this.#emit();
+    this.#focusReplayGraph();
   }
 
   playReplay(): void {
     this.#emit();
+    this.#focusReplayGraph();
   }
 
   pauseReplay(): void {
@@ -965,18 +967,47 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = clampReplayPosition(this.#replayPosition - 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
+    this.#focusReplayGraph();
   }
 
   nextReplay(): void {
     this.#replayPosition = clampReplayPosition(this.#replayPosition + 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
+    this.#focusReplayGraph();
   }
 
   seekReplay(args: { position: number }): void {
     this.#replayPosition = clampReplayPosition(args.position, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
+    this.#focusReplayGraph();
+  }
+
+  /**
+   * Dispatch a typed graph-focus command for a replay machine.
+   *
+   * Inputs: `machineName` from the current replay event's `hsm.machine.name`.
+   * Outputs: none on this dashboard. Hosts override to dispatch `focus_machine`
+   * to `BotMachineGraph`. Snapshot render must not call this.
+   * Ownership: this dashboard. Lifetime: one replay step.
+   * Concurrency: runtime-safe on the dashboard dispatch thread.
+   * Failure modes: missing names are not forwarded.
+   * Classification: runtime-safe.
+   */
+  focusGraph(_machineName: string): void {
+    return;
+  }
+
+  #replayMachineName(): string | null {
+    const name = this.#replayEvents[this.#replayPosition - 1]?.span.attributes["hsm.machine.name"];
+    return typeof name === "string" && name.length > 0 ? name : null;
+  }
+
+  #focusReplayGraph(): void {
+    const machineName = this.#replayMachineName();
+    if (machineName === null) return;
+    this.focusGraph(machineName);
   }
 
   returnToLive(): void {

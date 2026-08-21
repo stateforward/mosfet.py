@@ -132,4 +132,42 @@ describe("OTEL replay", () => {
     assert.equal(live.document?.observeCount, 7);
     await dashboard.stop();
   });
+
+  test("replay enter next seek and play stamp graph focus without snapshot command", async () => {
+    class FocusHost extends Dashboard {
+      readonly focused: string[] = [];
+      override focusGraph(machineName: string): void {
+        this.focused.push(machineName);
+      }
+    }
+    const dashboard = new FocusHost();
+    dashboard.origin = "http://localhost";
+    dashboard.connectStream = () => ({ close(): void { return; } });
+    dashboard.boot();
+    await dashboard.dispatch("dashboard.source.selected", { source: streamSource(), origin: "http://localhost" });
+    await dashboard.dispatch(hsm.typedEvent({ event: {
+      name: "dashboard.load.completed",
+      kind: hsm.Kinds.CompletionEvent,
+    }, data: {
+      mode: "replace",
+      skipped: 0,
+      observeSpans: fixtureSpans(),
+    } }));
+
+    await dashboard.dispatch("dashboard.replay.enter");
+    const noneFocused = 0;
+    assert.equal(dashboard.focused.length, noneFocused);
+    dashboard.snapshot();
+    assert.equal(dashboard.focused.length, noneFocused);
+
+    await dashboard.dispatch("dashboard.replay.next");
+    assert.deepEqual(dashboard.focused, ["/PhoneBot"]);
+
+    await dashboard.dispatch("dashboard.replay.seek", { position: 1 });
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/PhoneBot"]);
+
+    await dashboard.dispatch("dashboard.replay.play");
+    assert.deepEqual(dashboard.focused, ["/PhoneBot", "/PhoneBot", "/PhoneBot"]);
+    await dashboard.stop();
+  });
 });

@@ -3,7 +3,7 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard.ts";
-import { catchFailure } from "../hsm.ts";
+import { catchFailure, typedEvent } from "../hsm.ts";
 import {
   environmentWorkspaceGraphs,
   environmentRootGraphs,
@@ -1135,10 +1135,21 @@ export class BotDashboard extends Dashboard {
     this.#observes.textContent = String(selected.observationCount);
     this.#writeGraphHooks(selected);
     this.#graph.graphs = graphsForVisibility(workspaceMachines, visibleMachines);
-    if (snapshot.replay.active && snapshot.replay.current !== null) {
-      this.#graph.focusMachine(snapshot.replay.current.attributes["hsm.machine.name"]);
-    }
     restoreControlFocus();
+  }
+
+  /**
+   * Forward replay focus as a typed `focus_machine` event.
+   *
+   * Inputs: `machineName` stamped by Dashboard replay enter/next/seek/play
+   * effects. Outputs: `BotMachineGraph` consumes `focus_machine`.
+   * Snapshot render does not call this.
+   */
+  override focusGraph(machineName: string): void {
+    void this.#graph.dispatch(typedEvent({
+      event: BotMachineGraph.focusEvent,
+      data: { machineName },
+    })).catch(catchFailure(this));
   }
 
   #writeReplay(snapshot: DashboardSnapshot): void {
