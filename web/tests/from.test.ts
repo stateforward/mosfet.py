@@ -183,11 +183,48 @@ describe("hsm.from(HTMLElement)", () => {
     const unstarted = "unstarted";
     const stopped = "stopped";
     assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, unstarted);
-    // @ts-expect-error host is required to classify unstarted versus stopped
-    assert.equal(hsm.hostDropFrom({ error: startedHsmError }), null);
+    assert.throws(
+      () => {
+        // @ts-expect-error host is required to classify unstarted versus stopped
+        hsm.hostDropFrom({ error: startedHsmError });
+      },
+      (error: unknown) => error instanceof hsm.HostRequiredError,
+    );
     hsm.start(host, ClassifyHost.model);
     await host.stop();
     assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, stopped);
     host.remove();
+  });
+
+  test("rejected library stop still unbinds so later dispatch is host-drop stopped", async () => {
+    class RejectStopHost extends hsm.from(HTMLElement) {
+      static readonly pingEvent = { name: "ping", kind: hsm.Kinds.Event } as const;
+      static readonly model = hsm.define(
+        "RejectStopHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+      );
+    }
+
+    if (customElements.get("test-reject-stop-host") === undefined) {
+      customElements.define("test-reject-stop-host", RejectStopHost);
+    }
+    const host = document.createElement("test-reject-stop-host");
+    assert.ok(host instanceof RejectStopHost);
+    const startedHsmError = new Error("dispatch requires a started HSM");
+    const stopped = "stopped";
+    const libraryStopFailed = "library stop failed";
+    const originalStop = library.Instance.prototype.stop;
+    library.Instance.prototype.stop = async function (this: object): Promise<void> {
+      throw new Error(libraryStopFailed);
+    };
+    hsm.start(host, RejectStopHost.model);
+    try {
+      await assert.rejects(() => host.stop(), (error: unknown) => error instanceof Error && error.message === libraryStopFailed);
+      assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, stopped);
+    } finally {
+      library.Instance.prototype.stop = originalStop;
+      host.remove();
+    }
   });
 });

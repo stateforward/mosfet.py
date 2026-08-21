@@ -198,8 +198,12 @@ export function start<I extends object, M>(
 
 /** Stop the library runtime on `machine`. Further dispatch is a host-drop. */
 export async function stop(machine: object): Promise<void> {
-  await library.Instance.prototype.stop.call(machine);
   delete (machine as BoundHost)[BIND];
+  try {
+    await library.Instance.prototype.stop.call(machine);
+  } finally {
+    delete (machine as BoundHost)[BIND];
+  }
 }
 
 function isDispatchable(value: unknown): value is library.Dispatchable {
@@ -261,6 +265,25 @@ export class HostDropError extends Error {
 }
 
 /**
+ * Caller-fault when a started-HSM rejection is classified without `host`.
+ *
+ * Inputs: none. Outputs: an Error whose `name` is `HostRequiredError`.
+ * Ownership: caller owns the thrown instance. Lifetime: one classification
+ * attempt. Concurrency: synchronous. Failure modes: this error is the failure.
+ * Classification: runtime-safe.
+ */
+export class HostRequiredError extends Error {
+  constructor() {
+    super("hostDropFrom requires host to classify a started-HSM rejection");
+    this.name = "HostRequiredError";
+  }
+}
+
+function isStartedHsmRejection(error: unknown): error is Error {
+  return error instanceof Error && error.message.endsWith("requires a started HSM");
+}
+
+/**
  * Detail of the `host-drop` CustomEvent emitted by `reportFailure`/`catchFailure`.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
  * Postcondition: the dropped write was NOT applied. `reason` is `"unstarted"`
@@ -287,18 +310,19 @@ function toError(error: unknown): Error {
  * `reason` `"stopped"` when this module has seen `start` then `stop` on
  * `host`, otherwise `"unstarted"`; `null` when `error` is not a started-HSM
  * rejection. Precondition: `host` must be the host object whose bind tokens
- * this module owns. Omitting `host` is a caller contract violation and does
- * not classify the drop (`null`); it never reports `"unstarted"` for an
- * unknown host. Ownership: does not retain `host`. Lifetime: `host` must
- * still carry this module's bind tokens from `start`/`stop`. Concurrency:
- * synchronous. Failure modes: missing host returns `null`; an already
- * constructed `HostDropError` is returned as-is.
+ * this module owns. Omitting `host` on a started-HSM rejection is a caller
+ * contract violation and throws `HostRequiredError`; it is not the same
+ * `null` as a non-drop. Ownership: does not retain `host`. Lifetime: `host`
+ * must still carry this module's bind tokens from `start`/`stop`.
+ * Concurrency: synchronous. Failure modes: missing host throws
+ * `HostRequiredError`; an already constructed `HostDropError` is returned
+ * as-is.
  * Classification: runtime-safe.
  */
 export function hostDropFrom(args: { error: unknown; host: object }): HostDropError | null {
   if (args.error instanceof HostDropError) return args.error;
-  if (!(args.error instanceof Error) || !args.error.message.endsWith("requires a started HSM")) return null;
-  if (args.host === undefined || args.host === null) return null;
+  if (!isStartedHsmRejection(args.error)) return null;
+  if (args.host === undefined || args.host === null) throw new HostRequiredError();
   const operation = args.error.message.replace(/ requires a started HSM$/, "");
   const reason = hostWasStopped(args.host) ? "stopped" : "unstarted";
   return new HostDropError({ reason, operation, cause: args.error });
@@ -324,18 +348,27 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
  *
  * Inputs: `error` to classify; optional `host` EventTarget (from `ownerTarget`
  * or the element itself). Outputs: rethrows `HostDropError` after emitting
- * `host-drop` when `host` is an EventTarget; otherwise reports or rethrows a
- * normalized Error. Ownership: does not take ownership of `host`. Lifetime:
- * `host` must still be able to `dispatchEvent` (undefined host skips emit).
- * Concurrency: synchronous. Failure modes: missing/non-EventTarget host skips
- * `host-drop`; non-drop errors go to `reportError` when present, else throw.
+ * `host-drop` when `host` is an EventTarget. A started-HSM rejection with
+ * omitted `host` throws `HostRequiredError` (caller contract), never
+ * `reportError`. Already-classified `HostDropError` without `host` is
+ * rethrown without emit. Other errors report or rethrow a normalized Error.
+ * Ownership: does not take ownership of `host`. Lifetime: `host` must still
+ * be able to `dispatchEvent` (undefined host skips emit). Concurrency:
+ * synchronous. Failure modes: missing host on a started-HSM rejection is
+ * `HostRequiredError`; non-EventTarget host skips `host-drop` emit; non-drop
+ * errors go to `reportError` when present, else throw.
  * Classification: runtime-safe.
  */
 export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
-  const drop = args.host === undefined ? null : hostDropFrom({ error: args.error, host: args.host });
-  if (drop !== null) {
-    emitDrop(args.host, drop);
-    throw drop;
+  if (args.host === undefined) {
+    if (args.error instanceof HostDropError) throw args.error;
+    if (isStartedHsmRejection(args.error)) throw new HostRequiredError();
+  } else {
+    const drop = hostDropFrom({ error: args.error, host: args.host });
+    if (drop !== null) {
+      emitDrop(args.host, drop);
+      throw drop;
+    }
   }
   const err = toError(args.error);
   const reportError = (globalThis as typeof globalThis & { reportError?: (value: unknown) => void }).reportError;
@@ -351,20 +384,28 @@ export function reportFailure(args: { error: unknown; host?: EventTarget }): Err
  *
  * Inputs: optional `host` EventTarget (typically `ownerTarget(instance)` or
  * `this` on a host element). Outputs: a callback that swallows `HostDropError`
- * after emitting `host-drop` when `host` is defined, and otherwise defers to
+ * after emitting `host-drop` when `host` is defined. Omitted `host` on a
+ * started-HSM rejection throws `HostRequiredError`; an already-classified
+ * `HostDropError` is swallowed without emit. Other errors defer to
  * `reportFailure`. Ownership/lifetime/concurrency: same as `reportFailure`.
- * Failure modes: undefined host means host-drop is classified but not
- * dispatched; non-drop errors still report or throw.
+ * Failure modes: undefined host does not classify a started-HSM rejection as
+ * `reportError`; non-drop errors still report or throw.
  * Classification: runtime-safe.
  */
 export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {
-    const drop = host === undefined ? null : hostDropFrom({ error, host });
+    if (host === undefined) {
+      if (error instanceof HostDropError) return;
+      if (isStartedHsmRejection(error)) throw new HostRequiredError();
+      reportFailure({ error });
+      return;
+    }
+    const drop = hostDropFrom({ error, host });
     if (drop !== null) {
       emitDrop(host, drop);
       return;
     }
-    reportFailure({ error, ...(host !== undefined ? { host } : {}) });
+    reportFailure({ error, host });
   };
 }
 

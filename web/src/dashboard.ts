@@ -19,7 +19,7 @@ import {
   type OtelSource,
   type OtelStreamConnect,
 } from "./otel/source.ts";
-import { collectorUrl, stampUrlAllowed } from "./otel-source.ts";
+import { collectorUrl, eventWithUrlAdmission, sourceConnectFrom } from "./otel-source.ts";
 import { type ObserveSpan } from "./otel/span.ts";
 import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } from "./otel/replay.ts";
 
@@ -112,7 +112,42 @@ export type DashboardSnapshot = {
   readonly visibleMachines: Readonly<Record<string, boolean>>;
 };
 
-export const COMMAND_EVENT_NAME = /^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$/;
+const COMMAND_NAME_MAX = 128;
+const LETTER_A = 65;
+const LETTER_Z = 90;
+const LETTER_a = 97;
+const LETTER_z = 122;
+const DIGIT_0 = 48;
+const DIGIT_9 = 57;
+const CHAR_UNDERSCORE = 95;
+const CHAR_DOT = 46;
+const CHAR_COLON = 58;
+const CHAR_SLASH = 47;
+const CHAR_DASH = 45;
+
+/**
+ * Allocation-free command event-name charset: `A-Za-z` then up to 127 of
+ * `A-Za-z0-9_.:/-`. Does not trim.
+ */
+export function commandEventNameLegal(name: string): boolean {
+  if (name.length === 0 || name.length > COMMAND_NAME_MAX) return false;
+  const first = name.charCodeAt(0);
+  if (!isCommandNameLetter(first)) return false;
+  for (let index = 1; index < name.length; index += 1) {
+    if (!isCommandNameChar(name.charCodeAt(index))) return false;
+  }
+  return true;
+}
+
+function isCommandNameLetter(code: number): boolean {
+  return (code >= LETTER_A && code <= LETTER_Z) || (code >= LETTER_a && code <= LETTER_z);
+}
+
+function isCommandNameChar(code: number): boolean {
+  if (isCommandNameLetter(code)) return true;
+  if (code >= DIGIT_0 && code <= DIGIT_9) return true;
+  return code === CHAR_UNDERSCORE || code === CHAR_DOT || code === CHAR_COLON || code === CHAR_SLASH || code === CHAR_DASH;
+}
 
 function controllerOf(instance: hsm.Instance): Dashboard | null {
   return instance instanceof Dashboard ? instance : null;
@@ -201,7 +236,7 @@ export async function postCommandHttp(command: {
   dataJson: string;
   signal?: AbortSignal;
 }): Promise<CommandResult> {
-  if (!COMMAND_EVENT_NAME.test(command.eventName)) {
+  if (!commandEventNameLegal(command.eventName)) {
     return { result: "error", detail: "event_name is not an allowed command" };
   }
   if (signalAborted(command.signal)) {
@@ -477,6 +512,7 @@ function commandActorFromEvent(event: hsm.Event): Command | null {
 }
 
 async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
+  controllerOf(instance)?.noteHostStopping();
   const command = commandActorFromEvent(event);
   if (command !== null) await hsm.stop(command);
   await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
@@ -619,7 +655,7 @@ export function isDashboardEventName(value: string): value is DashboardEventName
 
 function commandNameLegal(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
   if (!hsm.isRecord(event.data) || typeof event.data["eventName"] !== "string") return false;
-  return COMMAND_EVENT_NAME.test(event.data["eventName"]);
+  return commandEventNameLegal(event.data["eventName"]);
 }
 
 class Command extends hsm.Instance {
@@ -689,7 +725,7 @@ class Command extends hsm.Instance {
    */
   static async post(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
     if (!(instance instanceof Command)) return;
-    const name = (stringField({ event, key: "eventName" }) ?? "").trim();
+    const name = stringField({ event, key: "eventName" }) ?? "";
     const payload = stringField({ event, key: "dataJson" }) ?? "";
     const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
     const finish = async (args: {
@@ -704,6 +740,11 @@ class Command extends hsm.Instance {
         }),
       });
     };
+    if (!commandEventNameLegal(name)) {
+      const detail = name.length === 0 ? "event_name is required" : "event_name is not an allowed command";
+      await finish({ event: Command.failedEvent, result: { result: "error", detail } });
+      return;
+    }
     const canceled: CommandResult = { result: "canceled", detail: "command canceled" };
     const interrupted: CommandResult = { result: "error", detail: "command reply interrupted" };
     if (ctx.done) {
@@ -768,6 +809,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
   origin = "";
   #commandSeq = 0;
   #command: Command | null = null;
+  #hostStopped: (() => void) | null = null;
+  #hostHasStopped = false;
+  #enteredStopping = false;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
   postCommand: CommandPost = postCommandHttp;
@@ -838,6 +882,13 @@ export class Dashboard extends hsm.from(HTMLElement) {
    */
   clearCommandActor(): void {
     this.#command = null;
+    this.#hostHasStopped = true;
+    this.#hostStopped?.();
+    this.#hostStopped = null;
+  }
+
+  noteHostStopping(): void {
+    this.#enteredStopping = true;
   }
 
   snapshot(): DashboardSnapshot {
@@ -870,15 +921,15 @@ export class Dashboard extends hsm.from(HTMLElement) {
   override dispatch(eventOrContext: DashboardEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<DashboardSnapshot> {
     if (typeof eventOrContext !== "string") {
       return eventOrContext instanceof hsm.Context
-        ? super.dispatch(eventOrContext, data as hsm.Event)
-        : super.dispatch(eventOrContext);
+        ? super.dispatch(eventOrContext, eventWithUrlAdmission(data as hsm.Event))
+        : super.dispatch(eventWithUrlAdmission(eventOrContext));
     }
     return this.#dispatchController(eventOrContext, data);
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
     const admitted = eventName === "dashboard.source.selected" || eventName === "dashboard.replay.live"
-      ? stampUrlAllowed(data)
+      ? sourceConnectFrom(data)
       : data;
     await super.dispatch(
       admitted === undefined
@@ -889,10 +940,44 @@ export class Dashboard extends hsm.from(HTMLElement) {
     return this.snapshot();
   }
 
+  /**
+   * Stop through modeled detach, then unbind.
+   *
+   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command`, waits
+   * for `dashboard.host.stopped`, then module `hsm.stop(this)`. Does not write
+   * `#command` or `hsm.stop` a Command actor outside RTC.
+   * Outputs: host unbound. Ownership: this dashboard. Lifetime: one stop.
+   * Concurrency: runtime-safe. Overlapping stop after `dashboard.host.stopped`
+   * only unbinds. Failure modes: detach dispatch rejection unbinds then
+   * rethrows.
+   * Classification: runtime-safe.
+   */
   override async stop(): Promise<void> {
-    const command = this.#command;
-    this.#command = null;
-    if (command !== null) await hsm.stop(command);
+    if (this.#hostHasStopped) {
+      await hsm.stop(this);
+      return;
+    }
+    const done = new Promise<void>((resolve) => {
+      this.#hostStopped = resolve;
+    });
+    this.#enteredStopping = false;
+    try {
+      await this.dispatch(hsm.typedEvent({
+        event: dashboardCommands["dashboard.host.detach"],
+        data: { command: this.#command },
+      }));
+    } catch (error) {
+      this.#hostStopped = null;
+      this.#hostHasStopped = true;
+      await hsm.stop(this);
+      throw error;
+    }
+    if (!this.#enteredStopping) {
+      this.#hostStopped?.();
+      this.#hostStopped = null;
+      this.#hostHasStopped = true;
+    }
+    await done;
     await hsm.stop(this);
   }
 

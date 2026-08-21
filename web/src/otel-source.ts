@@ -16,6 +16,25 @@ const sourceCompletions = {
 
 export type OtelSourceEventName = keyof typeof sourceCommands;
 
+/**
+ * Typed URL-bearing ingress for source connect / dashboard stream selection.
+ *
+ * Inputs: producer `origin`, optional `url` and `source`. `urlAllowed` is
+ * computed here from `collectorUrl` and is never trusted from the caller.
+ * Outputs: the payload guards and activities read. Ownership: returned record
+ * is owned by the dispatch. Lifetime: one admission. Concurrency: synchronous.
+ * Failure modes: missing/invalid origin or URL yields `urlAllowed: false`.
+ * Classification: runtime-safe.
+ */
+export type SourceConnectData = {
+  readonly urlAllowed: boolean;
+  readonly origin: string;
+  readonly url?: string;
+  readonly source?: StreamSource;
+};
+
+const SOURCE_CONNECT_EVENT = sourceCommands["source.connect.requested"].name;
+
 export type OtelSourcePhase = "idle" | "connecting" | "live" | "error";
 
 export type OtelSourceSnapshot = {
@@ -60,16 +79,36 @@ function emitReady(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event)
   controllerOf(instance)?.emitReady();
 }
 
-async function connectCollector(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
+async function connectCollector(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
+    if (!ctx.done) {
+      await instance.dispatch(hsm.typedEvent({
+        event: sourceCompletions["source.connect.failed"],
+        data: { message: "source host missing" },
+      }));
+    }
     return;
   }
-  await controller.connect(event);
+  await controller.connect({ ctx, event });
 }
 
 function urlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
   return hsm.isRecord(event.data) && event.data["urlAllowed"] === true;
+}
+
+function sourceConnectOf(event: hsm.Event): SourceConnectData | null {
+  if (!hsm.isRecord(event.data) || typeof event.data["urlAllowed"] !== "boolean" || typeof event.data["origin"] !== "string") {
+    return null;
+  }
+  const url = event.data["url"];
+  const source = event.data["source"];
+  return {
+    urlAllowed: event.data["urlAllowed"],
+    origin: event.data["origin"],
+    ...(typeof url === "string" ? { url } : {}),
+    ...(isOtelSource(source) ? { source } : {}),
+  };
 }
 
 async function stopHost(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
@@ -209,14 +248,14 @@ export class OtelSource extends hsm.from(HTMLElement) {
   override dispatch(eventOrContext: OtelSourceEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<OtelSourceSnapshot> {
     if (typeof eventOrContext !== "string") {
       return eventOrContext instanceof hsm.Context
-        ? super.dispatch(eventOrContext, data as hsm.Event)
-        : super.dispatch(eventOrContext);
+        ? super.dispatch(eventOrContext, eventWithSourceConnect(data as hsm.Event))
+        : super.dispatch(eventWithSourceConnect(eventOrContext));
     }
     return this.#dispatchController(eventOrContext, data);
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    const admitted = eventName === "source.connect.requested" ? stampUrlAllowed(data) : data;
+    const admitted = eventName === SOURCE_CONNECT_EVENT ? sourceConnectFrom(data) : data;
     await super.dispatch(
       admitted === undefined
         ? hsm.typedEvent({ event: sourceCommands[eventName] })
@@ -250,18 +289,29 @@ export class OtelSource extends hsm.from(HTMLElement) {
     this.onReady?.(source);
   }
 
-  async connect(event: hsm.Event): Promise<void> {
-    if (!hsm.isRecord(event.data) || typeof event.data["origin"] !== "string") {
+  async connect(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
+    const fail = async (message: string): Promise<void> => {
+      if (args.ctx.done) return;
+      await this.dispatch(hsm.typedEvent({
+        event: sourceCompletions["source.connect.failed"],
+        data: { message },
+      }));
+    };
+    const admitted = sourceConnectOf(args.event);
+    if (admitted === null || admitted.origin.length === 0) {
+      await fail("collector origin is missing");
       return;
     }
-    const requested = typeof event.data["url"] === "string" ? event.data["url"] : undefined;
+    const requested = admitted.url ?? admitted.source?.url;
     const url = collectorUrl({
-      origin: event.data["origin"],
+      origin: admitted.origin,
       ...(requested !== undefined ? { requested } : {}),
     });
     if (url === null) {
+      await fail("collector url is not allowed");
       return;
     }
+    if (args.ctx.done) return;
     const source = streamSource(url);
     await this.dispatch(hsm.typedEvent({ event: sourceCompletions["source.connected"], data: { source } }));
   }
@@ -289,28 +339,51 @@ export function collectorUrl(args: { readonly requested?: string; readonly origi
 }
 
 /**
- * Stamp `urlAllowed` on connect/source ingress so choice guards compare a
- * precomputed boolean and never construct `URL` objects.
+ * Build typed URL-bearing ingress so choice guards compare `urlAllowed` and
+ * never construct `URL` objects.
  *
  * Inputs: the command payload (`origin`, optional `url` or `source.url`).
- * Outputs: a record with `urlAllowed: boolean` plus the original fields.
- * Ownership: returns a new record; does not retain the input. Lifetime:
- * consumed by the following dispatch. Concurrency: synchronous.
- * Failure modes: missing/invalid origin or URL yields `urlAllowed: false`.
- * Classification: initialization-only (ingress admission).
+ * Caller-supplied `urlAllowed` is ignored and recomputed. Outputs:
+ * `SourceConnectData`. Ownership: returns a new record; does not retain the
+ * input. Lifetime: consumed by the following dispatch. Concurrency:
+ * synchronous. Failure modes: missing/invalid origin or URL yields
+ * `urlAllowed: false`. Classification: runtime-safe.
  */
-export function stampUrlAllowed(data: unknown): Record<string, unknown> {
-  const record = hsm.isRecord(data) ? { ...data } : {};
+export function sourceConnectFrom(data: unknown): SourceConnectData {
+  const record = hsm.isRecord(data) ? data : {};
   const origin = typeof record["origin"] === "string" ? record["origin"] : "";
-  const requestedFromUrl = typeof record["url"] === "string" ? record["url"] : undefined;
-  const source = record["source"];
-  const requestedFromSource = hsm.isRecord(source) && typeof source["url"] === "string" ? source["url"] : undefined;
-  const requested = requestedFromUrl ?? requestedFromSource;
-  record["urlAllowed"] = origin.length > 0 && collectorUrl({
+  const url = typeof record["url"] === "string" ? record["url"] : undefined;
+  const source = isOtelSource(record["source"]) ? record["source"] : undefined;
+  const requested = url ?? source?.url;
+  const urlAllowed = origin.length > 0 && collectorUrl({
     origin,
     ...(requested !== undefined ? { requested } : {}),
   }) !== null;
-  return record;
+  return {
+    urlAllowed,
+    origin,
+    ...(url !== undefined ? { url } : {}),
+    ...(source !== undefined ? { source } : {}),
+  };
+}
+
+export function eventWithSourceConnect(event: hsm.Event): hsm.Event {
+  if (event.name !== SOURCE_CONNECT_EVENT) return event;
+  return { ...event, data: sourceConnectFrom(event.data) };
+}
+
+const DASHBOARD_SOURCE_SELECTED = "dashboard.source.selected";
+const DASHBOARD_REPLAY_LIVE = "dashboard.replay.live";
+
+export function eventWithUrlAdmission(event: hsm.Event): hsm.Event {
+  if (
+    event.name !== SOURCE_CONNECT_EVENT
+    && event.name !== DASHBOARD_SOURCE_SELECTED
+    && event.name !== DASHBOARD_REPLAY_LIVE
+  ) {
+    return event;
+  }
+  return { ...event, data: sourceConnectFrom(event.data) };
 }
 
 

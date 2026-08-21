@@ -520,11 +520,17 @@ describe("companion-style HSM controllers", () => {
         () => hsm.reportFailure({ error: startedHsmError, host }),
         (error: unknown) => error instanceof hsm.HostDropError && error.reason === unstarted,
       );
-      hsm.reportFailure({ error: startedHsmError });
-      hsm.catchFailure()(startedHsmError);
+      assert.throws(
+        () => hsm.reportFailure({ error: startedHsmError }),
+        (error: unknown) => error instanceof hsm.HostRequiredError,
+      );
+      assert.throws(
+        () => hsm.catchFailure()(startedHsmError),
+        (error: unknown) => error instanceof hsm.HostRequiredError,
+      );
       const unexpected = new Error("unexpected HSM failure");
       hsm.reportFailure({ error: unexpected });
-      assert.deepEqual(reports, [startedHsmError, startedHsmError, unexpected]);
+      assert.deepEqual(reports, [unexpected]);
     } finally {
       if (previous === undefined) {
         delete globalWithReportError.reportError;
@@ -737,6 +743,27 @@ describe("companion-style HSM controllers", () => {
     assert.equal(after.replay.playing, replayNotPlaying);
     assert.match(after.statePath, /\/idle$/);
     await dashboard.stop();
+  });
+
+  test("dashboard stop detaches through host.stopped before unbind", async () => {
+    const dashboard = bootDashboard();
+    const names: string[] = [];
+    const inner = dashboard.dispatch.bind(dashboard);
+    dashboard.dispatch = ((eventOrCtx: hsm.Event | hsm.Context | string, maybeEvent?: unknown) => {
+      const event = typeof eventOrCtx === "string"
+        ? undefined
+        : eventOrCtx instanceof hsm.Context
+          ? maybeEvent as hsm.Event | undefined
+          : eventOrCtx;
+      if (event !== undefined && typeof event.name === "string") names.push(event.name);
+      return inner(eventOrCtx as never, maybeEvent as never);
+    }) as Dashboard["dispatch"];
+    await dashboard.stop();
+    const detach = "dashboard.host.detach";
+    const stopped = "dashboard.host.stopped";
+    assert.ok(names.includes(detach));
+    assert.ok(names.includes(stopped));
+    assert.ok(names.indexOf(detach) < names.indexOf(stopped));
   });
 
   test("empty command name fails without posting", async () => {
@@ -1242,6 +1269,19 @@ describe("companion-style HSM controllers", () => {
     const replayNotPlaying = false;
     assert.equal(dashboard.snapshot().replay.playing, replayNotPlaying);
     await dashboard.stop();
+  });
+
+  test("event-path connect without origin fails closed instead of staying connecting", async () => {
+    const source = bootSource();
+    const spoofAllowed = true;
+    await source.dispatch(hsm.typedEvent({
+      event: { name: "source.connect.requested", kind: hsm.Kinds.Event },
+      data: { urlAllowed: spoofAllowed },
+    }));
+    await waitFor(() => source.snapshot().phase === "error" || source.snapshot().phase === "live");
+    assert.equal(source.snapshot().phase, "error");
+    assert.notEqual(source.snapshot().phase, "connecting");
+    await source.stop();
   });
 
   test("otel source connect completions keep declared kinds", async () => {
