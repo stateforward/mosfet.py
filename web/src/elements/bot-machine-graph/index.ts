@@ -10,7 +10,6 @@ import { graphStyles } from "./styles.ts";
 const ELEMENT_NAME = "bot-machine-graph";
 /** Public attribute. This host is the only writer; value is `graphNodeCount(#held)`. */
 const NODE_COUNT_ATTR = "data-node-count";
-const FIT_REQUESTED = true;
 
 /**
  * Detail of the `bot-machine-graph-zoom` CustomEvent.
@@ -60,22 +59,27 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.exit(BotMachineGraph.onConnectedExit),
       hsm.transition(hsm.on(BotMachineGraph.detachEvent.name), hsm.target("../stopping")),
       hsm.transition(hsm.on(BotMachineGraph.graphsEvent.name), hsm.effect(BotMachineGraph.admitGraphs)),
-      hsm.transition(hsm.on(Graph.drawnEvent.name), hsm.target("drawn")),
+      hsm.transition(hsm.on(Graph.drawnEvent.name), hsm.target("afterDraw")),
       hsm.transition(hsm.on(Graph.clearedEvent.name), hsm.effect(BotMachineGraph.applyCleared)),
       hsm.transition(hsm.on(BotMachineGraph.focusEvent.name), hsm.effect(BotMachineGraph.applyFocus)),
       hsm.transition(hsm.on(BotMachineGraph.fitEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.state("ready"),
-      hsm.state(
-        "drawn",
-        hsm.entry(BotMachineGraph.applyDrawnThenSignal),
-        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../afterDraw")),
-      ),
       hsm.choice(
         "afterDraw",
-        hsm.transition(hsm.guard(BotMachineGraph.fitRequested), hsm.target("fitting")),
-        hsm.transition(hsm.target("ready")),
+        hsm.transition(hsm.guard(BotMachineGraph.needsFit), hsm.target("drawingFit")),
+        hsm.transition(hsm.target("drawingSkip")),
+      ),
+      hsm.state(
+        "drawingSkip",
+        hsm.entry(BotMachineGraph.applyDrawnThenSignal),
+        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../ready")),
+      ),
+      hsm.state(
+        "drawingFit",
+        hsm.entry(BotMachineGraph.applyDrawnThenSignal),
+        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../fitting")),
       ),
       hsm.state(
         "fitting",
@@ -204,16 +208,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     return graphNodeCount(instance.#held) !== graphNodeCount(graphs);
   }
 
-  static fitRequested(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    if (!hsm.isRecord(event.data)) return false;
-    return event.data["fit"] === FIT_REQUESTED;
-  }
-
   static applyDrawnThenSignal(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph)) return;
-    const fit = BotMachineGraph.needsFit(ctx, instance, event);
     BotMachineGraph.applyDrawn(ctx, instance, event);
-    void instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.drawnAppliedEvent, data: { fit } })).catch(hsm.catchFailure(instance));
+    void instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.drawnAppliedEvent })).catch(hsm.catchFailure(instance));
   }
 
   static applyFitThenSignal(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
