@@ -716,6 +716,7 @@ export class BotDashboard extends Dashboard {
     this.#zoom = document.createElement("span");
     this.#zoom.className = "zoom";
     this.#zoom.textContent = "100%";
+    mark(this.#zoom, "zoom");
     const reset = document.createElement("button");
     reset.type = "button";
     reset.className = "tool";
@@ -843,6 +844,7 @@ export class BotDashboard extends Dashboard {
 
     const details = document.createElement("section");
     details.className = "details";
+    mark(details, "details");
     const detailsHeading = document.createElement("h2");
     detailsHeading.className = "details-heading";
     detailsHeading.textContent = "Selected machine";
@@ -859,6 +861,7 @@ export class BotDashboard extends Dashboard {
 
     const mapPanel = document.createElement("section");
     mapPanel.className = "map-panel";
+    mark(mapPanel, "map");
     const mapHeading = document.createElement("header");
     mapHeading.className = "map-heading";
     mark(mapHeading, "map-header");
@@ -1000,6 +1003,12 @@ export class BotDashboard extends Dashboard {
   }
 
   #render(snapshot: DashboardSnapshot): void {
+    const active = this.#root.activeElement;
+    const pickerFocused = active === this.#picker;
+    const machineName = active instanceof HTMLElement
+      ? (active.dataset["machineVisibility"] ?? active.dataset["machineName"])
+      : undefined;
+    const visibilityFocused = active instanceof HTMLInputElement;
     const live = snapshot.phase === "live";
     this.#inspectorStatus.textContent = live ? "live" : snapshot.phase === "error" ? "offline" : snapshot.phase;
     this.#error.textContent = snapshot.errorMessage ?? "";
@@ -1017,6 +1026,18 @@ export class BotDashboard extends Dashboard {
     this.#picker.replaceChildren();
     this.#machines.replaceChildren();
     this.#eventList.replaceChildren();
+    const restoreControlFocus = (): void => {
+      if (pickerFocused) {
+        this.#picker.focus();
+        return;
+      }
+      if (typeof machineName !== "string" || machineName.length === 0) return;
+      const selector = visibilityFocused
+        ? `input[data-machine-visibility="${CSS.escape(machineName)}"]`
+        : `button[data-machine-name="${CSS.escape(machineName)}"]`;
+      const next = this.#machines.querySelector(selector);
+      if (next instanceof HTMLElement) next.focus();
+    };
     const view = snapshot.document;
     const visibleMachines = visibilityMap(snapshot);
     if (view === null || view.machines.length === 0) {
@@ -1028,6 +1049,7 @@ export class BotDashboard extends Dashboard {
       this.#observes.textContent = "0";
       this.#writeGraphHooks(null);
       this.#graph.graphs = [];
+      restoreControlFocus();
       return;
     }
     const workspaceMachines = environmentWorkspaceGraphs(view.machines);
@@ -1096,6 +1118,7 @@ export class BotDashboard extends Dashboard {
       this.#observes.textContent = String(view.observeCount);
       this.#writeGraphHooks(null);
       this.#graph.graphs = [];
+      restoreControlFocus();
       return;
     }
     this.#writeCurrentState(selected.currentState);
@@ -1106,6 +1129,7 @@ export class BotDashboard extends Dashboard {
     if (snapshot.replay.active && snapshot.replay.current !== null) {
       this.#graph.focusMachine(snapshot.replay.current.attributes["hsm.machine.name"]);
     }
+    restoreControlFocus();
   }
 
   #writeReplay(snapshot: DashboardSnapshot): void {
