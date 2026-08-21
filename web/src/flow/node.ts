@@ -4,9 +4,11 @@ import { DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node } from "./types.ts";
 import { nodeStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node";
+const BUTTON_TYPE = "button";
 
 export class FlowNode extends HTMLElement {
   readonly #root: ShadowRoot;
+  readonly #button: HTMLButtonElement;
   readonly #label: HTMLSpanElement;
   #node: Node | null = null;
 
@@ -14,11 +16,15 @@ export class FlowNode extends HTMLElement {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     applyStyles(this.#root, nodeStyles);
+    this.#button = document.createElement("button");
+    this.#button.type = BUTTON_TYPE;
+    this.#button.part.add("control");
     this.#label = document.createElement("span");
     this.#label.className = "label node-badge";
     this.#label.part.add("badge");
     this.#label.setAttribute("data-testid", "node-badge");
-    this.#root.append(document.createElement("slot"), this.#label);
+    this.#button.append(this.#label);
+    this.#root.append(document.createElement("slot"), this.#button);
   }
 
   get node(): Node | null {
@@ -32,6 +38,10 @@ export class FlowNode extends HTMLElement {
 
   connectedCallback(): void {
     this.#sync();
+  }
+
+  override focus(options?: FocusOptions): void {
+    this.#button.focus(options);
   }
 
   #sync(): void {
@@ -48,17 +58,16 @@ export class FlowNode extends HTMLElement {
     if (typeof node.data["className"] === "string") this.className = node.data["className"];
     this.part.add("node");
     this.setAttribute("data-testid", "state-node");
-    this.setAttribute("role", "button");
-    if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
     this.toggleAttribute("selected", node.selected === true);
-    this.setAttribute("aria-selected", node.selected === true ? "true" : "false");
+    const selected = node.selected === true;
+    this.#button.setAttribute("aria-pressed", selected ? "true" : "false");
     const path = node.data["path"];
     const machineName = node.data["machineName"];
     if (typeof path === "string") this.dataset["path"] = path;
     if (typeof machineName === "string") this.dataset["machineName"] = machineName;
     const label = node.data["label"];
     this.#label.textContent = typeof label === "string" ? label : node.id;
-    this.setAttribute("aria-label", this.#label.textContent);
+    this.#button.setAttribute("aria-label", this.#label.textContent);
   }
 }
 

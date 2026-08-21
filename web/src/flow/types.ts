@@ -55,7 +55,14 @@ export type PointerOrigin = {
   readonly type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel";
 };
 
-export type NodeClickDetail = { readonly node: Node; readonly originalEvent: PointerOrigin };
+export type KeyboardOrigin = {
+  readonly type: "keydown";
+  readonly key: "Enter" | " ";
+};
+
+export type ActivationOrigin = PointerOrigin | KeyboardOrigin;
+
+export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
 export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };
 export type ViewportChangeDetail = { readonly viewport: Viewport };
 export type ConnectDetail = {

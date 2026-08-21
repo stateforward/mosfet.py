@@ -49,9 +49,19 @@ export const nodeStyles = `
   position: absolute;
   box-sizing: border-box;
   display: grid;
-  place-items: center;
   min-width: 2rem;
   min-height: 1.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+button {
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  margin: 0;
   padding: 0.35rem 0.55rem;
   border: 1px solid #3d4a5c;
   border-radius: 8px;
@@ -60,11 +70,11 @@ export const nodeStyles = `
   font: 500 12px/1.2 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   cursor: pointer;
 }
-:host([selected]) {
+:host([selected]) button {
   border-color: #2dd4bf;
   box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.18);
 }
-:host(:focus-visible) {
+button:focus-visible {
   outline: 2px solid #2dd4bf;
   outline-offset: 2px;
 }

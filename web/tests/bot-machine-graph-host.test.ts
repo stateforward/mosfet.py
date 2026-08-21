@@ -26,7 +26,7 @@ function graphFor(name: string) {
 }
 
 describe("bot-machine-graph flow host", () => {
-  test("admits graphs and focuses a machine on a defined element", () => {
+  test("admits graphs and focuses a machine on a defined element", async () => {
     const host = document.createElement("bot-machine-graph");
     assert.ok(host instanceof BotMachineGraph);
     document.body.append(host);
@@ -46,12 +46,12 @@ describe("bot-machine-graph flow host", () => {
       edges: [],
     }];
     assert.equal(host.focusMachine("/Empty"), false);
-    host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
+    await host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName: "/Phone",
       path: "/Phone/ready",
       bounds: { left: 0, right: 40, top: 0, bottom: 20 },
     } }));
-    host.dispatch(hsm.typedEvent({
+    await host.dispatch(hsm.typedEvent({
       event: { name: "graph.drawn", kind: hsm.Kinds.Event },
       data: { graphs: [{ not: "a graph" }] },
     }));

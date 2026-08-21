@@ -28,6 +28,7 @@ import {
   type ConnectDetail,
   type Edge,
   type EdgeClickDetail,
+  type KeyboardOrigin,
   type Node,
   type NodeClickDetail,
   type PointerHit,
@@ -42,6 +43,12 @@ import {
 
 const ELEMENT_NAME = "flow-graph";
 const SVG_NS = "http://www.w3.org/2000/svg";
+const ENTER_KEY = "Enter";
+const SPACE_KEY = " ";
+const EXCLUSIVE_SELECT = false;
+const EVENT_BUBBLES = true;
+const EVENT_COMPOSED = true;
+const GRAPH_ROLE = "group";
 
 export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly attachEvent = { name: "graph_attach", kind: hsm.Kinds.Event } as const;
@@ -344,13 +351,27 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return { x: this.#view.x, y: this.#view.y, zoom: this.#view.zoom };
   }
 
+  /**
+   * Fit the viewport to `target.bounds` and record the Focuser kind.
+   *
+   * Inputs: a `FocusTarget` with `kind`, `bounds`, and optional `nodeId` /
+   * `nodePath` / `machineName`.
+   * Outputs: Focuser `current` and a pan/zoom fit. Keyboard focus moves onto
+   * the node's native button only when `kind` is `"node"` and `nodeId` or
+   * `nodePath` resolve to a painted node. Machine and viewport kinds do not
+   * DOM-focus a descendant or set `aria-activedescendant`.
+   * Ownership: this graph owns Focuser/Panner dispatch. Lifetime: one focus
+   * request. Concurrency: runtime-safe on the graph dispatch thread.
+   * Failure modes: missing bounds or missing node are no-ops.
+   * Classification: runtime-safe.
+   */
   focusTarget(target: FocusTarget): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.focusEvent, data: target }));
   }
 
   connectedCallback(): void {
     if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
-    if (!this.hasAttribute("role")) this.setAttribute("role", "application");
+    if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start(this, FlowGraph.model);
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
@@ -569,26 +590,29 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     } }) });
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
       detail: { node: copyNode(sample.hit.node), originalEvent: sample.originalEvent },
-      bubbles: true,
-      composed: true,
+      bubbles: EVENT_BUBBLES,
+      composed: EVENT_COMPOSED,
     }));
   }
 
   static emitNodeActivate(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
     const nodeId = event.data["nodeId"];
+    const key = event.data["key"];
     if (typeof nodeId !== "string") return;
+    const originKey = key === SPACE_KEY ? SPACE_KEY : ENTER_KEY;
     const node = instance.#nodes.find((item) => item.id === nodeId);
     if (node === undefined) return;
     instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
       id: node.id,
       kind: "node",
-      additive: false,
+      additive: EXCLUSIVE_SELECT,
     } }) });
+    const origin: KeyboardOrigin = { type: "keydown", key: originKey };
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
-      detail: { node: copyNode(node), originalEvent: { pointerId: 0, clientX: 0, clientY: 0, type: "pointerup" } },
-      bubbles: true,
-      composed: true,
+      detail: { node: copyNode(node), originalEvent: origin },
+      bubbles: EVENT_BUBBLES,
+      composed: EVENT_COMPOSED,
     }));
   }
 
@@ -806,10 +830,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         : {}),
     } }) });
     instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
+    if (kind !== "node") return;
     const focused = instance.#nodeElement(hsm.isRecord(event.data) ? event.data : null);
     if (focused === null) return;
     focused.focus();
-    instance.setAttribute("aria-activedescendant", focused.id);
   }
 
   #childActors(): object[] {
@@ -882,12 +906,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
       let handled = false;
-      const target = event.target;
-      if (target instanceof FlowNode && target.node !== null && (event.key === "Enter" || event.key === " ")) {
-        this.#live(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId: target.node.id } }));
+      const node = this.#flowNodeFromEvent(event);
+      if (node !== null && node.node !== null && (event.key === ENTER_KEY || event.key === SPACE_KEY)) {
+        this.#live(hsm.typedEvent({
+          event: FlowGraph.activateNodeEvent,
+          data: { nodeId: node.node.id, key: event.key },
+        }));
         handled = true;
       }
-      if (target !== this) {
+      if (node !== null || event.target !== this) {
         if (handled) event.preventDefault();
         return;
       }
@@ -979,11 +1006,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         if (element.dataset["path"] === nodePath) return element;
       }
     }
-    const machineName = data["machineName"];
-    if (typeof machineName === "string") {
-      for (const element of this.#nodeElements.values()) {
-        if (element.dataset["machineName"] === machineName) return element;
-      }
+    return null;
+  }
+
+  #flowNodeFromEvent(event: Event): FlowNode | null {
+    for (const target of event.composedPath()) {
+      if (target instanceof FlowNode && target.node !== null) return target;
     }
     return null;
   }

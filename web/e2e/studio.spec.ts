@@ -277,14 +277,19 @@ test("simulated replay steps through event spans and focuses the owning graph", 
 
   await page.getByTestId("canvas").evaluate((element) => {
     const graph = element as HTMLElement & {
-      focusMachine: (machineName: string) => boolean;
+      dispatch: (event: { name: string; data?: unknown }) => Promise<unknown>;
       replayFocusCalls?: string[];
     };
-    const original = graph.focusMachine.bind(graph);
+    const original = graph.dispatch.bind(graph);
     graph.replayFocusCalls = [];
-    graph.focusMachine = (machineName: string): boolean => {
-      graph.replayFocusCalls?.push(machineName);
-      return original(machineName);
+    graph.dispatch = (event: { name: string; data?: unknown }): Promise<unknown> => {
+      if (event.name === "focus_machine") {
+        const data = event.data;
+        if (typeof data === "object" && data !== null && "machineName" in data && typeof data.machineName === "string") {
+          graph.replayFocusCalls?.push(data.machineName);
+        }
+      }
+      return original(event);
     };
   });
 
@@ -619,7 +624,7 @@ test("bot-otel-source live-badge names the control and announces errors", async 
   await expect(page.getByRole("status")).toHaveText(/.+/);
 });
 
-test("flow-graph host is an application landmark with keyboard viewport control", async ({ page, request }) => {
+test("flow-graph host is a labeled group with keyboard viewport control", async ({ page, request }) => {
   await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   const response = await request.post("/v1/models", { data: publishedModel("/Keyboard", null) });
@@ -627,9 +632,11 @@ test("flow-graph host is an application landmark with keyboard viewport control"
   await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
 
   const frame = page.getByTestId("frame");
-  await expect(frame).toHaveAttribute("role", "application");
+  await expect(frame).toHaveAttribute("role", "group");
   await expect(frame).toHaveAttribute("aria-label", "Machine graph");
   await frame.focus();
+  await frame.press("-");
+  await frame.press("-");
   const before = await frameViewport(page);
 
   await frame.press("+");
@@ -643,4 +650,37 @@ test("flow-graph host is an application landmark with keyboard viewport control"
   await frame.press("f");
   const fitted = await frameViewport(page);
   expect(fitted.zoom).not.toBe(panned.zoom);
+});
+
+test("focused flow-node native button activates with Enter and Space", async ({ page, request }) => {
+  await page.setViewportSize(DESKTOP_VIEWPORT);
+  await openStudio(page);
+  const response = await request.post("/v1/models", { data: publishedModel("/Keyboard", null) });
+  expect(response.ok()).toBeTruthy();
+  await expect(page.getByTestId("canvas")).not.toHaveAttribute("data-node-count", "0");
+
+  const enterKey = "Enter";
+  const spaceKey = " ";
+  await page.getByTestId("frame").evaluate((frame) => {
+    const host = frame as HTMLElement & { activationOrigins?: unknown[] };
+    host.activationOrigins = [];
+    frame.addEventListener("flow-node-click", (event) => {
+      host.activationOrigins?.push((event as CustomEvent<{ originalEvent: unknown }>).detail.originalEvent);
+    });
+  });
+
+  const node = page.getByTestId("state-node").first();
+  const control = node.getByRole("button");
+  await expect(control).toHaveRole("button");
+  await expect(control).toHaveAccessibleName(/.+/);
+  await control.focus();
+  await expect(control).toBeFocused();
+  await control.press(enterKey);
+  await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
+    return (frame as HTMLElement & { activationOrigins?: unknown[] }).activationOrigins ?? [];
+  })).toContainEqual({ type: "keydown", key: enterKey });
+  await control.press(spaceKey);
+  await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
+    return (frame as HTMLElement & { activationOrigins?: unknown[] }).activationOrigins ?? [];
+  })).toContainEqual({ type: "keydown", key: spaceKey });
 });

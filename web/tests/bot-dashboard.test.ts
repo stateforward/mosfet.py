@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { BotDashboard, registerBotDashboard } from "../src/elements/bot-dashboard.ts";
-import { registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
+import { BotMachineGraph, registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
 import { registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { streamSource } from "../src/otel/source.ts";
@@ -97,6 +97,20 @@ describe("bot-dashboard inspector focus", () => {
     await host.dispatch("dashboard.model.published", publishedModel("/PhoneBot"));
     const picker = host.querySelector('select[aria-label="Observed machine"]');
     assert.notEqual(host.shadowRoot?.activeElement, picker);
+    host.remove();
+  });
+
+  test("machine-kind graph focus does not steal inspector control focus", async () => {
+    const host = await bootDashboard();
+    await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
+    const select = host.querySelector('button[data-machine-name="/Phone"]');
+    assert.ok(select instanceof HTMLElement);
+    select.focus();
+    const graph = host.querySelector("bot-machine-graph");
+    assert.ok(graph instanceof BotMachineGraph);
+    const machineFound = true;
+    assert.equal(graph.focusMachine("/Phone"), machineFound);
+    assert.equal(host.shadowRoot?.activeElement, select);
     host.remove();
   });
 });

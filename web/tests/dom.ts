@@ -155,6 +155,10 @@ class FakeElement {
     let current: FakeElement | null = this;
     while (current !== null) {
       path.push(current);
+      if (current instanceof FakeShadowRoot) {
+        current = current.host;
+        continue;
+      }
       current = current.parentNode;
     }
     return path;

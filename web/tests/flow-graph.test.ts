@@ -101,21 +101,21 @@ describe("flow-graph", () => {
     document.body.append(graph);
     graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
     const before = graph.getViewport();
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 40, y: 40 },
       client: { x: 40, y: 40 },
       viewport: { x: 40, y: 40 },
       hit: { kind: "empty" },
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 40, y: 40 },
       client: { x: 80, y: 90 },
       viewport: { x: 80, y: 90 },
       hit: { kind: "empty" },
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 40, y: 40 },
@@ -133,7 +133,7 @@ describe("flow-graph", () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
     graph.panOnDrag = true;
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 20, y: 20 },
       client: { x: 20, y: 20 },
@@ -143,7 +143,7 @@ describe("flow-graph", () => {
     assert.match(graph.state(), /\/pan$/);
     graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
     assert.match(graph.state(), /\/pan$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 20, y: 20 },
@@ -171,7 +171,7 @@ describe("flow-graph", () => {
         if (hsm.isRecord(node) && typeof node["id"] === "string") selected.push(node["id"]);
       }
     });
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       shiftKey: true,
       origin: { x: 10, y: 10 },
@@ -181,7 +181,7 @@ describe("flow-graph", () => {
     }) }));
     assert.match(graph.state(), /\/box$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       shiftKey: true,
       origin: { x: 10, y: 10 },
@@ -189,7 +189,7 @@ describe("flow-graph", () => {
       viewport: { x: 120, y: 80 },
       hit: { kind: "empty" },
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       shiftKey: true,
       buttons: 0,
@@ -210,7 +210,7 @@ describe("flow-graph", () => {
     document.body.append(graph);
     graph.panOnDrag = true;
     const before = graph.getViewport();
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 20, y: 20 },
       client: { x: 20, y: 20 },
@@ -219,14 +219,14 @@ describe("flow-graph", () => {
     }) }));
     assert.match(graph.state(), /\/pan$/);
     assert.doesNotMatch(graph.state(), /\/box$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 20, y: 20 },
       client: { x: 60, y: 70 },
       viewport: { x: 60, y: 70 },
       hit: { kind: "empty" },
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 20, y: 20 },
@@ -250,7 +250,7 @@ describe("flow-graph", () => {
     const admitted = graph.nodes[0];
     assert.ok(admitted !== undefined);
     const hit = { kind: "node" as const, node: admitted };
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 10, y: 10 },
       client: { x: 10, y: 10 },
@@ -259,7 +259,7 @@ describe("flow-graph", () => {
       hit,
     }) }));
     assert.match(graph.state(), /\/click$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 10, y: 10 },
       client: { x: 40, y: 10 },
@@ -269,7 +269,7 @@ describe("flow-graph", () => {
     }) }));
     assert.match(graph.state(), /\/drag$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 10, y: 10 },
       client: { x: 80, y: 10 },
@@ -277,7 +277,7 @@ describe("flow-graph", () => {
       world: { x: 80, y: 10 },
       hit,
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 10, y: 10 },
@@ -310,7 +310,7 @@ describe("flow-graph", () => {
       const targetId = event.detail["target"];
       if (typeof sourceId === "string" && typeof targetId === "string") connected.push({ source: sourceId, target: targetId });
     });
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 80, y: 20 },
       client: { x: 80, y: 20 },
@@ -318,14 +318,14 @@ describe("flow-graph", () => {
       hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
     }) }));
     assert.match(graph.state(), /\/connect$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 80, y: 20 },
       client: { x: 200, y: 20 },
       world: { x: 200, y: 20 },
       hit: { kind: "handle", node: target, handleKind: "target", position: "left" },
     }) }));
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 80, y: 20 },
@@ -361,12 +361,12 @@ describe("flow-graph", () => {
     graph.addEventListener("flow-connect", () => {
       connected.push("connected");
     });
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
     }) }));
     assert.match(graph.state(), /\/connect$/);
-    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       hit: { kind: "empty" },
@@ -543,12 +543,12 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
-  test("viewport is an application landmark", async () => {
+  test("viewport is a labeled group landmark", async () => {
     const graph = document.createElement("flow-graph");
     const roleMissingBeforeConnect = false;
     assert.equal(graph.hasAttribute("role"), roleMissingBeforeConnect);
     document.body.append(graph);
-    assert.equal(graph.getAttribute("role"), "application");
+    assert.equal(graph.getAttribute("role"), "group");
     assert.equal(graph.getAttribute("aria-label"), "Machine graph");
     graph.remove();
   });
@@ -625,36 +625,59 @@ describe("flow-graph", () => {
   test("clickable nodes are keyboard and AT focusable", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const expectedTabIndex = 0;
+    const keyConsumed = true;
     graph.nodes = [
-      { id: "a", position: { x: 0, y: 0 }, data: { label: "A", path: "/A", machineName: "/A" }, width: 80, height: 40 },
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A", path: "/A", machineName: "/A" }, width: nodeWidth, height: nodeHeight },
     ];
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const node = graph.querySelector("flow-node");
     assert.ok(node instanceof HTMLElement);
-    assert.equal(node.getAttribute("role"), "button");
-    assert.equal(node.getAttribute("aria-label"), "A");
+    const control = node.shadowRoot?.querySelector("button");
+    assert.ok(control instanceof HTMLElement);
+    assert.equal(control.localName, "button");
+    assert.equal(node.getAttribute("role"), null);
+    assert.equal(control.getAttribute("aria-label"), "A");
     assert.equal(node.getAttribute("data-testid"), "state-node");
-    assert.equal(node.tabIndex, 0);
+    assert.equal(control.tabIndex, expectedTabIndex);
+    graph.focusTarget({
+      kind: "machine",
+      machineName: "/A",
+      bounds: { left: 0, right: nodeWidth, top: 0, bottom: nodeHeight },
+    });
+    await flush();
+    const noShadowFocus = null;
+    assert.equal(graph.shadowRoot?.activeElement, noShadowFocus);
+    assert.equal(graph.getAttribute("aria-activedescendant"), noShadowFocus);
     graph.focusTarget({
       kind: "node",
       nodeId: "a",
       nodePath: "/A",
       machineName: "/A",
-      bounds: { left: 0, right: 80, top: 0, bottom: 40 },
+      bounds: { left: 0, right: nodeWidth, top: 0, bottom: nodeHeight },
     });
     await flush();
-    assert.equal(graph.shadowRoot?.activeElement, node);
-    assert.equal(graph.getAttribute("aria-activedescendant"), "a");
-    const activate = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, composed: true });
-    let clicked = 0;
-    graph.addEventListener("flow-node-click", () => {
-      clicked += 1;
+    assert.equal(node.shadowRoot?.activeElement, control);
+    const origins: unknown[] = [];
+    graph.addEventListener("flow-node-click", (event) => {
+      if (event instanceof CustomEvent) origins.push(event.detail.originalEvent);
     });
-    node.dispatchEvent(activate);
+    const activate = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, composed: true });
+    control.dispatchEvent(activate);
     await flush();
     const activated = 1;
-    assert.equal(activate.defaultPrevented, true);
-    assert.equal(clicked, activated);
+    assert.equal(activate.defaultPrevented, keyConsumed);
+    assert.equal(origins.length, activated);
+    assert.deepEqual(origins[0], { type: "keydown", key: "Enter" });
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, composed: true });
+    control.dispatchEvent(space);
+    await flush();
+    const spaceActivated = 2;
+    assert.equal(space.defaultPrevented, keyConsumed);
+    assert.equal(origins.length, spaceActivated);
+    assert.deepEqual(origins[1], { type: "keydown", key: " " });
     graph.remove();
   });
 });
