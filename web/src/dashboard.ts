@@ -46,7 +46,6 @@ const dashboardCommands = {
 const dashboardCompletions = {
   "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
-  "dashboard.stream.canceled": { name: "dashboard.stream.canceled", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
@@ -441,11 +440,6 @@ function failCollectorUrl(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm
   controllerOf(instance)?.applyError("collector url is not allowed");
 }
 
-function applyStreamCanceled(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const reason = stringField({ event, key: "reason" });
-  controllerOf(instance)?.applyError(reason === "stale" ? "stream canceled" : (reason ?? "stream canceled"));
-}
-
 function commandActorFromEvent(event: hsm.Event): Command | null {
   if (!hsm.isRecord(event.data) || !(event.data["command"] instanceof Command)) return null;
   return event.data["command"];
@@ -493,13 +487,15 @@ const dashboardModel = hsm.define(
       hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
       hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("live/sourceCheck"), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("live/replay/paused"), hsm.effect(enterReplay)),
-      hsm.transition(
-        hsm.on("dashboard.replay.play"),
-        hsm.guard(hasPlayableReplay),
-        hsm.target("live/replay/playing"),
-        hsm.effect(playReplay),
+      hsm.state(
+        "idle",
+        hsm.transition(
+          hsm.on("dashboard.replay.play"),
+          hsm.guard(hasPlayableReplay),
+          hsm.target("../live/replay/playing"),
+          hsm.effect(playReplay),
+        ),
       ),
-      hsm.state("idle"),
       hsm.state(
         "live",
         hsm.initial(hsm.target("sourceCheck")),
@@ -518,11 +514,6 @@ const dashboardModel = hsm.define(
           hsm.activity(streamLive),
           hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
           hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
-          hsm.transition(
-            hsm.on("dashboard.stream.canceled"),
-            hsm.target("../../error"),
-            hsm.effect(applyStreamCanceled),
-          ),
         ),
         hsm.state(
           "replay",
@@ -533,14 +524,17 @@ const dashboardModel = hsm.define(
           hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
           hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
           hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
-          hsm.state(
-            "paused",
-            hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
+          hsm.transition(
+            hsm.on("dashboard.replay.play"),
+            hsm.guard(hasPlayableReplay),
+            hsm.target("playing"),
+            hsm.effect(playReplay),
           ),
+          hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("paused"), hsm.effect(pauseReplay)),
+          hsm.state("paused"),
           hsm.state(
             "playing",
             hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay)),
-            hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("../paused"), hsm.effect(pauseReplay)),
           ),
         ),
       ),
@@ -1004,34 +998,33 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Inputs: activity `ctx` and the `dashboard.source.selected` /
    * `dashboard.replay.live` event whose data already contains `source` and
    * `origin` (producer-stamped; this method does not read instance fields).
-   * Outputs: `dashboard.load.completed` / `dashboard.model.published` products,
-   * `dashboard.load.failed` for stream errors, or `dashboard.stream.canceled`
-   * when the activity is canceled. Ownership: this dashboard owns the
-   * subscription and closes it on activity exit. Lifetime: one viewing
-   * activity. Concurrency: one stream per viewing; overlapping viewing is
-   * prevented by topology. Classification: external-system.
+   * Outputs: `dashboard.load.completed` / `dashboard.model.published` products
+   * and `dashboard.load.failed` for stream errors. Leaving viewing (replay.enter,
+   * reset, detach, new source) cancels the stream by exiting this activity.
+   * Ownership: this dashboard owns the subscription and closes it on activity
+   * exit. Lifetime: one viewing activity. Concurrency: one stream per viewing;
+   * overlapping viewing is prevented by topology. Classification: external-system.
    */
   async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
     const source = sourceFromEvent(args.event);
     const origin = stringField({ event: args.event, key: "origin" });
     if (source === null || source.kind !== "stream" || origin === null) {
       await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.stream.canceled"],
-        data: { reason: "stale" },
+        event: dashboardCompletions["dashboard.load.failed"],
+        data: { message: "no otel stream selected" },
       })).catch(hsm.catchFailure(this));
       return;
     }
     const url = collectorUrl({ requested: source.url, origin });
     if (url === null) {
       await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.stream.canceled"],
-        data: { reason: "stale" },
+        event: dashboardCompletions["dashboard.load.failed"],
+        data: { message: "collector url is not allowed" },
       })).catch(hsm.catchFailure(this));
       return;
     }
     const ctx = args.ctx;
     let subscription: { close(): void } | null = null;
-    let dropped = false;
     const drop = (): void => {
       subscription?.close();
       subscription = null;
@@ -1047,48 +1040,27 @@ export class Dashboard extends hsm.from(HTMLElement) {
         onDone();
       }
     });
-    const stale = (): void => {
-      if (dropped) return;
-      dropped = true;
-      drop();
-      void this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.stream.canceled"],
-        data: { reason: "stale" },
-      })).catch(hsm.catchFailure(this));
-    };
     subscription = this.connectStream(url, {
       onSnapshot: (batch) => {
-        if (ctx.done) {
-          stale();
-          return;
-        }
+        if (ctx.done) return;
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "replace",
         } })).catch(hsm.catchFailure(this));
       },
       onSpans: (batch) => {
-        if (ctx.done) {
-          stale();
-          return;
-        }
+        if (ctx.done) return;
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "append",
         } })).catch(hsm.catchFailure(this));
       },
       onModels: (models) => {
-        if (ctx.done) {
-          stale();
-          return;
-        }
+        if (ctx.done) return;
         void this.dispatch("dashboard.model.published", { models }).catch(hsm.catchFailure(this));
       },
       onError: (message) => {
-        if (ctx.done) {
-          stale();
-          return;
-        }
+        if (ctx.done) return;
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.failed"], data: {
           message,
         } })).catch(hsm.catchFailure(this));

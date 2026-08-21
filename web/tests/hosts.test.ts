@@ -847,8 +847,9 @@ describe("companion-style HSM controllers", () => {
         dataJson: "",
         signal: abort.signal,
       });
+      const fetchNotEntered = false;
       assert.equal(result.result, "canceled");
-      assert.equal(fetched, false);
+      assert.equal(fetched, fetchNotEntered);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1043,7 +1044,7 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
   });
 
-  test("late stream batches after leaving viewing dispatch stream canceled", async () => {
+  test("late stream batches after leaving viewing do not dispatch stream canceled", async () => {
     const captured: { handlers?: OtelStreamHandlers } = {};
     const kinds: string[] = [];
     const dashboard = bootDashboard({
@@ -1062,8 +1063,34 @@ describe("companion-style HSM controllers", () => {
     await dashboard.dispatch("dashboard.source.selected", streamView());
     await dashboard.dispatch("dashboard.replay.enter");
     captured.handlers?.onSpans({ observeSpans: [], skipped: 0 });
-    await waitFor(() => kinds.includes("dashboard.stream.canceled"));
-    assert.equal(kinds.includes("dashboard.load.failed"), false);
+    await Promise.resolve();
+    await Promise.resolve();
+    const streamCanceled = false;
+    const loadFailed = false;
+    assert.equal(kinds.includes("dashboard.stream.canceled"), streamCanceled);
+    assert.equal(kinds.includes("dashboard.load.failed"), loadFailed);
+    assert.match(dashboard.snapshot().statePath, /\/replay\//);
+    await dashboard.stop();
+  });
+
+  test("replay play while viewing stays in viewing", async () => {
+    const dashboard = bootDashboard({
+      connectStream: () => ({ close(): void { return; } }),
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.match(dashboard.snapshot().statePath, /\/viewing$/);
+    const request: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const parsed = parseExportTraceServiceRequest(request);
+    assert.ok(parsed !== null);
+    await dispatchLoad(dashboard, {
+      mode: "replace",
+      skipped: parsed.skipped,
+      observeSpans: parsed.spans,
+    });
+    await dashboard.dispatch("dashboard.replay.play");
+    assert.match(dashboard.snapshot().statePath, /\/viewing$/);
+    const replayNotPlaying = false;
+    assert.equal(dashboard.snapshot().replay.playing, replayNotPlaying);
     await dashboard.stop();
   });
 
