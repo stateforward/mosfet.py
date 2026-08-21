@@ -46,6 +46,7 @@ const dashboardCompletions = {
   "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
+  "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
 } as const;
 
 export type CommandResult = {
@@ -246,16 +247,12 @@ function applyModelsAt(args: { instance: hsm.Instance; event: hsm.Event; replay:
   controllerOf(args.instance)?.applyModels({ models, replay: args.replay });
 }
 
-function applySend(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const controller = controllerOf(instance);
-  if (controller === null) {
-    return;
-  }
-  void controller.sendCommand({
-    ctx: controller.context(),
-    eventName: stringField(event, "eventName"),
-    dataJson: stringField(event, "dataJson"),
-  }).catch(hsm.catchFailure(controller));
+function forwardCommand(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  controllerOf(instance)?.forwardCommand(event);
+}
+
+function attachCommand(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.attachCommand();
 }
 
 function applyCommandCompleted(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -264,6 +261,12 @@ function applyCommandCompleted(_ctx: hsm.Context, instance: hsm.Instance, event:
 
 function applyCommandFailed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   controllerOf(instance)?.rememberCommand(commandResultFromEvent(event) ?? { result: "error", detail: "command request failed" });
+}
+
+function applyCommandCanceled(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const result = commandResultFromEvent(event);
+  if (result === null) return;
+  controllerOf(instance)?.rememberCommand({ result: "error", detail: result.detail, ...(result.id !== undefined ? { id: result.id } : {}) });
 }
 
 function commandResultFromEvent(event: hsm.Event): (CommandResult & { id?: number }) | null {
@@ -332,7 +335,32 @@ async function streamLive(ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
   if (controller === null) {
     return;
   }
-  await controller.streamSource(ctx, event);
+  await controller.streamSource({ ctx, event });
+}
+
+function hasPlayableReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): boolean {
+  return controllerOf(instance)?.hasPlayableReplay() === true;
+}
+
+function hasStreamSource(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+  const source = sourceFromEvent(event) ?? controllerOf(instance)?.selectedSource() ?? null;
+  return source !== null && source.kind === "stream";
+}
+
+function streamUrlAllowed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+  const controller = controllerOf(instance);
+  if (controller === null) return false;
+  const source = sourceFromEvent(event) ?? controller.selectedSource();
+  if (source === null || source.kind !== "stream") return false;
+  return collectorUrl({ requested: source.url, origin: controller.origin }) !== null;
+}
+
+function failNoStream(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.applyError("no otel stream selected");
+}
+
+function failCollectorUrl(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.applyError("collector url is not allowed");
 }
 
 function replayStep(): number {
@@ -345,32 +373,50 @@ const dashboardModel = hsm.define(
   hsm.state(
     "session",
     hsm.initial(hsm.target("idle")),
+    hsm.entry(attachCommand),
     hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
-    hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
+    hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(forwardCommand)),
     hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
     hsm.transition(hsm.on("dashboard.command.failed"), hsm.effect(applyCommandFailed)),
+    hsm.transition(hsm.on("dashboard.command.canceled"), hsm.effect(applyCommandCanceled)),
     hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
     hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
     hsm.state(
       "idle",
-      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live/sourceCheck"), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live/replay/paused"), hsm.effect(enterReplay)),
-      hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../live/replay/playing"), hsm.effect(playReplay)),
+      hsm.transition(
+        hsm.on("dashboard.replay.play"),
+        hsm.guard(hasPlayableReplay),
+        hsm.target("../live/replay/playing"),
+        hsm.effect(playReplay),
+      ),
     ),
     hsm.state(
       "live",
       hsm.initial(hsm.target("viewing")),
       hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
-      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("."), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("sourceCheck"), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      hsm.choice(
+        "sourceCheck",
+        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
+        hsm.transition(hsm.guard(hasStreamSource), hsm.target("../error"), hsm.effect(failCollectorUrl)),
+        hsm.transition(hsm.target("../error"), hsm.effect(failNoStream)),
+      ),
       hsm.state(
         "viewing",
         hsm.activity(streamLive),
         hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
         hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
         hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../replay/paused"), hsm.effect(enterReplay)),
-        hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../replay/playing"), hsm.effect(playReplay)),
+        hsm.transition(
+          hsm.on("dashboard.replay.play"),
+          hsm.guard(hasPlayableReplay),
+          hsm.target("../replay/playing"),
+          hsm.effect(playReplay),
+        ),
       ),
       hsm.state(
         "replay",
@@ -384,7 +430,12 @@ const dashboardModel = hsm.define(
         hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("paused"), hsm.effect(enterReplay)),
         hsm.state(
           "paused",
-          hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../playing"), hsm.effect(playReplay)),
+          hsm.transition(
+            hsm.on("dashboard.replay.play"),
+            hsm.guard(hasPlayableReplay),
+            hsm.target("../playing"),
+            hsm.effect(playReplay),
+          ),
           hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
         ),
         hsm.state(
@@ -396,7 +447,7 @@ const dashboardModel = hsm.define(
     ),
     hsm.state(
       "error",
-      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live"), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("../live/sourceCheck"), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
       hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../live/replay/paused"), hsm.effect(enterReplay)),
     ),
@@ -417,6 +468,108 @@ export function isDashboardEventName(value: string): value is DashboardEventName
   return Object.hasOwn(dashboardCommands, value);
 }
 
+function commandNameLegal(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  if (!hsm.isRecord(event.data) || typeof event.data["eventName"] !== "string") return false;
+  const name = event.data["eventName"].trim();
+  return name.length > 0 && COMMAND_EVENT_NAME.test(name);
+}
+
+class Command extends hsm.Instance {
+  static readonly sendEvent = { name: "command.send", kind: hsm.Kinds.Event } as const;
+  static readonly completedEvent = dashboardCompletions["dashboard.command.completed"];
+  static readonly failedEvent = dashboardCompletions["dashboard.command.failed"];
+  static readonly canceledEvent = dashboardCompletions["dashboard.command.canceled"];
+
+  static readonly model = hsm.define(
+    "Command",
+    hsm.initial(hsm.target("idle")),
+    hsm.choice(
+      "validate",
+      hsm.transition(hsm.guard(commandNameLegal), hsm.target("sending")),
+      hsm.transition(hsm.target("idle"), hsm.effect(Command.reject)),
+    ),
+    hsm.state(
+      "idle",
+      hsm.transition(hsm.on(Command.sendEvent.name), hsm.target("../validate")),
+    ),
+    hsm.state(
+      "sending",
+      hsm.activity(Command.post),
+      hsm.transition(hsm.on(Command.sendEvent.name), hsm.target("../validate")),
+      hsm.transition(hsm.on(Command.completedEvent.name), hsm.target("../idle")),
+      hsm.transition(hsm.on(Command.failedEvent.name), hsm.target("../idle")),
+      hsm.transition(hsm.on(Command.canceledEvent.name), hsm.target("../idle")),
+    ),
+  );
+
+  readonly post: CommandPost;
+
+  constructor(args: { post: CommandPost }) {
+    super();
+    this.post = args.post;
+  }
+
+  static reject(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof Command)) return;
+    const name = stringField(event, "eventName") ?? "";
+    const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
+    const detail = name.trim().length === 0 ? "event_name is required" : "event_name is not an allowed command";
+    void hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent({
+        event: Command.failedEvent,
+        data: { result: "error", detail, ...(id !== undefined ? { id } : {}) },
+      }),
+    }).catch(hsm.catchFailure());
+  }
+
+  static async post(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
+    if (!(instance instanceof Command)) return;
+    const name = (stringField(event, "eventName") ?? "").trim();
+    const payload = stringField(event, "dataJson") ?? "";
+    const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
+    const abort = new AbortController();
+    const onDone = (): void => {
+      abort.abort();
+    };
+    ctx.addEventListener("done", onDone);
+    if (ctx.done) abort.abort();
+    const finish = async (eventKind: typeof Command.completedEvent | typeof Command.failedEvent | typeof Command.canceledEvent, result: CommandResult): Promise<void> => {
+      await hsm.notifyOwner({
+        instance,
+        event: hsm.typedEvent({
+          event: eventKind,
+          data: { ...result, ...(id !== undefined ? { id } : {}) },
+        }),
+      });
+    };
+    try {
+      if (ctx.done || abort.signal.aborted) {
+        await finish(Command.canceledEvent, { result: "error", detail: "command canceled" });
+        return;
+      }
+      const result = await instance.post({ eventName: name, dataJson: payload, signal: abort.signal });
+      if (ctx.done || abort.signal.aborted) {
+        await finish(Command.canceledEvent, { result: "error", detail: "command canceled" });
+        return;
+      }
+      if (result.result === "error") {
+        await finish(Command.failedEvent, result);
+        return;
+      }
+      await finish(Command.completedEvent, result);
+    } catch (error) {
+      if (ctx.done || abort.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        await finish(Command.canceledEvent, { result: "error", detail: "command canceled" });
+        return;
+      }
+      await finish(Command.failedEvent, { result: "error", detail: "command request failed" });
+    } finally {
+      ctx.removeEventListener("done", onDone);
+    }
+  }
+}
+
 export class Dashboard extends hsm.from(HTMLElement) {
   #source: OtelSource | null = null;
   #spans: ObserveSpan[] = [];
@@ -432,6 +585,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
   #visibleMachines = new Map<string, boolean>();
   origin = "";
   #commandSeq = 0;
+  #command: Command | null = null;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
   postCommand: CommandPost = postCommandHttp;
@@ -481,13 +635,48 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    await super.dispatch(hsm.typedEvent(dashboardCommands[eventName], data));
+    await super.dispatch(
+      data === undefined
+        ? hsm.typedEvent({ event: dashboardCommands[eventName] })
+        : hsm.typedEvent({ event: dashboardCommands[eventName], data }),
+    );
     this.#emit();
     return this.snapshot();
   }
 
   override async stop(): Promise<void> {
+    const command = this.#command;
+    this.#command = null;
+    if (command !== null) await hsm.stop(command);
     await hsm.stop(this);
+  }
+
+  attachCommand(): void {
+    if (this.#command !== null) return;
+    this.#command = hsm.start(this.context(), new Command({ post: (command) => this.postCommand(command) }), Command.model);
+  }
+
+  selectedSource(): OtelSource | null {
+    return this.#source;
+  }
+
+  hasPlayableReplay(): boolean {
+    return this.#replayEvents.length > 0 && this.#replayPosition < this.#replayEvents.length;
+  }
+
+  forwardCommand(event: hsm.Event): void {
+    const command = this.#command;
+    if (command === null) return;
+    const name = (stringField(event, "eventName") ?? this.#commandEventName).trim();
+    const payload = stringField(event, "dataJson") ?? this.#commandDataJson;
+    this.#commandEventName = name;
+    this.#commandDataJson = payload;
+    const id = this.#commandSeq + 1;
+    this.#commandSeq = id;
+    void command.dispatch(hsm.typedEvent({
+      event: Command.sendEvent,
+      data: { eventName: name, dataJson: payload, id },
+    })).catch(hsm.catchFailure(this));
   }
 
   applySource(source: OtelSource): void {
@@ -565,12 +754,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   playReplay(): void {
-    if (this.#replayEvents.length === 0) {
-      this.enterReplay();
-    }
-    if (this.#replayEvents.length === 0 || this.#replayPosition >= this.#replayEvents.length) {
-      return;
-    }
     this.#emit();
   }
 
@@ -634,70 +817,12 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  async sendCommand(args: {
-    ctx: hsm.Context;
-    eventName: string | null;
-    dataJson: string | null;
-  }): Promise<void> {
-    const name = (args.eventName ?? this.#commandEventName).trim();
-    const payload = args.dataJson ?? this.#commandDataJson;
-    this.#commandEventName = name;
-    this.#commandDataJson = payload;
-    const id = this.#commandSeq + 1;
-    this.#commandSeq = id;
-    const fail = (detail: string): void => {
-      void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.failed"], {
-        result: "error",
-        detail,
-        id,
-      })).catch(hsm.catchFailure(this));
-    };
-    if (name.length === 0) {
-      fail("event_name is required");
-      return;
-    }
-    if (!COMMAND_EVENT_NAME.test(name)) {
-      fail("event_name is not an allowed command");
-      return;
-    }
-    const abort = new AbortController();
-    const onDone = (): void => {
-      abort.abort();
-    };
-    args.ctx.addEventListener("done", onDone);
-    if (args.ctx.done) abort.abort();
-    try {
-      const result = await this.postCommand({ eventName: name, dataJson: payload, signal: abort.signal });
-      if (args.ctx.done || abort.signal.aborted) return;
-      if (result.result === "error") {
-        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.failed"], { ...result, id })).catch(hsm.catchFailure(this));
-        return;
-      }
-      void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.command.completed"], { ...result, id })).catch(hsm.catchFailure(this));
-    } catch (error) {
-      if (args.ctx.done || abort.signal.aborted) return;
-      if (error instanceof Error && error.name === "AbortError") return;
-      fail("command request failed");
-    } finally {
-      args.ctx.removeEventListener("done", onDone);
-    }
-  }
-
-  async streamSource(ctx: hsm.Context, event: hsm.Event): Promise<void> {
-    const source = sourceFromEvent(event) ?? this.#source;
-    if (source === null || source.kind !== "stream") {
-      await this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
-        message: "no otel stream selected",
-      }));
-      return;
-    }
+  async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
+    const source = sourceFromEvent(args.event) ?? this.#source;
+    if (source === null || source.kind !== "stream") return;
     const url = collectorUrl({ requested: source.url, origin: this.origin });
-    if (url === null) {
-      await this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
-        message: "collector url is not allowed",
-      }));
-      return;
-    }
+    if (url === null) return;
+    const ctx = args.ctx;
     const finished = new Promise<void>((resolve) => {
       const onDone = (): void => {
         ctx.removeEventListener("done", onDone);
@@ -713,19 +838,19 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.completed"], {
+        void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "replace",
-        })).catch(hsm.catchFailure(this));
+        } })).catch(hsm.catchFailure(this));
       },
       onSpans: (batch) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.completed"], {
+        void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
           ...batch,
           mode: "append",
-        })).catch(hsm.catchFailure(this));
+        } })).catch(hsm.catchFailure(this));
       },
       onModels: (models) => {
         if (ctx.done) {
@@ -737,9 +862,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch(hsm.typedEvent(dashboardCompletions["dashboard.load.failed"], {
+        void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.failed"], data: {
           message,
-        })).catch(hsm.catchFailure(this));
+        } })).catch(hsm.catchFailure(this));
       },
     });
     try {

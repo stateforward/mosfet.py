@@ -28,7 +28,18 @@ class FakeElement {
   readonly childNodes: FakeElement[] = [];
   readonly attributes = new Map<string, string>();
   readonly dataset: Record<string, string> = {};
-  readonly style: Record<string, string> = {};
+  readonly style: Record<string, string> & {
+    setProperty(name: string, value: string): void;
+    getPropertyValue(name: string): string;
+  } = Object.assign(Object.create(null) as Record<string, string>, {
+    setProperty(this: Record<string, string>, name: string, value: string): void {
+      this[name] = value;
+    },
+    getPropertyValue(this: Record<string, string>, name: string): string {
+      const value = this[name];
+      return typeof value === "string" ? value : "";
+    },
+  });
   readonly classList = new FakeClassList();
   readonly part = { add(_token: string): void { return; } };
   parentNode: FakeElement | null = null;
@@ -199,6 +210,12 @@ class FakeElement {
 
   get clientHeight(): number {
     return 600;
+  }
+
+  tabIndex = 0;
+
+  focus(): void {
+    return;
   }
 }
 
@@ -372,6 +389,11 @@ if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined"
     PointerEvent: FakePointerEvent,
     WheelEvent: FakeWheelEvent,
     KeyboardEvent: FakeKeyboardEvent,
+    getComputedStyle: (element: { style?: { getPropertyValue?: (name: string) => string } }): { getPropertyValue(name: string): string } => ({
+      getPropertyValue(name: string): string {
+        return element.style?.getPropertyValue?.(name) ?? "";
+      },
+    }),
     requestAnimationFrame: (callback: (time: number) => void): number => {
       const handle = globalThis.setTimeout(() => callback(0), 0);
       return typeof handle === "number" ? handle : 0;

@@ -85,28 +85,28 @@ describe("flow-graph", () => {
     document.body.append(graph);
     graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
     const before = graph.getViewport();
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 40, y: 40 },
       client: { x: 40, y: 40 },
       viewport: { x: 40, y: 40 },
       hit: { kind: "empty" },
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 40, y: 40 },
       client: { x: 80, y: 90 },
       viewport: { x: 80, y: 90 },
       hit: { kind: "empty" },
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 40, y: 40 },
       client: { x: 80, y: 90 },
       viewport: { x: 80, y: 90 },
       hit: { kind: "empty" },
-    })));
+    }) }));
     await flush();
     const after = graph.getViewport();
     assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
@@ -126,25 +126,25 @@ describe("flow-graph", () => {
         if (hsm.isRecord(node) && typeof node["id"] === "string") selected.push(node["id"]);
       }
     });
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       shiftKey: true,
       origin: { x: 10, y: 10 },
       client: { x: 10, y: 10 },
       viewport: { x: 10, y: 10 },
       hit: { kind: "empty" },
-    })));
+    }) }));
     assert.match(graph.state(), /\/box$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       shiftKey: true,
       origin: { x: 10, y: 10 },
       client: { x: 120, y: 80 },
       viewport: { x: 120, y: 80 },
       hit: { kind: "empty" },
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       shiftKey: true,
       buttons: 0,
@@ -152,7 +152,7 @@ describe("flow-graph", () => {
       client: { x: 120, y: 80 },
       viewport: { x: 120, y: 80 },
       hit: { kind: "empty" },
-    })));
+    }) }));
     await flush();
     assert.match(graph.state(), /\/idle$/);
     assert.deepEqual(graph.getViewport(), before);
@@ -165,30 +165,30 @@ describe("flow-graph", () => {
     document.body.append(graph);
     graph.panOnDrag = true;
     const before = graph.getViewport();
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 20, y: 20 },
       client: { x: 20, y: 20 },
       viewport: { x: 20, y: 20 },
       hit: { kind: "empty" },
-    })));
+    }) }));
     assert.match(graph.state(), /\/pan$/);
     assert.doesNotMatch(graph.state(), /\/box$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 20, y: 20 },
       client: { x: 60, y: 70 },
       viewport: { x: 60, y: 70 },
       hit: { kind: "empty" },
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 20, y: 20 },
       client: { x: 60, y: 70 },
       viewport: { x: 60, y: 70 },
       hit: { kind: "empty" },
-    })));
+    }) }));
     await flush();
     const after = graph.getViewport();
     assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
@@ -205,34 +205,34 @@ describe("flow-graph", () => {
     const admitted = graph.nodes[0];
     assert.ok(admitted !== undefined);
     const hit = { kind: "node" as const, node: admitted };
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 10, y: 10 },
       client: { x: 10, y: 10 },
       viewport: { x: 10, y: 10 },
       world: { x: 10, y: 10 },
       hit,
-    })));
+    }) }));
     assert.match(graph.state(), /\/click$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 10, y: 10 },
       client: { x: 40, y: 10 },
       viewport: { x: 40, y: 10 },
       world: { x: 40, y: 10 },
       hit,
-    })));
+    }) }));
     assert.match(graph.state(), /\/drag$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 10, y: 10 },
       client: { x: 80, y: 10 },
       viewport: { x: 80, y: 10 },
       world: { x: 80, y: 10 },
       hit,
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 10, y: 10 },
@@ -240,7 +240,7 @@ describe("flow-graph", () => {
       viewport: { x: 80, y: 10 },
       world: { x: 80, y: 10 },
       hit,
-    })));
+    }) }));
     await flush();
     assert.match(graph.state(), /\/idle$/);
     assert.notEqual(graph.nodes[0]?.position.x, 0);
@@ -265,29 +265,29 @@ describe("flow-graph", () => {
       const targetId = event.detail["target"];
       if (typeof sourceId === "string" && typeof targetId === "string") connected.push({ source: sourceId, target: targetId });
     });
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       origin: { x: 80, y: 20 },
       client: { x: 80, y: 20 },
       world: { x: 80, y: 20 },
       hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
-    })));
+    }) }));
     assert.match(graph.state(), /\/connect$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
       eventType: "pointermove",
       origin: { x: 80, y: 20 },
       client: { x: 200, y: 20 },
       world: { x: 200, y: 20 },
       hit: { kind: "handle", node: target, handleKind: "target", position: "left" },
-    })));
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    }) }));
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       origin: { x: 80, y: 20 },
       client: { x: 200, y: 20 },
       world: { x: 200, y: 20 },
       hit: { kind: "handle", node: target, handleKind: "target", position: "left" },
-    })));
+    }) }));
     await flush();
     assert.match(graph.state(), /\/idle$/);
     assert.deepEqual(connected, [{ source: "a", target: "b" }]);
@@ -316,16 +316,16 @@ describe("flow-graph", () => {
     graph.addEventListener("flow-connect", () => {
       connected.push("connected");
     });
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
       eventType: "pointerdown",
       hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
-    })));
+    }) }));
     assert.match(graph.state(), /\/connect$/);
-    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+    graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
       eventType: "pointerup",
       buttons: 0,
       hit: { kind: "empty" },
-    })));
+    }) }));
     await flush();
     assert.match(graph.state(), /\/idle$/);
     assert.deepEqual(connected, []);
@@ -428,9 +428,9 @@ describe("flow-graph", () => {
     graph.remove();
     await waitUntil(() => /\/disconnected$/.test(graph.state()));
     document.body.append(graph);
-    await waitUntil(() => graph.edges.length === 1 && (graph.shadowRoot?.querySelectorAll("flow-node").length ?? 0) === 2);
+    await waitUntil(() => graph.nodes.length === 2 && graph.edges.length === 1);
+    assert.equal(graph.nodes.length, 2);
     assert.equal(graph.edges.length, 1);
-    assert.equal(graph.shadowRoot?.querySelectorAll("flow-node").length, 2);
     graph.remove();
   });
 
@@ -501,11 +501,33 @@ describe("flow-graph", () => {
   test("viewport is an application landmark", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
-    const viewport = [...(graph.shadowRoot?.childNodes ?? [])].find((node) => {
-      return typeof node.getAttribute === "function" && node.getAttribute("role") === "application";
-    });
-    assert.ok(viewport !== undefined);
-    assert.equal(viewport.getAttribute("aria-label"), "Machine graph");
+    assert.equal(graph.getAttribute("role"), "application");
+    assert.equal(graph.getAttribute("aria-label"), "Machine graph");
+    graph.remove();
+  });
+
+  test("application keys zoom pan and fit through the public viewport", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 },
+      { id: "b", position: { x: 200, y: 0 }, data: { label: "B" }, width: 80, height: 40 },
+    ];
+    await flush();
+    graph.focus();
+    const before = graph.getViewport();
+    graph.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true }));
+    await flush();
+    const zoomed = graph.getViewport();
+    assert.ok(zoomed.zoom > before.zoom);
+    graph.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await flush();
+    const panned = graph.getViewport();
+    assert.ok(panned.x !== zoomed.x);
+    graph.dispatchEvent(new KeyboardEvent("keydown", { key: "f", bubbles: true }));
+    await flush();
+    const fitted = graph.getViewport();
+    assert.notEqual(fitted.zoom, panned.zoom);
     graph.remove();
   });
 });

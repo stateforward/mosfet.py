@@ -158,7 +158,11 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    await super.dispatch(hsm.typedEvent(sourceCommands[eventName], data));
+    await super.dispatch(
+      data === undefined
+        ? hsm.typedEvent({ event: sourceCommands[eventName] })
+        : hsm.typedEvent({ event: sourceCommands[eventName], data }),
+    );
     this.#emit();
     return this.snapshot();
   }
@@ -189,7 +193,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
 
   async connect(event: hsm.Event): Promise<void> {
     const fail = (message: string): hsm.Completion => {
-      return this.dispatch(hsm.typedEvent(sourceCompletions["source.connect.failed"], { message }));
+      return this.dispatch(hsm.typedEvent({ event: sourceCompletions["source.connect.failed"], data: { message } }));
     };
     if (!hsm.isRecord(event.data) || typeof event.data["origin"] !== "string") {
       await fail("connect failed");
@@ -205,7 +209,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
       return;
     }
     const source = streamSource(url);
-    await this.dispatch(hsm.typedEvent(sourceCompletions["source.connected"], { source }));
+    await this.dispatch(hsm.typedEvent({ event: sourceCompletions["source.connected"], data: { source } }));
   }
 
   #emit(): void {

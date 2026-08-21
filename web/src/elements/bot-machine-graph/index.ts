@@ -1,7 +1,7 @@
 import * as hsm from "../../hsm.ts";
 
 import { FlowGraph, type NodeClickDetail } from "../../flow/index.ts";
-import { Graph } from "../../machine-graph.ts";
+import { copyGraphs, Graph } from "../../machine-graph.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
 import { replaceStyles } from "../styles.ts";
 import { flowModelFromGraphs, focusBoundsForMachine, type FlowGraphModel } from "./flow-model.ts";
@@ -95,29 +95,32 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   get graphs(): readonly MachineGraph[] {
-    return this.#held.map((graph) => ({ ...graph, nodes: [...graph.nodes], edges: [...graph.edges] }));
+    return copyGraphs(this.#held);
   }
 
   set graphs(value: readonly MachineGraph[]) {
-    this.#live(hsm.typedEvent(BotMachineGraph.graphsEvent, { graphs: [...value] } satisfies GraphsAdmitData));
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: [...value] } satisfies GraphsAdmitData }));
   }
 
   fit(): void {
-    this.#live(hsm.typedEvent(BotMachineGraph.fitEvent));
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.fitEvent }));
   }
 
   focusMachine(machineName: string): boolean {
-    this.#live(hsm.typedEvent(BotMachineGraph.focusEvent, { machineName } satisfies FocusData));
-    return this.#held.some((graph) => graph.name === machineName);
+    const model = this.#model ?? flowModelFromGraphs(this.#held);
+    const bounds = focusBoundsForMachine(this.#held, machineName, model);
+    if (bounds === null) return false;
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.focusEvent, data: { machineName } satisfies FocusData }));
+    return true;
   }
 
   connectedCallback(): void {
     hsm.start(this, BotMachineGraph.model);
-    this.#live(hsm.typedEvent(BotMachineGraph.attachEvent));
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.attachEvent }));
   }
 
   disconnectedCallback(): void {
-    this.#live(hsm.typedEvent(BotMachineGraph.detachEvent));
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.detachEvent }));
   }
 
   #live(event: hsm.DispatchEvent): void {
@@ -148,7 +151,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof BotMachineGraph)) return;
     await instance.terminateActors();
-    instance.dispatch(hsm.typedEvent(BotMachineGraph.stoppedEvent));
+    await instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.stoppedEvent }));
   }
 
   terminateActors(): Promise<void> {
@@ -160,7 +163,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   static admitGraphs(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph) || instance.#graph === null || !hsm.isRecord(event.data)) return;
-    void instance.#graph.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: event.data["graphs"] })).catch(hsm.catchFailure(instance));
+    void instance.#graph.dispatch(hsm.typedEvent({ event: Graph.setEvent, data: { graphs: event.data["graphs"] } })).catch(hsm.catchFailure(instance));
   }
 
   static needsFit(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
@@ -196,8 +199,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return;
     const machineName = event.data["machineName"];
     if (typeof machineName !== "string") return;
-    const model = instance.#model ?? flowModelFromGraphs(instance.graphs);
-    const bounds = focusBoundsForMachine(instance.graphs, machineName, model);
+    const model = instance.#model ?? flowModelFromGraphs(instance.#held);
+    const bounds = focusBoundsForMachine(instance.#held, machineName, model);
     if (bounds === null) return;
     instance.#flow.fitBounds(bounds);
     instance.#flow.focusTarget({ kind: "machine", machineName, bounds });
@@ -218,7 +221,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   #applyDrawn(graphs: readonly MachineGraph[]): void {
-    this.#held = graphs.map((graph) => ({ ...graph, nodes: [...graph.nodes], edges: [...graph.edges] }));
+    this.#held = copyGraphs(graphs);
     const model = flowModelFromGraphs(this.#held);
     this.#model = model;
     this.#flow.nodes = model.nodes;
@@ -233,7 +236,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     const path = node.data["path"];
     const machineName = node.data["machineName"];
     if (typeof path !== "string" || typeof machineName !== "string") return;
-    this.#live(hsm.typedEvent(BotMachineGraph.nodeClickEvent, {
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName,
       path,
       bounds: {
@@ -242,7 +245,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
         top: node.position.y,
         bottom: node.position.y + (node.height ?? 0),
       },
-    }));
+    } }));
   };
 
   #onEdgeClick = (event: Event): void => {
@@ -274,7 +277,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   #ensureResizeObserver(): void {
     if (this.#resizeObserver !== null || typeof ResizeObserver === "undefined") return;
-    this.#resizeObserver = new ResizeObserver(() => this.#live(hsm.typedEvent(BotMachineGraph.resizeEvent)));
+    this.#resizeObserver = new ResizeObserver(() => this.#live(hsm.typedEvent({ event: BotMachineGraph.resizeEvent })));
     this.#resizeObserver.observe(this);
   }
 }

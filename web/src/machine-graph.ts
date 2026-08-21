@@ -41,20 +41,19 @@ export class Graph extends hsm.Instance {
     ),
   );
 
-  graphs: readonly MachineGraph[] = [];
+  #graphs: readonly MachineGraph[] = [];
+
+  get graphs(): readonly MachineGraph[] {
+    return copyGraphs(this.#graphs);
+  }
 
   snapshot(): MachineGraphSnapshot {
     const statePath = this.state();
     return {
       phase: statePath.endsWith("/drawing") ? "drawing" : "empty",
       statePath,
-      graphs: copyGraphs(this.graphs),
+      graphs: copyGraphs(this.#graphs),
     };
-  }
-
-  admit(value: unknown): MachineGraphSnapshot {
-    void this.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: value })).catch(hsm.catchFailure());
-    return this.snapshot();
   }
 
   static hasGraphs(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
@@ -66,28 +65,28 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph)) return;
     const graphs = graphsFromEvent(event);
     if (graphs === null || graphs.length === 0) {
-      instance.graphs = [];
+      instance.#graphs = [];
       return;
     }
-    instance.graphs = copyGraphs(graphs);
+    instance.#graphs = copyGraphs(graphs);
   }
 
   static clear(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Graph)) return;
-    instance.graphs = [];
+    instance.#graphs = [];
   }
 
   static notifyDrawn(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-    if (!(instance instanceof Graph) || instance.graphs.length === 0) return;
-    hsm.notifyOwner({
+    if (!(instance instanceof Graph) || instance.#graphs.length === 0) return;
+    void hsm.notifyOwner({
       instance,
-      event: hsm.typedEvent(Graph.drawnEvent, { graphs: copyGraphs(instance.graphs) }),
-    });
+      event: hsm.typedEvent({ event: Graph.drawnEvent, data: { graphs: copyGraphs(instance.#graphs) } }),
+    }).catch(hsm.catchFailure());
   }
 
   static notifyCleared(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Graph)) return;
-    hsm.notifyOwner({ instance, event: hsm.typedEvent(Graph.clearedEvent) });
+    void hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Graph.clearedEvent }) }).catch(hsm.catchFailure());
   }
 }
 
@@ -116,6 +115,6 @@ function copyGraph(graph: MachineGraph): MachineGraph {
   };
 }
 
-function copyGraphs(graphs: readonly MachineGraph[]): MachineGraph[] {
+export function copyGraphs(graphs: readonly MachineGraph[]): MachineGraph[] {
   return graphs.map(copyGraph);
 }

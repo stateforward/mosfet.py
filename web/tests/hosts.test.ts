@@ -47,6 +47,11 @@ function startAdmittedGraph(): Graph {
   return hsm.start(new Graph(), Graph.model);
 }
 
+async function admitGraphs(graph: Graph, value: unknown) {
+  await graph.dispatch(hsm.typedEvent({ event: Graph.setEvent, data: { graphs: value } }));
+  return graph.snapshot();
+}
+
 function countGraphSignals(graph: Graph): { draws: string[][]; destroys: number } {
   const signals = { draws: [] as string[][], destroys: 0 };
   const inner = graph.dispatch.bind(graph);
@@ -80,7 +85,7 @@ async function dispatchLoad(
   name: "dashboard.load.completed" | "dashboard.load.failed" = "dashboard.load.completed",
 ): Promise<DashboardSnapshot> {
   const kind = name.endsWith("failed") ? hsm.Kinds.ErrorEvent : hsm.Kinds.CompletionEvent;
-  await dashboard.dispatch(hsm.typedEvent({ name, kind }, data));
+  await dashboard.dispatch(hsm.typedEvent({ event: { name, kind }, data: data }));
   return dashboard.snapshot();
 }
 
@@ -126,20 +131,20 @@ describe("companion-style HSM controllers", () => {
     const signals = countGraphSignals(graph);
     const valid = graphFor("/Demo");
 
-    const empty = graph.admit([]);
+    const empty = await admitGraphs(graph, []);
     assert.equal(empty.phase, "empty");
     assert.equal(empty.graphs.length, 0);
-    const drawing = graph.admit([valid]);
+    const drawing = await admitGraphs(graph, [valid]);
     assert.equal(drawing.phase, "drawing");
     assert.equal(signals.draws.length, 1);
-    const malformed = graph.admit([{}]);
+    const malformed = await admitGraphs(graph, [{}]);
     assert.equal(malformed.phase, "empty");
     assert.equal(malformed.graphs.length, 0);
     assert.ok(signals.destroys >= 1);
-    const malformedPayload = graph.admit("invalid");
+    const malformedPayload = await admitGraphs(graph, "invalid");
     assert.equal(malformedPayload.phase, "empty");
     assert.equal(malformedPayload.graphs.length, 0);
-    const redraw = graph.admit([valid]);
+    const redraw = await admitGraphs(graph, [valid]);
     assert.equal(redraw.phase, "drawing");
     assert.equal(signals.draws.length, 2);
     await hsm.stop(graph);
@@ -150,10 +155,10 @@ describe("companion-style HSM controllers", () => {
     const panner = hsm.start(new Panner({ world }), Panner.model);
     const graph = startAdmittedGraph();
 
-    const drawing = graph.admit([graphFor("/Demo")]);
+    const drawing = await admitGraphs(graph, [graphFor("/Demo")]);
     assert.equal(drawing.phase, "drawing");
     assert.match(drawing.statePath, /\/drawing$/);
-    panner.fit({
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: {
       bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
       metrics: {
         width: 1000,
@@ -161,13 +166,13 @@ describe("companion-style HSM controllers", () => {
         bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
         origin: { x: 0, y: 0 },
       },
-    });
-    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId: 1, point: { x: 10, y: 10 } } }));
     assert.match(panner.state(), /\/single$/);
     assert.match(graph.state(), /\/drawing$/);
-    panner.setViewport({ x: 12, y: 8, zoom: panner.viewport.zoom });
-    panner.zoom({ scale: 1.1, point: { x: 20, y: 20 } });
-    panner.panEnd({ pointerId: 1 });
+    await panner.dispatch(hsm.typedEvent({ event: Panner.viewportEvent, data: { x: 12, y: 8, zoom: panner.viewport.zoom } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.zoomEvent, data: { scale: 1.1, point: { x: 20, y: 20 } } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: 1 } }));
     assert.match(panner.state(), /\/fixed$/);
     assert.match(world.style.transform, /translate\(/);
     await hsm.stop(panner);
@@ -180,17 +185,26 @@ describe("companion-style HSM controllers", () => {
     const graph = startAdmittedGraph();
     const signals = countGraphSignals(graph);
 
-    graph.admit([graphFor("/A")]);
-    graph.admit([graphFor("/B")]);
-    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    await admitGraphs(graph, [graphFor("/A")]);
+    await admitGraphs(graph, [graphFor("/B")]);
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId: 1, point: { x: 10, y: 10 } } }));
     assert.match(panner.state(), /\/single$/);
-    graph.admit([graphFor("/C")]);
+    await admitGraphs(graph, [graphFor("/C")]);
 
     assert.deepEqual(signals.draws, [["/A"], ["/B"], ["/C"]]);
     assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
     const snap = graph.snapshot();
     (snap.graphs as unknown as Array<{ name: string }>).push({ name: "/hijack" });
     assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
+    const live = graph.graphs as unknown as Array<{ name: string; nodes: Array<{ label: string }> }>;
+    const first = live[0];
+    if (first !== undefined) {
+      first.name = "/hijacked";
+      const node = first.nodes[0];
+      if (node !== undefined) node.label = "MUT";
+    }
+    assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
+    assert.equal(graph.snapshot().graphs[0]?.nodes[0]?.label, "/C");
     await hsm.stop(panner);
     await hsm.stop(graph);
   });
@@ -205,13 +219,13 @@ describe("companion-style HSM controllers", () => {
       origin: { x: 0, y: 0 },
     };
 
-    panner.fit({ reason: "initial", bounds: metrics.bounds, metrics });
-    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { reason: "initial", bounds: metrics.bounds, metrics } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId: 1, point: { x: 10, y: 10 } } }));
     assert.match(panner.state(), /\/single$/);
-    panner.cursorMove({ pointerId: 1, point: { x: 30, y: 24 } });
-    panner.panEnd({ pointerId: 1 });
-    panner.zoom({ deltaY: -100, point: { x: 30, y: 24 } });
-    panner.fit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics });
+    await panner.dispatch(hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: 1, point: { x: 30, y: 24 } } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: 1 } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.zoomEvent, data: { deltaY: -100, point: { x: 30, y: 24 } } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics } }));
     assert.deepEqual(panner.transform, { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
     await hsm.stop(panner);
   });
@@ -229,9 +243,9 @@ describe("companion-style HSM controllers", () => {
       origin: { x: 0, y: 0 },
     };
 
-    panner.fit({ reason: "initial", bounds: metrics.bounds, metrics });
-    focuser.focus({ kind: "machine", machineName: "/Demo", bounds: { left: 0, right: 400, top: 0, bottom: 300 } });
-    panner.fit({
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { reason: "initial", bounds: metrics.bounds, metrics } }));
+    await focuser.dispatch(hsm.typedEvent({ event: Focuser.focusEvent, data: { kind: "machine", machineName: "/Demo", bounds: { left: 0, right: 400, top: 0, bottom: 300 } } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: {
       bounds: { left: 0, right: 400, top: 0, bottom: 300 },
       metrics: {
         width: 1000,
@@ -239,13 +253,13 @@ describe("companion-style HSM controllers", () => {
         bounds: { left: 0, right: 400, top: 0, bottom: 300 },
         origin: { x: 0, y: 0 },
       },
-    });
-    focuser.focus({
+    } }));
+    await focuser.dispatch(hsm.typedEvent({ event: Focuser.focusEvent, data: {
       kind: "node",
       nodePath: "/Demo/idle",
       bounds: { left: 40, right: 136, top: 80, bottom: 176 },
-    });
-    panner.fit({
+    } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: {
       bounds: { left: 40, right: 136, top: 80, bottom: 176 },
       metrics: {
         width: 1000,
@@ -253,7 +267,7 @@ describe("companion-style HSM controllers", () => {
         bounds: { left: 0, right: 400, top: 0, bottom: 300 },
         origin: { x: 0, y: 0 },
       },
-    });
+    } }));
     const nodeTransform = panner.transform;
     assert.deepEqual(nodeTransform, { scale: 1.2, pan: { x: 394.4, y: 146.4 } });
     focusKind = focuser.current?.kind ?? "";
@@ -275,11 +289,11 @@ describe("companion-style HSM controllers", () => {
       bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
       origin: { x: 0, y: 0 },
     };
-    focuser.focus({ kind: "machine", machineName: "/A", bounds: { left: 0, right: 96, top: 0, bottom: 96 } });
-    panner.fit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics });
+    await focuser.dispatch(hsm.typedEvent({ event: Focuser.focusEvent, data: { kind: "machine", machineName: "/A", bounds: { left: 0, right: 96, top: 0, bottom: 96 } } }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics } }));
     assert.deepEqual(panner.transform, { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
-    focuser.clear();
-    panner.fit({ bounds: metrics.bounds, metrics });
+    await focuser.dispatch(hsm.typedEvent({ event: Focuser.clearEvent }));
+    await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: metrics.bounds, metrics } }));
     assert.deepEqual(panner.transform, {
       scale: 600 / 656,
       pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
@@ -312,7 +326,7 @@ describe("companion-style HSM controllers", () => {
       if (event.name === Renderer.paintEvent.name) paints += 1;
       return inner(event);
     }) as Renderer["dispatch"];
-    renderer.markDirty();
+    void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     await waitFor(() => paints === 1);
     assert.match(renderer.state(), /\/clean$/);
     await hsm.stop(renderer);
@@ -326,8 +340,8 @@ describe("companion-style HSM controllers", () => {
     };
     process.on("unhandledRejection", onUnhandled);
     try {
-      graph.admit([graphFor("/Demo")]);
-      graph.admit([graphFor("/Demo")]);
+      await admitGraphs(graph, [graphFor("/Demo")]);
+      await admitGraphs(graph, [graphFor("/Demo")]);
       await hsm.stop(graph);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     } finally {
@@ -451,7 +465,7 @@ describe("companion-style HSM controllers", () => {
     assert.ok(phone !== undefined);
     const phoneBot = document.machines.find((machine) => machine.name === "/PhoneBot");
     assert.ok(phoneBot !== undefined);
-    const afterDraw = graph.admit([phone, phoneBot]);
+    const afterDraw = await admitGraphs(graph, [phone, phoneBot]);
     assert.equal(afterDraw.phase, "drawing");
     assert.ok(afterDraw.statePath.startsWith("/"));
     assert.ok(draws.includes("/Phone,/PhoneBot/active/processing"));
@@ -575,6 +589,29 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
   });
 
+  test("replay play without events stays idle", async () => {
+    const dashboard = bootDashboard();
+    const after = await dashboard.dispatch("dashboard.replay.play");
+    assert.equal(after.replay.playing, false);
+    assert.match(after.statePath, /\/idle$/);
+    await dashboard.stop();
+  });
+
+  test("empty command name fails without posting", async () => {
+    const posted: string[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted.push(command.eventName);
+        return { result: "accepted", detail: "ok" };
+      },
+    });
+    await dashboard.dispatch("dashboard.command.send", { eventName: "", dataJson: "" });
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
+    assert.deepEqual(posted, []);
+    assert.equal(dashboard.snapshot().commandResult?.detail, "event_name is required");
+    await dashboard.stop();
+  });
+
   test("send event posts the named command and records the gateway result", async () => {
     const posted: Array<{ eventName: string; dataJson: string }> = [];
     const dashboard = bootDashboard({
@@ -672,13 +709,14 @@ describe("companion-style HSM controllers", () => {
       }
       return inner(eventOrContext, data);
     }) as unknown as Dashboard["dispatch"];
-    await dashboard.dispatch(hsm.typedEvent({ name: "dashboard.command.send", kind: hsm.Kinds.Event }, {
+    await dashboard.dispatch(hsm.typedEvent({ event: { name: "dashboard.command.send", kind: hsm.Kinds.Event }, data: {
       eventName: "phone.ring",
       dataJson: "",
-    }));
+    } }));
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, ["phone.ring"]);
-    assert.ok(kinds.includes(hsm.Kinds.CompletionEvent));
+    assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
+    assert.ok(kinds.includes(hsm.Kinds.Event));
     await dashboard.stop();
   });
 

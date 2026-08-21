@@ -85,14 +85,14 @@ describe("OTEL replay", () => {
     dashboard.connectStream = () => ({ close(): void {} });
     dashboard.boot();
     await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
-    await dashboard.dispatch(hsm.typedEvent({
+    await dashboard.dispatch(hsm.typedEvent({ event: {
       name: "dashboard.load.completed",
       kind: hsm.Kinds.CompletionEvent,
-    }, {
+    }, data: {
       mode: "replace",
       skipped: 0,
       observeSpans: fixtureSpans(),
-    }));
+    } }));
 
     const entered = await dashboard.dispatch("dashboard.replay.enter");
     assert.deepEqual(entered.replay, { active: true, playing: false, position: 0, total: 5, current: null });
@@ -111,14 +111,14 @@ describe("OTEL replay", () => {
       ...last,
       attributes: { ...last.attributes, "hsm.event.name": "replay.extra" },
     }];
-    await dashboard.dispatch(hsm.typedEvent({
+    await dashboard.dispatch(hsm.typedEvent({ event: {
       name: "dashboard.load.completed",
       kind: hsm.Kinds.CompletionEvent,
-    }, {
+    }, data: {
       mode: "append",
       skipped: 0,
       observeSpans: liveBatch,
-    }));
+    } }));
     const whileReplaying = dashboard.snapshot();
     assert.equal(whileReplaying.replay.position, 1);
     assert.equal(whileReplaying.replay.total, 6);

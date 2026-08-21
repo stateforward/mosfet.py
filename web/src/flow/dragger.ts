@@ -36,18 +36,6 @@ export class Dragger extends hsm.Instance {
   #nodeId: string | null = null;
   #offset: DragPosition = { x: 0, y: 0 };
 
-  dragStart(data: DragStartData): void {
-    this.dispatch(hsm.typedEvent(Dragger.dragStartEvent, data));
-  }
-
-  dragMove(data: DragMoveData): void {
-    this.dispatch(hsm.typedEvent(Dragger.dragMoveEvent, data));
-  }
-
-  dragEnd(): void {
-    this.dispatch(hsm.typedEvent(Dragger.dragEndEvent));
-  }
-
   static startDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     const data = dragStartOf(event.data);
     if (!(instance instanceof Dragger) || data === null) return;
@@ -59,16 +47,16 @@ export class Dragger extends hsm.Instance {
     if (!(instance instanceof Dragger) || instance.#nodeId === null) return;
     const position = positionOf(hsm.isRecord(event.data) ? event.data["position"] : null);
     if (position === null) return;
-    hsm.notifyOwner({
+    void hsm.notifyOwner({
       instance,
-      event: hsm.typedEvent(Dragger.movedEvent, {
+      event: hsm.typedEvent({ event: Dragger.movedEvent, data: {
         nodeId: instance.#nodeId,
         position: {
           x: position.x - instance.#offset.x,
           y: position.y - instance.#offset.y,
         },
-      }),
-    });
+      } }),
+    }).catch(hsm.catchFailure());
   }
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {

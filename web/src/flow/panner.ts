@@ -110,30 +110,6 @@ export class Panner extends hsm.Instance {
     return { x: this.pan.x, y: this.pan.y, zoom: this.scale };
   }
 
-  panStart(data: PanPointerData): void {
-    this.dispatch(hsm.typedEvent(Panner.panStartEvent, data));
-  }
-
-  cursorMove(data: PanPointerData): void {
-    this.dispatch(hsm.typedEvent(Panner.cursorMoveEvent, data));
-  }
-
-  panEnd(data: { pointerId: number }): void {
-    this.dispatch(hsm.typedEvent(Panner.panEndEvent, data));
-  }
-
-  zoom(data: ZoomData): void {
-    this.dispatch(hsm.typedEvent(Panner.zoomEvent, data));
-  }
-
-  fit(data: FitData): void {
-    this.dispatch(hsm.typedEvent(Panner.fitEvent, data));
-  }
-
-  setViewport(viewport: ViewportData): void {
-    this.dispatch(hsm.typedEvent(Panner.viewportEvent, viewport));
-  }
-
   static startPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Panner)) return;
     const pointer = panPointerOf(event.data);
@@ -279,7 +255,10 @@ export class Panner extends hsm.Instance {
     this.pan = { ...pan };
     this.world.style.transformOrigin = "0 0";
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.scale})`;
-    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Panner.transformEvent, this.viewport) });
+    void hsm.notifyOwner({
+      instance: this,
+      event: hsm.typedEvent({ event: Panner.transformEvent, data: this.viewport }),
+    }).catch(hsm.catchFailure());
   }
 
   #setPanning(panning: boolean): void {

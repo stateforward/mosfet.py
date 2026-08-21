@@ -54,14 +54,6 @@ export class Focuser extends hsm.Instance {
     this.host = host;
   }
 
-  focus(target: FocusTarget): void {
-    this.dispatch(hsm.typedEvent(Focuser.focusEvent, target));
-  }
-
-  clear(): void {
-    this.dispatch(hsm.typedEvent(Focuser.clearEvent));
-  }
-
   static setFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Focuser)) return;
     instance.current = focusTargetOf(event.data);

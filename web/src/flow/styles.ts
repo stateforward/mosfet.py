@@ -129,6 +129,7 @@ button {
 
 export const minimapStyles = `
 :host {
+  --flow-minimap-fill: #1d2430;
   position: absolute;
   right: 0.6rem;
   bottom: 0.6rem;

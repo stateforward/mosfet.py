@@ -16,7 +16,19 @@ export class FlowMinimap extends HTMLElement {
     const root = this.attachShadow({ mode: "open" });
     applyStyles(root, minimapStyles);
     this.#canvas = document.createElement("canvas");
+    this.#canvas.part.add("canvas");
     root.append(this.#canvas);
+  }
+
+  /** Resolved `--flow-minimap-fill`, falling back to the documented default. */
+  get fillStyle(): string {
+    const inline = this.style.getPropertyValue("--flow-minimap-fill").trim();
+    if (inline.length > 0) return inline;
+    if (typeof getComputedStyle === "function") {
+      const computed = getComputedStyle(this).getPropertyValue("--flow-minimap-fill").trim();
+      if (computed.length > 0) return computed;
+    }
+    return "#1d2430";
   }
 
   draw(nodes: readonly Node[]): void {
@@ -28,7 +40,7 @@ export class FlowMinimap extends HTMLElement {
     const ctx = this.#canvas.getContext("2d");
     if (ctx === null) return;
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = "#1d2430";
+    ctx.fillStyle = this.fillStyle;
     const scale = Math.min(width / bounds.width, height / bounds.height);
     for (const node of nodes) {
       ctx.fillRect(

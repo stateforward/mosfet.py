@@ -1,6 +1,6 @@
 import * as hsm from "../hsm.ts";
 
-import type { HandleKind, HandlePosition, XYPosition } from "./types.ts";
+import type { HandlePosition, XYPosition } from "./types.ts";
 
 export type ConnectionDraft = {
   readonly source: string;
@@ -66,22 +66,6 @@ export class Connection extends hsm.Instance {
 
   #draft: ConnectionDraft | null = null;
 
-  beginFrom(data: ConnectStartData): void {
-    this.dispatch(hsm.typedEvent(Connection.startEvent, data));
-  }
-
-  cursorMove(point: XYPosition): void {
-    this.dispatch(hsm.typedEvent(Connection.moveEvent, point));
-  }
-
-  complete(data: { target: string; targetHandle?: string; kind?: HandleKind }): void {
-    this.dispatch(hsm.typedEvent(Connection.completeEvent, data));
-  }
-
-  cancel(): void {
-    this.dispatch(hsm.typedEvent(Connection.cancelEvent));
-  }
-
   static begin(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Connection) || !hsm.isRecord(event.data)) return;
     const source = event.data["source"];
@@ -138,7 +122,10 @@ export class Connection extends hsm.Instance {
       ...(typeof targetHandle === "string" ? { targetHandle } : {}),
     };
     instance.#draft = null;
-    hsm.notifyOwner({ instance, event: hsm.typedEvent(Connection.finishedEvent, completed) });
+    void hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent({ event: Connection.finishedEvent, data: completed }),
+    }).catch(hsm.catchFailure());
     instance.#emitDraft();
   }
 
@@ -149,7 +136,10 @@ export class Connection extends hsm.Instance {
   }
 
   #emitDraft(): void {
-    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Connection.draftEvent, this.#draft) });
+    void hsm.notifyOwner({
+      instance: this,
+      event: hsm.typedEvent({ event: Connection.draftEvent, data: this.#draft }),
+    }).catch(hsm.catchFailure());
   }
 }
 

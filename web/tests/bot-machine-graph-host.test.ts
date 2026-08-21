@@ -36,11 +36,21 @@ describe("bot-machine-graph flow host", () => {
     assert.equal(host.graphs[0]?.name, "/Phone");
     assert.equal(host.focusMachine("/Phone"), true);
     assert.equal(host.focusMachine("/Missing"), false);
-    host.dispatch(hsm.typedEvent(BotMachineGraph.nodeClickEvent, {
+    host.graphs = [{
+      name: "/Empty",
+      componentName: "Empty",
+      currentState: "/Empty",
+      lastEventName: "",
+      observationCount: 0,
+      nodes: [],
+      edges: [],
+    }];
+    assert.equal(host.focusMachine("/Empty"), false);
+    host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName: "/Phone",
       path: "/Phone/ready",
       bounds: { left: 0, right: 40, top: 0, bottom: 20 },
-    }));
+    } }));
     assert.match(host.state(), /\/connected/);
     host.dispatchEvent(new CustomEvent("flow-node-click", { detail: { node: {} }, bubbles: true, composed: true }));
     host.dispatchEvent(new CustomEvent("flow-node-click", {

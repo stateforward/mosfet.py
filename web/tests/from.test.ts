@@ -30,13 +30,13 @@ describe("hsm.from(HTMLElement)", () => {
     assert.equal(typeof host.dispatch, "function");
     assert.equal(typeof host.context, "function");
     assert.match(host.state(), /\/idle$/);
-    host.dispatch(hsm.typedEvent(Host.pingEvent));
+    await host.dispatch(hsm.typedEvent({ event: Host.pingEvent }));
     assert.match(host.state(), /\/active$/);
     await hsm.stop(host);
     assert.equal(host.state(), "");
     hsm.start(host, Host.model);
     assert.match(host.state(), /\/idle$/);
-    host.dispatch(hsm.typedEvent(Host.pingEvent));
+    await host.dispatch(hsm.typedEvent({ event: Host.pingEvent }));
     assert.match(host.state(), /\/active$/);
     await hsm.stop(host);
   });

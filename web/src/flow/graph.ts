@@ -249,11 +249,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     replaceStyles(this.#root, graphStyles);
+    this.tabIndex = 0;
+    this.setAttribute("role", "application");
+    this.setAttribute("aria-label", "Machine graph");
     this.#viewport = document.createElement("div");
     this.#viewport.className = "viewport";
-    this.#viewport.tabIndex = 0;
-    this.#viewport.setAttribute("role", "application");
-    this.#viewport.setAttribute("aria-label", "Machine graph");
+    this.#viewport.part.add("viewport");
     this.#world = document.createElement("div");
     this.#world.className = "world";
     this.#edgeLayer = document.createElementNS(SVG_NS, "svg");
@@ -277,7 +278,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodes(value: readonly Node[]) {
-    this.#live(hsm.typedEvent(FlowGraph.setNodesEvent, { nodes: value }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
   }
 
   get edges(): readonly Edge[] {
@@ -285,7 +286,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set edges(value: readonly Edge[]) {
-    this.#live(hsm.typedEvent(FlowGraph.setEdgesEvent, { edges: value }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
   }
 
   get nodesDraggable(): boolean {
@@ -293,7 +294,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodesDraggable(value: boolean) {
-    this.#live(hsm.typedEvent(FlowGraph.setPolicyEvent, { nodesDraggable: value }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
   }
 
   get panOnDrag(): boolean {
@@ -301,7 +302,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set panOnDrag(value: boolean) {
-    this.#live(hsm.typedEvent(FlowGraph.setPolicyEvent, { panOnDrag: value }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
   }
 
   adoptStyles(cssText: string): void {
@@ -309,23 +310,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   fitView(): void {
-    this.#live(hsm.typedEvent(FlowGraph.fitViewEvent));
+    this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
   }
 
   fitBounds(bounds: ViewportBounds): void {
-    this.#live(hsm.typedEvent(FlowGraph.fitBoundsEvent, { bounds }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.fitBoundsEvent, data: { bounds } }));
   }
 
   zoomIn(): void {
-    this.#live(hsm.typedEvent(FlowGraph.zoomInEvent));
+    this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
   }
 
   zoomOut(): void {
-    this.#live(hsm.typedEvent(FlowGraph.zoomOutEvent));
+    this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
   }
 
   setViewport(viewport: Viewport): void {
-    this.#live(hsm.typedEvent(FlowGraph.setViewportEvent, viewport));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: viewport }));
   }
 
   getViewport(): Viewport {
@@ -333,29 +334,29 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   focusTarget(target: FocusTarget): void {
-    this.#live(hsm.typedEvent(FlowGraph.focusEvent, target));
+    this.#live(hsm.typedEvent({ event: FlowGraph.focusEvent, data: target }));
   }
 
   connectedCallback(): void {
     hsm.start(this, FlowGraph.model);
-    this.#live(hsm.typedEvent(FlowGraph.attachEvent));
+    this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }
 
   disconnectedCallback(): void {
-    this.#live(hsm.typedEvent(FlowGraph.detachEvent));
+    this.#live(hsm.typedEvent({ event: FlowGraph.detachEvent }));
   }
 
   #live(event: hsm.DispatchEvent): void {
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 
-  #send(machine: hsm.Instance | null, event: hsm.DispatchEvent): void {
-    if (machine === null) return;
-    void machine.dispatch(event).catch(hsm.catchFailure(this));
+  #send(args: { machine: hsm.Instance | null; event: hsm.DispatchEvent }): void {
+    if (args.machine === null) return;
+    void args.machine.dispatch(args.event).catch(hsm.catchFailure(this));
   }
 
   #dirty(): void {
-    this.#send(this.#renderer, hsm.typedEvent(Renderer.markDirtyEvent));
+    this.#send({ machine: this.#renderer, event: hsm.typedEvent({ event: Renderer.markDirtyEvent }) });
   }
 
   #emitRejected(detail: AdmitRejectedDetail): void {
@@ -370,7 +371,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     instance.#startActors();
     instance.#listen();
-    instance.#send(instance.#renderer, hsm.typedEvent(Renderer.markDirtyEvent));
+    instance.#send({ machine: instance.#renderer, event: hsm.typedEvent({ event: Renderer.markDirtyEvent }) });
   }
 
   static onConnectedExit(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -382,7 +383,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof FlowGraph)) return;
     await instance.terminateActors();
-    instance.dispatch(hsm.typedEvent(FlowGraph.stoppedEvent));
+    await instance.dispatch(hsm.typedEvent({ event: FlowGraph.stoppedEvent }));
   }
 
   terminateActors(): Promise<void> {
@@ -449,12 +450,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "handle") return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#send(instance.#connection, hsm.typedEvent(Connection.startEvent, {
+    instance.#send({ machine: instance.#connection, event: hsm.typedEvent({ event: Connection.startEvent, data: {
       source: sample.hit.node.id,
       sourcePosition: sample.hit.position,
       start: sample.world,
       ...(sample.hit.id !== undefined ? { sourceHandle: sample.hit.id } : {}),
-    }));
+    } }) });
   }
 
   static beginBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -462,7 +463,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample === null) return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxStartEvent, sample.viewport));
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.boxStartEvent, data: sample.viewport }) });
   }
 
   static beginPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -470,93 +471,93 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const sample = pointerOf(event.data);
     if (sample === null) return;
     instance.#viewport.setPointerCapture(sample.pointerId);
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.panStartEvent, { pointerId: sample.pointerId, point: sample.viewport }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.panStartEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
   }
 
   static beginDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "node") return;
-    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragStartEvent, {
+    instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragStartEvent, data: {
       nodeId: sample.hit.node.id,
       offset: {
         x: sample.world.x - sample.hit.node.position.x,
         y: sample.world.y - sample.hit.node.position.y,
       },
-    }));
+    } }) });
   }
 
   static movePan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.cursorMoveEvent, { pointerId: sample.pointerId, point: sample.viewport }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
   }
 
   static endPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.panEndEvent, { pointerId: sample.pointerId }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: sample.pointerId } }) });
   }
 
   static moveDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragMoveEvent, { position: sample.world }));
+    instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragMoveEvent, data: { position: sample.world } }) });
   }
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#send(instance.#dragger, hsm.typedEvent(Dragger.dragEndEvent));
+    instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragEndEvent }) });
   }
 
   static moveBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxMoveEvent, sample.viewport));
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.boxMoveEvent, data: sample.viewport }) });
   }
 
   static endBox(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const box = instance.#box;
     const ids = box === null ? [] : instance.#nodes.filter((node) => nodeHitsBox(node, box, instance.#view)).map((node) => node.id);
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.boxEndEvent, { ids }));
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.boxEndEvent, data: { ids } }) });
   }
 
   static moveConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
-    instance.#send(instance.#connection, hsm.typedEvent(Connection.moveEvent, sample.world));
+    instance.#send({ machine: instance.#connection, event: hsm.typedEvent({ event: Connection.moveEvent, data: sample.world }) });
   }
 
   static completeConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "handle") return;
-    instance.#send(instance.#connection, hsm.typedEvent(Connection.completeEvent, {
+    instance.#send({ machine: instance.#connection, event: hsm.typedEvent({ event: Connection.completeEvent, data: {
       target: sample.hit.node.id,
       ...(sample.hit.id !== undefined ? { targetHandle: sample.hit.id } : {}),
-    }));
+    } }) });
   }
 
   static cancelConnect(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#send(instance.#connection, hsm.typedEvent(Connection.cancelEvent));
+    instance.#send({ machine: instance.#connection, event: hsm.typedEvent({ event: Connection.cancelEvent }) });
   }
 
   static emitNodeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.eventType !== "pointerup" || sample.hit.kind !== "node") return;
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.clickEvent, {
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
       id: sample.hit.node.id,
       kind: "node",
       additive: sample.metaKey || sample.ctrlKey,
-    }));
+    } }) });
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
       detail: { node: copyNode(sample.hit.node), originalEvent: sample.originalEvent },
       bubbles: true,
@@ -568,11 +569,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.eventType !== "pointerup" || sample.hit.kind !== "edge") return;
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.clickEvent, {
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
       id: sample.hit.edge.id,
       kind: "edge",
       additive: sample.metaKey || sample.ctrlKey,
-    }));
+    } }) });
     instance.dispatchEvent(new CustomEvent<EdgeClickDetail>("flow-edge-click", {
       detail: { edge: copyEdge(sample.hit.edge), originalEvent: sample.originalEvent },
       bubbles: true,
@@ -584,7 +585,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null || sample.metaKey || sample.ctrlKey) return;
-    instance.#send(instance.#selection, hsm.typedEvent(Selection.clearEvent));
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clearEvent }) });
   }
 
   static applyFitView(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -597,24 +598,24 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const bounds = boundsOf(event.data["bounds"]);
     const metrics = instance.#metrics();
     if (bounds === null || metrics === null) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.fitEvent, { bounds, metrics }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
   }
 
   static applyZoomIn(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { scale: instance.#view.zoom * ZOOM_FACTOR }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.zoomEvent, data: { scale: instance.#view.zoom * ZOOM_FACTOR } }) });
   }
 
   static applyZoomOut(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { scale: instance.#view.zoom / ZOOM_FACTOR }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.zoomEvent, data: { scale: instance.#view.zoom / ZOOM_FACTOR } }) });
   }
 
   static applySetViewport(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.viewportEvent, viewport));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.viewportEvent, data: viewport }) });
   }
 
   static applyWheel(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -622,7 +623,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const deltaY = event.data["deltaY"];
     const point = pointOf(event.data["point"]);
     if (typeof deltaY !== "number" || point === null) return;
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.zoomEvent, { deltaY, point }));
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.zoomEvent, data: { deltaY, point } }) });
   }
 
   static nodesAdmissible(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
@@ -738,14 +739,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
     const metrics = instance.#metrics();
     if (bounds === null || metrics === null) return;
-    instance.#send(instance.#focuser, hsm.typedEvent(Focuser.focusEvent, {
+    instance.#send({ machine: instance.#focuser, event: hsm.typedEvent({ event: Focuser.focusEvent, data: {
       kind: "machine",
       bounds,
       ...(hsm.isRecord(event.data) && typeof event.data["machineName"] === "string"
         ? { machineName: event.data["machineName"] }
         : {}),
-    }));
-    instance.#send(instance.#panner, hsm.typedEvent(Panner.fitEvent, { bounds, metrics }));
+    } }) });
+    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
   }
 
   #startActors(): void {
@@ -773,14 +774,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       frame = 0;
       const sample = latest;
       latest = null;
-      if (sample !== null) this.#live(hsm.typedEvent(FlowGraph.pointerSampleEvent, sample));
+      if (sample !== null) this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
     };
     const onPointerDown = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
       if (event.button !== 0 && event.pointerType === "mouse") return;
       const sample = this.#sampleFrom(event, "pointerdown", { x: event.clientX, y: event.clientY });
       origin = sample.origin;
-      this.#live(hsm.typedEvent(FlowGraph.pointerDownEvent, sample));
+      this.#live(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: sample }));
     };
     const onPointerMove = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
@@ -796,37 +797,37 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         origin ?? { x: event.clientX, y: event.clientY },
       );
       origin = null;
-      this.#live(hsm.typedEvent(FlowGraph.pointerUpEvent, sample));
+      this.#live(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: sample }));
     };
     const onWheel = (event: Event): void => {
       if (!(event instanceof WheelEvent)) return;
       event.preventDefault();
       const data: WheelSampleData = { deltaY: event.deltaY, point: this.#pointerPoint(event) };
-      this.#live(hsm.typedEvent(FlowGraph.wheelEvent, data));
+      this.#live(hsm.typedEvent({ event: FlowGraph.wheelEvent, data: data }));
     };
     const onControl = (event: Event): void => {
       if (!(event instanceof CustomEvent)) return;
       const action = hsm.isRecord(event.detail) ? event.detail["action"] : undefined;
-      if (action === "zoom-in") this.#live(hsm.typedEvent(FlowGraph.zoomInEvent));
-      if (action === "zoom-out") this.#live(hsm.typedEvent(FlowGraph.zoomOutEvent));
-      if (action === "fit") this.#live(hsm.typedEvent(FlowGraph.fitViewEvent));
+      if (action === "zoom-in") this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
+      if (action === "zoom-out") this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
+      if (action === "fit") this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
     };
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
-      if (event.key === "+" || event.key === "=") this.#live(hsm.typedEvent(FlowGraph.zoomInEvent));
-      if (event.key === "-" || event.key === "_") this.#live(hsm.typedEvent(FlowGraph.zoomOutEvent));
-      if (event.key === "f" || event.key === "F") this.#live(hsm.typedEvent(FlowGraph.fitViewEvent));
-      if (event.key === "ArrowLeft") this.#live(hsm.typedEvent(FlowGraph.setViewportEvent, { ...this.#view, x: this.#view.x + 40 }));
-      if (event.key === "ArrowRight") this.#live(hsm.typedEvent(FlowGraph.setViewportEvent, { ...this.#view, x: this.#view.x - 40 }));
-      if (event.key === "ArrowUp") this.#live(hsm.typedEvent(FlowGraph.setViewportEvent, { ...this.#view, y: this.#view.y + 40 }));
-      if (event.key === "ArrowDown") this.#live(hsm.typedEvent(FlowGraph.setViewportEvent, { ...this.#view, y: this.#view.y - 40 }));
+      if (event.key === "+" || event.key === "=") this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
+      if (event.key === "-" || event.key === "_") this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
+      if (event.key === "f" || event.key === "F") this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
+      if (event.key === "ArrowLeft") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x + 40 } }));
+      if (event.key === "ArrowRight") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x - 40 } }));
+      if (event.key === "ArrowUp") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y + 40 } }));
+      if (event.key === "ArrowDown") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y - 40 } }));
     };
     this.addEventListener("pointerdown", onPointerDown);
     this.addEventListener("pointermove", onPointerMove);
     this.addEventListener("pointerup", onPointerUp, { capture: true });
     this.addEventListener("pointercancel", onPointerUp, { capture: true });
     this.addEventListener("wheel", onWheel, { passive: false });
-    this.#viewport.addEventListener("keydown", onKey);
+    this.addEventListener("keydown", onKey);
     this.addEventListener("flow-control", onControl);
     this.#unlisten = () => {
       this.removeEventListener("pointerdown", onPointerDown);
@@ -834,7 +835,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.removeEventListener("pointerup", onPointerUp, { capture: true });
       this.removeEventListener("pointercancel", onPointerUp, { capture: true });
       this.removeEventListener("wheel", onWheel);
-      this.#viewport.removeEventListener("keydown", onKey);
+      this.removeEventListener("keydown", onKey);
       this.removeEventListener("flow-control", onControl);
       if (frame !== 0) globalThis.clearTimeout(frame);
     };
@@ -936,7 +937,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (metrics === null || nodes.length === 0) return;
     const box = getNodesBounds(nodes);
     const viewport = getViewportForBounds(box, metrics.width, metrics.height, MIN_ZOOM, MAX_ZOOM, FIT_PADDING_RATIO);
-    this.#send(this.#panner, hsm.typedEvent(Panner.viewportEvent, viewport));
+    this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.viewportEvent, data: viewport }) });
   }
 
   #worldPoint(client: { x: number; y: number }): { x: number; y: number } {

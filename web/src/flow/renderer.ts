@@ -40,10 +40,6 @@ export class Renderer extends hsm.Instance {
     this.host = host;
   }
 
-  markDirty(): void {
-    this.dispatch(hsm.typedEvent(Renderer.markDirtyEvent));
-  }
-
   static frameDelay(): number {
     return 0;
   }
@@ -60,7 +56,7 @@ export class Renderer extends hsm.Instance {
 
   static async performRender(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof Renderer)) return;
-    const cancel = (): hsm.Completion => instance.dispatch(hsm.typedEvent(Renderer.renderCanceledEvent));
+    const cancel = (): hsm.Completion => instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
     if (ctx.done) {
       await cancel();
       return;
@@ -72,12 +68,12 @@ export class Renderer extends hsm.Instance {
         await cancel();
         return;
       }
-      await hsm.notifyOwner({ instance, event: hsm.typedEvent(Renderer.paintEvent) });
+      await hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Renderer.paintEvent }) });
       if (ctx.done) {
         await cancel();
         return;
       }
-      await instance.dispatch(hsm.typedEvent(Renderer.renderCompleteEvent));
+      await instance.dispatch(hsm.typedEvent({ event: Renderer.renderCompleteEvent }));
     } catch (error) {
       await instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }

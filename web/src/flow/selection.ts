@@ -82,26 +82,6 @@ export class Selection extends hsm.Instance {
     };
   }
 
-  click(data: SelectionClickData): void {
-    this.dispatch(hsm.typedEvent(Selection.clickEvent, data));
-  }
-
-  boxStart(point: SelectionPointData): void {
-    this.dispatch(hsm.typedEvent(Selection.boxStartEvent, point));
-  }
-
-  boxMove(point: SelectionPointData): void {
-    this.dispatch(hsm.typedEvent(Selection.boxMoveEvent, point));
-  }
-
-  boxEnd(ids: readonly string[]): void {
-    this.dispatch(hsm.typedEvent(Selection.boxEndEvent, { ids }));
-  }
-
-  clear(): void {
-    this.dispatch(hsm.typedEvent(Selection.clearEvent));
-  }
-
   static applyClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Selection) || !hsm.isRecord(event.data)) return;
     const id = event.data["id"];
@@ -165,7 +145,10 @@ export class Selection extends hsm.Instance {
   }
 
   #emit(): void {
-    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Selection.changedEvent, this.snapshot()) });
+    void hsm.notifyOwner({
+      instance: this,
+      event: hsm.typedEvent({ event: Selection.changedEvent, data: this.snapshot() }),
+    }).catch(hsm.catchFailure());
   }
 }
 
