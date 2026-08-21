@@ -1,10 +1,6 @@
 import * as hsm from "./hsm.ts";
 import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 
-export function reportMachineGraphFailure(error: unknown): void {
-  hsm.catchFailure()(error);
-}
-
 export type MachineGraphPhase = "empty" | "drawing";
 
 export type MachineGraphSnapshot = {
@@ -68,7 +64,7 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph)) return;
     const graphs = graphsFromEvent(event);
     if (graphs === null) {
-      instance.dispatch(hsm.namedEvent(Graph.clearEvent.name));
+      instance.graphs = [];
       return;
     }
     instance.graphs = graphs;
@@ -93,17 +89,6 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph)) return;
     instance.onDestroy();
   }
-}
-
-export function startGraph(
-  ctx: hsm.Context,
-  hooks: { onDraw: (graphs: readonly MachineGraph[]) => void; onDestroy: () => void },
-): Graph {
-  return hsm.start(ctx, new Graph(hooks), Graph.model);
-}
-
-export async function stopGraph(graph: Graph): Promise<void> {
-  await hsm.stop(graph);
 }
 
 function parseGraphs(value: unknown): MachineGraph[] | null {

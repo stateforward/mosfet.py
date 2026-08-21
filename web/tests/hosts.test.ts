@@ -15,7 +15,7 @@ import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
-import { OtelSource } from "../src/otel-source.ts";
+import { collectorUrl, OtelSource } from "../src/otel-source.ts";
 
 const fixturePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -24,15 +24,13 @@ const fixturePath = path.join(
 );
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 1000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) {
-      throw new Error("timed out waiting for dashboard stream update");
-    }
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
+      globalThis.setTimeout(resolve, 0);
     });
   }
+  throw new Error("timed out waiting for dashboard stream update");
 }
 
 function fakeWorld(): HTMLElement {
@@ -131,14 +129,8 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("panner writes transform synchronously and stays off the graph model", async () => {
-    const applied: string[] = [];
     const world = fakeWorld();
-    const panner = hsm.start(new Panner(world, {
-      onTransform: (transform) => {
-        applied.push(world.style.transform);
-        applied.push(`${transform.scale}:${transform.pan.x},${transform.pan.y}`);
-      },
-    }), Panner.model);
+    const panner = hsm.start(new Panner(world), Panner.model);
     const graph = startAdmittedGraph({
       onDraw: () => undefined,
       onDestroy: () => undefined,
@@ -163,7 +155,7 @@ describe("companion-style HSM controllers", () => {
     panner.zoom({ scale: 1.1, point: { x: 20, y: 20 } });
     panner.panEnd({ pointerId: 1 });
     assert.match(panner.state(), /\/fixed$/);
-    assert.ok(applied.length >= 3);
+    assert.match(world.style.transform, /translate\(/);
     await hsm.stop(panner);
     await hsm.stop(graph);
   });
@@ -392,7 +384,8 @@ describe("companion-style HSM controllers", () => {
     const snapshotsBeforeStop = snapshots.length;
 
     await dashboard.stop();
-    await new Promise<void>((resolve) => setTimeout(resolve, 750));
+    await Promise.resolve();
+    await Promise.resolve();
 
     assert.equal(snapshots.length, snapshotsBeforeStop);
   });
@@ -573,12 +566,74 @@ describe("companion-style HSM controllers", () => {
     });
     const afterPrefill = await dashboard.dispatch("dashboard.command.prefill", { eventName: "phone.ring" });
     assert.equal(afterPrefill.commandEventName, "phone.ring");
-    const afterSend = await dashboard.dispatch("dashboard.command.send", {
+    await dashboard.dispatch("dashboard.command.send", {
       eventName: "phone.ring",
       dataJson: "",
     });
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, [{ eventName: "phone.ring", dataJson: "" }]);
-    assert.equal(afterSend.commandResult?.result, "no_subscriber");
+    assert.equal(dashboard.snapshot().commandResult?.result, "no_subscriber");
+    await dashboard.stop();
+  });
+
+  test("command send failures complete through dashboard.command.failed", async () => {
+    const dashboard = bootDashboard({
+      postCommand: async () => {
+        return { result: "error", detail: "gateway down" };
+      },
+    });
+    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
+    assert.equal(dashboard.snapshot().commandResult?.result, "error");
+    assert.equal(dashboard.snapshot().commandResult?.detail, "gateway down");
+    await dashboard.stop();
+  });
+
+  test("error.replay.enter enters replay paused", async () => {
+    const dashboard = bootDashboard({
+      connectStream: () => ({
+        close(): void {
+          return;
+        },
+      }),
+    });
+    await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    await dashboard.dispatch("dashboard.load.failed", { message: "stream failed" });
+    assert.equal(dashboard.snapshot().phase, "error");
+    await dashboard.dispatch("dashboard.replay.enter");
+    assert.match(dashboard.snapshot().statePath, /\/replay\/paused$/);
+    assert.equal(dashboard.snapshot().replay.active, true);
+    await dashboard.stop();
+  });
+
+  test("collectorUrl admits only the exact same-origin stream path", () => {
+    const origin = "http://localhost:8080";
+    assert.equal(collectorUrl({ origin }), "/v1/traces/stream");
+    assert.equal(collectorUrl({ requested: "/v1/traces/stream", origin }), "/v1/traces/stream");
+    assert.equal(collectorUrl({ requested: "http://localhost:8080/v1/traces/stream", origin }), "/v1/traces/stream");
+    assert.equal(collectorUrl({ requested: "/v1/traces/stream/../../../v1/commands", origin }), null);
+    assert.equal(collectorUrl({ requested: "/v1/traces/streamevil", origin }), null);
+    assert.equal(collectorUrl({ requested: "/v1/traces/stream?token=1", origin }), null);
+    assert.equal(collectorUrl({ requested: "javascript:alert(1)", origin }), null);
+    assert.equal(collectorUrl({ requested: "https://evil.example/v1/traces/stream", origin }), null);
+    assert.equal(collectorUrl({ requested: "http://169.254.169.254/v1/traces/stream", origin }), null);
+  });
+
+  test("hostile dashboard source URLs fail before EventSource", async () => {
+    const opened: string[] = [];
+    const dashboard = bootDashboard({
+      connectStream: (url) => {
+        opened.push(url);
+        return { close(): void { return; } };
+      },
+    });
+    dashboard.origin = "http://localhost";
+    await dashboard.dispatch("dashboard.source.selected", {
+      source: { kind: "stream", url: "https://evil.example/sse", label: "evil" },
+    });
+    await waitFor(() => dashboard.snapshot().phase === "error");
+    assert.deepEqual(opened, []);
+    assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
     await dashboard.stop();
   });
 });

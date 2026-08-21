@@ -1,6 +1,6 @@
 import * as hsm from "../../hsm.ts";
 
-import { FlowGraph, type EdgeClickDetail, type NodeClickDetail, type ViewportChangeDetail } from "../../flow/index.ts";
+import { FlowGraph, type NodeClickDetail, type ViewportChangeDetail } from "../../flow/index.ts";
 import { Graph } from "../../machine-graph.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
 import { replaceStyles } from "../styles.ts";
@@ -22,6 +22,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static readonly graphsEvent = { name: "graphs_admit", kind: hsm.Kinds.Event } as const;
   static readonly focusEvent = { name: "focus_machine", kind: hsm.Kinds.Event } as const;
   static readonly fitEvent = { name: "fit_view", kind: hsm.Kinds.Event } as const;
+  static readonly nodeClickEvent = { name: "node_click", kind: hsm.Kinds.Event } as const;
   static readonly resizeEvent = { name: "host_resize", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
@@ -32,6 +33,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.defer(BotMachineGraph.graphsEvent.name),
       hsm.defer(BotMachineGraph.focusEvent.name),
       hsm.defer(BotMachineGraph.fitEvent.name),
+      hsm.defer(BotMachineGraph.nodeClickEvent.name),
       hsm.transition(hsm.on(BotMachineGraph.attachEvent.name), hsm.target("../connected")),
     ),
     hsm.state(
@@ -42,6 +44,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(BotMachineGraph.graphsEvent.name), hsm.effect(BotMachineGraph.admitGraphs)),
       hsm.transition(hsm.on(BotMachineGraph.focusEvent.name), hsm.effect(BotMachineGraph.applyFocus)),
       hsm.transition(hsm.on(BotMachineGraph.fitEvent.name), hsm.effect(BotMachineGraph.applyFit)),
+      hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
     ),
     hsm.state(
@@ -49,6 +52,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.defer(BotMachineGraph.attachEvent.name),
       hsm.defer(BotMachineGraph.graphsEvent.name),
       hsm.defer(BotMachineGraph.focusEvent.name),
+      hsm.defer(BotMachineGraph.nodeClickEvent.name),
       hsm.activity(BotMachineGraph.stopActors),
       hsm.transition(hsm.on(BotMachineGraph.stoppedEvent.name), hsm.target("../disconnected")),
     ),
@@ -144,14 +148,17 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.#flow.removeEventListener("flow-viewport-change", instance.#onViewport);
   }
 
-  static async stopActors(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
-    if (!(instance instanceof BotMachineGraph) || ctx.done) return;
-    const graph = instance.#graph;
-    instance.#graph = null;
-    instance.#model = null;
-    if (graph !== null) await hsm.stop(graph);
-    if (ctx.done) return;
+  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+    if (!(instance instanceof BotMachineGraph)) return;
+    await instance.terminateActors();
     instance.dispatch(hsm.typedEvent(BotMachineGraph.stoppedEvent));
+  }
+
+  terminateActors(): Promise<void> {
+    const graph = this.#graph;
+    this.#graph = null;
+    this.#model = null;
+    return graph === null ? Promise.resolve() : hsm.stop(graph);
   }
 
   static admitGraphs(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -177,6 +184,15 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.#flow.fitView();
   }
 
+  static applyNodeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return;
+    const machineName = event.data["machineName"];
+    const bounds = boundsOf(event.data["bounds"]);
+    if (typeof machineName !== "string" || bounds === null) return;
+    instance.#flow.fitBounds(bounds);
+    instance.#flow.focusTarget({ kind: "machine", machineName, bounds });
+  }
+
   #draw(graphs: readonly MachineGraph[]): void {
     const previous = this.#model;
     const model = flowModelFromGraphs(graphs);
@@ -190,25 +206,27 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   #onNodeClick = (event: Event): void => {
     if (!(event instanceof CustomEvent)) return;
-    const detail = event.detail as NodeClickDetail | undefined;
-    const node = detail?.node;
-    if (node === undefined) return;
+    const node = nodeFromClickDetail(event.detail);
+    if (node === null) return;
     const path = node.data["path"];
     const machineName = node.data["machineName"];
     if (typeof path !== "string" || typeof machineName !== "string") return;
-    this.#flow.fitBounds({
-      left: node.position.x,
-      right: node.position.x + (node.width ?? 0),
-      top: node.position.y,
-      bottom: node.position.y + (node.height ?? 0),
-    });
+    this.#live(hsm.typedEvent(BotMachineGraph.nodeClickEvent, {
+      machineName,
+      path,
+      bounds: {
+        left: node.position.x,
+        right: node.position.x + (node.width ?? 0),
+        top: node.position.y,
+        bottom: node.position.y + (node.height ?? 0),
+      },
+    }));
   };
 
   #onEdgeClick = (event: Event): void => {
     if (!(event instanceof CustomEvent)) return;
-    const detail = event.detail as EdgeClickDetail | undefined;
-    const eventName = detail?.edge.data?.["eventName"];
-    if (typeof eventName !== "string" || eventName.length === 0) return;
+    const eventName = eventNameFromEdgeDetail(event.detail);
+    if (eventName === null) return;
     this.dispatchEvent(new CustomEvent<GraphEdgeDetail>("bot-machine-graph-edge", {
       detail: { eventName },
       bubbles: true,
@@ -239,6 +257,37 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
 export function registerBotMachineGraph(): void {
   if (customElements.get(ELEMENT_NAME) === undefined) customElements.define(ELEMENT_NAME, BotMachineGraph);
+}
+
+function nodeFromClickDetail(value: unknown): NodeClickDetail["node"] | null {
+  if (!hsm.isRecord(value) || !hsm.isRecord(value["node"])) return null;
+  const node = value["node"];
+  if (typeof node["id"] !== "string" || !hsm.isRecord(node["position"]) || !hsm.isRecord(node["data"])) return null;
+  const x = node["position"]["x"];
+  const y = node["position"]["y"];
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  return node as NodeClickDetail["node"];
+}
+
+function eventNameFromEdgeDetail(value: unknown): string | null {
+  if (!hsm.isRecord(value) || !hsm.isRecord(value["edge"])) return null;
+  const data = value["edge"]["data"];
+  if (!hsm.isRecord(data) || typeof data["eventName"] !== "string" || data["eventName"].length === 0) return null;
+  return data["eventName"];
+}
+
+function boundsOf(value: unknown): { left: number; right: number; top: number; bottom: number } | null {
+  if (!hsm.isRecord(value)) return null;
+  const left = value["left"];
+  const right = value["right"];
+  const top = value["top"];
+  const bottom = value["bottom"];
+  return typeof left === "number" && Number.isFinite(left)
+    && typeof right === "number" && Number.isFinite(right)
+    && typeof top === "number" && Number.isFinite(top)
+    && typeof bottom === "number" && Number.isFinite(bottom)
+    ? { left, right, top, bottom }
+    : null;
 }
 
 declare global {

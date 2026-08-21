@@ -106,13 +106,7 @@ export class BotOtelSource extends OtelSource {
     this.#abort = new AbortController();
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.snapshot());
-    if (this.snapshot().phase === "idle") {
-      void this.dispatch("source.connect.requested").catch(catchFailure(this));
-      return;
-    }
-    if (this.snapshot().phase === "live") {
-      this.replayReady();
-    }
+    void this.dispatch("source.connect.requested").catch(catchFailure(this));
   }
 
   disconnectedCallback(): void {

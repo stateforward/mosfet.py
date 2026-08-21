@@ -1,15 +1,15 @@
 import * as hsm from "../hsm.ts";
 import { applyStyles, replaceStyles } from "../elements/styles.ts";
 
-import { startConnection, type ConnectionComplete, type ConnectionDraft } from "./connection.ts";
-import { startDragger, type DragMovedData } from "./dragger.ts";
+import { Connection, startConnection, type ConnectionDraft } from "./connection.ts";
+import { Dragger, startDragger } from "./dragger.ts";
 import { FlowEdge } from "./edge.ts";
 import { startFocuser, type FocusTarget } from "./focuser.ts";
 import { FlowNode } from "./node.ts";
-import { startPanner, type ViewportTransform } from "./panner.ts";
+import { Panner, startPanner } from "./panner.ts";
 import { edgePath, getNodesBounds, getViewportForBounds } from "./path.ts";
 import { startRenderer } from "./renderer.ts";
-import { startSelection, type SelectionBox, type SelectionSnapshot } from "./selection.ts";
+import { Selection, startSelection, type SelectionBox } from "./selection.ts";
 import { graphStyles } from "./styles.ts";
 import {
   CLICK_THRESHOLD,
@@ -56,12 +56,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly setViewportEvent = { name: "set_viewport", kind: hsm.Kinds.Event } as const;
   static readonly nodesChangedEvent = { name: "nodes_changed", kind: hsm.Kinds.Event } as const;
   static readonly edgesChangedEvent = { name: "edges_changed", kind: hsm.Kinds.Event } as const;
-  static readonly viewportChangedEvent = { name: "viewport_changed", kind: hsm.Kinds.Event } as const;
-  static readonly selectionChangedEvent = { name: "selection_changed", kind: hsm.Kinds.Event } as const;
-  static readonly nodeMovedEvent = { name: "node_moved", kind: hsm.Kinds.Event } as const;
-  static readonly draftChangedEvent = { name: "draft_changed", kind: hsm.Kinds.Event } as const;
   static readonly focusEvent = { name: "focus_target", kind: hsm.Kinds.Event } as const;
-  static readonly dropEvent = { name: "graph_drop", kind: hsm.Kinds.ErrorEvent } as const;
 
   static readonly model = hsm.define(
     "FlowGraph",
@@ -90,65 +85,59 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.wheelEvent.name), hsm.effect(FlowGraph.applyWheel)),
       hsm.transition(hsm.on(FlowGraph.nodesChangedEvent.name), hsm.effect(FlowGraph.requestPaint)),
       hsm.transition(hsm.on(FlowGraph.edgesChangedEvent.name), hsm.effect(FlowGraph.requestPaint)),
-      hsm.transition(hsm.on(FlowGraph.viewportChangedEvent.name), hsm.effect(FlowGraph.rememberViewport)),
-      hsm.transition(hsm.on(FlowGraph.selectionChangedEvent.name), hsm.effect(FlowGraph.rememberSelection)),
-      hsm.transition(hsm.on(FlowGraph.nodeMovedEvent.name), hsm.effect(FlowGraph.applyNodeMoved)),
-      hsm.transition(hsm.on(FlowGraph.draftChangedEvent.name), hsm.effect(FlowGraph.paintDraft)),
+      hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
+      hsm.transition(hsm.on(Selection.changedEvent.name), hsm.effect(FlowGraph.rememberSelection)),
+      hsm.transition(hsm.on(Dragger.movedEvent.name), hsm.effect(FlowGraph.applyNodeMoved)),
+      hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
+      hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.effect(FlowGraph.applyFocus)),
       hsm.state(
         "idle",
+        hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.target("../hit")),
+      ),
+      hsm.choice(
+        "hit",
         hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
           hsm.guard(FlowGraph.isConnectStart),
-          hsm.target("../connect"),
+          hsm.target("connect"),
           hsm.effect(FlowGraph.beginConnect),
         ),
         hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
           hsm.guard(FlowGraph.isBoxStart),
-          hsm.target("../box"),
+          hsm.target("box"),
           hsm.effect(FlowGraph.beginBox),
         ),
+        hsm.transition(hsm.guard(FlowGraph.isNodePress), hsm.target("click")),
+        hsm.transition(hsm.guard(FlowGraph.isEdgePress), hsm.target("click")),
         hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
-          hsm.guard(FlowGraph.isNodePress),
-          hsm.target("../click"),
-        ),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
-          hsm.guard(FlowGraph.isEdgePress),
-          hsm.target("../click"),
-        ),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
           hsm.guard(FlowGraph.isPanStart),
-          hsm.target("../pan"),
+          hsm.target("pan"),
           hsm.effect(FlowGraph.beginPan),
         ),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerDownEvent.name),
-          hsm.target("../click"),
-        ),
+        hsm.transition(hsm.target("click")),
       ),
       hsm.state(
         "click",
-        hsm.transition(
-          hsm.on(FlowGraph.pointerSampleEvent.name),
-          hsm.guard(FlowGraph.isDragFromClick),
-          hsm.target("../drag"),
-          hsm.effect(FlowGraph.beginDrag),
-        ),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerSampleEvent.name),
-          hsm.guard(FlowGraph.isPanFromClick),
-          hsm.target("../pan"),
-          hsm.effect(FlowGraph.beginPan),
-        ),
+        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.target("../intent")),
         hsm.transition(
           hsm.on(FlowGraph.pointerUpEvent.name),
           hsm.target("../idle"),
           hsm.effect(FlowGraph.emitClick),
         ),
+      ),
+      hsm.choice(
+        "intent",
+        hsm.transition(
+          hsm.guard(FlowGraph.isDragFromClick),
+          hsm.target("drag"),
+          hsm.effect(FlowGraph.beginDrag),
+        ),
+        hsm.transition(
+          hsm.guard(FlowGraph.isPanFromClick),
+          hsm.target("pan"),
+          hsm.effect(FlowGraph.beginPan),
+        ),
+        hsm.transition(hsm.target("click")),
       ),
       hsm.state(
         "pan",
@@ -356,25 +345,28 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#unlisten = null;
   }
 
-  static async stopActors(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
-    if (!(instance instanceof FlowGraph) || ctx.done) return;
-    const machines = [
-      instance.#renderer,
-      instance.#panner,
-      instance.#dragger,
-      instance.#focuser,
-      instance.#selection,
-      instance.#connection,
-    ];
-    instance.#renderer = null;
-    instance.#panner = null;
-    instance.#dragger = null;
-    instance.#focuser = null;
-    instance.#selection = null;
-    instance.#connection = null;
-    await Promise.all(machines.map((machine) => machine === null ? undefined : hsm.stop(machine)));
-    if (ctx.done) return;
+  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+    if (!(instance instanceof FlowGraph)) return;
+    await instance.terminateActors();
     instance.dispatch(hsm.typedEvent(FlowGraph.stoppedEvent));
+  }
+
+  terminateActors(): Promise<void> {
+    const machines = [
+      this.#renderer,
+      this.#panner,
+      this.#dragger,
+      this.#focuser,
+      this.#selection,
+      this.#connection,
+    ];
+    this.#renderer = null;
+    this.#panner = null;
+    this.#dragger = null;
+    this.#focuser = null;
+    this.#selection = null;
+    this.#connection = null;
+    return Promise.all(machines.map((machine) => machine === null ? undefined : hsm.stop(machine))).then(() => undefined);
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
@@ -398,7 +390,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static isPanStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
     const sample = pointerOf(event.data);
-    return sample !== null && sample.hit.kind === "empty";
+    return sample !== null && sample.hit.kind === "empty" && !sample.shiftKey;
   }
 
   static isDragFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
@@ -410,7 +402,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static isPanFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
     const sample = pointerOf(event.data);
-    return sample !== null && movedPastClick(sample);
+    return sample !== null && movedPastClick(sample) && !(instance.#nodesDraggable && sample.hit.kind === "node");
   }
 
   static beginConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -628,6 +620,25 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#paintConnection(draftOf(event.data));
   }
 
+  static acceptConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    const source = event.data["source"];
+    const target = event.data["target"];
+    if (typeof source !== "string" || typeof target !== "string") return;
+    const sourceHandle = event.data["sourceHandle"];
+    const targetHandle = event.data["targetHandle"];
+    instance.dispatchEvent(new CustomEvent<ConnectDetail>("flow-connect", {
+      detail: {
+        source,
+        target,
+        ...(typeof sourceHandle === "string" ? { sourceHandle } : {}),
+        ...(typeof targetHandle === "string" ? { targetHandle } : {}),
+      },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
@@ -654,42 +665,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       ctx,
       world: this.#world,
       frame: this.#viewport,
-      onTransform: (transform) => this.#onPannerTransform(transform),
     });
-    this.#dragger = startDragger({
-      ctx,
-      onMoved: (moved) => this.#onDragged(moved),
-    });
+    this.#dragger = startDragger({ ctx });
     this.#focuser = startFocuser({ ctx, host: this });
-    this.#selection = startSelection({
-      ctx,
-      onChange: (snapshot) => this.#onSelection(snapshot),
-    });
-    this.#connection = startConnection({
-      ctx,
-      onDraft: (draft) => this.#onDraft(draft),
-      onComplete: (connection) => this.#emitConnect(connection),
-    });
-  }
-
-  #onPannerTransform(transform: ViewportTransform): void {
-    this.#live(hsm.typedEvent(FlowGraph.viewportChangedEvent, {
-      x: transform.pan.x,
-      y: transform.pan.y,
-      zoom: transform.scale,
-    }));
-  }
-
-  #onDragged(moved: DragMovedData): void {
-    this.#live(hsm.typedEvent(FlowGraph.nodeMovedEvent, moved));
-  }
-
-  #onSelection(snapshot: SelectionSnapshot): void {
-    this.#live(hsm.typedEvent(FlowGraph.selectionChangedEvent, snapshot));
-  }
-
-  #onDraft(draft: ConnectionDraft | null): void {
-    this.#live(hsm.typedEvent(FlowGraph.draftChangedEvent, draft));
+    this.#selection = startSelection({ ctx });
+    this.#connection = startConnection({ ctx });
   }
 
   #listen(): void {
@@ -913,15 +893,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     });
     this.#connectionLine.setAttribute("d", d);
   }
-
-  #emitConnect(connection: ConnectionComplete): boolean {
-    this.dispatchEvent(new CustomEvent<ConnectDetail>("flow-connect", {
-      detail: connection,
-      bubbles: true,
-      composed: true,
-    }));
-    return true;
-  }
 }
 
 function pointerOf(value: unknown): PointerSampleData | null {
@@ -1005,10 +976,17 @@ function viewportOf(value: unknown): Viewport | null {
   const x = value["x"];
   const y = value["y"];
   const zoom = value["zoom"];
-  return typeof x === "number" && Number.isFinite(x)
+  if (
+    typeof x === "number" && Number.isFinite(x)
     && typeof y === "number" && Number.isFinite(y)
     && typeof zoom === "number" && Number.isFinite(zoom)
-    ? { x, y, zoom }
+  ) {
+    return { x, y, zoom };
+  }
+  const scale = value["scale"];
+  const pan = pointOf(value["pan"]);
+  return typeof scale === "number" && Number.isFinite(scale) && pan !== null
+    ? { x: pan.x, y: pan.y, zoom: scale }
     : null;
 }
 

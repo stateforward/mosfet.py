@@ -33,14 +33,8 @@ export class Dragger extends hsm.Instance {
     ),
   );
 
-  readonly onMoved: (moved: DragMovedData) => void;
   #nodeId: string | null = null;
   #offset: DragPosition = { x: 0, y: 0 };
-
-  constructor(onMoved: (moved: DragMovedData) => void) {
-    super();
-    this.onMoved = onMoved;
-  }
 
   dragStart(data: DragStartData): void {
     this.dispatch(hsm.typedEvent(Dragger.dragStartEvent, data));
@@ -65,12 +59,15 @@ export class Dragger extends hsm.Instance {
     if (!(instance instanceof Dragger) || instance.#nodeId === null) return;
     const position = positionOf(hsm.isRecord(event.data) ? event.data["position"] : null);
     if (position === null) return;
-    instance.onMoved({
-      nodeId: instance.#nodeId,
-      position: {
-        x: position.x - instance.#offset.x,
-        y: position.y - instance.#offset.y,
-      },
+    hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent(Dragger.movedEvent, {
+        nodeId: instance.#nodeId,
+        position: {
+          x: position.x - instance.#offset.x,
+          y: position.y - instance.#offset.y,
+        },
+      }),
     });
   }
 
@@ -80,11 +77,8 @@ export class Dragger extends hsm.Instance {
   }
 }
 
-export function startDragger(args: {
-  ctx: hsm.Context;
-  onMoved: (moved: DragMovedData) => void;
-}): Dragger {
-  return hsm.start(args.ctx, new Dragger(args.onMoved), Dragger.model);
+export function startDragger(args: { ctx: hsm.Context }): Dragger {
+  return hsm.start(args.ctx, new Dragger(), Dragger.model);
 }
 
 function positionOf(value: unknown): DragPosition | null {

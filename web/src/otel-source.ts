@@ -172,7 +172,13 @@ export class OtelSource extends hsm.from(HTMLElement) {
 
   async connect(event: hsm.Event): Promise<void> {
     const requested = hsm.isRecord(event.data) && typeof event.data["url"] === "string" ? event.data["url"] : undefined;
-    const url = collectorUrl(requested);
+    const origin = hsm.isRecord(event.data) && typeof event.data["origin"] === "string"
+      ? event.data["origin"]
+      : platformOrigin();
+    const url = collectorUrl({
+      origin,
+      ...(requested !== undefined ? { requested } : {}),
+    });
     if (url === null) {
       await this.dispatch("source.connect.failed", { message: "collector url is not allowed" });
       return;
@@ -186,23 +192,24 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 }
 
-export function collectorUrl(requested: string | undefined): string | null {
+export function collectorUrl(args: { readonly requested?: string; readonly origin: string }): string | null {
+  const requested = args.requested;
   const value = requested === undefined || requested.length === 0 ? ALLOWED_COLLECTOR_PATH : requested;
-  if (value === ALLOWED_COLLECTOR_PATH || value.startsWith(`${ALLOWED_COLLECTOR_PATH}?`)) {
-    return value;
+  try {
+    const origin = new URL(args.origin);
+    const url = new URL(value, origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.origin !== origin.origin) return null;
+    if (url.pathname !== ALLOWED_COLLECTOR_PATH) return null;
+    if (url.username.length > 0 || url.password.length > 0) return null;
+    if (url.hash.length > 0 || url.search.length > 0) return null;
+    return url.pathname;
+  } catch {
+    return null;
   }
-  if (!value.startsWith("/")) {
-    try {
-      const url = new URL(value);
-      if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-      const origin = globalThis.location?.origin;
-      if (typeof origin === "string" && origin.length > 0 && url.origin !== origin) return null;
-      if (url.pathname !== ALLOWED_COLLECTOR_PATH) return null;
-      return `${url.pathname}${url.search}`;
-    } catch {
-      return null;
-    }
-  }
-  if (!value.startsWith(ALLOWED_COLLECTOR_PATH)) return null;
-  return value;
+}
+
+function platformOrigin(): string {
+  const origin = globalThis.location?.origin;
+  return typeof origin === "string" && origin.length > 0 ? origin : "http://localhost";
 }

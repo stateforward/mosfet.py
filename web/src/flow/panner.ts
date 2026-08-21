@@ -89,21 +89,16 @@ export class Panner extends hsm.Instance {
 
   readonly world: HTMLElement;
   readonly frame: HTMLElement | null;
-  readonly onTransform: ((transform: ViewportTransform) => void) | null;
   scale = 1;
   pan: ViewportPoint = { x: 0, y: 0 };
   #pointers = new Map<number, ViewportPoint>();
   #dragStart: { pointerId: number; point: ViewportPoint; pan: ViewportPoint } | null = null;
   #pinchStart: { distance: number; scale: number } | null = null;
 
-  constructor(
-    world: HTMLElement,
-    options: { frame?: HTMLElement; onTransform?: (transform: ViewportTransform) => void } = {},
-  ) {
+  constructor(world: HTMLElement, options: { frame?: HTMLElement } = {}) {
     super();
     this.world = world;
     this.frame = options.frame ?? null;
-    this.onTransform = options.onTransform ?? null;
   }
 
   get transform(): ViewportTransform {
@@ -288,7 +283,7 @@ export class Panner extends hsm.Instance {
     this.pan = { ...pan };
     this.world.style.transformOrigin = "0 0";
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.scale})`;
-    this.onTransform?.(this.transform);
+    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Panner.transformEvent, this.transform) });
   }
 
   #setPanning(panning: boolean): void {
@@ -300,11 +295,9 @@ export function startPanner(args: {
   ctx: hsm.Context;
   world: HTMLElement;
   frame?: HTMLElement;
-  onTransform?: (transform: ViewportTransform) => void;
 }): Panner {
   return hsm.start(args.ctx, new Panner(args.world, {
     ...(args.frame !== undefined ? { frame: args.frame } : {}),
-    ...(args.onTransform !== undefined ? { onTransform: args.onTransform } : {}),
   }), Panner.model);
 }
 

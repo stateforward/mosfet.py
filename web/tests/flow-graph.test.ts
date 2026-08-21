@@ -10,12 +10,19 @@ import type { PointerSampleData } from "../src/flow/types.ts";
 
 registerFlowElements();
 
-async function ticks(count = 3): Promise<void> {
-  for (let i = 0; i < count; i += 1) {
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (predicate()) return;
     await new Promise<void>((resolve) => {
       globalThis.setTimeout(resolve, 0);
     });
   }
+  throw new Error("timed out waiting for flow-graph");
 }
 
 function pointerData(overrides: Partial<PointerSampleData> = {}): PointerSampleData {
@@ -50,14 +57,14 @@ describe("flow-graph", () => {
     ];
     graph.edges = [{ id: "a-b", source: "a", target: "b", type: "bezier" }];
     graph.fitView();
-    await ticks();
+    await flush();
     const viewport = graph.getViewport();
     assert.equal(graph.nodes.length, 2);
     assert.equal(graph.edges.length, 1);
     assert.ok(viewport.zoom > 0);
     const before = graph.getViewport();
     graph.setViewport({ x: 12, y: 8, zoom: 1.1 });
-    await ticks();
+    await flush();
     const after = graph.getViewport();
     assert.notEqual(`${before.x},${before.y},${before.zoom}`, `${after.x},${after.y},${after.zoom}`);
     assert.equal(after.zoom, 1.1);
@@ -91,10 +98,200 @@ describe("flow-graph", () => {
       viewport: { x: 80, y: 90 },
       hit: { kind: "empty" },
     })));
-    await ticks();
+    await flush();
     const after = graph.getViewport();
     assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
     graph.remove();
+  });
+
+  test("shift+empty pointer_down boxes and does not pan", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.panOnDrag = true;
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    const before = graph.getViewport();
+    const selected: string[] = [];
+    graph.addEventListener("flow-selection-change", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail) || !Array.isArray(event.detail["nodes"])) return;
+      for (const node of event.detail["nodes"]) {
+        if (hsm.isRecord(node) && typeof node["id"] === "string") selected.push(node["id"]);
+      }
+    });
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+      eventType: "pointerdown",
+      shiftKey: true,
+      origin: { x: 10, y: 10 },
+      client: { x: 10, y: 10 },
+      viewport: { x: 10, y: 10 },
+      hit: { kind: "empty" },
+    })));
+    assert.match(graph.state(), /\/box$/);
+    assert.doesNotMatch(graph.state(), /\/pan$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+      eventType: "pointermove",
+      shiftKey: true,
+      origin: { x: 10, y: 10 },
+      client: { x: 120, y: 80 },
+      viewport: { x: 120, y: 80 },
+      hit: { kind: "empty" },
+    })));
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+      eventType: "pointerup",
+      shiftKey: true,
+      buttons: 0,
+      origin: { x: 10, y: 10 },
+      client: { x: 120, y: 80 },
+      viewport: { x: 120, y: 80 },
+      hit: { kind: "empty" },
+    })));
+    await flush();
+    assert.match(graph.state(), /\/idle$/);
+    assert.deepEqual(graph.getViewport(), before);
+    assert.ok(selected.includes("a"));
+    graph.remove();
+  });
+
+  test("empty pointer_down pans and does not box when panOnDrag", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.panOnDrag = true;
+    const before = graph.getViewport();
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+      eventType: "pointerdown",
+      origin: { x: 20, y: 20 },
+      client: { x: 20, y: 20 },
+      viewport: { x: 20, y: 20 },
+      hit: { kind: "empty" },
+    })));
+    assert.match(graph.state(), /\/pan$/);
+    assert.doesNotMatch(graph.state(), /\/box$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+      eventType: "pointermove",
+      origin: { x: 20, y: 20 },
+      client: { x: 60, y: 70 },
+      viewport: { x: 60, y: 70 },
+      hit: { kind: "empty" },
+    })));
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+      eventType: "pointerup",
+      buttons: 0,
+      origin: { x: 20, y: 20 },
+      client: { x: 60, y: 70 },
+      viewport: { x: 60, y: 70 },
+      hit: { kind: "empty" },
+    })));
+    await flush();
+    const after = graph.getViewport();
+    assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
+    graph.remove();
+  });
+
+  test("node pointer_down past click threshold drags and does not pan", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const node = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [node];
+    graph.nodesDraggable = true;
+    graph.panOnDrag = true;
+    const hit = { kind: "node" as const, node: graph.nodes[0]! };
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+      eventType: "pointerdown",
+      origin: { x: 10, y: 10 },
+      client: { x: 10, y: 10 },
+      viewport: { x: 10, y: 10 },
+      world: { x: 10, y: 10 },
+      hit,
+    })));
+    assert.match(graph.state(), /\/click$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+      eventType: "pointermove",
+      origin: { x: 10, y: 10 },
+      client: { x: 40, y: 10 },
+      viewport: { x: 40, y: 10 },
+      world: { x: 40, y: 10 },
+      hit,
+    })));
+    assert.match(graph.state(), /\/drag$/);
+    assert.doesNotMatch(graph.state(), /\/pan$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+      eventType: "pointermove",
+      origin: { x: 10, y: 10 },
+      client: { x: 80, y: 10 },
+      viewport: { x: 80, y: 10 },
+      world: { x: 80, y: 10 },
+      hit,
+    })));
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+      eventType: "pointerup",
+      buttons: 0,
+      origin: { x: 10, y: 10 },
+      client: { x: 80, y: 10 },
+      viewport: { x: 80, y: 10 },
+      world: { x: 80, y: 10 },
+      hit,
+    })));
+    await flush();
+    assert.match(graph.state(), /\/idle$/);
+    assert.notEqual(graph.nodes[0]?.position.x, 0);
+    graph.remove();
+  });
+
+  test("handle pointer_down connects and finishes on a target handle", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 },
+      { id: "b", position: { x: 200, y: 0 }, data: { label: "B" }, width: 80, height: 40 },
+    ];
+    const source = graph.nodes[0]!;
+    const target = graph.nodes[1]!;
+    const connected: Array<{ source: string; target: string }> = [];
+    graph.addEventListener("flow-connect", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail)) return;
+      const sourceId = event.detail["source"];
+      const targetId = event.detail["target"];
+      if (typeof sourceId === "string" && typeof targetId === "string") connected.push({ source: sourceId, target: targetId });
+    });
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+      eventType: "pointerdown",
+      origin: { x: 80, y: 20 },
+      client: { x: 80, y: 20 },
+      world: { x: 80, y: 20 },
+      hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
+    })));
+    assert.match(graph.state(), /\/connect$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerSampleEvent, pointerData({
+      eventType: "pointermove",
+      origin: { x: 80, y: 20 },
+      client: { x: 200, y: 20 },
+      world: { x: 200, y: 20 },
+      hit: { kind: "handle", node: target, handleKind: "target", position: "left" },
+    })));
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+      eventType: "pointerup",
+      buttons: 0,
+      origin: { x: 80, y: 20 },
+      client: { x: 200, y: 20 },
+      world: { x: 200, y: 20 },
+      hit: { kind: "handle", node: target, handleKind: "target", position: "left" },
+    })));
+    await flush();
+    assert.match(graph.state(), /\/idle$/);
+    assert.deepEqual(connected, [{ source: "a", target: "b" }]);
+    graph.remove();
+  });
+
+  test("detach reaches disconnected and reconnects on the defined element", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    assert.match(graph.state(), /\/connected\//);
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    document.body.append(graph);
+    await flush();
+    assert.match(graph.state(), /\/connected\//);
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
   });
 
   test("path helpers cover bezier, straight, bounds, and viewport", () => {

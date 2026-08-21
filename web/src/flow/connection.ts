@@ -59,20 +59,7 @@ export class Connection extends hsm.Instance {
     ),
   );
 
-  readonly onDraft: ((draft: ConnectionDraft | null) => void) | null;
-  readonly onComplete: ((connection: ConnectionComplete) => boolean) | null;
   #draft: ConnectionDraft | null = null;
-
-  constructor(
-    hooks: {
-      onDraft?: (draft: ConnectionDraft | null) => void;
-      onComplete?: (connection: ConnectionComplete) => boolean;
-    } = {},
-  ) {
-    super();
-    this.onDraft = hooks.onDraft ?? null;
-    this.onComplete = hooks.onComplete ?? null;
-  }
 
   beginFrom(data: ConnectStartData): void {
     this.dispatch(hsm.typedEvent(Connection.startEvent, data));
@@ -110,7 +97,7 @@ export class Connection extends hsm.Instance {
       cursor: { x, y },
       ...(typeof sourceHandle === "string" ? { sourceHandle } : {}),
     };
-    instance.onDraft?.(instance.#draft);
+    instance.#emitDraft();
   }
 
   static move(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -119,7 +106,7 @@ export class Connection extends hsm.Instance {
     const y = event.data["y"];
     if (typeof x !== "number" || typeof y !== "number") return;
     instance.#draft = { ...instance.#draft, cursor: { x, y } };
-    instance.onDraft?.(instance.#draft);
+    instance.#emitDraft();
   }
 
   static finish(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -139,29 +126,22 @@ export class Connection extends hsm.Instance {
       ...(instance.#draft.sourceHandle !== undefined ? { sourceHandle: instance.#draft.sourceHandle } : {}),
       ...(typeof targetHandle === "string" ? { targetHandle } : {}),
     };
-    const valid = instance.onComplete?.(completed) ?? true;
-    if (!valid) {
-      Connection.reset(_ctx, instance, event);
-      return;
-    }
     instance.#draft = null;
-    instance.onDraft?.(null);
+    hsm.notifyOwner({ instance, event: hsm.typedEvent(Connection.finishedEvent, completed) });
+    instance.#emitDraft();
   }
 
   static reset(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Connection)) return;
     instance.#draft = null;
-    instance.onDraft?.(null);
+    instance.#emitDraft();
+  }
+
+  #emitDraft(): void {
+    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Connection.draftEvent, this.#draft) });
   }
 }
 
-export function startConnection(args: {
-  ctx: hsm.Context;
-  onDraft?: (draft: ConnectionDraft | null) => void;
-  onComplete?: (connection: ConnectionComplete) => boolean;
-}): Connection {
-  return hsm.start(args.ctx, new Connection({
-    ...(args.onDraft !== undefined ? { onDraft: args.onDraft } : {}),
-    ...(args.onComplete !== undefined ? { onComplete: args.onComplete } : {}),
-  }), Connection.model);
+export function startConnection(args: { ctx: hsm.Context }): Connection {
+  return hsm.start(args.ctx, new Connection(), Connection.model);
 }

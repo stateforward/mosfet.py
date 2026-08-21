@@ -7,6 +7,8 @@ export {
   Context,
   defer,
   define,
+  dispatch,
+  dispatchAll,
   effect,
   entry,
   ErrorEvent,
@@ -16,6 +18,7 @@ export {
   guard,
   initial,
   Instance,
+  Keys,
   kinds,
   Kinds,
   on,
@@ -24,7 +27,7 @@ export {
   transition,
 } from "@stateforward/hsm.ts";
 
-export type { Completion, DispatchEvent, Event, Snapshot } from "@stateforward/hsm.ts";
+export type { Completion, Dispatchable, DispatchEvent, Event, Snapshot } from "@stateforward/hsm.ts";
 
 /**
  * Host protocol after `start(this, model)`.
@@ -45,19 +48,19 @@ export type Host = {
 type MixinRest = any[];
 type HostConstructor<T = object> = new (...args: MixinRest) => T;
 
-const startedHosts = new WeakSet<object>();
-
 /**
  * Mixin: subclass stays a custom element; call `start(this, model)` after `super()`.
  *
  * CORE-EXC-001: copies `Instance.prototype` method descriptors because
  * `@stateforward/hsm.ts` does not export a custom-element mixin. Isolated to
  * this module. Do not add `from` to the published package. Owner: web/src/hsm.ts.
- * Tests: web/tests/from.test.ts.
+ * Tests: web/tests/from.test.ts. Permanent until the library exports a host mixin;
+ * retire by switching to that mixin and deleting this copy.
  *
  * CORE-EXC-001 (OTEL): this package has no OpenTelemetry SDK (dependency not
  * approved). Control outcomes are HSM events and DOM CustomEvents with bounded
- * names (machine, event kind, stage, outcome).
+ * names (machine, event kind, stage, outcome). Tests: web/tests/from.test.ts and
+ * web/tests/hosts.test.ts. Retire when an OTEL API dependency is approved.
  */
 export function from<TBase extends HostConstructor>(
   Base: TBase,
@@ -74,6 +77,12 @@ export function from<TBase extends HostConstructor>(
   return HostElement as unknown as new () => InstanceType<TBase> & Host;
 }
 
+/**
+ * Bind library runtime onto `instance` and enter the model.
+ * Idempotent while the library reports a live state path. After `stop`, call
+ * `start` again to re-bind. Hosts stay started across attach/detach; children
+ * parented with a context share the owner's environment.
+ */
 export function start<I extends object, M>(instance: I, model: M): I & Host;
 export function start<I extends object, M>(ctx: library.Context, instance: I, model: M): I & Host;
 export function start<I extends object, M>(
@@ -82,7 +91,7 @@ export function start<I extends object, M>(
   maybeModel?: M,
 ): I & Host {
   const instance = (maybeModel !== undefined ? instanceOrModel : ctxOrInstance) as object;
-  if (startedHosts.has(instance)) {
+  if (isRunning(instance)) {
     return instance as I & Host;
   }
   type LibraryStart = {
@@ -93,16 +102,37 @@ export function start<I extends object, M>(
   const started = maybeModel !== undefined
     ? libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object)
     : libraryStart(ctxOrInstance as object, instanceOrModel as object);
-  startedHosts.add(started);
   return started as I & Host;
 }
 
+/** Stop the library runtime on `machine`. Further dispatch is a host-drop. */
 export async function stop(machine: object): Promise<void> {
+  await library.Instance.prototype.stop.call(machine);
+}
+
+function isRunning(instance: object): boolean {
   try {
-    await library.Instance.prototype.stop.call(machine);
-  } finally {
-    startedHosts.delete(machine);
+    const snapshot = library.Instance.prototype.takeSnapshot.call(instance);
+    return typeof snapshot.state === "string" && snapshot.state.length > 0;
+  } catch {
+    return false;
   }
+}
+
+function isDispatchable(value: unknown): value is library.Dispatchable {
+  return typeof value === "object" && value !== null
+    && typeof (value as { dispatch?: unknown }).dispatch === "function"
+    && typeof (value as { context?: unknown }).context === "function";
+}
+
+/** Dispatch `event` on `instance` and, when parented, on the owning host. */
+export function notifyOwner(args: { instance: library.Instance; event: library.DispatchEvent }): library.Completion {
+  args.instance.dispatch(args.event);
+  const owner = args.instance.context().Value(library.Keys.Owner);
+  if (isDispatchable(owner) && owner !== args.instance) {
+    return library.dispatch(owner, args.event);
+  }
+  return Promise.resolve();
 }
 
 export function typedEvent<T>(event: { readonly name: string; readonly kind: library.DispatchEvent["kind"] }, data?: T): library.DispatchEvent {

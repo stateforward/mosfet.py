@@ -73,13 +73,7 @@ export class Selection extends hsm.Instance {
   #nodeIds = new Set<string>();
   #edgeIds = new Set<string>();
   #box: SelectionBox | null = null;
-  readonly onChange: ((snapshot: SelectionSnapshot) => void) | null;
   #boxOrigin: { x: number; y: number } | null = null;
-
-  constructor(onChange: ((snapshot: SelectionSnapshot) => void) | null = null) {
-    super();
-    this.onChange = onChange;
-  }
 
   snapshot(): SelectionSnapshot {
     return {
@@ -172,13 +166,10 @@ export class Selection extends hsm.Instance {
   }
 
   #emit(): void {
-    this.onChange?.(this.snapshot());
+    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Selection.changedEvent, this.snapshot()) });
   }
 }
 
-export function startSelection(args: {
-  ctx: hsm.Context;
-  onChange?: ((snapshot: SelectionSnapshot) => void) | null;
-}): Selection {
-  return hsm.start(args.ctx, new Selection(args.onChange ?? null), Selection.model);
+export function startSelection(args: { ctx: hsm.Context }): Selection {
+  return hsm.start(args.ctx, new Selection(), Selection.model);
 }
