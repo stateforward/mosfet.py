@@ -23,12 +23,42 @@ export {
   Kinds,
   on,
   state,
-  submachineState,
   target,
   transition,
 } from "@stateforward/hsm.ts";
 
 export type { Completion, Dispatchable, DispatchEvent, Event, Snapshot } from "@stateforward/hsm.ts";
+
+/**
+ * Nest a `define()` model as a region of the parent model.
+ *
+ * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at
+ * `library.submachineState` `machine: Model`. Owner: web/src/hsm.ts.
+ * Rationale: library `submachineState` takes `machine: Model`. `define()`
+ * returns `TypedModelFromInfer` whose `id` is `string | undefined` while
+ * `Model`/`TypedModel` still type `id` as `string` under
+ * `exactOptionalPropertyTypes`. Isolated to this host nesting adapter.
+ * Risk tests: web/tests/flow-graph.test.ts.
+ * Expiration: library `submachineState` accepts `define()` results without
+ * assertion.
+ * Removal plan: re-export library `submachineState` and pass `pointerModel`
+ * without assertion.
+ *
+ * CORE-EXC-001 exception for TS-BUILD-001 MUST Typecheck Separately From
+ * Transpilation. Owner: web/src/hsm.ts (web package typecheck).
+ * Rationale: GitHub CI in `.github/workflows/ci.yml` is Python
+ * publish-readiness only; a web typecheck job is out of this web-only repair
+ * scope. Local proof is `web/package.json` `scripts.typecheck`.
+ * Risk tests: web/tests/flow-graph.test.ts; `cd web && npm run typecheck`.
+ * Expiration: CI runs `npm run typecheck` in web/ on pull_request and main.
+ * Removal plan: add that CI job, then delete this exception.
+ */
+export function submachineState(
+  name: string,
+  machine: object,
+): ReturnType<typeof library.submachineState> {
+  return library.submachineState(name, machine as library.Model);
+}
 
 /**
  * Host protocol after `start(this, model)`.

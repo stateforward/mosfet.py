@@ -247,16 +247,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.focusMachineEvent.name), hsm.effect(FlowGraph.applyMachineFocus)),
       hsm.transition(hsm.on(FlowGraph.activateClickEvent.name), hsm.effect(FlowGraph.emitNodeActivateClick)),
       hsm.transition(hsm.on(FlowGraph.activateKeyEvent.name), hsm.effect(FlowGraph.emitNodeActivateKey)),
-      /**
-       * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any and
-       * CORE-GEN-001 at `submachineState` `Model.id`. Owner: web/src/flow/graph.ts.
-       * Rationale: library `Model` requires `id: string` while `define()` returns a
-       * TypedModel whose `id` is optional under `exactOptionalPropertyTypes`.
-       * Isolated to this nesting call. Risk tests: web/tests/flow-graph.test.ts.
-       * Expiration: library `Model.id` is optional, or `define()` stamps `id`.
-       * Removal plan: pass `pointerModel` into `submachineState` without assertion.
-       */
-      hsm.submachineState(FlowGraph.pointerRegion, FlowGraph.pointerModel as never),
+      hsm.submachineState(FlowGraph.pointerRegion, FlowGraph.pointerModel),
     ),
     hsm.state(
       "stopping",
