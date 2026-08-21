@@ -25,7 +25,7 @@ export const graphStyles = `
 .state-node:not(.compound) { z-index: 4; }
 .state-node.active-path { border-color: #2dd4bf; border-width: 2px; color: #d5dbe8; font-weight: 650; }
 .state-node.current { border-color: #2dd4bf; border-width: 3px; color: #d5dbe8; font-weight: 800; box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.13); }
-flow-node .label, .state-node .label {
+flow-node::part(badge), .state-node::part(badge) {
   max-width: calc(100% - 12px); padding: 2px 5px; overflow: hidden; color: inherit;
   background: #161b22; border-radius: 5px; text-overflow: ellipsis; white-space: nowrap;
 }
