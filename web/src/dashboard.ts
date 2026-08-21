@@ -549,6 +549,12 @@ class Command extends hsm.Instance {
     }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
+  /**
+   * Failure effect: abort before `instance.post` resolves means the HTTP
+   * command did not commit (`canceled`). Once `post` resolves, that result is
+   * committed — accepted/no_subscriber complete, error fails, canceled
+   * cancels — and a later ctx.done/abort does not relabel or roll back.
+   */
   static async post(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
     if (!(instance instanceof Command)) return;
     const name = (stringField({ event, key: "eventName" }) ?? "").trim();
@@ -573,30 +579,33 @@ class Command extends hsm.Instance {
       });
     };
     const canceled: CommandResult = { result: "canceled", detail: "command canceled" };
+    let posted: CommandResult | undefined;
     try {
       if (ctx.done || abort.signal.aborted) {
         await finish({ event: Command.canceledEvent, result: canceled });
         return;
       }
-      const result = await instance.post({ eventName: name, dataJson: payload, signal: abort.signal });
-      if (ctx.done || abort.signal.aborted) {
-        await finish({ event: Command.canceledEvent, result: canceled });
-        return;
-      }
-      if (result.result === "error" || result.result === "canceled") {
-        await finish({ event: result.result === "canceled" ? Command.canceledEvent : Command.failedEvent, result });
-        return;
-      }
-      await finish({ event: Command.completedEvent, result });
+      posted = await instance.post({ eventName: name, dataJson: payload, signal: abort.signal });
     } catch (error) {
       if (ctx.done || abort.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
         await finish({ event: Command.canceledEvent, result: canceled });
         return;
       }
       await finish({ event: Command.failedEvent, result: { result: "error", detail: "command request failed" } });
+      return;
     } finally {
       ctx.removeEventListener("done", onDone);
     }
+    if (posted === undefined) return;
+    if (posted.result === "accepted" || posted.result === "no_subscriber") {
+      await finish({ event: Command.completedEvent, result: posted });
+      return;
+    }
+    if (posted.result === "error") {
+      await finish({ event: Command.failedEvent, result: posted });
+      return;
+    }
+    await finish({ event: Command.canceledEvent, result: posted });
   }
 }
 

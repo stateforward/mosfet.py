@@ -790,6 +790,47 @@ describe("companion-style HSM controllers", () => {
     assert.equal(kinds.includes("dashboard.command.failed"), false);
   });
 
+  test("accepted post is not relabeled canceled after abort", async () => {
+    let started = false;
+    const seen: DashboardSnapshot[] = [];
+    const kinds: unknown[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        started = true;
+        return await new Promise((resolve) => {
+          const succeed = (): void => {
+            resolve({ result: "accepted", detail: "committed" });
+          };
+          if (command.signal?.aborted === true) {
+            succeed();
+            return;
+          }
+          command.signal?.addEventListener("abort", succeed);
+        });
+      },
+    });
+    dashboard.onSnapshot = (snapshot) => {
+      seen.push(snapshot);
+    };
+    const inner = dashboard.dispatch.bind(dashboard) as Dashboard["dispatch"];
+    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
+      if (typeof eventOrContext === "object" && eventOrContext !== null && "name" in eventOrContext) {
+        kinds.push((eventOrContext as { name: string }).name);
+      }
+      return inner(eventOrContext as never, data);
+    }) as Dashboard["dispatch"];
+    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+    await waitFor(() => started);
+    await dashboard.stop();
+    const accepted = seen.find((snapshot) => snapshot.commandResult?.result === "accepted");
+    const failedSeen = kinds.includes("dashboard.command.failed");
+    const failedAbsent = false;
+    assert.ok(accepted !== undefined);
+    assert.equal(accepted.commandResult?.result, "accepted");
+    assert.equal(accepted.commandResult?.detail, "committed");
+    assert.equal(failedSeen, failedAbsent);
+  });
+
   test("stale aborted send cannot cancel the successor send", async () => {
     const holds: Array<{
       resolve: (result: { result: "accepted"; detail: string }) => void;
