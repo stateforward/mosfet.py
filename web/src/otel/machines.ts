@@ -445,6 +445,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isStateNodeShape(value: unknown): boolean {
+  if (!isRecord(value) || typeof value["path"] !== "string" || typeof value["label"] !== "string") {
+    return false;
+  }
+  const parent = value["parent"];
+  return parent === null || typeof parent === "string";
+}
+
 function parseStateNode(value: unknown): MachineStateNode | null {
   if (!isRecord(value) || typeof value["path"] !== "string" || typeof value["label"] !== "string") {
     return null;
@@ -456,14 +464,23 @@ function parseStateNode(value: unknown): MachineStateNode | null {
   return { path: value["path"], parent, label: value["label"] };
 }
 
+function isEdgeShape(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value["source"] === "string"
+    && typeof value["target"] === "string"
+    && typeof value["eventName"] === "string"
+    && typeof value["count"] === "number"
+    && typeof value["lastFired"] === "boolean";
+}
+
 function parseEdge(value: unknown): MachineEdge | null {
   if (
-    !isRecord(value) ||
-    typeof value["source"] !== "string" ||
-    typeof value["target"] !== "string" ||
-    typeof value["eventName"] !== "string" ||
-    typeof value["count"] !== "number" ||
-    typeof value["lastFired"] !== "boolean"
+    !isRecord(value)
+    || typeof value["source"] !== "string"
+    || typeof value["target"] !== "string"
+    || typeof value["eventName"] !== "string"
+    || typeof value["count"] !== "number"
+    || typeof value["lastFired"] !== "boolean"
   ) {
     return null;
   }
@@ -476,27 +493,73 @@ function parseEdge(value: unknown): MachineEdge | null {
   };
 }
 
-export function parseMachineGraph(value: unknown): MachineGraph | null {
+/**
+ * Predicate: `value` has the `MachineGraph` field shape.
+ *
+ * Inputs: JSON-like candidate. Outputs: true when required fields and nested
+ * node/edge items type-check. Never allocates node or edge arrays.
+ * Ownership: caller owns `value`. Purity: no I/O. Failure modes: malformed
+ * payload => false. Classification: runtime-safe.
+ */
+export function isMachineGraph(value: unknown): boolean {
   if (!isRecord(value)) {
-    return null;
+    return false;
   }
   if (
-    typeof value["name"] !== "string" ||
-    typeof value["componentName"] !== "string" ||
-    typeof value["currentState"] !== "string" ||
-    typeof value["lastEventName"] !== "string" ||
-    typeof value["observationCount"] !== "number" ||
-    !Array.isArray(value["nodes"]) ||
-    !Array.isArray(value["edges"])
+    typeof value["name"] !== "string"
+    || typeof value["componentName"] !== "string"
+    || typeof value["currentState"] !== "string"
+    || typeof value["lastEventName"] !== "string"
+    || typeof value["observationCount"] !== "number"
+    || !Array.isArray(value["nodes"])
+    || !Array.isArray(value["edges"])
   ) {
+    return false;
+  }
+  if (parseOwner(value) === INVALID_OWNER) {
+    return false;
+  }
+  for (const item of value["nodes"]) {
+    if (!isStateNodeShape(item)) {
+      return false;
+    }
+  }
+  for (const item of value["edges"]) {
+    if (!isEdgeShape(item)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function parseMachineGraph(value: unknown): MachineGraph | null {
+  if (!isMachineGraph(value) || !isRecord(value)) {
     return null;
   }
   const owner = parseOwner(value);
   if (owner === INVALID_OWNER) {
     return null;
   }
+  const name = value["name"];
+  const componentName = value["componentName"];
+  const currentState = value["currentState"];
+  const lastEventName = value["lastEventName"];
+  const observationCount = value["observationCount"];
+  const rawNodes = value["nodes"];
+  const rawEdges = value["edges"];
+  if (
+    typeof name !== "string"
+    || typeof componentName !== "string"
+    || typeof currentState !== "string"
+    || typeof lastEventName !== "string"
+    || typeof observationCount !== "number"
+    || !Array.isArray(rawNodes)
+    || !Array.isArray(rawEdges)
+  ) {
+    return null;
+  }
   const nodes: MachineStateNode[] = [];
-  for (const item of value["nodes"]) {
+  for (const item of rawNodes) {
     const node = parseStateNode(item);
     if (node === null) {
       return null;
@@ -504,7 +567,7 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     nodes.push(node);
   }
   const edges: MachineEdge[] = [];
-  for (const item of value["edges"]) {
+  for (const item of rawEdges) {
     const edge = parseEdge(item);
     if (edge === null) {
       return null;
@@ -512,13 +575,13 @@ export function parseMachineGraph(value: unknown): MachineGraph | null {
     edges.push(edge);
   }
   const graph: MachineGraph = {
-    name: value["name"],
-    componentName: value["componentName"],
-    currentState: value["currentState"],
-    lastEventName: value["lastEventName"],
+    name,
+    componentName,
+    currentState,
+    lastEventName,
     nodes,
     edges,
-    observationCount: value["observationCount"],
+    observationCount,
   };
   if (owner !== undefined) {
     graph.owner = owner;

@@ -158,8 +158,7 @@ describe("bot-dashboard inspector focus", () => {
     select.focus();
     const graph = host.querySelector("bot-machine-graph");
     assert.ok(graph instanceof BotMachineGraph);
-    const machineFound = true;
-    assert.equal(graph.focusMachine("/Phone"), machineFound);
+    graph.focusMachine("/Phone");
     assert.equal(host.shadowRoot?.activeElement, select);
     host.remove();
   });

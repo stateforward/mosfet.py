@@ -1,5 +1,5 @@
 import * as hsm from "./hsm.ts";
-import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
+import { isMachineGraph, parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 
 export type MachineGraphPhase = "empty" | "drawing";
 
@@ -56,8 +56,13 @@ export class Graph extends hsm.Instance {
   }
 
   static hasGraphs(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    const graphs = graphsFromEvent(event);
-    return graphs !== null && graphs.length > 0;
+    if (!hsm.isRecord(event.data) || !Array.isArray(event.data["graphs"])) return false;
+    const graphs = event.data["graphs"];
+    if (graphs.length === 0) return false;
+    for (const item of graphs) {
+      if (!isMachineGraph(item)) return false;
+    }
+    return true;
   }
 
   static remember(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {

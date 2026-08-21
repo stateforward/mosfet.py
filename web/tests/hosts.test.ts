@@ -13,6 +13,7 @@ import { Panner } from "../src/flow/panner.ts";
 import { FIT_PADDING_RATIO, MAX_ZOOM, MIN_ZOOM } from "../src/flow/types.ts";
 import { Renderer } from "../src/flow/renderer.ts";
 import { Graph, graphsFromEvent, parseGraphs } from "../src/machine-graph.ts";
+import { isMachineGraph } from "../src/otel/machines.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -147,6 +148,8 @@ describe("companion-style HSM controllers", () => {
     assert.deepEqual(parseGraphs(empty), []);
     assert.equal(parseGraphs(null), null);
     assert.equal(parseGraphs([{}]), null);
+    assert.equal(isMachineGraph({}), false);
+    assert.equal(isMachineGraph(graphFor("/Demo")), true);
     const missingData = graphsFromEvent(hsm.typedEvent({ event: Graph.setEvent }));
     assert.equal(missingData, null);
     const malformed = graphsFromEvent(hsm.typedEvent({ event: Graph.setEvent, data: { graphs: [{}] } }));

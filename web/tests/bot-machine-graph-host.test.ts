@@ -52,8 +52,36 @@ describe("bot-machine-graph flow host", () => {
     await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
     assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
     assert.match(host.state(), /\/ready$/);
-    assert.equal(host.focusMachine("/Phone"), true);
-    assert.equal(host.focusMachine("/Missing"), false);
+    const focused: string[] = [];
+    const originalDispatch = host.dispatch.bind(host);
+    host.dispatch = ((eventOrCtx: hsm.Event | hsm.Context, maybeEvent?: hsm.Event) => {
+      const event = maybeEvent ?? (eventOrCtx instanceof hsm.Context ? undefined : eventOrCtx);
+      if (event !== undefined && event.name === BotMachineGraph.focusEvent.name && hsm.isRecord(event.data)) {
+        const machineName = event.data["machineName"];
+        if (typeof machineName === "string") focused.push(machineName);
+      }
+      return maybeEvent === undefined
+        ? originalDispatch(eventOrCtx as hsm.Event)
+        : originalDispatch(eventOrCtx as hsm.Context, maybeEvent);
+    }) as BotMachineGraph["dispatch"];
+    let fitBoundsCount = 0;
+    const originalFitBounds = FlowGraph.prototype.fitBounds;
+    FlowGraph.prototype.fitBounds = function (this: FlowGraph, bounds) {
+      fitBoundsCount += 1;
+      return originalFitBounds.call(this, bounds);
+    };
+    try {
+      host.focusMachine("/Phone");
+      host.focusMachine("/Missing");
+      await waitUntil(() => focused.length === 2);
+      assert.deepEqual(focused, ["/Phone", "/Missing"]);
+      const oneFit = 1;
+      assert.equal(fitBoundsCount, oneFit);
+      assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
+    } finally {
+      host.dispatch = originalDispatch;
+      FlowGraph.prototype.fitBounds = originalFitBounds;
+    }
     host.graphs = [{
       name: "/Empty",
       componentName: "Empty",
@@ -65,7 +93,9 @@ describe("bot-machine-graph flow host", () => {
     }];
     await waitUntil(() => host.getAttribute("data-node-count") === "0");
     assert.equal(host.getAttribute("data-node-count"), "0");
-    assert.equal(host.focusMachine("/Empty"), false);
+    host.focusMachine("/Empty");
+    await waitUntil(() => host.getAttribute("data-node-count") === "0");
+    assert.equal(host.getAttribute("data-node-count"), "0");
     await host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName: "/Phone",
       path: "/Phone/ready",

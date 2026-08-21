@@ -143,12 +143,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.fitEvent }));
   }
 
-  focusMachine(machineName: string): boolean {
-    const model = this.#model ?? flowModelFromGraphs(this.#held);
-    const bounds = focusBoundsForMachine(this.#held, machineName, model);
-    if (bounds === null) return false;
+  focusMachine(machineName: string): void {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.focusEvent, data: { machineName } satisfies FocusData }));
-    return true;
   }
 
   connectedCallback(): void {
@@ -208,10 +204,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   static needsFit(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof BotMachineGraph)) return false;
-    const graphs = graphsFromEvent(event);
-    if (graphs === null) return false;
+    const incoming = eventGraphNodeCount(event);
+    if (incoming === null) return false;
     if (instance.#model === null) return true;
-    return graphNodeCount(instance.#held) !== graphNodeCount(graphs);
+    return graphNodeCount(instance.#held) !== incoming;
   }
 
   static applyDrawnThenSignal(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -366,6 +362,16 @@ function graphFromEvent(event: hsm.Event): Graph | null {
 function graphNodeCount(graphs: readonly MachineGraph[]): number {
   let count = 0;
   for (const graph of graphs) count += graph.nodes.length;
+  return count;
+}
+
+function eventGraphNodeCount(event: hsm.Event): number | null {
+  if (!hsm.isRecord(event.data) || !Array.isArray(event.data["graphs"])) return null;
+  let count = 0;
+  for (const graph of event.data["graphs"]) {
+    if (!hsm.isRecord(graph) || !Array.isArray(graph["nodes"])) return null;
+    count += graph["nodes"].length;
+  }
   return count;
 }
 
