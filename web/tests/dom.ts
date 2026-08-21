@@ -308,11 +308,17 @@ class FakeEvent {
   readonly type: string;
   readonly bubbles: boolean;
   readonly composed: boolean;
+  readonly cancelable: boolean;
+  defaultPrevented = false;
   target: unknown = null;
-  constructor(type: string, init: { bubbles?: boolean; composed?: boolean } = {}) {
+  constructor(type: string, init: { bubbles?: boolean; composed?: boolean; cancelable?: boolean } = {}) {
     this.type = type;
     this.bubbles = init.bubbles === true;
     this.composed = init.composed === true;
+    this.cancelable = init.cancelable === true;
+  }
+  preventDefault(): void {
+    if (this.cancelable) this.defaultPrevented = true;
   }
   composedPath(): unknown[] {
     const target = this.target;
@@ -369,20 +375,17 @@ class FakeWheelEvent extends FakeEvent {
   readonly clientX: number;
   readonly clientY: number;
   readonly deltaY: number;
-  constructor(type: string, init: { clientX?: number; clientY?: number; deltaY?: number; bubbles?: boolean; composed?: boolean } = {}) {
-    super(type, init);
+  constructor(type: string, init: { clientX?: number; clientY?: number; deltaY?: number; bubbles?: boolean; composed?: boolean; cancelable?: boolean } = {}) {
+    super(type, { ...init, cancelable: init.cancelable ?? true });
     this.clientX = init.clientX ?? 0;
     this.clientY = init.clientY ?? 0;
     this.deltaY = init.deltaY ?? 0;
-  }
-  preventDefault(): void {
-    return;
   }
 }
 
 class FakeKeyboardEvent extends FakeEvent {
   readonly key: string;
-  constructor(type: string, init: { key?: string; bubbles?: boolean; composed?: boolean } = {}) {
+  constructor(type: string, init: { key?: string; bubbles?: boolean; composed?: boolean; cancelable?: boolean } = {}) {
     super(type, init);
     this.key = init.key ?? "";
   }

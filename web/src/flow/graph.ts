@@ -848,13 +848,36 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     };
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
-      if (event.key === "+" || event.key === "=") this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
-      if (event.key === "-" || event.key === "_") this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
-      if (event.key === "f" || event.key === "F") this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
-      if (event.key === "ArrowLeft") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x + 40 } }));
-      if (event.key === "ArrowRight") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x - 40 } }));
-      if (event.key === "ArrowUp") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y + 40 } }));
-      if (event.key === "ArrowDown") this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y - 40 } }));
+      let handled = false;
+      if (event.key === "+" || event.key === "=") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
+        handled = true;
+      }
+      if (event.key === "-" || event.key === "_") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
+        handled = true;
+      }
+      if (event.key === "f" || event.key === "F") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
+        handled = true;
+      }
+      if (event.key === "ArrowLeft") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x + 40 } }));
+        handled = true;
+      }
+      if (event.key === "ArrowRight") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, x: this.#view.x - 40 } }));
+        handled = true;
+      }
+      if (event.key === "ArrowUp") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y + 40 } }));
+        handled = true;
+      }
+      if (event.key === "ArrowDown") {
+        this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: { ...this.#view, y: this.#view.y - 40 } }));
+        handled = true;
+      }
+      if (handled) event.preventDefault();
     };
     this.addEventListener("pointerdown", onPointerDown);
     this.addEventListener("pointermove", onPointerMove);
