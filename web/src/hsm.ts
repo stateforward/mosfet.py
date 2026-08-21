@@ -23,25 +23,12 @@ export {
   Kinds,
   on,
   state,
+  submachineState,
   target,
   transition,
 } from "@stateforward/hsm.ts";
 
 export type { Completion, Dispatchable, DispatchEvent, Event, Snapshot } from "@stateforward/hsm.ts";
-
-/**
- * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at
- * `library.submachineState` `Model.id`. Owner: web/src/hsm.ts.
- * Rationale: library `Model` requires `id: string` while `define()` returns a
- * TypedModel whose `id` is optional under `exactOptionalPropertyTypes`.
- * Isolated to this host nesting helper. Risk tests: web/tests/flow-graph.test.ts.
- * Expiration: library `Model.id` is optional, or `define()` stamps `id`.
- * Removal plan: pass `define()` results into `submachineState` directly and
- * delete this assertion.
- */
-export function submachineState(name: string, machine: object): ReturnType<typeof library.submachineState> {
-  return library.submachineState(name, machine as never);
-}
 
 /**
  * Host protocol after `start(this, model)`.
@@ -87,8 +74,8 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  * events and DOM CustomEvents (machine, event kind, stage, outcome) on:
  * command completed/failed/canceled; stream load.failed / stream.dropped; host-drop; coalesce
  * timer flush via Scheduler; renderer paint / render_canceled
- * / ErrorEvent; FlowGraph nodes/edges admit and reject; node_activate /
- * flow-node-click click origin; Panner transform_changed
+ * / ErrorEvent; FlowGraph nodes/edges admit and reject; node_activate_click /
+ * node_activate_key / flow-node-click click origin; Panner transform_changed
  * / panning_changed; Focuser focus_changed; dashboard.graph.focus.
  * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts,
  * web/tests/flow-renderer.test.ts, web/tests/flow-graph.test.ts,
