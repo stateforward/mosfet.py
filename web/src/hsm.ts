@@ -57,10 +57,16 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  * Tests: web/tests/from.test.ts. Permanent until the library exports a host mixin;
  * retire by switching to that mixin and deleting this copy.
  *
- * CORE-EXC-001 (OTEL): this package has no OpenTelemetry SDK (dependency not
- * approved). Control outcomes are HSM events and DOM CustomEvents with bounded
- * names (machine, event kind, stage, outcome). Tests: web/tests/from.test.ts and
- * web/tests/hosts.test.ts. Retire when an OTEL API dependency is approved.
+ * CORE-EXC-001 exception for CORE-OBS-001 MUST OpenTelemetry Telemetry.
+ * Owner: web/src/hsm.ts (bot-hsm-dashboard). Rationale: no OpenTelemetry JS
+ * SDK is approved for this package; do not add one. Changed command, stream,
+ * and host-drop paths emit HSM events and DOM CustomEvents with bounded names
+ * (machine, event kind, stage, outcome) instead of OTEL signals.
+ * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts.
+ * Expiration: an OpenTelemetry API or SDK dependency is user-approved for web/.
+ * Removal plan: instrument host-drop, command completed/failed/canceled, and
+ * stream load.failed with OTEL spans/metrics of bounded cardinality, then
+ * delete this exception.
  */
 export function from<TBase extends HostConstructor>(
   Base: TBase,
@@ -122,7 +128,19 @@ function isDispatchable(value: unknown): value is library.Dispatchable {
     && typeof (value as { context?: unknown }).context === "function";
 }
 
-/** Owning host when it is an EventTarget; used so host-drop is not silent. */
+/**
+ * Owning host EventTarget for `host-drop` CustomEvents.
+ *
+ * Inputs: `instance` — an HSM instance whose `context().Value(Keys.Owner)` may
+ * hold a parent host. Outputs: that owner when it is an EventTarget; otherwise
+ * `undefined` (missing owner, `Value` miss, or a non-EventTarget owner such as
+ * another Instance that is not a host element). Ownership: does not retain the
+ * target; callers use it only to emit `host-drop`. Lifetime: valid while the
+ * instance context still holds that owner; after stop/unbind the lookup may
+ * miss. Concurrency: synchronous and side-effect free. Failure modes: never
+ * throws; undefined means `catchFailure`/`reportFailure` cannot dispatch
+ * `host-drop` (HostDropError is still classified).
+ */
 export function ownerTarget(instance: library.Instance): EventTarget | undefined {
   const owner = instance.context().Value(library.Keys.Owner);
   return owner instanceof EventTarget ? owner : undefined;
@@ -186,6 +204,17 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
   }));
 }
 
+/**
+ * Host-drop boundary for rejected activities.
+ *
+ * Inputs: `error` to classify; optional `host` EventTarget (from `ownerTarget`
+ * or the element itself). Outputs: rethrows `HostDropError` after emitting
+ * `host-drop` when `host` is an EventTarget; otherwise reports or rethrows a
+ * normalized Error. Ownership: does not take ownership of `host`. Lifetime:
+ * `host` must still be able to `dispatchEvent` (undefined host skips emit).
+ * Concurrency: synchronous. Failure modes: missing/non-EventTarget host skips
+ * `host-drop`; non-drop errors go to `reportError` when present, else throw.
+ */
 export function reportFailure(error: unknown, host?: EventTarget): Error {
   const drop = hostDropFrom(error);
   if (drop !== null) {
@@ -201,6 +230,16 @@ export function reportFailure(error: unknown, host?: EventTarget): Error {
   throw err;
 }
 
+/**
+ * Promise rejection handler for host-drop and other activity failures.
+ *
+ * Inputs: optional `host` EventTarget (typically `ownerTarget(instance)` or
+ * `this` on a host element). Outputs: a callback that swallows `HostDropError`
+ * after emitting `host-drop` when `host` is defined, and otherwise defers to
+ * `reportFailure`. Ownership/lifetime/concurrency: same as `reportFailure`.
+ * Failure modes: undefined host means host-drop is classified but not
+ * dispatched; non-drop errors still report or throw.
+ */
 export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {
     const drop = hostDropFrom(error);
