@@ -29,6 +29,7 @@ export type {
   HandleKind,
   PointerOrigin,
   KeyboardOrigin,
+  ClickOrigin,
   ActivationOrigin,
   NodeClickDetail,
   EdgeClickDetail,

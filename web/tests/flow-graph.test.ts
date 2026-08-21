@@ -627,10 +627,17 @@ describe("flow-graph", () => {
     document.body.append(graph);
     const nodeWidth = 80;
     const nodeHeight = 40;
+    const originLeft = 0;
+    const originTop = 0;
     const expectedTabIndex = 0;
-    const keyConsumed = true;
+    const keyNotConsumed = false;
+    const eventBubbles = true;
+    const eventCancelable = true;
+    const eventComposed = true;
+    const enterKey = "Enter";
+    const spaceKey = " ";
     graph.nodes = [
-      { id: "a", position: { x: 0, y: 0 }, data: { label: "A", path: "/A", machineName: "/A" }, width: nodeWidth, height: nodeHeight },
+      { id: "a", position: { x: originLeft, y: originTop }, data: { label: "A", path: "/A", machineName: "/A" }, width: nodeWidth, height: nodeHeight },
     ];
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const node = graph.querySelector("flow-node");
@@ -638,6 +645,7 @@ describe("flow-graph", () => {
     const control = node.shadowRoot?.querySelector("button");
     assert.ok(control instanceof HTMLElement);
     assert.equal(control.localName, "button");
+    assert.equal(control.tagName, "BUTTON");
     assert.equal(node.getAttribute("role"), null);
     assert.equal(control.getAttribute("aria-label"), "A");
     assert.equal(node.getAttribute("data-testid"), "state-node");
@@ -645,7 +653,7 @@ describe("flow-graph", () => {
     graph.focusTarget({
       kind: "machine",
       machineName: "/A",
-      bounds: { left: 0, right: nodeWidth, top: 0, bottom: nodeHeight },
+      bounds: { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight },
     });
     await flush();
     const noShadowFocus = null;
@@ -656,7 +664,7 @@ describe("flow-graph", () => {
       nodeId: "a",
       nodePath: "/A",
       machineName: "/A",
-      bounds: { left: 0, right: nodeWidth, top: 0, bottom: nodeHeight },
+      bounds: { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight },
     });
     await flush();
     assert.equal(node.shadowRoot?.activeElement, control);
@@ -664,20 +672,57 @@ describe("flow-graph", () => {
     graph.addEventListener("flow-node-click", (event) => {
       if (event instanceof CustomEvent) origins.push(event.detail.originalEvent);
     });
-    const activate = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, composed: true });
-    control.dispatchEvent(activate);
+    const keyInit = { bubbles: eventBubbles, cancelable: eventCancelable, composed: eventComposed };
+    const enter = new KeyboardEvent("keydown", { ...keyInit, key: enterKey });
+    control.dispatchEvent(enter);
     await flush();
-    const activated = 1;
-    assert.equal(activate.defaultPrevented, keyConsumed);
-    assert.equal(origins.length, activated);
-    assert.deepEqual(origins[0], { type: "keydown", key: "Enter" });
-    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true, composed: true });
+    const noneActivated = 0;
+    assert.equal(enter.defaultPrevented, keyNotConsumed);
+    assert.equal(origins.length, noneActivated);
+    const space = new KeyboardEvent("keydown", { ...keyInit, key: spaceKey });
     control.dispatchEvent(space);
     await flush();
-    const spaceActivated = 2;
-    assert.equal(space.defaultPrevented, keyConsumed);
-    assert.equal(origins.length, spaceActivated);
-    assert.deepEqual(origins[1], { type: "keydown", key: " " });
+    assert.equal(space.defaultPrevented, keyNotConsumed);
+    assert.equal(origins.length, noneActivated);
+    const clickInit = { bubbles: eventBubbles, cancelable: eventCancelable, composed: eventComposed };
+    control.dispatchEvent(new Event("click", clickInit));
+    await flush();
+    const activated = 1;
+    assert.equal(origins.length, activated);
+    assert.deepEqual(origins[0], { type: "click" });
+    graph.remove();
+  });
+
+  test("node_activate types accepted keys and rejects unknown keys", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const originLeft = 0;
+    const originTop = 0;
+    graph.nodes = [
+      { id: "a", position: { x: originLeft, y: originTop }, data: { label: "A" }, width: nodeWidth, height: nodeHeight },
+    ];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const origins: unknown[] = [];
+    graph.addEventListener("flow-node-click", (event) => {
+      if (event instanceof CustomEvent) origins.push(event.detail.originalEvent);
+    });
+    const nodeId = "a";
+    const enterKey = "Enter";
+    const spaceKey = " ";
+    const tabKey = "Tab";
+    const unknownKey = "Escape";
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId } }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId, key: enterKey } }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId, key: spaceKey } }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId, key: tabKey } }));
+    await graph.dispatch(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId, key: unknownKey } }));
+    const accepted = 3;
+    assert.equal(origins.length, accepted);
+    assert.deepEqual(origins[0], { type: "click" });
+    assert.deepEqual(origins[1], { type: "keydown", key: enterKey });
+    assert.deepEqual(origins[2], { type: "keydown", key: spaceKey });
     graph.remove();
   });
 });

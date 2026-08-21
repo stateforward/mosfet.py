@@ -60,7 +60,11 @@ export type KeyboardOrigin = {
   readonly key: "Enter" | " ";
 };
 
-export type ActivationOrigin = PointerOrigin | KeyboardOrigin;
+export type ClickOrigin = {
+  readonly type: "click";
+};
+
+export type ActivationOrigin = PointerOrigin | KeyboardOrigin | ClickOrigin;
 
 export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
 export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };

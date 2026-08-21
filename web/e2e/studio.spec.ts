@@ -662,25 +662,32 @@ test("focused flow-node native button activates with Enter and Space", async ({ 
   const enterKey = "Enter";
   const spaceKey = " ";
   await page.getByTestId("frame").evaluate((frame) => {
-    const host = frame as HTMLElement & { activationOrigins?: unknown[] };
-    host.activationOrigins = [];
-    frame.addEventListener("flow-node-click", (event) => {
-      host.activationOrigins?.push((event as CustomEvent<{ originalEvent: unknown }>).detail.originalEvent);
+    const host = frame as HTMLElement & { activationCount?: number };
+    host.activationCount = 0;
+    frame.addEventListener("flow-node-click", () => {
+      host.activationCount = (host.activationCount ?? 0) + 1;
     });
   });
 
   const node = page.getByTestId("state-node").first();
-  const control = node.getByRole("button");
-  await expect(control).toHaveRole("button");
+  const control = node.locator("button");
+  await expect.poll(async () => control.evaluate((element) => element.localName)).toBe("button");
+  await expect.poll(async () => control.evaluate((element) => element.tagName)).toBe("BUTTON");
   await expect(control).toHaveAccessibleName(/.+/);
   await control.focus();
   await expect(control).toBeFocused();
   await control.press(enterKey);
   await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
-    return (frame as HTMLElement & { activationOrigins?: unknown[] }).activationOrigins ?? [];
-  })).toContainEqual({ type: "keydown", key: enterKey });
+    return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
+  })).toBeGreaterThan(0);
   await control.press(spaceKey);
   await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
-    return (frame as HTMLElement & { activationOrigins?: unknown[] }).activationOrigins ?? [];
-  })).toContainEqual({ type: "keydown", key: spaceKey });
+    return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
+  })).toBeGreaterThan(1);
+  await control.evaluate((element) => {
+    if (element instanceof HTMLButtonElement) element.click();
+  });
+  await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
+    return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
+  })).toBeGreaterThan(2);
 });

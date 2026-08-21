@@ -28,7 +28,7 @@ import {
   type ConnectDetail,
   type Edge,
   type EdgeClickDetail,
-  type KeyboardOrigin,
+  type ActivationOrigin,
   type Node,
   type NodeClickDetail,
   type PointerHit,
@@ -49,6 +49,10 @@ const EXCLUSIVE_SELECT = false;
 const EVENT_BUBBLES = true;
 const EVENT_COMPOSED = true;
 const GRAPH_ROLE = "group";
+const KEYBOARD_CLICK_DETAIL = 0;
+// TS2589: inferred hsm.define tuple exceeds the checker when connected owns the
+// guarded focus_target pair. Runtime model is unchanged.
+const defineGraph = hsm.define as (name: string, ...parts: unknown[]) => object;
 
 export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly attachEvent = { name: "graph_attach", kind: hsm.Kinds.Event } as const;
@@ -69,7 +73,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly focusEvent = { name: "focus_target", kind: hsm.Kinds.Event } as const;
   static readonly activateNodeEvent = { name: "node_activate", kind: hsm.Kinds.Event } as const;
 
-  static readonly model = hsm.define(
+  static readonly model = defineGraph(
     "FlowGraph",
     hsm.initial(hsm.target("disconnected")),
     hsm.state(
@@ -123,7 +127,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
-      hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.effect(FlowGraph.applyFocus)),
+      hsm.transition(
+        hsm.on(FlowGraph.focusEvent.name),
+        hsm.guard(FlowGraph.isNodeFocus),
+        hsm.effect(FlowGraph.applyNodeFocus),
+      ),
+      hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.effect(FlowGraph.applyViewportFocus)),
       hsm.transition(hsm.on(FlowGraph.activateNodeEvent.name), hsm.effect(FlowGraph.emitNodeActivate)),
       hsm.state(
         "idle",
@@ -355,11 +364,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Fit the viewport to `target.bounds` and record the Focuser kind.
    *
    * Inputs: a `FocusTarget` with `kind`, `bounds`, and optional `nodeId` /
-   * `nodePath` / `machineName`.
+   * `nodePath` / `machineName`. Topology routes `kind === "node"` to DOM-focus
+   * the node's native button; machine and viewport kinds pan/fit only.
    * Outputs: Focuser `current` and a pan/zoom fit. Keyboard focus moves onto
-   * the node's native button only when `kind` is `"node"` and `nodeId` or
-   * `nodePath` resolve to a painted node. Machine and viewport kinds do not
-   * DOM-focus a descendant or set `aria-activedescendant`.
+   * the node's native button only for the node transition, and only when
+   * `nodeId` or `nodePath` resolve to a painted node. Machine and viewport
+   * kinds do not DOM-focus a descendant or set `aria-activedescendant`.
    * Ownership: this graph owns Focuser/Panner dispatch. Lifetime: one focus
    * request. Concurrency: runtime-safe on the graph dispatch thread.
    * Failure modes: missing bounds or missing node are no-ops.
@@ -595,12 +605,32 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }));
   }
 
+  /**
+   * Activate a painted node from native button click or a typed key.
+   *
+   * Inputs: `nodeId` required. Optional `key` is exactly `Enter` or Space (` `).
+   * Outputs: exclusive Selection click and `flow-node-click` with
+   * `{ type: "click" }` when `key` is omitted, or `{ type: "keydown", key }`
+   * when `key` is accepted.
+   * Ownership: this graph. Lifetime: one activation.
+   * Concurrency: runtime-safe on the graph dispatch thread.
+   * Failure modes: missing `nodeId`, unknown node, or any `key` other than
+   * Enter/Space — no selection and no `flow-node-click`. Keys are not coerced.
+   * Classification: runtime-safe.
+   */
   static emitNodeActivate(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
     const nodeId = event.data["nodeId"];
+    if (typeof nodeId !== "string" || nodeId.length === 0) return;
     const key = event.data["key"];
-    if (typeof nodeId !== "string") return;
-    const originKey = key === SPACE_KEY ? SPACE_KEY : ENTER_KEY;
+    let origin: ActivationOrigin;
+    if (key === undefined) {
+      origin = { type: "click" };
+    } else if (key === ENTER_KEY || key === SPACE_KEY) {
+      origin = { type: "keydown", key };
+    } else {
+      return;
+    }
     const node = instance.#nodes.find((item) => item.id === nodeId);
     if (node === undefined) return;
     instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
@@ -608,7 +638,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       kind: "node",
       additive: EXCLUSIVE_SELECT,
     } }) });
-    const origin: KeyboardOrigin = { type: "keydown", key: originKey };
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
       detail: { node: copyNode(node), originalEvent: origin },
       bubbles: EVENT_BUBBLES,
@@ -808,15 +837,31 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }));
   }
 
-  static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  static isNodeFocus(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return hsm.isRecord(event.data) && event.data["kind"] === "node";
+  }
+
+  static applyNodeFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
+    if (!instance.#applyFocusPan(event)) return;
+    const focused = instance.#nodeElement(hsm.isRecord(event.data) ? event.data : null);
+    if (focused === null) return;
+    focused.focus();
+  }
+
+  static applyViewportFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#applyFocusPan(event);
+  }
+
+  #applyFocusPan(event: hsm.Event): boolean {
     const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
-    const metrics = instance.#metrics();
-    if (bounds === null || metrics === null) return;
+    const metrics = this.#metrics();
+    if (bounds === null || metrics === null) return false;
     const kind = hsm.isRecord(event.data) && (event.data["kind"] === "node" || event.data["kind"] === "viewport")
       ? event.data["kind"]
       : "machine";
-    instance.#send({ machine: instance.#focuser, event: hsm.typedEvent({ event: Focuser.focusEvent, data: {
+    this.#send({ machine: this.#focuser, event: hsm.typedEvent({ event: Focuser.focusEvent, data: {
       kind,
       bounds,
       ...(hsm.isRecord(event.data) && typeof event.data["machineName"] === "string"
@@ -829,11 +874,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         ? { nodeId: event.data["nodeId"] }
         : {}),
     } }) });
-    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
-    if (kind !== "node") return;
-    const focused = instance.#nodeElement(hsm.isRecord(event.data) ? event.data : null);
-    if (focused === null) return;
-    focused.focus();
+    this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
+    return true;
   }
 
   #childActors(): object[] {
@@ -903,19 +945,30 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       if (action === "zoom-out") this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
       if (action === "fit") this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
     };
+    const onActivateClick = (event: Event): void => {
+      if (event.type !== "click") return;
+      const detail = "detail" in event && typeof event.detail === "number" ? event.detail : KEYBOARD_CLICK_DETAIL;
+      if (detail !== KEYBOARD_CLICK_DETAIL) return;
+      const node = this.#flowNodeFromEvent(event);
+      if (node === null || node.node === null) return;
+      let fromButton = false;
+      for (const target of event.composedPath()) {
+        if (target instanceof HTMLElement && target.localName === "button") {
+          fromButton = true;
+          break;
+        }
+      }
+      if (!fromButton) return;
+      this.#live(hsm.typedEvent({
+        event: FlowGraph.activateNodeEvent,
+        data: { nodeId: node.node.id },
+      }));
+    };
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
       let handled = false;
       const node = this.#flowNodeFromEvent(event);
-      if (node !== null && node.node !== null && (event.key === ENTER_KEY || event.key === SPACE_KEY)) {
-        this.#live(hsm.typedEvent({
-          event: FlowGraph.activateNodeEvent,
-          data: { nodeId: node.node.id, key: event.key },
-        }));
-        handled = true;
-      }
       if (node !== null || event.target !== this) {
-        if (handled) event.preventDefault();
         return;
       }
       if (event.key === "+" || event.key === "=") {
@@ -953,6 +1006,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.addEventListener("pointerup", onPointerUp, { capture: true });
     this.addEventListener("pointercancel", onPointerUp, { capture: true });
     this.addEventListener("wheel", onWheel, { passive: false });
+    this.addEventListener("click", onActivateClick);
     this.addEventListener("keydown", onKey);
     this.addEventListener("flow-control", onControl);
     this.#unlisten = () => {
@@ -961,6 +1015,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.removeEventListener("pointerup", onPointerUp, { capture: true });
       this.removeEventListener("pointercancel", onPointerUp, { capture: true });
       this.removeEventListener("wheel", onWheel);
+      this.removeEventListener("click", onActivateClick);
       this.removeEventListener("keydown", onKey);
       this.removeEventListener("flow-control", onControl);
       samples.dispose();
