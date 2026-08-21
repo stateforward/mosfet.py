@@ -82,20 +82,20 @@ async function frameViewport(page: Page): Promise<GraphViewport> {
   });
 }
 
-async function layoutBox(page: Page, testId: string): Promise<{ top: number; bottom: number }> {
-  const box = await page.getByTestId(testId).boundingBox();
+async function layoutBox(args: { page: Page; testId: string }): Promise<{ top: number; bottom: number }> {
+  const box = await args.page.getByTestId(args.testId).boundingBox();
   if (box === null) {
-    throw new Error(`dashboard layout element is unavailable: ${testId}`);
+    throw new Error(`dashboard layout element is unavailable: ${args.testId}`);
   }
   return { top: box.y, bottom: box.y + box.height };
 }
 
 async function dashboardLayout(page: Page): Promise<DashboardLayout> {
   return {
-    inspector: await layoutBox(page, "inspector"),
-    map: await layoutBox(page, "map"),
-    canvas: await layoutBox(page, "canvas"),
-    events: await layoutBox(page, "event-rail"),
+    inspector: await layoutBox({ page, testId: "inspector" }),
+    map: await layoutBox({ page, testId: "map" }),
+    canvas: await layoutBox({ page, testId: "canvas" }),
+    events: await layoutBox({ page, testId: "event-rail" }),
   };
 }
 
@@ -117,10 +117,21 @@ function totalNodeCount(graphs: readonly VisibleGraph[]): string {
   return String(graphs.reduce((count, graph) => count + graph.nodeCount, 0));
 }
 
+const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
+const MOBILE_VIEWPORT = { width: 390, height: 844 };
+const NODE_MIN_WIDTH = 105;
+const FOCUS_CENTER_SLACK = 24;
+const NODE_DRAG_DELTA = { x: 64, y: 8 };
+const NODE_DRAG_STEPS = 4;
+const VIEWPORT_POLL_MS = 2000;
+const PAN_SHIFT_MIN = 20;
+const WHEEL_DELTA_Y = 12;
+const WHEEL_CLIENT = { x: 40, y: 40 };
+
 test.describe.configure({ mode: "serial" });
 
 test("studio chrome is visible while the collector is empty", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   await expect(page.getByTestId("current-path")).toHaveText("—");
   await expect(page.getByTestId("last-event")).toHaveText("—");
@@ -132,19 +143,19 @@ test("studio chrome is visible while the collector is empty", async ({ page }) =
   await page.getByTestId("replay-live").click();
   await page.screenshot({ path: shotPath("desktop-empty.png"), fullPage: true });
 
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize(MOBILE_VIEWPORT);
   await expect(page.getByTestId("inspector")).toBeVisible();
   await expect(page.getByTestId("canvas")).toBeVisible();
   const mobileLayout = await dashboardLayout(page);
   expect(mobileLayout.inspector.bottom).toBeLessThanOrEqual(mobileLayout.map.top);
   expect(mobileLayout.map.bottom).toBeLessThanOrEqual(mobileLayout.events.top);
   expect(mobileLayout.canvas.bottom).toBeLessThanOrEqual(mobileLayout.events.top);
-  expect(mobileLayout.events.bottom).toBeLessThanOrEqual(844);
+  expect(mobileLayout.events.bottom).toBeLessThanOrEqual(MOBILE_VIEWPORT.height);
   await page.screenshot({ path: shotPath("mobile-empty.png"), fullPage: true });
 });
 
 test("two persisted root models render the native graph without locking the page", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   for (const name of ["/Phone", "/PhoneBot"]) {
     const response = await request.post("/v1/models", { data: publishedModel(name, null) });
@@ -152,12 +163,12 @@ test("two persisted root models render the native graph without locking the page
   }
   await expect(page).toHaveTitle("Environment workspace");
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "2");
-  await expect(page.locator("bot-machine-graph .state-node")).toHaveCount(2);
+  await expect(page.getByTestId("state-node")).toHaveCount(2);
   await expect(page.getByTestId("frame")).toBeVisible();
 });
 
 test("clicking a state node centers and zooms that node", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   const response = await request.post("/v1/models", {
     data: {
@@ -174,28 +185,29 @@ test("clicking a state node centers and zooms that node", async ({ page, request
   });
   expect(response.ok()).toBeTruthy();
 
-  await expect(page.locator('bot-machine-graph .state-node[data-path="/Phone/right"]')).toBeVisible();
-  await expect(page.locator("bot-machine-graph .edge-path:not(.initial)")).toHaveCount(1);
-  await expect(page.locator("bot-machine-graph .edge-label")).toHaveCount(1);
-  await expect(page.locator("bot-machine-graph .edge-label")).toContainText("go");
+  const rightNode = page.locator('flow-node[data-testid="state-node"][data-path="/Phone/right"]');
+  await expect(rightNode).toBeVisible();
+  await expect(page.locator('[data-testid="edge-path"]:not(.initial)')).toHaveCount(1);
+  await expect(page.getByTestId("edge-label")).toHaveCount(1);
+  await expect(page.getByTestId("edge-label")).toContainText("go");
   const before = await frameViewport(page);
-  await page.locator('bot-machine-graph .state-node[data-path="/Phone/right"] .node-badge').click();
+  await rightNode.getByTestId("node-badge").click();
   await expect.poll(async () => frameViewport(page)).not.toEqual(before);
 
-  const nodeBox = await page.locator('bot-machine-graph .state-node[data-path="/Phone/right"]').boundingBox();
+  const nodeBox = await rightNode.boundingBox();
   const viewportBox = await page.locator("css=flow-graph::part(viewport)").boundingBox();
   if (nodeBox === null || viewportBox === null) throw new Error("focused node geometry is unavailable");
   const dx = nodeBox.x + nodeBox.width / 2 - (viewportBox.x + viewportBox.width / 2);
   const dy = nodeBox.y + nodeBox.height / 2 - (viewportBox.y + viewportBox.height / 2);
-  expect(nodeBox.width).toBeGreaterThan(105);
-  expect(Math.abs(dx)).toBeLessThan(24);
-  expect(Math.abs(dy)).toBeLessThan(24);
+  expect(nodeBox.width).toBeGreaterThan(NODE_MIN_WIDTH);
+  expect(Math.abs(dx)).toBeLessThan(FOCUS_CENTER_SLACK);
+  expect(Math.abs(dy)).toBeLessThan(FOCUS_CENTER_SLACK);
 });
 
 test("dragging a state node pans without refocusing it", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
-  const node = page.locator('bot-machine-graph .state-node[data-path="/Phone/right"]');
+  const node = page.locator('flow-node[data-testid="state-node"][data-path="/Phone/right"]');
   await expect(node).toBeVisible();
   const viewport = page.locator("css=flow-graph::part(viewport)");
   const beforeView = await frameViewport(page);
@@ -208,20 +220,20 @@ test("dragging a state node pans without refocusing it", async ({ page }) => {
   const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
-  await page.mouse.move(start.x + 64, start.y + 8, { steps: 4 });
+  await page.mouse.move(start.x + NODE_DRAG_DELTA.x, start.y + NODE_DRAG_DELTA.y, { steps: NODE_DRAG_STEPS });
   await page.mouse.up();
-  await expect.poll(async () => frameViewport(page), { timeout: 2000 }).not.toEqual(beforeView);
+  await expect.poll(async () => frameViewport(page), { timeout: VIEWPORT_POLL_MS }).not.toEqual(beforeView);
   const afterView = await frameViewport(page);
   const afterNode = await node.boundingBox();
   const afterViewport = await viewport.boundingBox();
   if (afterNode === null || afterViewport === null) throw new Error("drag geometry is unavailable");
   const afterDx = afterNode.x + afterNode.width / 2 - (afterViewport.x + afterViewport.width / 2);
   expect(afterView.zoom).toBeCloseTo(beforeView.zoom, 5);
-  expect(Math.abs(afterDx - beforeDx)).toBeGreaterThan(20);
+  expect(Math.abs(afterDx - beforeDx)).toBeGreaterThan(PAN_SHIFT_MIN);
 });
 
 test("live OTLP observe spans update the inspector and canvas", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   await publishObservedEnvironmentRoots(request);
 
@@ -249,7 +261,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
   await expect(page.getByTestId("last-event")).toHaveText("bot.processing.completed");
   await page.screenshot({ path: shotPath("desktop-after-spans.png"), fullPage: true });
 
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize(MOBILE_VIEWPORT);
   await expect(page.getByTestId("inspector")).toBeVisible();
   await expect(page.getByTestId("canvas")).toBeVisible();
   await expect(page.getByTestId("current-path")).toContainText("/PhoneBot/active/processing");
@@ -257,7 +269,7 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
 });
 
 test("simulated replay steps through event spans and focuses the owning graph", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   await publishObservedEnvironmentRoots(request);
   await exportTraces(firstBatch);
@@ -299,7 +311,7 @@ test("simulated replay steps through event spans and focuses the owning graph", 
 });
 
 test("environment graph visibility is independent from machine selection", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   await expect(page).toHaveTitle("Environment workspace");
   await expect(page.getByTestId("title")).toHaveText("Environment");
@@ -510,7 +522,7 @@ test("command gateway reports no subscriber when no bot is attached", async ({ p
 });
 
 test("populated mobile rails stay contained around the map", async ({ page, request }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize(MOBILE_VIEWPORT);
   await openStudio(page);
   await loadPopulatedData(request);
 
@@ -526,12 +538,12 @@ test("populated mobile rails stay contained around the map", async ({ page, requ
 
   const layout = await dashboardLayout(page);
   expect(layout.inspector.top).toBeGreaterThanOrEqual(0);
-  expect(layout.inspector.bottom).toBeLessThanOrEqual(844);
+  expect(layout.inspector.bottom).toBeLessThanOrEqual(MOBILE_VIEWPORT.height);
   expect(layout.inspector.bottom).toBeLessThanOrEqual(layout.map.top);
   expect(layout.map.bottom).toBeLessThanOrEqual(layout.events.top);
   expect(layout.canvas.top).toBeGreaterThanOrEqual(layout.map.top);
   expect(layout.canvas.bottom).toBeLessThanOrEqual(layout.map.bottom);
-  expect(layout.events.bottom).toBeLessThanOrEqual(844);
+  expect(layout.events.bottom).toBeLessThanOrEqual(MOBILE_VIEWPORT.height);
 
   const memberMetrics = await page.getByTestId("members").evaluate((members) => ({
     membersBottom: members.getBoundingClientRect().bottom,
@@ -566,9 +578,9 @@ test("queued graph gestures do not reject when the element disconnects", async (
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.getByTestId("frame").dispatchEvent("wheel", {
-    deltaY: 12,
-    clientX: 40,
-    clientY: 40,
+    deltaY: WHEEL_DELTA_Y,
+    clientX: WHEEL_CLIENT.x,
+    clientY: WHEEL_CLIENT.y,
     bubbles: true,
     cancelable: true,
   });
@@ -586,7 +598,7 @@ test("queued graph gestures do not reject when the element disconnects", async (
 });
 
 test("bot-otel-source live-badge names the control and announces errors", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   const badge = page.getByTestId("live-badge");
   await expect(badge).toHaveRole("button");
@@ -608,7 +620,7 @@ test("bot-otel-source live-badge names the control and announces errors", async 
 });
 
 test("flow-graph host is an application landmark with keyboard viewport control", async ({ page, request }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize(DESKTOP_VIEWPORT);
   await openStudio(page);
   const response = await request.post("/v1/models", { data: publishedModel("/Keyboard", null) });
   expect(response.ok()).toBeTruthy();

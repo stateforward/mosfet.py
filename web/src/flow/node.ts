@@ -16,6 +16,8 @@ export class FlowNode extends HTMLElement {
     applyStyles(this.#root, nodeStyles);
     this.#label = document.createElement("span");
     this.#label.className = "label node-badge";
+    this.#label.part.add("badge");
+    this.#label.setAttribute("data-testid", "node-badge");
     this.#root.append(document.createElement("slot"), this.#label);
   }
 
@@ -44,13 +46,19 @@ export class FlowNode extends HTMLElement {
     this.style.height = `${height}px`;
     this.className = node.className ?? "";
     if (typeof node.data["className"] === "string") this.className = node.data["className"];
+    this.part.add("node");
+    this.setAttribute("data-testid", "state-node");
+    this.setAttribute("role", "button");
+    if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
     this.toggleAttribute("selected", node.selected === true);
+    this.setAttribute("aria-selected", node.selected === true ? "true" : "false");
     const path = node.data["path"];
     const machineName = node.data["machineName"];
     if (typeof path === "string") this.dataset["path"] = path;
     if (typeof machineName === "string") this.dataset["machineName"] = machineName;
     const label = node.data["label"];
     this.#label.textContent = typeof label === "string" ? label : node.id;
+    this.setAttribute("aria-label", this.#label.textContent);
   }
 }
 

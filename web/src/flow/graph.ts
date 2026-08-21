@@ -60,6 +60,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly setEdgesEvent = { name: "edges_set", kind: hsm.Kinds.Event } as const;
   static readonly setPolicyEvent = { name: "policy_set", kind: hsm.Kinds.Event } as const;
   static readonly focusEvent = { name: "focus_target", kind: hsm.Kinds.Event } as const;
+  static readonly activateNodeEvent = { name: "node_activate", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "FlowGraph",
@@ -116,6 +117,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
       hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.effect(FlowGraph.applyFocus)),
+      hsm.transition(hsm.on(FlowGraph.activateNodeEvent.name), hsm.effect(FlowGraph.emitNodeActivate)),
       hsm.state(
         "idle",
         hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.target("../hit")),
@@ -572,6 +574,24 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }));
   }
 
+  static emitNodeActivate(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    const nodeId = event.data["nodeId"];
+    if (typeof nodeId !== "string") return;
+    const node = instance.#nodes.find((item) => item.id === nodeId);
+    if (node === undefined) return;
+    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
+      id: node.id,
+      kind: "node",
+      additive: false,
+    } }) });
+    instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
+      detail: { node: copyNode(node), originalEvent: { pointerId: 0, clientX: 0, clientY: 0, type: "pointerup" } },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   static emitEdgeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
@@ -769,14 +789,27 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
     const metrics = instance.#metrics();
     if (bounds === null || metrics === null) return;
+    const kind = hsm.isRecord(event.data) && (event.data["kind"] === "node" || event.data["kind"] === "viewport")
+      ? event.data["kind"]
+      : "machine";
     instance.#send({ machine: instance.#focuser, event: hsm.typedEvent({ event: Focuser.focusEvent, data: {
-      kind: "machine",
+      kind,
       bounds,
       ...(hsm.isRecord(event.data) && typeof event.data["machineName"] === "string"
         ? { machineName: event.data["machineName"] }
         : {}),
+      ...(hsm.isRecord(event.data) && typeof event.data["nodePath"] === "string"
+        ? { nodePath: event.data["nodePath"] }
+        : {}),
+      ...(hsm.isRecord(event.data) && typeof event.data["nodeId"] === "string"
+        ? { nodeId: event.data["nodeId"] }
+        : {}),
     } }) });
     instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
+    const focused = instance.#nodeElement(hsm.isRecord(event.data) ? event.data : null);
+    if (focused === null) return;
+    focused.focus();
+    instance.setAttribute("aria-activedescendant", focused.id);
   }
 
   #childActors(): object[] {
@@ -849,6 +882,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
       let handled = false;
+      const target = event.target;
+      if (target instanceof FlowNode && target.node !== null && (event.key === "Enter" || event.key === " ")) {
+        this.#live(hsm.typedEvent({ event: FlowGraph.activateNodeEvent, data: { nodeId: target.node.id } }));
+        handled = true;
+      }
+      if (target !== this) {
+        if (handled) event.preventDefault();
+        return;
+      }
       if (event.key === "+" || event.key === "=") {
         this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
         handled = true;
@@ -922,6 +964,28 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         type: eventType,
       },
     };
+  }
+
+  #nodeElement(data: Record<string, unknown> | null): FlowNode | null {
+    if (data === null) return null;
+    const nodeId = data["nodeId"];
+    if (typeof nodeId === "string") {
+      const byId = this.#nodeElements.get(nodeId);
+      if (byId !== undefined) return byId;
+    }
+    const nodePath = data["nodePath"];
+    if (typeof nodePath === "string") {
+      for (const element of this.#nodeElements.values()) {
+        if (element.dataset["path"] === nodePath) return element;
+      }
+    }
+    const machineName = data["machineName"];
+    if (typeof machineName === "string") {
+      for (const element of this.#nodeElements.values()) {
+        if (element.dataset["machineName"] === machineName) return element;
+      }
+    }
+    return null;
   }
 
   #paint(): void {

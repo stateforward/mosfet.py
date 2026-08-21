@@ -221,10 +221,16 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static applyNodeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return;
     const machineName = event.data["machineName"];
+    const path = event.data["path"];
     const bounds = boundsOf(event.data["bounds"]);
     if (typeof machineName !== "string" || bounds === null) return;
     instance.#flow.fitBounds(bounds);
-    instance.#flow.focusTarget({ kind: "machine", machineName, bounds });
+    instance.#flow.focusTarget({
+      kind: "node",
+      machineName,
+      bounds,
+      ...(typeof path === "string" ? { nodePath: path } : {}),
+    });
   }
 
   #applyDrawn(graphs: readonly MachineGraph[]): void {

@@ -608,4 +608,53 @@ describe("flow-graph", () => {
     assert.equal(ignored.defaultPrevented, keyNotConsumed);
     graph.remove();
   });
+
+  test("application keys leave slotted native controls alone", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const zoom = document.createElement("button");
+    graph.append(zoom);
+    await flush();
+    const panKey = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });
+    zoom.dispatchEvent(panKey);
+    const keyNotConsumed = false;
+    assert.equal(panKey.defaultPrevented, keyNotConsumed);
+    graph.remove();
+  });
+
+  test("clickable nodes are keyboard and AT focusable", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A", path: "/A", machineName: "/A" }, width: 80, height: 40 },
+    ];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const node = graph.querySelector("flow-node");
+    assert.ok(node instanceof HTMLElement);
+    assert.equal(node.getAttribute("role"), "button");
+    assert.equal(node.getAttribute("aria-label"), "A");
+    assert.equal(node.getAttribute("data-testid"), "state-node");
+    assert.equal(node.tabIndex, 0);
+    graph.focusTarget({
+      kind: "node",
+      nodeId: "a",
+      nodePath: "/A",
+      machineName: "/A",
+      bounds: { left: 0, right: 80, top: 0, bottom: 40 },
+    });
+    await flush();
+    assert.equal(graph.shadowRoot?.activeElement, node);
+    assert.equal(graph.getAttribute("aria-activedescendant"), "a");
+    const activate = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, composed: true });
+    let clicked = 0;
+    graph.addEventListener("flow-node-click", () => {
+      clicked += 1;
+    });
+    node.dispatchEvent(activate);
+    await flush();
+    const activated = 1;
+    assert.equal(activate.defaultPrevented, true);
+    assert.equal(clicked, activated);
+    graph.remove();
+  });
 });

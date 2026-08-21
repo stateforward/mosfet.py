@@ -16,10 +16,14 @@ export class FlowEdge extends HTMLElement {
     super();
     this.path = document.createElementNS(SVG_NS, "path");
     this.path.classList.add("edge-path");
+    this.path.setAttribute("data-testid", "edge-path");
+    this.path.setAttribute("part", "path");
     this.hit = document.createElementNS(SVG_NS, "path");
     this.hit.classList.add("edge-hit");
     this.label = document.createElementNS(SVG_NS, "text");
     this.label.classList.add("edge-label");
+    this.label.setAttribute("data-testid", "edge-label");
+    this.label.setAttribute("part", "label");
   }
 
   get edge(): Edge | null {

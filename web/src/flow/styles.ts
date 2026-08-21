@@ -64,6 +64,10 @@ export const nodeStyles = `
   border-color: #2dd4bf;
   box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.18);
 }
+:host(:focus-visible) {
+  outline: 2px solid #2dd4bf;
+  outline-offset: 2px;
+}
 .label { pointer-events: none; }
 `;
 
