@@ -18,6 +18,7 @@ export class Graph extends hsm.Instance {
   static readonly model = hsm.define(
     "Graph",
     hsm.initial(hsm.target("empty")),
+    hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("admit")),
     hsm.choice(
       "admit",
       hsm.transition(
@@ -31,12 +32,10 @@ export class Graph extends hsm.Instance {
       "empty",
       hsm.entry(Graph.notifyCleared),
       hsm.transition(hsm.on(Graph.clearEvent.name), hsm.effect(Graph.clear)),
-      hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("../admit")),
     ),
     hsm.state(
       "drawing",
       hsm.entry(Graph.notifyDrawn),
-      hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("../admit")),
       hsm.transition(hsm.on(Graph.clearEvent.name), hsm.target("../empty"), hsm.effect(Graph.clear)),
     ),
   );
@@ -90,6 +89,19 @@ export class Graph extends hsm.Instance {
   }
 }
 
+/**
+ * Parse an unknown value as a list of machine graphs.
+ *
+ * Inputs: `value` — JSON-like payload expected to be an array of objects
+ * accepted by `parseMachineGraph`.
+ * Outputs: a new `MachineGraph[]`, or `null` when `value` is not an array or
+ * any item fails `parseMachineGraph`. Never throws. An empty array is success
+ * for `[]`; malformed payloads are `null`, not `[]`.
+ * Ownership: caller owns `value` and the returned array; this function retains
+ * neither. Purity: no I/O and no shared mutable state.
+ * Concurrency: runtime-safe. Failure modes: malformed payload => `null`.
+ * Units: none. Classification: runtime-safe.
+ */
 export function parseGraphs(value: unknown): MachineGraph[] | null {
   if (!Array.isArray(value)) return null;
   const graphs: MachineGraph[] = [];
@@ -101,6 +113,17 @@ export function parseGraphs(value: unknown): MachineGraph[] | null {
   return graphs;
 }
 
+/**
+ * Read `event.data.graphs` as `MachineGraph[]`.
+ *
+ * Inputs: an HSM event whose `data` is a record with a `graphs` field.
+ * Outputs: the parsed graphs, or `null` when `data` is not a record or
+ * `parseGraphs` rejects the field. Never throws.
+ * Ownership: caller owns the event; this function retains nothing.
+ * Purity: no I/O. Concurrency: runtime-safe.
+ * Failure modes: missing or malformed `graphs` => `null`.
+ * Units: none. Classification: runtime-safe.
+ */
 export function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
   if (!hsm.isRecord(event.data)) return null;
   return parseGraphs(event.data["graphs"]);

@@ -10,7 +10,7 @@ import { Dashboard, postCommandHttp, type DashboardSnapshot } from "../src/dashb
 import { Focuser } from "../src/flow/focuser.ts";
 import { Panner } from "../src/flow/panner.ts";
 import { Renderer } from "../src/flow/renderer.ts";
-import { Graph } from "../src/machine-graph.ts";
+import { Graph, graphsFromEvent, parseGraphs } from "../src/machine-graph.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -123,6 +123,19 @@ describe("companion-style HSM controllers", () => {
     const labelChanged = { ...graph, nodes: [{ path: node.path, parent: node.parent, label: "Renamed" }] };
     assert.notEqual(structureKey([graph]), structureKey([parentChanged]));
     assert.notEqual(structureKey([graph]), structureKey([labelChanged]));
+  });
+
+  test("parseGraphs and graphsFromEvent reject malformed payloads", () => {
+    const empty: unknown[] = [];
+    assert.deepEqual(parseGraphs(empty), []);
+    assert.equal(parseGraphs(null), null);
+    assert.equal(parseGraphs([{}]), null);
+    const missingData = graphsFromEvent(hsm.typedEvent({ event: Graph.setEvent }));
+    assert.equal(missingData, null);
+    const malformed = graphsFromEvent(hsm.typedEvent({ event: Graph.setEvent, data: { graphs: [{}] } }));
+    assert.equal(malformed, null);
+    const valid = graphsFromEvent(hsm.typedEvent({ event: Graph.setEvent, data: { graphs: [graphFor("/Demo")] } }));
+    assert.equal(valid?.[0]?.name, "/Demo");
   });
 
   test("malformed and empty graph sets remain empty and clear a drawing", async () => {
