@@ -1,9 +1,9 @@
 import {
-  DashboardController,
+  Dashboard,
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard-hsm.ts";
-import { reportHsmFailure } from "../hsm-runtime.ts";
+import { reportHsmFailure } from "../hsm.ts";
 import {
   environmentWorkspaceGraphs,
   environmentRootGraphs,
@@ -653,7 +653,7 @@ function isVisibilityAction(value: string | undefined): value is VisibilityActio
   return value === "show-all" || value === "hide-all" || value === "hide-unobserved";
 }
 
-export class BotDashboard extends HTMLElement {
+export class BotDashboard extends Dashboard {
   readonly #root: ShadowRoot;
   readonly #inspectorStatus: HTMLParagraphElement;
   readonly #picker: HTMLSelectElement;
@@ -682,7 +682,6 @@ export class BotDashboard extends HTMLElement {
   readonly #replayNext: HTMLButtonElement;
   readonly #replayLive: HTMLButtonElement;
   #visibleMachines = new Map<string, boolean>();
-  #controller: DashboardController | null = null;
   #abort: AbortController | null = null;
 
   constructor() {
@@ -979,31 +978,24 @@ export class BotDashboard extends HTMLElement {
   }
 
   connectedCallback(): void {
-    if (this.#controller === null) {
-      this.#controller = new DashboardController({
-        onSnapshot: (snapshot) => {
-          this.#render(snapshot);
-        },
-      });
-    }
+    this.onSnapshot = (snapshot) => {
+      this.#render(snapshot);
+    };
+    this.boot();
     this.#abort = new AbortController();
     const signal = this.#abort.signal;
     this.#root.addEventListener("click", this.#onGesture, { signal });
     this.#root.addEventListener("change", this.#onGesture, { signal });
     this.#graph.addEventListener("bot-machine-graph-zoom", this.#onZoom, { signal });
     this.#graph.addEventListener("bot-machine-graph-edge", this.#onEdge, { signal });
-    this.#render(this.#controller.snapshot());
+    this.#render(this.snapshot());
     this.#source.replayReady();
   }
 
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    const controller = this.#controller;
-    this.#controller = null;
-    if (controller !== null) {
-      void controller.stop().catch(reportHsmFailure);
-    }
+    void this.stop().catch(reportHsmFailure);
   }
 
   #render(snapshot: DashboardSnapshot): void {
@@ -1209,7 +1201,7 @@ export class BotDashboard extends HTMLElement {
   }
 
   #applyVisibilityAction(action: VisibilityAction): void {
-    const view = this.#controller?.snapshot().document;
+    const view = this.snapshot().document;
     if (view === null || view === undefined) {
       return;
     }
@@ -1232,7 +1224,7 @@ export class BotDashboard extends HTMLElement {
   }
 
   #setMachineVisibility(machineName: string, visible: boolean): void {
-    const document = this.#controller?.snapshot().document;
+    const document = this.snapshot().document;
     if (document === null || document === undefined) {
       this.#graph.graphs = [];
       return;
@@ -1288,20 +1280,20 @@ export class BotDashboard extends HTMLElement {
   }
 
   readonly #onSource = (event: Event): void => {
-    if (!(event instanceof CustomEvent) || this.#controller === null) {
+    if (!(event instanceof CustomEvent)) {
       return;
     }
     if (!isSourceDetail(event.detail)) {
       return;
     }
-    void this.#controller.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(reportHsmFailure);
+    void this.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(reportHsmFailure);
   };
 
   readonly #onEdge = (event: Event): void => {
-    if (!(event instanceof CustomEvent) || this.#controller === null || !isEdgeDetail(event.detail)) {
+    if (!(event instanceof CustomEvent) || !isEdgeDetail(event.detail)) {
       return;
     }
-    void this.#controller.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(reportHsmFailure);
+    void this.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(reportHsmFailure);
   };
 
   readonly #onZoom = (event: Event): void => {
@@ -1313,7 +1305,7 @@ export class BotDashboard extends HTMLElement {
 
   readonly #onGesture = (event: Event): void => {
     const target = event.target;
-    if (!(target instanceof Element) || this.#controller === null) {
+    if (!(target instanceof Element)) {
       return;
     }
     const actionControl = target.closest("[data-dashboard-action]");
@@ -1338,11 +1330,11 @@ export class BotDashboard extends HTMLElement {
       if (!(control instanceof HTMLSelectElement)) {
         this.#graph.focusMachine(machineName);
       }
-      void this.#controller.dispatch(eventName, { machineName }).catch(reportHsmFailure);
+      void this.dispatch(eventName, { machineName }).catch(reportHsmFailure);
       return;
     }
     if (eventName === "dashboard.command.send") {
-      void this.#controller.dispatch(eventName, {
+      void this.dispatch(eventName, {
         eventName: this.#eventName.value,
         dataJson: this.#eventData.value,
       }).catch(reportHsmFailure);
@@ -1351,11 +1343,11 @@ export class BotDashboard extends HTMLElement {
     if (eventName === "dashboard.replay.seek") {
       const position = control instanceof HTMLInputElement ? Number(control.value) : Number.NaN;
       if (Number.isFinite(position)) {
-        void this.#controller.dispatch(eventName, { position }).catch(reportHsmFailure);
+        void this.dispatch(eventName, { position }).catch(reportHsmFailure);
       }
       return;
     }
-    void this.#controller.dispatch(eventName).catch(reportHsmFailure);
+    void this.dispatch(eventName).catch(reportHsmFailure);
   };
 }
 

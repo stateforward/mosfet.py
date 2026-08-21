@@ -1,21 +1,21 @@
+import "./dom.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import * as hsm from "@stateforward/hsm.ts";
+import * as hsm from "../src/hsm.ts";
 
-import { DashboardController, type DashboardSnapshot } from "../src/dashboard-hsm.ts";
-import { Focuser } from "../src/focuser-hsm.ts";
-import { From, reportHsmFailure, startMachine, stopMachine } from "../src/hsm-runtime.ts";
+import { Dashboard, type DashboardSnapshot } from "../src/dashboard-hsm.ts";
+import { Focuser } from "../src/flow/focuser.ts";
+import { Panner } from "../src/flow/panner.ts";
+import { Renderer } from "../src/flow/renderer.ts";
 import { Graph } from "../src/machine-graph-hsm.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
-import { Panner } from "../src/panner-hsm.ts";
-import { Renderer } from "../src/renderer-hsm.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
-import { OtelSourceController } from "../src/otel-source-hsm.ts";
+import { OtelSource } from "../src/otel-source-hsm.ts";
 
 const fixturePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -44,7 +44,27 @@ function fakeWorld(): HTMLElement {
 }
 
 function startAdmittedGraph(hooks: ConstructorParameters<typeof Graph>[0]): Graph {
-  return startMachine(new Graph(hooks), Graph.model);
+  return hsm.start(new Graph(hooks), Graph.model);
+}
+
+function bootDashboard(options: {
+  onSnapshot?: (snapshot: DashboardSnapshot) => void;
+  connectStream?: Dashboard["connectStream"];
+  postCommand?: Dashboard["postCommand"];
+} = {}): Dashboard {
+  const dashboard = new Dashboard();
+  if (options.onSnapshot !== undefined) dashboard.onSnapshot = options.onSnapshot;
+  if (options.connectStream !== undefined) dashboard.connectStream = options.connectStream;
+  if (options.postCommand !== undefined) dashboard.postCommand = options.postCommand;
+  dashboard.boot();
+  return dashboard;
+}
+
+function bootSource(options: { onReady?: OtelSource["onReady"] } = {}): OtelSource {
+  const source = new OtelSource();
+  if (options.onReady !== undefined) source.onReady = options.onReady;
+  source.boot();
+  return source;
 }
 
 function graphFor(name: string, admitted = true) {
@@ -107,13 +127,13 @@ describe("companion-style HSM controllers", () => {
     const redraw = graph.setGraphs([valid]);
     assert.equal(redraw.phase, "drawing");
     assert.equal(draws, 2);
-    await stopMachine(graph);
+    await hsm.stop(graph);
   });
 
   test("panner writes transform synchronously and stays off the graph model", async () => {
     const applied: string[] = [];
     const world = fakeWorld();
-    const panner = startMachine(new Panner(world, {
+    const panner = hsm.start(new Panner(world, {
       onTransform: (transform) => {
         applied.push(world.style.transform);
         applied.push(`${transform.scale}:${transform.pan.x},${transform.pan.y}`);
@@ -144,14 +164,14 @@ describe("companion-style HSM controllers", () => {
     panner.panEnd({ pointerId: 1 });
     assert.match(panner.state(), /\/fixed$/);
     assert.ok(applied.length >= 3);
-    await stopMachine(panner);
-    await stopMachine(graph);
+    await hsm.stop(panner);
+    await hsm.stop(graph);
   });
 
   test("graph updates repaint while the viewport is panning", async () => {
     const drawn: string[][] = [];
     const world = fakeWorld();
-    const panner = startMachine(new Panner(world), Panner.model);
+    const panner = hsm.start(new Panner(world), Panner.model);
     const graph = startAdmittedGraph({
       onDraw: (graphs) => {
         drawn.push(graphs.map((value) => value.name));
@@ -167,13 +187,13 @@ describe("companion-style HSM controllers", () => {
 
     assert.deepEqual(drawn, [["/A"], ["/B"], ["/C"]]);
     assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
-    await stopMachine(panner);
-    await stopMachine(graph);
+    await hsm.stop(panner);
+    await hsm.stop(graph);
   });
 
   test("normalized viewport intents update panner-owned transform", async () => {
     const world = fakeWorld();
-    const panner = startMachine(new Panner(world), Panner.model);
+    const panner = hsm.start(new Panner(world), Panner.model);
     const metrics = {
       width: 1000,
       height: 600,
@@ -189,15 +209,15 @@ describe("companion-style HSM controllers", () => {
     panner.zoom({ deltaY: -100, point: { x: 30, y: 24 } });
     panner.fit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics });
     assert.deepEqual(panner.transform, { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
-    await stopMachine(panner);
+    await hsm.stop(panner);
   });
 
   test("node viewport focus uses exact bounds and stays focused across resize", async () => {
     const world = fakeWorld();
-    const panner = startMachine(new Panner(world), Panner.model);
+    const panner = hsm.start(new Panner(world), Panner.model);
     let focusKind = "";
     let focusPath = "";
-    const focuser = startMachine(new Focuser(null, {
+    const focuser = hsm.start(new Focuser(null, {
       onFocus: (target) => {
         focusKind = target.kind;
         focusPath = target.nodePath ?? "";
@@ -235,14 +255,14 @@ describe("companion-style HSM controllers", () => {
     assert.equal(focusKind, "node");
     assert.equal(focusPath, "/Demo/idle");
     assert.deepEqual(panner.transform, nodeTransform);
-    await stopMachine(focuser);
-    await stopMachine(panner);
+    await hsm.stop(focuser);
+    await hsm.stop(panner);
   });
 
   test("clearing focus fits the remaining graphs", async () => {
     const world = fakeWorld();
-    const panner = startMachine(new Panner(world), Panner.model);
-    const focuser = startMachine(new Focuser(), Focuser.model);
+    const panner = hsm.start(new Panner(world), Panner.model);
+    const focuser = hsm.start(new Focuser(), Focuser.model);
     const metrics = {
       width: 1000,
       height: 600,
@@ -258,16 +278,16 @@ describe("companion-style HSM controllers", () => {
       scale: 600 / 656,
       pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
     });
-    await stopMachine(focuser);
-    await stopMachine(panner);
+    await hsm.stop(focuser);
+    await hsm.stop(panner);
   });
 
   test("From mixin starts an element-shaped host as an HSM instance", async () => {
     class Base {
       label = "host";
     }
-    class Host extends From(Base) {}
-    const host = startMachine(new Host(), hsm.define(
+    class Host extends hsm.from(Base) {}
+    const host = hsm.start(new Host(), hsm.define(
       "Host",
       hsm.initial(hsm.target("active")),
       hsm.state("active"),
@@ -275,18 +295,18 @@ describe("companion-style HSM controllers", () => {
     assert.equal(host.label, "host");
     assert.equal(typeof host.dispatch, "function");
     assert.match(host.state(), /\/active$/);
-    await stopMachine(host);
+    await hsm.stop(host);
   });
 
   test("renderer paints after mark_dirty", async () => {
     let paints = 0;
-    const renderer = startMachine(new Renderer(() => {
+    const renderer = hsm.start(new Renderer(() => {
       paints += 1;
     }), Renderer.model);
     renderer.markDirty();
     await waitFor(() => paints === 1);
     assert.match(renderer.state(), /\/clean$/);
-    await stopMachine(renderer);
+    await hsm.stop(renderer);
   });
 
   test("graph admission is synchronous and stop leaves no unhandled rejection", async () => {
@@ -302,7 +322,7 @@ describe("companion-style HSM controllers", () => {
     try {
       graph.setGraphs([graphFor("/Demo")]);
       graph.setGraphs([graphFor("/Demo")]);
-      await stopMachine(graph);
+      await hsm.stop(graph);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     } finally {
       process.off("unhandledRejection", onUnhandled);
@@ -311,16 +331,16 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("source and dashboard dispatch-stop races suppress expected shutdown failures", async () => {
-    const source = new OtelSourceController();
-    const dashboard = new DashboardController();
+    const source = bootSource();
+    const dashboard = bootDashboard();
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
     };
     process.on("unhandledRejection", onUnhandled);
     try {
-      const sourceDispatch = source.dispatch("source.connect.requested").catch(reportHsmFailure);
-      const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(reportHsmFailure);
+      const sourceDispatch = source.dispatch("source.connect.requested").catch(hsm.reportHsmFailure);
+      const dashboardDispatch = dashboard.dispatch("dashboard.replay.next").catch(hsm.reportHsmFailure);
       await Promise.all([source.stop(), dashboard.stop()]);
       await Promise.all([sourceDispatch, dashboardDispatch]);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -340,9 +360,9 @@ describe("companion-style HSM controllers", () => {
       reports.push(error);
     };
     try {
-      reportHsmFailure(new Error("dispatch requires a started HSM"));
+      hsm.reportHsmFailure(new Error("dispatch requires a started HSM"));
       const unexpected = new Error("unexpected HSM failure");
-      reportHsmFailure(unexpected);
+      hsm.reportHsmFailure(unexpected);
       assert.deepEqual(reports, [unexpected]);
     } finally {
       if (previous === undefined) {
@@ -358,7 +378,7 @@ describe("companion-style HSM controllers", () => {
     const parsed = parseExportTraceServiceRequest(request);
     assert.ok(parsed !== null);
     const snapshots: DashboardSnapshot[] = [];
-    const dashboard = new DashboardController({
+    const dashboard = bootDashboard({
       onSnapshot: (snapshot) => {
         snapshots.push(snapshot);
       },
@@ -377,8 +397,8 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("each controller starts an hsm.ts machine whose snapshot state path is hierarchical", async () => {
-    const dashboard = new DashboardController();
-    const source = new OtelSourceController();
+    const dashboard = bootDashboard();
+    const source = bootSource();
     const draws: string[] = [];
     const graph = startAdmittedGraph({
       onDraw: (values) => {
@@ -389,8 +409,8 @@ describe("companion-style HSM controllers", () => {
       },
     });
 
-    assert.equal(dashboard instanceof hsm.Instance, true);
-    assert.equal(source instanceof hsm.Instance, true);
+    assert.equal(typeof dashboard.dispatch, "function");
+    assert.equal(typeof source.dispatch, "function");
     assert.equal(graph instanceof hsm.Instance, true);
     assert.match(dashboard.snapshot().statePath, /^\//);
     assert.match(source.snapshot().statePath, /^\//);
@@ -400,7 +420,7 @@ describe("companion-style HSM controllers", () => {
     assert.equal(graph.snapshot().phase, "empty");
 
     const ready: string[] = [];
-    const emitting = new OtelSourceController({
+    const emitting = bootSource({
       onReady: (otelSource) => {
         ready.push(otelSource.label);
       },
@@ -427,7 +447,7 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
     await source.stop();
     await emitting.stop();
-    await stopMachine(graph);
+    await hsm.stop(graph);
   });
 
   test("stream source incrementally folds spans into live dashboard state", async () => {
@@ -441,7 +461,7 @@ describe("companion-style HSM controllers", () => {
 
     const captured: { handlers?: OtelStreamHandlers } = {};
     let closed = 0;
-    const live = new DashboardController({
+    const live = bootDashboard({
       connectStream: (url, next): OtelStreamSubscription => {
         assert.equal(url, "/v1/traces/stream");
         captured.handlers = next;
@@ -477,7 +497,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("a published model appears before any observe spans and overlay highlights the leaf", async () => {
-    const dashboard = new DashboardController({
+    const dashboard = bootDashboard({
       connectStream: () => ({
         close(): void {
           return;
@@ -544,7 +564,7 @@ describe("companion-style HSM controllers", () => {
 
   test("send event posts the named command and records the gateway result", async () => {
     const posted: Array<{ eventName: string; dataJson: string }> = [];
-    const dashboard = new DashboardController({
+    const dashboard = bootDashboard({
       postCommand: async (command) => {
         posted.push(command);
         return { result: "no_subscriber", detail: "no subscriber" };

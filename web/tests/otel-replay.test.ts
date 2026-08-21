@@ -4,7 +4,8 @@ import path from "node:path";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { DashboardController } from "../src/dashboard-hsm.ts";
+import "./dom.ts";
+import { Dashboard } from "../src/dashboard-hsm.ts";
 import { replayEvents, replayPrefix } from "../src/otel/replay.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource } from "../src/otel/source.ts";
@@ -78,9 +79,9 @@ describe("OTEL replay", () => {
   });
 
   test("controller replays a prefix, selects the event machine, and returns to live", async () => {
-    const dashboard = new DashboardController({
-      connectStream: () => ({ close(): void {} }),
-    });
+    const dashboard = new Dashboard();
+    dashboard.connectStream = () => ({ close(): void {} });
+    dashboard.boot();
     await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
     await dashboard.dispatch("dashboard.load.completed", {
       mode: "replace",

@@ -1,13 +1,10 @@
-import * as hsm from "@stateforward/hsm.ts";
+import * as hsm from "../../hsm.ts";
 
-import { startFocuser, type FocusTarget, type Focuser } from "../../focuser-hsm.ts";
-import { From, startMachine, stopMachine } from "../../hsm-runtime.ts";
-import { Graph, reportMachineGraphFailure, startGraph } from "../../machine-graph-hsm.ts";
+import { FlowGraph, type NodeClickDetail, type EdgeClickDetail, type ViewportChangeDetail } from "../../flow/index.ts";
+import { Graph, reportMachineGraphFailure } from "../../machine-graph-hsm.ts";
 import { type MachineGraph } from "../../otel/machines.ts";
-import { startPanner, type Panner } from "../../panner-hsm.ts";
-import { startRenderer, type Renderer } from "../../renderer-hsm.ts";
-import { applyStyles } from "../styles.ts";
-import { NativeGraphRenderer, type GraphHit } from "./renderer.ts";
+import { replaceStyles } from "../styles.ts";
+import { flowModelFromGraphs, focusBoundsForMachine, type FlowGraphModel } from "./flow-model.ts";
 import { graphStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "bot-machine-graph";
@@ -15,7 +12,7 @@ const ELEMENT_NAME = "bot-machine-graph";
 export type GraphZoomDetail = { zoom: number };
 export type GraphEdgeDetail = { eventName: string };
 
-export class BotMachineGraph extends From(HTMLElement) {
+export class BotMachineGraph extends hsm.from(HTMLElement) {
   static readonly model = hsm.define(
     "BotMachineGraph",
     hsm.initial(hsm.target("active")),
@@ -23,28 +20,30 @@ export class BotMachineGraph extends From(HTMLElement) {
   );
 
   readonly #root: ShadowRoot;
-  readonly #frame: HTMLDivElement;
-  #paint: NativeGraphRenderer | null = null;
+  readonly #flow: FlowGraph;
   #graph: Graph | null = null;
-  #renderer: Renderer | null = null;
-  #panner: Panner | null = null;
-  #focuser: Focuser | null = null;
   #pending: readonly MachineGraph[] | undefined;
   #pendingFocus: string | undefined;
-  #focusTarget: FocusTarget | null = null;
+  #model: FlowGraphModel | null = null;
   #connectionGeneration = 0;
   #resizeObserver: ResizeObserver | null = null;
-  #clickCandidate: { pointerId: number; hit: GraphHit; x: number; y: number } | null = null;
 
   constructor() {
     super();
     this.#root = this.attachShadow({ mode: "open" });
-    applyStyles(this.#root, graphStyles);
-    this.#frame = document.createElement("div");
-    this.#frame.className = "frame";
-    this.#frame.part.add("frame");
-    this.#frame.setAttribute("data-testid", "frame");
-    this.#root.append(this.#frame);
+    replaceStyles(this.#root, `:host { display: block; width: 100%; height: 100%; min-height: 16rem; }`);
+    this.#flow = document.createElement("flow-graph");
+    this.#flow.nodesDraggable = false;
+    this.#flow.panOnDrag = true;
+    this.#flow.adoptStyles(graphStyles);
+    this.#flow.style.width = "100%";
+    this.#flow.style.height = "100%";
+    this.#flow.setAttribute("data-testid", "frame");
+    this.#flow.part.add("frame");
+    const background = document.createElement("flow-background");
+    const controls = document.createElement("flow-controls");
+    this.#flow.append(background, controls);
+    this.#root.append(this.#flow);
   }
 
   get graphs(): readonly MachineGraph[] {
@@ -59,84 +58,50 @@ export class BotMachineGraph extends From(HTMLElement) {
 
   fit(): void {
     this.#pendingFocus = undefined;
-    this.#focuser?.clear();
-    this.#fitAdmitted();
+    this.#flow.fitView();
   }
 
   focusMachine(machineName: string): boolean {
-    const bounds = this.#paint?.focusBounds(machineName);
-    if (bounds === null || bounds === undefined) return false;
+    const model = this.#model ?? flowModelFromGraphs(this.graphs);
+    const bounds = focusBoundsForMachine(this.graphs, machineName, model);
+    if (bounds === null) return false;
     this.#pendingFocus = undefined;
-    this.#focuser?.focus({ kind: "machine", machineName, bounds });
+    this.#flow.fitBounds(bounds);
     return true;
   }
 
   connectedCallback(): void {
     const generation = ++this.#connectionGeneration;
-    if (this.#paint === null) {
-      this.#paint = new NativeGraphRenderer(this.#frame);
-    }
-    startMachine(this, BotMachineGraph.model);
+    hsm.start(this, BotMachineGraph.model);
     const ctx = this.context();
-    const paint = this.#paint;
-    this.#renderer = startRenderer(ctx, () => this.#paintNow());
-    this.#panner = startPanner(ctx, paint.world, {
-      frame: this.#frame,
-      onTransform: (transform) => this.#emitZoom(transform.scale),
-    });
-    this.#focuser = startFocuser(ctx, this.#frame, {
-      onFocus: (target) => {
-        this.#focusTarget = target;
-        this.#fitBounds(target.bounds);
+    this.#graph = hsm.start(ctx, new Graph({
+      onDraw: (graphs) => this.#draw(graphs),
+      onDestroy: () => {
+        this.#flow.nodes = [];
+        this.#flow.edges = [];
+        this.#model = null;
       },
-      onClear: () => {
-        this.#focusTarget = null;
-      },
-    });
-    this.#graph = startGraph(ctx, {
-      onDraw: () => this.#renderer?.markDirty(),
-      onDestroy: () => this.#paint?.destroy(),
-    });
-    paint.viewport.addEventListener("pointerdown", this.#onPointerDown);
-    paint.viewport.addEventListener("pointermove", this.#onPointerMove);
-    paint.viewport.addEventListener("pointerup", this.#onPointerUp, true);
-    paint.viewport.addEventListener("pointercancel", this.#onPointerUp, true);
-    paint.viewport.addEventListener("wheel", this.#onWheel, { passive: false });
-    paint.viewport.addEventListener("click", this.#onClick);
+    }), Graph.model);
+    this.#flow.addEventListener("flow-node-click", this.#onNodeClick);
+    this.#flow.addEventListener("flow-edge-click", this.#onEdgeClick);
+    this.#flow.addEventListener("flow-viewport-change", this.#onViewport);
     this.#ensureResizeObserver();
     if (generation === this.#connectionGeneration && this.#pending !== undefined) this.#admit(this.#pending);
   }
 
   disconnectedCallback(): void {
     this.#connectionGeneration += 1;
-    this.#clickCandidate = null;
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = null;
-    const paint = this.#paint;
-    paint?.viewport.removeEventListener("pointerdown", this.#onPointerDown);
-    paint?.viewport.removeEventListener("pointermove", this.#onPointerMove);
-    paint?.viewport.removeEventListener("pointerup", this.#onPointerUp, true);
-    paint?.viewport.removeEventListener("pointercancel", this.#onPointerUp, true);
-    paint?.viewport.removeEventListener("wheel", this.#onWheel);
-    paint?.viewport.removeEventListener("click", this.#onClick);
+    this.#flow.removeEventListener("flow-node-click", this.#onNodeClick);
+    this.#flow.removeEventListener("flow-edge-click", this.#onEdgeClick);
+    this.#flow.removeEventListener("flow-viewport-change", this.#onViewport);
     const graph = this.#graph;
-    const renderer = this.#renderer;
-    const panner = this.#panner;
-    const focuser = this.#focuser;
     this.#graph = null;
-    this.#renderer = null;
-    this.#panner = null;
-    this.#focuser = null;
-    this.#paint = null;
-    this.#focusTarget = null;
-    paint?.dispose();
-    this.#frame.replaceChildren();
+    this.#model = null;
     void Promise.all([
-      graph === null ? undefined : stopMachine(graph),
-      renderer === null ? undefined : stopMachine(renderer),
-      panner === null ? undefined : stopMachine(panner),
-      focuser === null ? undefined : stopMachine(focuser),
-      stopMachine(this),
+      graph === null ? undefined : hsm.stop(graph),
+      hsm.stop(this),
     ]).catch(reportMachineGraphFailure);
   }
 
@@ -149,133 +114,57 @@ export class BotMachineGraph extends From(HTMLElement) {
     }
   }
 
-  #paintNow(): void {
-    const paint = this.#paint;
-    const graph = this.#graph;
-    if (paint === null || graph === null) return;
-    const structureChanged = paint.draw(graph.graphs);
-    const focus = this.#focusTarget;
-    if (focus?.kind === "machine" && focus.machineName !== undefined) {
-      const bounds = paint.focusBounds(focus.machineName);
-      if (bounds === null) {
-        this.#focuser?.clear();
-        this.#fitAdmitted();
-        return;
-      }
-      this.#fitBounds(bounds);
-      return;
+  #draw(graphs: readonly MachineGraph[]): void {
+    const previous = this.#model;
+    const model = flowModelFromGraphs(graphs);
+    this.#model = model;
+    this.#flow.nodes = model.nodes;
+    this.#flow.edges = model.edges;
+    if (previous === null || previous.nodes.length !== model.nodes.length) {
+      this.#flow.fitView();
     }
-    if (structureChanged && focus === null) this.#fitAdmitted();
   }
 
-  #fitAdmitted(): void {
-    const metrics = this.#paint?.viewportMetrics();
-    if (metrics === undefined || metrics === null) return;
-    this.#panner?.fit({ bounds: metrics.bounds, metrics });
-  }
+  #onNodeClick = (event: Event): void => {
+    const detail = (event as CustomEvent<NodeClickDetail>).detail;
+    const node = detail?.node;
+    if (node === undefined) return;
+    const path = node.data["path"];
+    const machineName = node.data["machineName"];
+    if (typeof path !== "string" || typeof machineName !== "string") return;
+    this.#flow.fitBounds({
+      left: node.position.x,
+      right: node.position.x + (node.width ?? 0),
+      top: node.position.y,
+      bottom: node.position.y + (node.height ?? 0),
+    });
+  };
 
-  #fitBounds(bounds: FocusTarget["bounds"]): void {
-    const metrics = this.#paint?.viewportMetrics();
-    if (metrics === undefined || metrics === null) return;
-    this.#panner?.fit({ bounds, metrics });
-  }
-
-  #emitZoom(zoom: number): void {
-    this.dispatchEvent(new CustomEvent<GraphZoomDetail>("bot-machine-graph-zoom", {
-      detail: { zoom },
-      bubbles: true,
-      composed: true,
-    }));
-  }
-
-  #emitEdge(eventName: string): void {
+  #onEdgeClick = (event: Event): void => {
+    const detail = (event as CustomEvent<EdgeClickDetail>).detail;
+    const eventName = detail?.edge.data?.["eventName"];
+    if (typeof eventName !== "string" || eventName.length === 0) return;
     this.dispatchEvent(new CustomEvent<GraphEdgeDetail>("bot-machine-graph-edge", {
       detail: { eventName },
       bubbles: true,
       composed: true,
     }));
-  }
-
-  #pointerPoint(event: PointerEvent | WheelEvent): { x: number; y: number } {
-    const rect = this.#paint?.viewport.getBoundingClientRect();
-    return {
-      x: event.clientX - (rect?.left ?? 0),
-      y: event.clientY - (rect?.top ?? 0),
-    };
-  }
-
-  #onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0 && event.pointerType === "mouse") return;
-    const paint = this.#paint;
-    const panner = this.#panner;
-    if (paint === null || panner === null) return;
-    const hit = paint.hitTestNode(event);
-    this.#clickCandidate = hit === null
-      ? null
-      : { pointerId: event.pointerId, hit, x: event.clientX, y: event.clientY };
-    if (hit === null) paint.viewport.setPointerCapture(event.pointerId);
-    panner.panStart({ pointerId: event.pointerId, point: this.#pointerPoint(event) });
   };
 
-  #onPointerMove = (event: PointerEvent): void => {
-    const paint = this.#paint;
-    const panner = this.#panner;
-    if (paint === null || panner === null) return;
-    const candidate = this.#clickCandidate;
-    if (candidate?.pointerId === event.pointerId) {
-      if (Math.hypot(event.clientX - candidate.x, event.clientY - candidate.y) <= 4) return;
-      this.#clickCandidate = null;
-      paint.viewport.setPointerCapture(event.pointerId);
-    }
-    if (event.buttons === 0 && !paint.viewport.hasPointerCapture(event.pointerId)) return;
-    if (event.buttons !== 0 && !paint.viewport.hasPointerCapture(event.pointerId)) {
-      paint.viewport.setPointerCapture(event.pointerId);
-    }
-    panner.cursorMove({ pointerId: event.pointerId, point: this.#pointerPoint(event) });
-  };
-
-  #onPointerUp = (event: PointerEvent): void => {
-    const candidate = this.#clickCandidate?.pointerId === event.pointerId ? this.#clickCandidate : null;
-    this.#clickCandidate = null;
-    this.#panner?.panEnd({ pointerId: event.pointerId });
-    if (event.type === "pointerup" && candidate !== null) {
-      this.#focuser?.focus({
-        kind: "node",
-        nodePath: candidate.hit.path,
-        machineName: candidate.hit.machineName,
-        bounds: candidate.hit.bounds,
-      });
-    }
-  };
-
-  #onWheel = (event: WheelEvent): void => {
-    event.preventDefault();
-    this.#panner?.zoom({ deltaY: event.deltaY, point: this.#pointerPoint(event) });
-  };
-
-  #onClick = (event: MouseEvent): void => {
-    const paint = this.#paint;
-    if (paint === null) return;
-    const eventName = paint.hitTestEdge(event);
-    if (eventName !== null) this.#emitEdge(eventName);
-    if (event.detail > 0) return;
-    const hit = paint.hitTestNode(event);
-    if (hit === null) return;
-    this.#focuser?.focus({
-      kind: "node",
-      nodePath: hit.path,
-      machineName: hit.machineName,
-      bounds: hit.bounds,
-    });
+  #onViewport = (event: Event): void => {
+    const detail = (event as CustomEvent<ViewportChangeDetail>).detail;
+    if (detail === undefined) return;
+    this.dispatchEvent(new CustomEvent<GraphZoomDetail>("bot-machine-graph-zoom", {
+      detail: { zoom: detail.viewport.zoom },
+      bubbles: true,
+      composed: true,
+    }));
   };
 
   #ensureResizeObserver(): void {
     if (this.#resizeObserver !== null || typeof ResizeObserver === "undefined") return;
-    this.#resizeObserver = new ResizeObserver(() => {
-      if (this.#focusTarget !== null) return;
-      this.#fitAdmitted();
-    });
-    this.#resizeObserver.observe(this.#frame);
+    this.#resizeObserver = new ResizeObserver(() => this.#flow.fitView());
+    this.#resizeObserver.observe(this);
   }
 }
 

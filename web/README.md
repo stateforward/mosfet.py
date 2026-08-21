@@ -21,11 +21,11 @@ attributes come from `src/bot/telemetry/hsm.py` `observation_attributes`:
 - `hsm.observation.occurrence`
 - `bot.outcome`
 
-Native HTML/SVG graph nodes represent slash-separated observed state paths.
-Ownership is shown with nested machine shells, while SVG edges connect
-consecutive observations of the same `hsm.machine.name` when the state changes.
-The latest observed state is highlighted. Clicking an edge prefills the send-event
-name. Nothing here hard-codes a PhoneBot topology.
+`flow-graph` custom elements represent slash-separated observed state paths.
+Ownership is shown with nested machine shells, while edges connect consecutive
+observations of the same `hsm.machine.name` when the state changes. The latest
+observed state is highlighted. Clicking an edge prefills the send-event name.
+Nothing here hard-codes a PhoneBot topology.
 
 ## Setup
 
@@ -73,37 +73,52 @@ the collector fans that command to `Control.Subscribe` and the bot
 
 ## Element machines
 
-Low-rate session and transport elements (`bot-dashboard`, `bot-otel-source`)
-still use a Companion-style controller: the element is an `HTMLElement`, a
-controller owns `hsm.start`, and clicks map to named events.
+Studio elements are autonomous custom elements that `extends hsm.from(HTMLElement)`.
+`hsm.from` copies `Instance.prototype` onto the host so `hsm.start(this, model)`
+does not require `instanceof Instance`. Start in `connectedCallback`, stop in
+`disconnectedCallback`.
 
-Interactive graph pieces use gogo's `From(HTMLElement)` split:
+The graph library lives in `src/flow/` and ports React Flow's public surface as
+custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,
+`flow-background`, `flow-controls`, `flow-minimap`, `flow-panel`,
+`flow-node-resizer`, `flow-node-toolbar`, `flow-edge-toolbar`, `flow-edge-text`,
+`flow-viewport-portal`). Sibling HSMs own orthogonal behavior:
 
-1. `From` is exported from `src/hsm-runtime.ts`. Any custom element can
-   `extends From(HTMLElement)` and `startMachine(this, model)`.
-2. `bot-machine-graph` is that host. It owns hit-testing and graph admission.
-3. Sibling machines own the rest: `Renderer` (`clean` / `dirty` / `rendering`)
-   coalesces paints; `Panner` (`fixed` / `panning`) writes CSS translate+scale
-   synchronously; `Focuser` (`unfocused` / `focused`) is orthogonal to pan.
-4. Graph empty/drawing is a separate `Graph` model. Pointer motion does not
-   share a dispatch tail with `graph.set`.
+- `Renderer` (`clean` / `dirty` / `rendering`) coalesces paints
+- `Panner` (`fixed` / `panning`) writes CSS `translate+scale` synchronously
+- `Dragger` (`idle` / `dragging`) samples node drag at `hsm.every(16)`
+- `Focuser` (`unfocused` / `focused`)
+- `Selection` (`none` / `picking` / `box`)
+- `Connection` (`idle` / `connecting`)
+
+`bot-machine-graph` composes `flow-graph` plus background and controls. It maps
+`MachineGraph` layout onto flow nodes and edges. Pointer pan does not share a
+dispatch tail with graph admission.
 
 Machines:
 
-- `bot-dashboard` → `DashboardController` (`idle` / `live` / `error`);
+- `bot-dashboard` → `Dashboard` (`idle` / `live` / `error`);
   the live activity opens `EventSource` on the OTLP stream;
   `dashboard.command.send` posts `/v1/commands`
-- `bot-otel-source` → `OtelSourceController` (`idle` / `connecting` / `live` / `error`);
+- `bot-otel-source` → `OtelSource` (`idle` / `connecting` / `live` / `error`);
   the composed `bot-otel-source` event is an **effect** of entering `live`
-- `bot-machine-graph` → `From(HTMLElement)` host plus `Graph` / `Renderer` /
-  `Panner` / `Focuser`; the native HTML/SVG painter draws from Renderer
+- `bot-machine-graph` → `hsm.from(HTMLElement)` host plus `Graph` admission;
+  `flow-graph` owns pan, paint, selection, and connection
+
+## Library
+
+Package exports (TypeScript source):
+
+- `./hsm` — `@stateforward/hsm.ts` plus `from` / `From` / wrapped `start`
+- `./flow` — flow custom-element library
+- `./elements` — studio element registration
 
 ## Stack
 
 - TypeScript (strict, `noUncheckedIndexedAccess`)
-- Autonomous custom elements: `bot-dashboard`, `bot-machine-graph`, `bot-otel-source`
-- CSS via component stylesheets plus `src/dashboard.css`
-- `@stateforward/hsm.ts` 1.3.3 for every element machine and companion controller
-- Native HTML/SVG web-component rendering for nodes and edges
+- Autonomous custom elements: `bot-dashboard`, `bot-machine-graph`, `bot-otel-source`, `flow-*`
+- CSS via constructable stylesheets plus `src/dashboard.css`
+- `@stateforward/hsm.ts` 1.3.3 for every element machine
+- Native HTML/SVG rendering through flow node and edge custom elements
 - `@grpc/grpc-js` + `@grpc/proto-loader` for the in-process OTLP/control collector
 - Vite for local serve/build

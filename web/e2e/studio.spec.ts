@@ -148,6 +148,116 @@ test("two persisted root models render the native graph without locking the page
   await expect(page.locator("bot-machine-graph .edge-layer")).toBeVisible();
 });
 
+test("clicking a state node centers and zooms that node", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openStudio(page);
+  const response = await request.post("/v1/models", {
+    data: {
+      name: "/Phone",
+      owner: null,
+      states: [
+        { qualified_name: "/Phone", parent: "/", initial: "/Phone/.initial" },
+        { qualified_name: "/Phone/left", parent: "/Phone", initial: "" },
+        { qualified_name: "/Phone/right", parent: "/Phone", initial: "" },
+      ],
+      transitions: [{ source: "/Phone/left", target: "/Phone/right", events: ["go"] }],
+      initial: "/Phone/.initial",
+    },
+  });
+  expect(response.ok()).toBeTruthy();
+
+  await expect(page.locator('bot-machine-graph .state-node[data-path="/Phone/right"]')).toBeVisible();
+  await expect(page.locator("bot-machine-graph .edge-path:not(.initial)")).toHaveCount(1);
+  await expect(page.locator("bot-machine-graph .edge-label")).toHaveCount(1);
+  await expect(page.locator("bot-machine-graph .edge-label")).toContainText("go");
+  const before = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    return root?.querySelector<HTMLElement>(".world")?.style.transform ?? "";
+  });
+  await page.locator('bot-machine-graph .state-node[data-path="/Phone/right"] .node-badge').click();
+  await expect.poll(async () => page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    return root?.querySelector<HTMLElement>(".world")?.style.transform ?? "";
+  })).not.toBe(before);
+
+  const focused = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    if (root === null || root === undefined) throw new Error("graph shadow root is unavailable");
+    const node = root.querySelector<HTMLElement>('[data-path="/Phone/right"]');
+    const viewport = root.querySelector<HTMLElement>(".viewport");
+    if (node === null || viewport === null) throw new Error("focused node geometry is unavailable");
+    const nodeRect = node.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    return {
+      width: nodeRect.width,
+      dx: nodeRect.left + nodeRect.width / 2 - (viewportRect.left + viewportRect.width / 2),
+      dy: nodeRect.top + nodeRect.height / 2 - (viewportRect.top + viewportRect.height / 2),
+    };
+  });
+  expect(focused.width).toBeGreaterThan(105);
+  expect(Math.abs(focused.dx)).toBeLessThan(24);
+  expect(Math.abs(focused.dy)).toBeLessThan(24);
+});
+
+test("dragging a state node pans without refocusing it", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openStudio(page);
+  const node = page.locator('bot-machine-graph .state-node[data-path="/Phone/right"]');
+  await expect(node).toBeVisible();
+  const before = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    if (root === null || root === undefined) throw new Error("graph shadow root is unavailable");
+    const nodeElement = root.querySelector<HTMLElement>('[data-path="/Phone/right"]');
+    const viewport = root.querySelector<HTMLElement>(".viewport");
+    const world = root.querySelector<HTMLElement>(".world");
+    if (nodeElement === null || viewport === null || world === null) throw new Error("drag geometry is unavailable");
+    const nodeRect = nodeElement.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const scale = Number(world.style.transform.match(/scale\(([^)]+)\)/)?.[1] ?? "NaN");
+    return {
+      scale,
+      dx: nodeRect.left + nodeRect.width / 2 - (viewportRect.left + viewportRect.width / 2),
+      transform: world.style.transform,
+    };
+  });
+  const box = await node.boundingBox();
+  if (box === null) throw new Error("state node bounds are unavailable");
+  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 64, start.y + 8, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    return root?.querySelector<HTMLElement>(".world")?.style.transform ?? "";
+  }), {
+    timeout: 2000,
+  }).not.toBe(before.transform);
+  const after = await page.locator("bot-machine-graph").evaluate((element) => {
+    const flow = element.shadowRoot?.querySelector("flow-graph");
+    const root = flow?.shadowRoot ?? element.shadowRoot;
+    if (root === null || root === undefined) throw new Error("graph shadow root is unavailable");
+    const nodeElement = root.querySelector<HTMLElement>('[data-path="/Phone/right"]');
+    const viewport = root.querySelector<HTMLElement>(".viewport");
+    const world = root.querySelector<HTMLElement>(".world");
+    if (nodeElement === null || viewport === null || world === null) throw new Error("drag geometry is unavailable");
+    const nodeRect = nodeElement.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const scale = Number(world.style.transform.match(/scale\(([^)]+)\)/)?.[1] ?? "NaN");
+    return {
+      scale,
+      dx: nodeRect.left + nodeRect.width / 2 - (viewportRect.left + viewportRect.width / 2),
+    };
+  });
+  expect(after.scale).toBeCloseTo(before.scale, 5);
+  expect(Math.abs(after.dx - before.dx)).toBeGreaterThan(20);
+});
+
 test("live OTLP observe spans update the inspector and canvas", async ({ page, request }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openStudio(page);
@@ -511,7 +621,8 @@ test("queued graph gestures do not reject when the element disconnects", async (
     const dashboard = document.querySelector("bot-dashboard");
     const graph = dashboard?.shadowRoot?.querySelector("bot-machine-graph");
     const parent = graph?.parentElement;
-    const viewport = graph?.shadowRoot?.querySelector<HTMLElement>(".viewport");
+    const viewport = graph?.shadowRoot?.querySelector("flow-graph")?.shadowRoot?.querySelector<HTMLElement>(".viewport")
+      ?? graph?.shadowRoot?.querySelector<HTMLElement>(".viewport");
     if (graph === null || graph === undefined || parent === null || parent === undefined || viewport === null || viewport === undefined) {
       throw new Error("graph lifecycle test surface is unavailable");
     }

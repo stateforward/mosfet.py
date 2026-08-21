@@ -1,14 +1,14 @@
 import {
   isOtelSourceEventName,
-  OtelSourceController,
+  OtelSource,
   type OtelSourceSnapshot,
 } from "../otel-source-hsm.ts";
-import { reportHsmFailure } from "../hsm-runtime.ts";
-import { type OtelSource } from "../otel/source.ts";
+import { reportHsmFailure } from "../hsm.ts";
+import { type OtelSource as StreamSource } from "../otel/source.ts";
 import { applyStyles } from "./styles.ts";
 
 export type OtelSourceDetail = {
-  source: OtelSource;
+  source: StreamSource;
 };
 
 const ELEMENT_NAME = "bot-otel-source";
@@ -61,13 +61,12 @@ const cssText = `
 }
 `;
 
-export class BotOtelSource extends HTMLElement {
+export class BotOtelSource extends OtelSource {
   static readonly eventName = "bot-otel-source";
 
   readonly #root: ShadowRoot;
   readonly #badge: HTMLButtonElement;
   readonly #error: HTMLParagraphElement;
-  #controller: OtelSourceController | null = null;
   #abort: AbortController | null = null;
 
   constructor() {
@@ -87,34 +86,31 @@ export class BotOtelSource extends HTMLElement {
   }
 
   replayReady(): void {
-    this.#controller?.emitReady();
+    this.emitReady();
   }
 
   connectedCallback(): void {
-    if (this.#controller === null) {
-      this.#controller = new OtelSourceController({
-        onSnapshot: (snapshot) => {
-          this.#render(snapshot);
-        },
-        onReady: (source) => {
-          this.dispatchEvent(
-            new CustomEvent<OtelSourceDetail>(BotOtelSource.eventName, {
-              detail: { source },
-              bubbles: true,
-              composed: true,
-            }),
-          );
-        },
-      });
-    }
+    this.onSnapshot = (snapshot) => {
+      this.#render(snapshot);
+    };
+    this.onReady = (source) => {
+      this.dispatchEvent(
+        new CustomEvent<OtelSourceDetail>(BotOtelSource.eventName, {
+          detail: { source },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    };
+    this.boot();
     this.#abort = new AbortController();
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
-    this.#render(this.#controller.snapshot());
-    if (this.#controller.snapshot().phase === "idle") {
-      void this.#controller.dispatch("source.connect.requested").catch(reportHsmFailure);
+    this.#render(this.snapshot());
+    if (this.snapshot().phase === "idle") {
+      void this.dispatch("source.connect.requested").catch(reportHsmFailure);
       return;
     }
-    if (this.#controller.snapshot().phase === "live") {
+    if (this.snapshot().phase === "live") {
       this.replayReady();
     }
   }
@@ -122,11 +118,7 @@ export class BotOtelSource extends HTMLElement {
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    const controller = this.#controller;
-    this.#controller = null;
-    if (controller !== null) {
-      void controller.stop().catch(reportHsmFailure);
-    }
+    void this.stop().catch(reportHsmFailure);
   }
 
   #render(snapshot: OtelSourceSnapshot): void {
@@ -145,10 +137,10 @@ export class BotOtelSource extends HTMLElement {
       return;
     }
     const eventName = button.dataset["event"];
-    if (eventName === undefined || !isOtelSourceEventName(eventName) || this.#controller === null) {
+    if (eventName === undefined || !isOtelSourceEventName(eventName)) {
       return;
     }
-    void this.#controller.dispatch(eventName).catch(reportHsmFailure);
+    void this.dispatch(eventName).catch(reportHsmFailure);
   };
 }
 

@@ -1,9 +1,12 @@
-import * as hsm from "@stateforward/hsm.ts";
-
-import { type ViewportBounds } from "./focuser-hsm.ts";
-import { isRecord, namedEvent, startMachine } from "./hsm-runtime.ts";
+import * as hsm from "../hsm.ts";
 
 export type ViewportPoint = { readonly x: number; readonly y: number };
+export type ViewportBounds = {
+  readonly left: number;
+  readonly right: number;
+  readonly top: number;
+  readonly bottom: number;
+};
 export type ViewportMetrics = {
   readonly width: number;
   readonly height: number;
@@ -11,6 +14,7 @@ export type ViewportMetrics = {
   readonly origin: ViewportPoint;
 };
 export type ViewportTransform = { readonly scale: number; readonly pan: ViewportPoint };
+export type Viewport = { readonly x: number; readonly y: number; readonly zoom: number };
 
 const FIT_PADDING = 28;
 const MIN_ZOOM = 0.12;
@@ -77,24 +81,32 @@ export class Panner extends hsm.Instance {
     return { scale: this.scale, pan: this.pan };
   }
 
+  get viewport(): Viewport {
+    return { x: this.pan.x, y: this.pan.y, zoom: this.scale };
+  }
+
   panStart(data: unknown): void {
-    this.dispatch(namedEvent(Panner.panStartEvent.name, data));
+    this.dispatch(hsm.namedEvent(Panner.panStartEvent.name, data));
   }
 
   cursorMove(data: unknown): void {
-    this.dispatch(namedEvent(Panner.cursorMoveEvent.name, data));
+    this.dispatch(hsm.namedEvent(Panner.cursorMoveEvent.name, data));
   }
 
   panEnd(data: unknown): void {
-    this.dispatch(namedEvent(Panner.panEndEvent.name, data));
+    this.dispatch(hsm.namedEvent(Panner.panEndEvent.name, data));
   }
 
   zoom(data: unknown): void {
-    this.dispatch(namedEvent(Panner.zoomEvent.name, data));
+    this.dispatch(hsm.namedEvent(Panner.zoomEvent.name, data));
   }
 
   fit(data: unknown): void {
-    this.dispatch(namedEvent(Panner.fitEvent.name, data));
+    this.dispatch(hsm.namedEvent(Panner.fitEvent.name, data));
+  }
+
+  setViewport(viewport: Viewport): void {
+    this.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
   }
 
   static startPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -241,11 +253,11 @@ export function startPanner(
   world: HTMLElement,
   options: { frame?: HTMLElement; onTransform?: (transform: ViewportTransform) => void } = {},
 ): Panner {
-  return startMachine(ctx, new Panner(world, options), Panner.model);
+  return hsm.start(ctx, new Panner(world, options), Panner.model);
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
-  return isRecord(value) ? value : null;
+  return hsm.isRecord(value) ? value : null;
 }
 
 function pointOf(value: unknown): ViewportPoint | null {

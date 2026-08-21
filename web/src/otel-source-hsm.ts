@@ -1,7 +1,5 @@
-import * as hsm from "@stateforward/hsm.ts";
-
-import { isRecord, namedEvent, startMachine, stopMachine } from "./hsm-runtime.ts";
-import { isOtelSource, streamSource, type OtelSource } from "./otel/source.ts";
+import * as hsm from "./hsm.ts";
+import { isOtelSource, streamSource, type OtelSource as StreamSource } from "./otel/source.ts";
 
 const sourceEvents = {
   "source.connect.requested": { name: "source.connect.requested", kind: hsm.Kinds.Event },
@@ -17,21 +15,21 @@ export type OtelSourcePhase = "idle" | "connecting" | "live" | "error";
 export type OtelSourceSnapshot = {
   readonly phase: OtelSourcePhase;
   readonly statePath: string;
-  readonly source: OtelSource | null;
+  readonly source: StreamSource | null;
   readonly errorMessage: string | null;
 };
 
-export type OtelSourceControllerOptions = {
+export type OtelSourceOptions = {
   readonly onSnapshot?: (snapshot: OtelSourceSnapshot) => void;
-  readonly onReady?: (source: OtelSource) => void;
+  readonly onReady?: (source: StreamSource) => void;
 };
 
-function controllerOf(instance: hsm.Instance): OtelSourceController | null {
-  return instance instanceof OtelSourceController ? instance : null;
+function controllerOf(instance: hsm.Instance): OtelSource | null {
+  return instance instanceof OtelSource ? instance : null;
 }
 
-function sourceFromEvent(event: hsm.Event): OtelSource | null {
-  if (!isRecord(event.data) || !isOtelSource(event.data["source"])) {
+function sourceFromEvent(event: hsm.Event): StreamSource | null {
+  if (!hsm.isRecord(event.data) || !isOtelSource(event.data["source"])) {
     return null;
   }
   return event.data["source"];
@@ -47,7 +45,7 @@ function rememberReadySource(_ctx: hsm.Context, instance: hsm.Instance, event: h
 
 function rememberConnectFailure(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   const message =
-    isRecord(event.data) && typeof event.data["message"] === "string" ? event.data["message"] : "connect failed";
+    hsm.isRecord(event.data) && typeof event.data["message"] === "string" ? event.data["message"] : "connect failed";
   controllerOf(instance)?.rememberError(message);
 }
 
@@ -109,17 +107,18 @@ export function isOtelSourceEventName(value: string): value is OtelSourceEventNa
   return Object.hasOwn(sourceEvents, value);
 }
 
-export class OtelSourceController extends hsm.Instance {
-  #source: OtelSource | null = null;
+export class OtelSource extends hsm.from(HTMLElement) {
+  #source: StreamSource | null = null;
   #errorMessage: string | null = null;
-  #onSnapshot: ((snapshot: OtelSourceSnapshot) => void) | null;
-  #onReady: ((source: OtelSource) => void) | null;
+  onSnapshot: ((snapshot: OtelSourceSnapshot) => void) | null = null;
+  onReady: ((source: StreamSource) => void) | null = null;
 
-  constructor(options: OtelSourceControllerOptions = {}) {
+  constructor() {
     super();
-    this.#onSnapshot = options.onSnapshot ?? null;
-    this.#onReady = options.onReady ?? null;
-    startMachine(this, otelSourceModel);
+  }
+
+  boot(): void {
+    if (this.state() === "") hsm.start(this, otelSourceModel);
   }
 
   snapshot(): OtelSourceSnapshot {
@@ -145,16 +144,16 @@ export class OtelSourceController extends hsm.Instance {
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    await super.dispatch(namedEvent(sourceEvents[eventName].name, data));
+    await super.dispatch(hsm.namedEvent(sourceEvents[eventName].name, data));
     this.#emit();
     return this.snapshot();
   }
 
   override async stop(): Promise<void> {
-    await stopMachine(this);
+    await hsm.stop(this);
   }
 
-  rememberSource(source: OtelSource | null): void {
+  rememberSource(source: StreamSource | null): void {
     this.#source = source;
     this.#errorMessage = null;
     this.#emit();
@@ -171,11 +170,11 @@ export class OtelSourceController extends hsm.Instance {
     if (source === null) {
       return;
     }
-    this.#onReady?.(source);
+    this.onReady?.(source);
   }
 
   async connect(event: hsm.Event): Promise<void> {
-    const requested = isRecord(event.data) && typeof event.data["url"] === "string" ? event.data["url"] : undefined;
+    const requested = hsm.isRecord(event.data) && typeof event.data["url"] === "string" ? event.data["url"] : undefined;
     const source = streamSource(requested);
     if (source.url.length === 0) {
       await this.dispatch("source.connect.failed", { message: "missing OTLP stream url" });
@@ -185,6 +184,6 @@ export class OtelSourceController extends hsm.Instance {
   }
 
   #emit(): void {
-    this.#onSnapshot?.(this.snapshot());
+    this.onSnapshot?.(this.snapshot());
   }
 }

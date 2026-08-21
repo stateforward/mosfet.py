@@ -1,11 +1,10 @@
-import * as hsm from "@stateforward/hsm.ts";
-
-import { namedEvent, startMachine } from "./hsm-runtime.ts";
+import * as hsm from "../hsm.ts";
 
 export type FocusTarget = {
-  readonly kind: "node" | "machine";
+  readonly kind: "node" | "machine" | "viewport";
   readonly machineName?: string;
   readonly nodePath?: string;
+  readonly nodeId?: string;
   readonly bounds: ViewportBounds;
 };
 
@@ -64,11 +63,11 @@ export class Focuser extends hsm.Instance {
   }
 
   focus(target: FocusTarget): void {
-    this.dispatch(namedEvent(Focuser.focusEvent.name, target));
+    this.dispatch(hsm.namedEvent(Focuser.focusEvent.name, target));
   }
 
   clear(): void {
-    this.dispatch(namedEvent(Focuser.clearEvent.name));
+    this.dispatch(hsm.namedEvent(Focuser.clearEvent.name));
   }
 
   static setFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -99,19 +98,17 @@ export function startFocuser(
   host: HTMLElement | null,
   config: { onFocus?: (target: FocusTarget) => void; onClear?: () => void } = {},
 ): Focuser {
-  return startMachine(ctx, new Focuser(host, config), Focuser.model);
+  return hsm.start(ctx, new Focuser(host, config), Focuser.model);
 }
 
 function focusTargetOf(value: unknown): FocusTarget | null {
-  if (typeof value !== "object" || value === null) return null;
-  const record = value as Record<string, unknown>;
-  const bounds = record["bounds"];
-  if (typeof bounds !== "object" || bounds === null) return null;
-  const box = bounds as Record<string, unknown>;
-  const left = box["left"];
-  const right = box["right"];
-  const top = box["top"];
-  const bottom = box["bottom"];
+  if (!hsm.isRecord(value)) return null;
+  const bounds = value["bounds"];
+  if (!hsm.isRecord(bounds)) return null;
+  const left = bounds["left"];
+  const right = bounds["right"];
+  const top = bounds["top"];
+  const bottom = bounds["bottom"];
   if (
     typeof left !== "number" || !Number.isFinite(left)
     || typeof right !== "number" || !Number.isFinite(right)
@@ -120,15 +117,15 @@ function focusTargetOf(value: unknown): FocusTarget | null {
   ) {
     return null;
   }
-  const kind = record["kind"] === "node" || record["target"] === "node" ? "node" : "machine";
+  const kind = value["kind"] === "node" || value["kind"] === "viewport" ? value["kind"] : "machine";
   const target: FocusTarget = { kind, bounds: { left, right, top, bottom } };
-  if (typeof record["machineName"] === "string") {
-    return typeof record["nodePath"] === "string"
-      ? { ...target, machineName: record["machineName"], nodePath: record["nodePath"] }
-      : { ...target, machineName: record["machineName"] };
-  }
-  if (typeof record["nodePath"] === "string") {
-    return { ...target, nodePath: record["nodePath"] };
-  }
-  return target;
+  const machineName = value["machineName"];
+  const nodePath = value["nodePath"];
+  const nodeId = value["nodeId"];
+  return {
+    ...target,
+    ...(typeof machineName === "string" ? { machineName } : {}),
+    ...(typeof nodePath === "string" ? { nodePath } : {}),
+    ...(typeof nodeId === "string" ? { nodeId } : {}),
+  };
 }

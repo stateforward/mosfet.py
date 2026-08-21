@@ -1,0 +1,189 @@
+export const graphStyles = `
+:host {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 12rem;
+  position: relative;
+  overflow: hidden;
+  background: #0b0d12;
+  touch-action: none;
+  user-select: none;
+}
+.viewport, .world {
+  position: absolute;
+  inset: 0;
+}
+.viewport { overflow: hidden; }
+.world {
+  inset: auto;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.edge-layer {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.node-layer { position: absolute; inset: 0; }
+.connection-line {
+  fill: none;
+  stroke: #2dd4bf;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+  pointer-events: none;
+}
+.selection-box {
+  position: absolute;
+  border: 1px dashed #2dd4bf;
+  background: color-mix(in srgb, #2dd4bf 12%, transparent);
+  pointer-events: none;
+  z-index: 20;
+}
+.is-dragging { cursor: grabbing; }
+`;
+
+export const nodeStyles = `
+:host {
+  position: absolute;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  min-width: 2rem;
+  min-height: 1.5rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid #3d4a5c;
+  border-radius: 8px;
+  background: #161b22;
+  color: #d5dbe8;
+  font: 500 12px/1.2 "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+:host([selected]) {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.18);
+}
+.label { pointer-events: none; }
+`;
+
+export const edgeStyles = `
+:host { display: contents; }
+`;
+
+export const handleStyles = `
+:host {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2dd4bf;
+  border: 1px solid #0b0d12;
+  z-index: 5;
+}
+:host([position="top"]) { top: -4px; left: 50%; transform: translateX(-50%); }
+:host([position="right"]) { right: -4px; top: 50%; transform: translateY(-50%); }
+:host([position="bottom"]) { bottom: -4px; left: 50%; transform: translateX(-50%); }
+:host([position="left"]) { left: -4px; top: 50%; transform: translateY(-50%); }
+`;
+
+export const backgroundStyles = `
+:host {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-color: #0b0d12;
+  background-image: radial-gradient(rgba(232, 234, 239, 0.07) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+:host([variant="lines"]) {
+  background-image:
+    linear-gradient(rgba(232, 234, 239, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(232, 234, 239, 0.05) 1px, transparent 1px);
+}
+`;
+
+export const controlsStyles = `
+:host {
+  position: absolute;
+  z-index: 6;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.3rem;
+}
+:host([position="bottom-left"]) { left: 0.6rem; bottom: 0.6rem; }
+:host([position="bottom-right"]) { right: 0.6rem; bottom: 0.6rem; }
+:host([position="top-left"]) { left: 0.6rem; top: 0.6rem; }
+:host([position="top-right"]) { right: 0.6rem; top: 0.6rem; }
+button {
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid #2a3140;
+  border-radius: 0.3rem;
+  background: #161922;
+  color: #e8eaef;
+  cursor: pointer;
+}
+`;
+
+export const panelStyles = `
+:host {
+  position: absolute;
+  z-index: 6;
+  display: block;
+}
+:host([position="top-left"]) { top: 0.6rem; left: 0.6rem; }
+:host([position="top-right"]) { top: 0.6rem; right: 0.6rem; }
+:host([position="bottom-left"]) { bottom: 0.6rem; left: 0.6rem; }
+:host([position="bottom-right"]) { bottom: 0.6rem; right: 0.6rem; }
+`;
+
+export const minimapStyles = `
+:host {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  z-index: 6;
+  width: 8rem;
+  height: 5.5rem;
+  border: 1px solid #2a3140;
+  border-radius: 0.35rem;
+  background: #12141a;
+  overflow: hidden;
+}
+canvas { width: 100%; height: 100%; display: block; }
+`;
+
+export const toolbarStyles = `
+:host {
+  position: absolute;
+  z-index: 7;
+  display: none;
+  padding: 0.2rem 0.35rem;
+  border: 1px solid #2a3140;
+  border-radius: 0.3rem;
+  background: #161922;
+  color: #e8eaef;
+  font-size: 0.72rem;
+}
+:host([visible]) { display: block; }
+`;
+
+export const resizerStyles = `
+:host {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.control {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #2dd4bf;
+  pointer-events: auto;
+}
+.control[data-dir="right"] { right: -4px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.control[data-dir="bottom"] { bottom: -4px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.control[data-dir="bottom-right"] { right: -4px; bottom: -4px; cursor: nwse-resize; }
+`;

@@ -1,6 +1,4 @@
-import * as hsm from "@stateforward/hsm.ts";
-
-import { namedEvent, startMachine } from "./hsm-runtime.ts";
+import * as hsm from "../hsm.ts";
 
 export class Renderer extends hsm.Instance {
   static readonly markDirtyEvent = { name: "mark_dirty", kind: hsm.Kinds.Event } as const;
@@ -21,6 +19,8 @@ export class Renderer extends hsm.Instance {
     ),
     hsm.state(
       "rendering",
+      hsm.entry(Renderer.addRenderingClass),
+      hsm.exit(Renderer.removeRenderingClass),
       hsm.defer(Renderer.markDirtyEvent.name),
       hsm.activity(Renderer.performRender),
       hsm.transition(hsm.on(Renderer.renderCompleteEvent.name), hsm.target("../clean")),
@@ -28,20 +28,32 @@ export class Renderer extends hsm.Instance {
     ),
   );
 
+  readonly host: HTMLElement | null;
   readonly onRender: () => void | Promise<void>;
 
-  constructor(onRender: () => void | Promise<void>) {
+  constructor(onRender: () => void | Promise<void>, host: HTMLElement | null = null) {
     super();
     this.onRender = onRender;
+    this.host = host;
   }
 
   markDirty(): void {
-    this.dispatch(namedEvent(Renderer.markDirtyEvent.name));
+    this.dispatch(hsm.namedEvent(Renderer.markDirtyEvent.name));
   }
 
   static scheduleRender(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Renderer)) return;
-    instance.dispatch(namedEvent(Renderer.requestRenderEvent.name));
+    instance.dispatch(hsm.namedEvent(Renderer.requestRenderEvent.name));
+  }
+
+  static addRenderingClass(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof Renderer)) return;
+    instance.host?.classList.add("is-rendering");
+  }
+
+  static removeRenderingClass(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof Renderer)) return;
+    instance.host?.classList.remove("is-rendering");
   }
 
   static async performRender(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
@@ -49,13 +61,17 @@ export class Renderer extends hsm.Instance {
     try {
       await instance.onRender();
       if (ctx.done) return;
-      instance.dispatch(namedEvent(Renderer.renderCompleteEvent.name));
+      instance.dispatch(hsm.namedEvent(Renderer.renderCompleteEvent.name));
     } catch (error) {
       instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }
   }
 }
 
-export function startRenderer(ctx: hsm.Context, onRender: () => void | Promise<void>): Renderer {
-  return startMachine(ctx, new Renderer(onRender), Renderer.model);
+export function startRenderer(
+  ctx: hsm.Context,
+  onRender: () => void | Promise<void>,
+  host: HTMLElement | null = null,
+): Renderer {
+  return hsm.start(ctx, new Renderer(onRender, host), Renderer.model);
 }

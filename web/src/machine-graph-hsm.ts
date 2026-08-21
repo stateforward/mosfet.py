@@ -1,10 +1,8 @@
-import * as hsm from "@stateforward/hsm.ts";
-
-import { namedEvent, reportHsmFailure, startMachine, stopMachine } from "./hsm-runtime.ts";
+import * as hsm from "./hsm.ts";
 import { parseMachineGraph, type MachineGraph } from "./otel/machines.ts";
 
 export function reportMachineGraphFailure(error: unknown): void {
-  reportHsmFailure(error);
+  hsm.reportHsmFailure(error);
 }
 
 export type MachineGraphPhase = "empty" | "drawing";
@@ -59,9 +57,9 @@ export class Graph extends hsm.Instance {
   setGraphs(value: unknown): MachineGraphSnapshot {
     const graphs = parseGraphs(value);
     if (graphs === null || graphs.length === 0) {
-      this.dispatch(namedEvent(Graph.clearEvent.name));
+      this.dispatch(hsm.namedEvent(Graph.clearEvent.name));
     } else {
-      this.dispatch(namedEvent(Graph.setEvent.name, { graphs }));
+      this.dispatch(hsm.namedEvent(Graph.setEvent.name, { graphs }));
     }
     return this.snapshot();
   }
@@ -70,7 +68,7 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph)) return;
     const graphs = graphsFromEvent(event);
     if (graphs === null) {
-      instance.dispatch(namedEvent(Graph.clearEvent.name));
+      instance.dispatch(hsm.namedEvent(Graph.clearEvent.name));
       return;
     }
     instance.graphs = graphs;
@@ -101,11 +99,11 @@ export function startGraph(
   ctx: hsm.Context,
   hooks: { onDraw: (graphs: readonly MachineGraph[]) => void; onDestroy: () => void },
 ): Graph {
-  return startMachine(ctx, new Graph(hooks), Graph.model);
+  return hsm.start(ctx, new Graph(hooks), Graph.model);
 }
 
 export async function stopGraph(graph: Graph): Promise<void> {
-  await stopMachine(graph);
+  await hsm.stop(graph);
 }
 
 function parseGraphs(value: unknown): MachineGraph[] | null {
