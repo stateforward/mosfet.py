@@ -84,7 +84,7 @@ describe("OTEL replay", () => {
     dashboard.origin = "http://localhost";
     dashboard.connectStream = () => ({ close(): void {} });
     dashboard.boot();
-    await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    await dashboard.dispatch("dashboard.source.selected", { source: streamSource(), origin: "http://localhost" });
     await dashboard.dispatch(hsm.typedEvent({ event: {
       name: "dashboard.load.completed",
       kind: hsm.Kinds.CompletionEvent,
@@ -124,7 +124,10 @@ describe("OTEL replay", () => {
     assert.equal(whileReplaying.replay.total, 6);
     assert.equal(whileReplaying.document?.observeCount, 1);
 
-    const live = await dashboard.dispatch("dashboard.replay.live");
+    const live = await dashboard.dispatch("dashboard.replay.live", {
+      source: streamSource(),
+      origin: "http://localhost",
+    });
     assert.equal(live.replay.active, false);
     assert.equal(live.document?.observeCount, 7);
     await dashboard.stop();

@@ -44,6 +44,7 @@ const dashboardCommands = {
 const dashboardCompletions = {
   "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
+  "dashboard.stream.canceled": { name: "dashboard.stream.canceled", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
@@ -352,6 +353,10 @@ function returnToLive(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Eve
 async function streamLive(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
+    await instance.dispatch({
+      ...hsm.ErrorEvent,
+      data: { message: "dashboard host missing" },
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
     return;
   }
   await controller.streamSource({ ctx, event });
@@ -361,35 +366,19 @@ function hasPlayableReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hs
   return controllerOf(instance)?.hasPlayableReplay() === true;
 }
 
-function streamUrlAllowed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-  const controller = controllerOf(instance);
-  if (controller === null) return false;
-  const source = sourceFromEvent(event) ?? controller.selectedSource();
-  if (source === null || source.kind !== "stream") return false;
-  return collectorUrl({ requested: source.url, origin: controller.origin }) !== null;
+function streamUrlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  const source = sourceFromEvent(event);
+  const origin = stringField({ event, key: "origin" });
+  if (source === null || source.kind !== "stream" || origin === null) return false;
+  return collectorUrl({ requested: source.url, origin }) !== null;
 }
 
-function streamUrlDisallowed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-  const controller = controllerOf(instance);
-  if (controller === null) return false;
-  const source = sourceFromEvent(event) ?? controller.selectedSource();
+function streamUrlDisallowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  const source = sourceFromEvent(event);
   if (source === null || source.kind !== "stream") return false;
-  return collectorUrl({ requested: source.url, origin: controller.origin }) === null;
-}
-
-function stampStreamView(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const controller = controllerOf(instance);
-  if (controller === null) return;
-  const source = sourceFromEvent(event) ?? controller.selectedSource();
-  let payload: Record<string, unknown>;
-  if (hsm.isRecord(event.data)) {
-    payload = event.data;
-  } else {
-    payload = {};
-    Object.assign(event, { data: payload });
-  }
-  if (source !== null) payload["source"] = source;
-  payload["origin"] = controller.origin;
+  const origin = stringField({ event, key: "origin" });
+  if (origin === null) return true;
+  return collectorUrl({ requested: source.url, origin }) === null;
 }
 
 function failNoStream(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -437,7 +426,7 @@ const dashboardModel = hsm.define(
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
       hsm.choice(
         "sourceCheck",
-        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing"), hsm.effect(stampStreamView)),
+        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
         hsm.transition(hsm.guard(streamUrlDisallowed), hsm.target("../error"), hsm.effect(failCollectorUrl)),
         hsm.transition(hsm.target("../error"), hsm.effect(failNoStream)),
       ),
@@ -710,10 +699,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#command = hsm.start(this.context(), new Command({ post: (command) => this.postCommand(command) }), Command.model);
   }
 
-  selectedSource(): OtelSource | null {
-    return this.#source;
-  }
-
   hasPlayableReplay(): boolean {
     return this.#replayEvents.length > 0 && this.#replayPosition < this.#replayEvents.length;
   }
@@ -871,36 +856,35 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  /** Viewing activity: connect from stamped event source/origin only, never #source. */
   async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
     const source = sourceFromEvent(args.event);
     const origin = stringField({ event: args.event, key: "origin" });
-    if (source === null || source.kind !== "stream") {
+    if (source === null || source.kind !== "stream" || origin === null) {
       await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.load.failed"],
-        data: { message: "no otel stream selected" },
-      })).catch(hsm.catchFailure(this));
-      return;
-    }
-    if (origin === null) {
-      await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.load.failed"],
-        data: { message: "collector url is not allowed" },
+        event: dashboardCompletions["dashboard.stream.canceled"],
+        data: { reason: "stale" },
       })).catch(hsm.catchFailure(this));
       return;
     }
     const url = collectorUrl({ requested: source.url, origin });
     if (url === null) {
       await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.load.failed"],
-        data: { message: "collector url is not allowed" },
+        event: dashboardCompletions["dashboard.stream.canceled"],
+        data: { reason: "stale" },
       })).catch(hsm.catchFailure(this));
       return;
     }
     const ctx = args.ctx;
+    let subscription: { close(): void } | null = null;
+    let dropped = false;
+    const drop = (): void => {
+      subscription?.close();
+      subscription = null;
+    };
     const finished = new Promise<void>((resolve) => {
       const onDone = (): void => {
         ctx.removeEventListener("done", onDone);
+        drop();
         resolve();
       };
       ctx.addEventListener("done", onDone);
@@ -908,9 +892,19 @@ export class Dashboard extends hsm.from(HTMLElement) {
         onDone();
       }
     });
-    const subscription = this.connectStream(url, {
+    const stale = (): void => {
+      if (dropped) return;
+      dropped = true;
+      drop();
+      void this.dispatch(hsm.typedEvent({
+        event: dashboardCompletions["dashboard.stream.canceled"],
+        data: { reason: "stale" },
+      })).catch(hsm.catchFailure(this));
+    };
+    subscription = this.connectStream(url, {
       onSnapshot: (batch) => {
         if (ctx.done) {
+          stale();
           return;
         }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
@@ -920,6 +914,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
       },
       onSpans: (batch) => {
         if (ctx.done) {
+          stale();
           return;
         }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.completed"], data: {
@@ -929,12 +924,14 @@ export class Dashboard extends hsm.from(HTMLElement) {
       },
       onModels: (models) => {
         if (ctx.done) {
+          stale();
           return;
         }
         void this.dispatch("dashboard.model.published", { models }).catch(hsm.catchFailure(this));
       },
       onError: (message) => {
         if (ctx.done) {
+          stale();
           return;
         }
         void this.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.load.failed"], data: {
@@ -945,7 +942,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
     try {
       await finished;
     } finally {
-      subscription.close();
+      drop();
     }
   }
 

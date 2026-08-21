@@ -1228,7 +1228,10 @@ export class BotDashboard extends Dashboard {
     if (!isSourceDetail(event.detail)) {
       return;
     }
-    void this.dispatch("dashboard.source.selected", { source: event.detail.source }).catch(catchFailure(this));
+    void this.dispatch("dashboard.source.selected", {
+      source: event.detail.source,
+      origin: this.origin,
+    }).catch(catchFailure(this));
   };
 
   readonly #onEdge = (event: Event): void => {
@@ -1287,6 +1290,14 @@ export class BotDashboard extends Dashboard {
       if (Number.isFinite(position)) {
         void this.dispatch(eventName, { position }).catch(catchFailure(this));
       }
+      return;
+    }
+    if (eventName === "dashboard.replay.live") {
+      const source = this.snapshot().source;
+      void this.dispatch(eventName, {
+        origin: this.origin,
+        ...(source !== null ? { source } : {}),
+      }).catch(catchFailure(this));
       return;
     }
     void this.dispatch(eventName).catch(catchFailure(this));

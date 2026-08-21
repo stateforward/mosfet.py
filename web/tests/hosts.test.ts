@@ -43,6 +43,13 @@ function fakeWorld(): HTMLElement {
   } as unknown as HTMLElement;
 }
 
+function streamView(source = streamSource(), origin = "http://localhost"): {
+  source: ReturnType<typeof streamSource>;
+  origin: string;
+} {
+  return { source, origin };
+}
+
 function startAdmittedGraph(): Graph {
   return hsm.start(new Graph(), Graph.model);
 }
@@ -501,7 +508,7 @@ describe("companion-style HSM controllers", () => {
       },
     });
 
-    const afterSelect = await live.dispatch("dashboard.source.selected", { source: streamSource() });
+    const afterSelect = await live.dispatch("dashboard.source.selected", streamView());
     assert.equal(afterSelect.phase, "live");
     assert.equal(afterSelect.source?.kind, "stream");
     const handlers = captured.handlers;
@@ -532,7 +539,7 @@ describe("companion-style HSM controllers", () => {
         },
       }),
     });
-    const afterSource = await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    const afterSource = await dashboard.dispatch("dashboard.source.selected", streamView());
     assert.equal(afterSource.phase, "live");
     const afterModel = await dashboard.dispatch("dashboard.model.published", {
       name: "/Demo",
@@ -655,7 +662,7 @@ describe("companion-style HSM controllers", () => {
         },
       }),
     });
-    await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
     await dispatchLoad(dashboard, { message: "stream failed" }, "dashboard.load.failed");
     assert.equal(dashboard.snapshot().phase, "error");
     await dashboard.dispatch("dashboard.replay.enter");
@@ -688,6 +695,7 @@ describe("companion-style HSM controllers", () => {
     dashboard.origin = "http://localhost";
     await dashboard.dispatch("dashboard.source.selected", {
       source: { kind: "stream", url: "https://evil.example/sse", label: "evil" },
+      origin: "http://localhost",
     });
     await waitFor(() => dashboard.snapshot().phase === "error");
     assert.deepEqual(opened, []);
@@ -889,11 +897,11 @@ describe("companion-style HSM controllers", () => {
         return { close(): void { return; } };
       },
     });
-    await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
     assert.equal(dashboard.snapshot().phase, "live");
     assert.equal(connects, 1);
     await dashboard.dispatch("dashboard.replay.enter");
-    const after = await dashboard.dispatch("dashboard.replay.live");
+    const after = await dashboard.dispatch("dashboard.replay.live", streamView());
     assert.equal(after.phase, "live");
     const replayInactive = false;
     assert.equal(after.replay.active, replayInactive);
@@ -947,6 +955,41 @@ describe("companion-style HSM controllers", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("source.selected without origin does not fall back to instance origin", async () => {
+    const dashboard = bootDashboard({
+      connectStream: () => ({ close(): void { return; } }),
+    });
+    dashboard.origin = "http://localhost";
+    const after = await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
+    assert.equal(after.phase, "error");
+    assert.match(after.errorMessage ?? "", /collector url is not allowed/);
+    await dashboard.stop();
+  });
+
+  test("late stream batches after leaving viewing dispatch stream canceled", async () => {
+    const captured: { handlers?: OtelStreamHandlers } = {};
+    const kinds: string[] = [];
+    const dashboard = bootDashboard({
+      connectStream: (_url, next): OtelStreamSubscription => {
+        captured.handlers = next;
+        return { close(): void { return; } };
+      },
+    });
+    const inner = dashboard.dispatch.bind(dashboard) as Dashboard["dispatch"];
+    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
+      if (typeof eventOrContext === "object" && eventOrContext !== null && "name" in eventOrContext) {
+        kinds.push((eventOrContext as { name: string }).name);
+      }
+      return inner(eventOrContext as never, data);
+    }) as Dashboard["dispatch"];
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    await dashboard.dispatch("dashboard.replay.enter");
+    captured.handlers?.onSpans({ observeSpans: [], skipped: 0 });
+    await waitFor(() => kinds.includes("dashboard.stream.canceled"));
+    assert.equal(kinds.includes("dashboard.load.failed"), false);
+    await dashboard.stop();
   });
 
   test("otel source connect completions keep declared kinds", async () => {
