@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as hsm from "../src/hsm.ts";
 
-import { Dashboard, type DashboardSnapshot } from "../src/dashboard.ts";
+import { Dashboard, postCommandHttp, type DashboardSnapshot } from "../src/dashboard.ts";
 import { Focuser } from "../src/flow/focuser.ts";
 import { Panner } from "../src/flow/panner.ts";
 import { Renderer } from "../src/flow/renderer.ts";
@@ -855,6 +855,53 @@ describe("companion-style HSM controllers", () => {
     assert.match(after.statePath, /\/viewing$/);
     await waitFor(() => connects === 2);
     await dashboard.stop();
+  });
+
+  test("postCommandHttp maps abort to canceled", async () => {
+    const originalFetch = globalThis.fetch;
+    const abort = new AbortController();
+    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
+      const signal = init?.signal;
+      return await new Promise((_resolve, reject) => {
+        const fail = (): void => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (signal?.aborted === true) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail);
+      });
+    }) as typeof fetch;
+    abort.abort();
+    try {
+      const result = await postCommandHttp({
+        eventName: "phone.ring",
+        dataJson: "",
+        signal: abort.signal,
+      });
+      assert.equal(result.result, "canceled");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("postCommandHttp admits gateway canceled", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      return {
+        json: async () => ({ result: "canceled", detail: "gateway canceled" }),
+      };
+    }) as typeof fetch;
+    try {
+      const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
+      assert.equal(result.result, "canceled");
+      assert.equal(result.detail, "gateway canceled");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("otel source connect completions keep declared kinds", async () => {

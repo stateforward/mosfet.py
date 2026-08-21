@@ -143,6 +143,12 @@ function replayPositionFromEvent(event: hsm.Event): number | null {
   return event.data["position"];
 }
 
+/**
+ * POST `/v1/commands`. AbortError, an aborted signal, and gateway
+ * `result: "canceled"` are `canceled` (the HTTP side-effect did not commit).
+ * A parsed `accepted` / `no_subscriber` / `error` / `canceled` payload is
+ * returned as-is even if the signal later aborts (the gateway result stands).
+ */
 export async function postCommandHttp(command: {
   eventName: string;
   dataJson: string;
@@ -162,11 +168,19 @@ export async function postCommandHttp(command: {
     if (!hsm.isRecord(payload) || typeof payload["result"] !== "string" || typeof payload["detail"] !== "string") {
       return { result: "error", detail: "invalid command reply" };
     }
-    if (payload["result"] === "accepted" || payload["result"] === "no_subscriber" || payload["result"] === "error") {
+    if (
+      payload["result"] === "accepted"
+      || payload["result"] === "no_subscriber"
+      || payload["result"] === "error"
+      || payload["result"] === "canceled"
+    ) {
       return { result: payload["result"], detail: payload["detail"] };
     }
     return { result: "error", detail: payload["detail"] };
-  } catch {
+  } catch (error) {
+    if (command.signal?.aborted === true || (error instanceof Error && error.name === "AbortError")) {
+      return { result: "canceled", detail: "command canceled" };
+    }
     return { result: "error", detail: "command request failed" };
   }
 }
