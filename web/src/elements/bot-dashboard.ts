@@ -637,9 +637,9 @@ button.tool:disabled,
 }
 `;
 
-function mark(element: HTMLElement, hook: string): void {
-  element.part.add(hook);
-  element.setAttribute("data-testid", hook);
+function mark(args: { element: HTMLElement; hook: string }): void {
+  args.element.part.add(args.hook);
+  args.element.setAttribute("data-testid", args.hook);
 }
 
 function pathCrumbs(path: string): string[] {
@@ -697,7 +697,7 @@ export class BotDashboard extends Dashboard {
     const title = document.createElement("h1");
     title.className = "title";
     title.textContent = "Environment";
-    mark(title, "title");
+    mark({ element: title, hook: "title" });
     const subtitle = document.createElement("p");
     subtitle.className = "subtitle";
     subtitle.textContent = "A live map of loaded machines, ownership, and observed events.";
@@ -716,7 +716,7 @@ export class BotDashboard extends Dashboard {
     this.#zoom = document.createElement("span");
     this.#zoom.className = "zoom";
     this.#zoom.textContent = "100%";
-    mark(this.#zoom, "zoom");
+    mark({ element: this.#zoom, hook: "zoom" });
     const reset = document.createElement("button");
     reset.type = "button";
     reset.className = "tool";
@@ -736,10 +736,10 @@ export class BotDashboard extends Dashboard {
     studio.className = "studio";
     const inspector = document.createElement("aside");
     inspector.className = "inspector";
-    mark(inspector, "inspector");
+    mark({ element: inspector, hook: "inspector" });
     const members = document.createElement("section");
     members.className = "members";
-    mark(members, "members");
+    mark({ element: members, hook: "members" });
 
     const statusBlock = document.createElement("div");
     const statusLabel = document.createElement("p");
@@ -747,7 +747,7 @@ export class BotDashboard extends Dashboard {
     statusLabel.textContent = "Status";
     this.#inspectorStatus = document.createElement("p");
     this.#inspectorStatus.className = "inspector-status";
-    mark(this.#inspectorStatus, "inspector-status");
+    mark({ element: this.#inspectorStatus, hook: "inspector-status" });
     statusBlock.append(statusLabel, this.#inspectorStatus);
 
     const machineBlock = document.createElement("div");
@@ -761,7 +761,7 @@ export class BotDashboard extends Dashboard {
     machineHeading.append(machineLabel, this.#memberCount);
     this.#machines = document.createElement("div");
     this.#machines.className = "machine-list";
-    mark(this.#machines, "machine-list");
+    mark({ element: this.#machines, hook: "machine-list" });
     const memberActions = document.createElement("div");
     memberActions.className = "member-actions";
     memberActions.append(
@@ -785,11 +785,11 @@ export class BotDashboard extends Dashboard {
     this.#nowChip.className = "now-chip";
     this.#nowChip.textContent = "now";
     this.#nowChip.hidden = true;
-    mark(this.#nowChip, "now-chip");
+    mark({ element: this.#nowChip, hook: "now-chip" });
     pathHead.append(pathLabel, this.#nowChip);
     this.#path = document.createElement("p");
     this.#path.className = "path";
-    mark(this.#path, "current-path");
+    mark({ element: this.#path, hook: "current-path" });
     this.#pathBlock.append(pathHead, this.#path);
 
     const eventBlock = document.createElement("div");
@@ -798,7 +798,7 @@ export class BotDashboard extends Dashboard {
     eventLabel.textContent = "Last event";
     this.#lastEvent = document.createElement("p");
     this.#lastEvent.className = "last-event";
-    mark(this.#lastEvent, "last-event");
+    mark({ element: this.#lastEvent, hook: "last-event" });
     eventBlock.append(eventLabel, this.#lastEvent);
 
     const observeBlock = document.createElement("div");
@@ -807,7 +807,7 @@ export class BotDashboard extends Dashboard {
     observeLabel.textContent = "Observes";
     this.#observes = document.createElement("p");
     this.#observes.className = "observes";
-    mark(this.#observes, "observe-count");
+    mark({ element: this.#observes, hook: "observe-count" });
     observeBlock.append(observeLabel, this.#observes);
 
     this.#error = document.createElement("p");
@@ -823,28 +823,28 @@ export class BotDashboard extends Dashboard {
     this.#eventName = document.createElement("input");
     this.#eventName.type = "text";
     this.#eventName.setAttribute("aria-label", "Event name");
-    mark(this.#eventName, "event-name");
+    mark({ element: this.#eventName, hook: "event-name" });
     nameLabel.append(this.#eventName);
     const dataLabel = document.createElement("label");
     dataLabel.textContent = "JSON data";
     this.#eventData = document.createElement("textarea");
     this.#eventData.setAttribute("aria-label", "Event JSON data");
-    mark(this.#eventData, "event-data");
+    mark({ element: this.#eventData, hook: "event-data" });
     dataLabel.append(this.#eventData);
     const send = document.createElement("button");
     send.type = "button";
     send.className = "tool";
     send.dataset["event"] = "dashboard.command.send";
     send.textContent = "Send";
-    mark(send, "send-event");
+    mark({ element: send, hook: "send-event" });
     this.#commandResult = document.createElement("p");
     this.#commandResult.className = "command-result";
-    mark(this.#commandResult, "command-result");
+    mark({ element: this.#commandResult, hook: "command-result" });
     commandBlock.append(commandLabel, nameLabel, dataLabel, send, this.#commandResult);
 
     const details = document.createElement("section");
     details.className = "details";
-    mark(details, "details");
+    mark({ element: details, hook: "details" });
     const detailsHeading = document.createElement("h2");
     detailsHeading.className = "details-heading";
     detailsHeading.textContent = "Selected machine";
@@ -861,10 +861,10 @@ export class BotDashboard extends Dashboard {
 
     const mapPanel = document.createElement("section");
     mapPanel.className = "map-panel";
-    mark(mapPanel, "map");
+    mark({ element: mapPanel, hook: "map" });
     const mapHeading = document.createElement("header");
     mapHeading.className = "map-heading";
-    mark(mapHeading, "map-header");
+    mark({ element: mapHeading, hook: "map-header" });
     const mapHeadingLeft = document.createElement("div");
     mapHeadingLeft.className = "map-heading-left";
     const mapTitle = document.createElement("h2");
@@ -943,13 +943,13 @@ export class BotDashboard extends Dashboard {
     const canvas = document.createElement("div");
     canvas.className = "canvas";
     this.#graph = document.createElement("bot-machine-graph");
-    mark(this.#graph, "canvas");
+    mark({ element: this.#graph, hook: "canvas" });
     canvas.append(this.#graph);
     mapPanel.append(mapHeading, canvas);
 
     const eventRail = document.createElement("aside");
     eventRail.className = "event-rail";
-    mark(eventRail, "event-rail");
+    mark({ element: eventRail, hook: "event-rail" });
     const eventHeading = document.createElement("div");
     eventHeading.className = "event-heading";
     const eventTitle = document.createElement("h2");
@@ -961,7 +961,7 @@ export class BotDashboard extends Dashboard {
     eventHeading.append(eventTitle, eventMeta);
     this.#eventList = document.createElement("div");
     this.#eventList.className = "event-list";
-    mark(this.#eventList, "event-list");
+    mark({ element: this.#eventList, hook: "event-list" });
     eventRail.append(eventHeading, this.#eventList);
 
     studio.append(inspector, mapPanel, eventRail);
@@ -974,7 +974,7 @@ export class BotDashboard extends Dashboard {
     button.className = "member-action";
     button.textContent = label;
     button.dataset["dashboardAction"] = action;
-    mark(button, action);
+    mark({ element: button, hook: action });
     return button;
   }
 
@@ -1175,7 +1175,7 @@ export class BotDashboard extends Dashboard {
     for (const machine of orderedMachines) {
       const item = document.createElement("article");
       item.className = "event-item";
-      mark(item, "event-item");
+      mark({ element: item, hook: "event-item" });
       item.dataset["current"] = machine.name === selectedMachine ? "true" : "false";
       const machineName = document.createElement("span");
       machineName.className = "event-machine";
