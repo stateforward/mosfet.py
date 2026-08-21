@@ -1,6 +1,7 @@
 import * as hsm from "../hsm.ts";
 import { applyStyles, replaceStyles } from "../elements/styles.ts";
 
+import { coalesceLatest, timeoutScheduler } from "./coalesce.ts";
 import { Connection, startConnection, type ConnectionDraft } from "./connection.ts";
 import { Dragger, startDragger } from "./dragger.ts";
 import { FlowEdge } from "./edge.ts";
@@ -768,14 +769,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   #listen(): void {
     let origin: { x: number; y: number } | null = null;
-    let latest: PointerSampleData | null = null;
-    let frame: ReturnType<typeof globalThis.setTimeout> | 0 = 0;
-    const flush = (): void => {
-      frame = 0;
-      const sample = latest;
-      latest = null;
-      if (sample !== null) this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
-    };
+    const samples = coalesceLatest<PointerSampleData>({
+      scheduler: timeoutScheduler(),
+      emit: (sample) => {
+        this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
+      },
+    });
     const onPointerDown = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
       if (event.button !== 0 && event.pointerType === "mouse") return;
@@ -785,9 +784,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     };
     const onPointerMove = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
-      latest = this.#sampleFrom(event, "pointermove", origin ?? { x: event.clientX, y: event.clientY });
-      if (frame !== 0) return;
-      frame = globalThis.setTimeout(flush, 0);
+      samples.push(this.#sampleFrom(event, "pointermove", origin ?? { x: event.clientX, y: event.clientY }));
     };
     const onPointerUp = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
@@ -837,7 +834,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.removeEventListener("wheel", onWheel);
       this.removeEventListener("keydown", onKey);
       this.removeEventListener("flow-control", onControl);
-      if (frame !== 0) globalThis.clearTimeout(frame);
+      samples.dispose();
     };
   }
 
