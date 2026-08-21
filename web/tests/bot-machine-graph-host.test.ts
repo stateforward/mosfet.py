@@ -15,7 +15,7 @@ const YIELD_MS = 0;
 const FRAME_PART = '[part="frame"]';
 
 function flowFrame(host: BotMachineGraph): FlowGraph {
-  const flow = host.querySelector(FRAME_PART);
+  const flow = host.shadowRoot?.querySelector(FRAME_PART);
   assert.ok(flow instanceof FlowGraph);
   return flow;
 }
@@ -101,24 +101,25 @@ describe("bot-machine-graph flow host", () => {
       const oneFit = 1;
       assert.equal(fitBoundsCount, oneFit);
       assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
+      host.graphs = [{
+        name: "/Empty",
+        componentName: "Empty",
+        currentState: "/Empty",
+        lastEventName: "",
+        observationCount: 0,
+        nodes: [],
+        edges: [],
+      }];
+      await waitUntil(() => host.getAttribute("data-node-count") === "0");
+      assert.equal(host.getAttribute("data-node-count"), "0");
+      const emptyFitBefore = fitBoundsCount;
+      host.focusMachine("/Empty");
+      await waitUntil(() => focused.length === 3);
+      assert.equal(fitBoundsCount, emptyFitBefore);
     } finally {
       host.dispatch = originalDispatch;
       flow.fitBounds = originalFitBounds;
     }
-    host.graphs = [{
-      name: "/Empty",
-      componentName: "Empty",
-      currentState: "/Empty",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [],
-      edges: [],
-    }];
-    await waitUntil(() => host.getAttribute("data-node-count") === "0");
-    assert.equal(host.getAttribute("data-node-count"), "0");
-    host.focusMachine("/Empty");
-    await waitUntil(() => host.getAttribute("data-node-count") === "0");
-    assert.equal(host.getAttribute("data-node-count"), "0");
     await host.dispatch(hsm.typedEvent({ event: BotMachineGraph.nodeClickEvent, data: {
       machineName: "/Phone",
       path: "/Phone/ready",

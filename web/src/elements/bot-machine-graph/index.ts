@@ -118,6 +118,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   #graph: Graph | null = null;
   #model: FlowGraphModel | null = null;
   #held: readonly MachineGraph[] = [];
+  #focusableNames: ReadonlySet<string> = new Set();
   #resizeObserver: ResizeObserver | null = null;
 
   constructor() {
@@ -157,8 +158,9 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
    * in `applyFocus`. Lifetime: safe after `connectedCallback`/`start`;
    * unstarted or stopped hosts surface host-drop through `catchFailure(this)`.
    * Concurrency: `#live` queues overlapping calls as HSM events.
-   * Failure modes: a missing machine is ignored by the unguarded
-   * `focus_machine` fallback (no `fitBounds`, `data-node-count` unchanged).
+   * Failure modes: a missing machine or a held machine without painted fit
+   * bounds is ignored by the unguarded `focus_machine` fallback (no
+   * `fitBounds`, `data-node-count` unchanged).
    * Callers observe `data-node-count` and viewport/`fitBounds` effects rather
    * than a boolean return.
    * Classification: runtime-safe.
@@ -253,6 +255,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof BotMachineGraph)) return;
     instance.#held = [];
     instance.#model = null;
+    instance.#focusableNames = new Set();
     instance.#flow.nodes = [];
     instance.#flow.edges = [];
     instance.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(instance.#held)));
@@ -266,11 +269,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return false;
     const machineName = event.data["machineName"];
     if (typeof machineName !== "string" || machineName.length === 0) return false;
-    const held = instance.#held;
-    for (let index = 0; index < held.length; index += 1) {
-      if (held[index]?.name === machineName) return true;
-    }
-    return false;
+    return instance.#focusableNames.has(machineName);
   }
 
   static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -279,7 +278,9 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     if (typeof machineName !== "string") return;
     const model = instance.#model ?? flowModelFromGraphs(instance.#held);
     const bounds = focusBoundsForMachine(instance.#held, machineName, model);
-    if (bounds === null) return;
+    if (bounds === null) {
+      throw new TypeError("focus_machine taken without focus bounds");
+    }
     instance.#flow.fitBounds(bounds);
     instance.#flow.focusTarget({ kind: "machine", machineName, bounds });
   }
@@ -308,6 +309,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#held = copyGraphs(graphs);
     const model = flowModelFromGraphs(this.#held);
     this.#model = model;
+    this.#focusableNames = focusableMachineNames(this.#held, model);
     this.#flow.nodes = model.nodes;
     this.#flow.edges = model.edges;
     this.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(this.#held)));
@@ -392,6 +394,14 @@ function eventNameFromEdgeDetail(value: unknown): string | null {
 function graphFromEvent(event: hsm.Event): Graph | null {
   if (!hsm.isRecord(event.data) || !(event.data["graph"] instanceof Graph)) return null;
   return event.data["graph"];
+}
+
+function focusableMachineNames(graphs: readonly MachineGraph[], model: FlowGraphModel): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const graph of graphs) {
+    if (focusBoundsForMachine(graphs, graph.name, model) !== null) names.add(graph.name);
+  }
+  return names;
 }
 
 function graphNodeCount(graphs: readonly MachineGraph[]): number {
