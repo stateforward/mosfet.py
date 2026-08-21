@@ -159,10 +159,41 @@ export class OtelSource extends hsm.from(HTMLElement) {
     hsm.start(this, otelSourceModel);
   }
 
+  /**
+   * Request host attach.
+   *
+   * Inputs: none. Dispatches `source.attach`.
+   * Outputs: none directly. Topology moves `disconnected` to `connected` only
+   * when the host is already disconnected. Attach is ignored unless
+   * disconnected, and deferred while stopping so reconnect cannot start until
+   * `source.stopped` has completed the previous detach.
+   * Ownership: this collector host owns the dispatch. Lifetime: one attach
+   * request; the connected session lasts until detach/stop.
+   * Concurrency: runtime-safe. Overlapping attach while connected is ignored.
+   * While stopping, attach is deferred, not dropped.
+   * Failure modes: dispatch rejection is classified by `catchFailure` as a
+   * host-drop when the runtime is unstarted or stopped; otherwise reported.
+   * Units: none.
+   * Classification: runtime-safe.
+   */
   requestAttach(): void {
     void super.dispatch(hsm.typedEvent({ event: sourceCommands["source.attach"] })).catch(hsm.catchFailure(this));
   }
 
+  /**
+   * Request host detach through stopping.
+   *
+   * Inputs: none. Dispatches `source.detach`.
+   * Outputs: none directly. Topology moves `connected` to `stopping`, then
+   * `disconnected` on `source.stopped`.
+   * Ownership: this collector host owns the dispatch. Lifetime: one detach
+   * request; stopping lasts until `source.stopped`.
+   * Concurrency: runtime-safe. Detach while already disconnected is ignored.
+   * Failure modes: dispatch rejection is classified by `catchFailure` as a
+   * host-drop when the runtime is unstarted or stopped; otherwise reported.
+   * Units: none.
+   * Classification: runtime-safe.
+   */
   requestDetach(): void {
     void super.dispatch(hsm.typedEvent({ event: sourceCommands["source.detach"] })).catch(hsm.catchFailure(this));
   }
