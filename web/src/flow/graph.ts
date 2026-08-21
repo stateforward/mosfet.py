@@ -29,7 +29,9 @@ import {
   type Edge,
   type EdgeClickDetail,
   type ActivationOrigin,
+  type KeyboardOrigin,
   type Node,
+  type NodeActivateData,
   type NodeClickDetail,
   type PointerHit,
   type PointerOrigin,
@@ -50,9 +52,6 @@ const EVENT_BUBBLES = true;
 const EVENT_COMPOSED = true;
 const GRAPH_ROLE = "group";
 const KEYBOARD_CLICK_DETAIL = 0;
-// TS2589: inferred hsm.define tuple exceeds the checker when connected owns the
-// guarded focus_target pair. Runtime model is unchanged.
-const defineGraph = hsm.define as (name: string, ...parts: unknown[]) => object;
 
 export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly attachEvent = { name: "graph_attach", kind: hsm.Kinds.Event } as const;
@@ -73,7 +72,112 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly focusEvent = { name: "focus_target", kind: hsm.Kinds.Event } as const;
   static readonly activateNodeEvent = { name: "node_activate", kind: hsm.Kinds.Event } as const;
 
-  static readonly model = defineGraph(
+  static readonly pointerModel = hsm.define(
+    "Pointer",
+    hsm.initial(hsm.target("idle")),
+    hsm.state(
+      "idle",
+      hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.target("../hit")),
+    ),
+    hsm.choice(
+      "hit",
+      hsm.transition(
+        hsm.guard(FlowGraph.isConnectStart),
+        hsm.target("connect"),
+        hsm.effect(FlowGraph.beginConnect),
+      ),
+      hsm.transition(
+        hsm.guard(FlowGraph.isBoxStart),
+        hsm.target("box"),
+        hsm.effect(FlowGraph.beginBox),
+      ),
+      hsm.transition(hsm.guard(FlowGraph.isNodePress), hsm.target("click")),
+      hsm.transition(hsm.guard(FlowGraph.isEdgePress), hsm.target("click")),
+      hsm.transition(
+        hsm.guard(FlowGraph.isPanStart),
+        hsm.target("pan"),
+        hsm.effect(FlowGraph.beginPan),
+      ),
+      hsm.transition(hsm.target("click")),
+    ),
+    hsm.state(
+      "click",
+      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.target("../intent")),
+      hsm.transition(hsm.on(FlowGraph.pointerUpEvent.name), hsm.target("../clickKind")),
+    ),
+    hsm.choice(
+      "clickKind",
+      hsm.transition(
+        hsm.guard(FlowGraph.isNodePress),
+        hsm.target("idle"),
+        hsm.effect(FlowGraph.emitNodeClick),
+      ),
+      hsm.transition(
+        hsm.guard(FlowGraph.isEdgePress),
+        hsm.target("idle"),
+        hsm.effect(FlowGraph.emitEdgeClick),
+      ),
+      hsm.transition(hsm.target("idle"), hsm.effect(FlowGraph.emitEmptyClick)),
+    ),
+    hsm.choice(
+      "intent",
+      hsm.transition(
+        hsm.guard(FlowGraph.isDragFromClick),
+        hsm.target("drag"),
+        hsm.effect(FlowGraph.beginDrag),
+      ),
+      hsm.transition(
+        hsm.guard(FlowGraph.isPanFromClick),
+        hsm.target("pan"),
+        hsm.effect(FlowGraph.beginPan),
+      ),
+      hsm.transition(hsm.target("click")),
+    ),
+    hsm.state(
+      "pan",
+      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.movePan)),
+      hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.effect(FlowGraph.beginPan)),
+      hsm.transition(
+        hsm.on(FlowGraph.pointerUpEvent.name),
+        hsm.target("../idle"),
+        hsm.effect(FlowGraph.endPan),
+      ),
+    ),
+    hsm.state(
+      "drag",
+      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveDrag)),
+      hsm.transition(
+        hsm.on(FlowGraph.pointerUpEvent.name),
+        hsm.target("../idle"),
+        hsm.effect(FlowGraph.endDrag),
+      ),
+    ),
+    hsm.state(
+      "box",
+      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveBox)),
+      hsm.transition(
+        hsm.on(FlowGraph.pointerUpEvent.name),
+        hsm.target("../idle"),
+        hsm.effect(FlowGraph.endBox),
+      ),
+    ),
+    hsm.state(
+      "connect",
+      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveConnect)),
+      hsm.transition(hsm.on(FlowGraph.pointerUpEvent.name), hsm.target("../connectEnd")),
+    ),
+    hsm.choice(
+      "connectEnd",
+      hsm.transition(
+        hsm.guard(FlowGraph.isConnectComplete),
+        hsm.target("idle"),
+        hsm.effect(FlowGraph.completeConnect),
+      ),
+      hsm.transition(hsm.target("idle"), hsm.effect(FlowGraph.cancelConnect)),
+    ),
+  );
+
+  static readonly model = hsm.define(
     "FlowGraph",
     hsm.initial(hsm.target("disconnected")),
     hsm.state(
@@ -91,7 +195,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     ),
     hsm.state(
       "connected",
-      hsm.initial(hsm.target("idle")),
+      hsm.initial(hsm.target("pointer")),
       hsm.entry(FlowGraph.onConnected),
       hsm.exit(FlowGraph.onConnectedExit),
       hsm.transition(
@@ -127,113 +231,37 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
-      hsm.transition(
-        hsm.on(FlowGraph.focusEvent.name),
-        hsm.guard(FlowGraph.isNodeFocus),
-        hsm.effect(FlowGraph.applyNodeFocus),
-      ),
-      hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.effect(FlowGraph.applyViewportFocus)),
-      hsm.transition(hsm.on(FlowGraph.activateNodeEvent.name), hsm.effect(FlowGraph.emitNodeActivate)),
-      hsm.state(
-        "idle",
-        hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.target("../hit")),
-      ),
+      hsm.transition(hsm.on(FlowGraph.focusEvent.name), hsm.target("focusKind")),
       hsm.choice(
-        "hit",
+        "focusKind",
         hsm.transition(
-          hsm.guard(FlowGraph.isConnectStart),
-          hsm.target("connect"),
-          hsm.effect(FlowGraph.beginConnect),
+          hsm.guard(FlowGraph.isNodeFocus),
+          hsm.target("pointer"),
+          hsm.effect(FlowGraph.applyNodeFocus),
         ),
         hsm.transition(
-          hsm.guard(FlowGraph.isBoxStart),
-          hsm.target("box"),
-          hsm.effect(FlowGraph.beginBox),
+          hsm.guard(FlowGraph.isViewportFocus),
+          hsm.target("pointer"),
+          hsm.effect(FlowGraph.applyViewportFocus),
         ),
-        hsm.transition(hsm.guard(FlowGraph.isNodePress), hsm.target("click")),
-        hsm.transition(hsm.guard(FlowGraph.isEdgePress), hsm.target("click")),
-        hsm.transition(
-          hsm.guard(FlowGraph.isPanStart),
-          hsm.target("pan"),
-          hsm.effect(FlowGraph.beginPan),
-        ),
-        hsm.transition(hsm.target("click")),
+        hsm.transition(hsm.target("pointer"), hsm.effect(FlowGraph.applyMachineFocus)),
       ),
-      hsm.state(
-        "click",
-        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.target("../intent")),
-        hsm.transition(hsm.on(FlowGraph.pointerUpEvent.name), hsm.target("../clickKind")),
-      ),
+      hsm.transition(hsm.on(FlowGraph.activateNodeEvent.name), hsm.target("activateKind")),
       hsm.choice(
-        "clickKind",
+        "activateKind",
         hsm.transition(
-          hsm.guard(FlowGraph.isNodePress),
-          hsm.target("idle"),
-          hsm.effect(FlowGraph.emitNodeClick),
+          hsm.guard(FlowGraph.isActivateClick),
+          hsm.target("pointer"),
+          hsm.effect(FlowGraph.emitNodeActivateClick),
         ),
         hsm.transition(
-          hsm.guard(FlowGraph.isEdgePress),
-          hsm.target("idle"),
-          hsm.effect(FlowGraph.emitEdgeClick),
+          hsm.guard(FlowGraph.isActivateKey),
+          hsm.target("pointer"),
+          hsm.effect(FlowGraph.emitNodeActivateKey),
         ),
-        hsm.transition(hsm.target("idle"), hsm.effect(FlowGraph.emitEmptyClick)),
+        hsm.transition(hsm.target("pointer")),
       ),
-      hsm.choice(
-        "intent",
-        hsm.transition(
-          hsm.guard(FlowGraph.isDragFromClick),
-          hsm.target("drag"),
-          hsm.effect(FlowGraph.beginDrag),
-        ),
-        hsm.transition(
-          hsm.guard(FlowGraph.isPanFromClick),
-          hsm.target("pan"),
-          hsm.effect(FlowGraph.beginPan),
-        ),
-        hsm.transition(hsm.target("click")),
-      ),
-      hsm.state(
-        "pan",
-        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.movePan)),
-        hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.effect(FlowGraph.beginPan)),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerUpEvent.name),
-          hsm.target("../idle"),
-          hsm.effect(FlowGraph.endPan),
-        ),
-      ),
-      hsm.state(
-        "drag",
-        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveDrag)),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerUpEvent.name),
-          hsm.target("../idle"),
-          hsm.effect(FlowGraph.endDrag),
-        ),
-      ),
-      hsm.state(
-        "box",
-        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveBox)),
-        hsm.transition(
-          hsm.on(FlowGraph.pointerUpEvent.name),
-          hsm.target("../idle"),
-          hsm.effect(FlowGraph.endBox),
-        ),
-      ),
-      hsm.state(
-        "connect",
-        hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveConnect)),
-        hsm.transition(hsm.on(FlowGraph.pointerUpEvent.name), hsm.target("../connectEnd")),
-      ),
-      hsm.choice(
-        "connectEnd",
-        hsm.transition(
-          hsm.guard(FlowGraph.isConnectComplete),
-          hsm.target("idle"),
-          hsm.effect(FlowGraph.completeConnect),
-        ),
-        hsm.transition(hsm.target("idle"), hsm.effect(FlowGraph.cancelConnect)),
-      ),
+      hsm.submachineState("pointer", FlowGraph.pointerModel),
     ),
     hsm.state(
       "stopping",
@@ -606,43 +634,42 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Activate a painted node from native button click or a typed key.
+   * Activate a painted node from a click-origin `node_activate`.
    *
-   * Inputs: `nodeId` required. Optional `key` is exactly `Enter` or Space (` `).
-   * Outputs: exclusive Selection click and `flow-node-click` with
-   * `{ type: "click" }` when `key` is omitted, or `{ type: "keydown", key }`
-   * when `key` is accepted.
+   * Inputs: `nodeId` after `isActivateClick`. Outputs: exclusive Selection
+   * click and `flow-node-click` with `{ type: "click" }`.
    * Ownership: this graph. Lifetime: one activation.
    * Concurrency: runtime-safe on the graph dispatch thread.
-   * Failure modes: missing `nodeId`, unknown node, or any `key` other than
-   * Enter/Space — no selection and no `flow-node-click`. Keys are not coerced.
+   * Failure modes: unknown `nodeId` — no selection and no `flow-node-click`.
    * Classification: runtime-safe.
    */
-  static emitNodeActivate(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
-    const nodeId = event.data["nodeId"];
-    if (typeof nodeId !== "string" || nodeId.length === 0) return;
-    const key = event.data["key"];
-    let origin: ActivationOrigin;
-    if (key === undefined) {
-      origin = { type: "click" };
-    } else if (key === ENTER_KEY || key === SPACE_KEY) {
-      origin = { type: "keydown", key };
-    } else {
-      return;
-    }
-    const node = instance.#nodes.find((item) => item.id === nodeId);
-    if (node === undefined) return;
-    instance.#send({ machine: instance.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
-      id: node.id,
-      kind: "node",
-      additive: EXCLUSIVE_SELECT,
-    } }) });
-    instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
-      detail: { node: copyNode(node), originalEvent: origin },
-      bubbles: EVENT_BUBBLES,
-      composed: EVENT_COMPOSED,
-    }));
+  static emitNodeActivateClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    const payload = nodeActivateOf(event);
+    if (payload === null) return;
+    instance.#activateNode({ nodeId: payload.nodeId, origin: { type: "click" } });
+  }
+
+  /**
+   * Activate a painted node from an Enter/Space `node_activate`.
+   *
+   * Inputs: `nodeId` and `key` after `isActivateKey`. Outputs: exclusive
+   * Selection click and `flow-node-click` with `{ type: "keydown", key }`.
+   * Ownership: this graph. Lifetime: one activation.
+   * Concurrency: runtime-safe on the graph dispatch thread.
+   * Failure modes: unknown `nodeId` — no selection and no `flow-node-click`.
+   * Keys are not coerced.
+   * Classification: runtime-safe.
+   */
+  static emitNodeActivateKey(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    const payload = nodeActivateOf(event);
+    const key = payload === null ? null : activateKeyOf(payload.key);
+    if (payload === null || key === null) return;
+    instance.#activateNode({
+      nodeId: payload.nodeId,
+      origin: { type: "keydown", key },
+    });
   }
 
   static emitEdgeClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -841,9 +868,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return hsm.isRecord(event.data) && event.data["kind"] === "node";
   }
 
+  static isViewportFocus(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return hsm.isRecord(event.data) && event.data["kind"] === "viewport";
+  }
+
+  static isActivateClick(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    const payload = nodeActivateOf(event);
+    return payload !== null && payload.key === undefined;
+  }
+
+  static isActivateKey(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    const payload = nodeActivateOf(event);
+    return payload !== null && activateKeyOf(payload.key) !== null;
+  }
+
   static applyNodeFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    if (!instance.#applyFocusPan(event)) return;
+    if (!instance.#applyFocusPan({ event, kind: "node" })) return;
     const focused = instance.#nodeElement(hsm.isRecord(event.data) ? event.data : null);
     if (focused === null) return;
     focused.focus();
@@ -851,31 +892,48 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   static applyViewportFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
-    instance.#applyFocusPan(event);
+    instance.#applyFocusPan({ event, kind: "viewport" });
   }
 
-  #applyFocusPan(event: hsm.Event): boolean {
-    const bounds = hsm.isRecord(event.data) ? boundsOf(event.data["bounds"]) : null;
+  static applyMachineFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#applyFocusPan({ event, kind: "machine" });
+  }
+
+  #applyFocusPan(args: { event: hsm.Event; kind: FocusTarget["kind"] }): boolean {
+    const bounds = hsm.isRecord(args.event.data) ? boundsOf(args.event.data["bounds"]) : null;
     const metrics = this.#metrics();
     if (bounds === null || metrics === null) return false;
-    const kind = hsm.isRecord(event.data) && (event.data["kind"] === "node" || event.data["kind"] === "viewport")
-      ? event.data["kind"]
-      : "machine";
     this.#send({ machine: this.#focuser, event: hsm.typedEvent({ event: Focuser.focusEvent, data: {
-      kind,
+      kind: args.kind,
       bounds,
-      ...(hsm.isRecord(event.data) && typeof event.data["machineName"] === "string"
-        ? { machineName: event.data["machineName"] }
+      ...(hsm.isRecord(args.event.data) && typeof args.event.data["machineName"] === "string"
+        ? { machineName: args.event.data["machineName"] }
         : {}),
-      ...(hsm.isRecord(event.data) && typeof event.data["nodePath"] === "string"
-        ? { nodePath: event.data["nodePath"] }
+      ...(hsm.isRecord(args.event.data) && typeof args.event.data["nodePath"] === "string"
+        ? { nodePath: args.event.data["nodePath"] }
         : {}),
-      ...(hsm.isRecord(event.data) && typeof event.data["nodeId"] === "string"
-        ? { nodeId: event.data["nodeId"] }
+      ...(hsm.isRecord(args.event.data) && typeof args.event.data["nodeId"] === "string"
+        ? { nodeId: args.event.data["nodeId"] }
         : {}),
     } }) });
     this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
     return true;
+  }
+
+  #activateNode(args: { nodeId: string; origin: ActivationOrigin }): void {
+    const node = this.#nodes.find((item) => item.id === args.nodeId);
+    if (node === undefined) return;
+    this.#send({ machine: this.#selection, event: hsm.typedEvent({ event: Selection.clickEvent, data: {
+      id: node.id,
+      kind: "node",
+      additive: EXCLUSIVE_SELECT,
+    } }) });
+    this.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
+      detail: { node: copyNode(node), originalEvent: args.origin },
+      bubbles: EVENT_BUBBLES,
+      composed: EVENT_COMPOSED,
+    }));
   }
 
   #childActors(): object[] {
@@ -953,7 +1011,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       if (node === null || node.node === null) return;
       let fromButton = false;
       for (const target of event.composedPath()) {
-        if (target instanceof HTMLElement && target.localName === "button") {
+        if (target instanceof HTMLButtonElement) {
           fromButton = true;
           break;
         }
@@ -1197,6 +1255,21 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     });
     this.#connectionLine.setAttribute("d", d);
   }
+}
+
+function nodeActivateOf(event: hsm.Event): { nodeId: string; key?: unknown } | null {
+  if (!hsm.isRecord(event.data)) return null;
+  const nodeId = event.data["nodeId"];
+  if (typeof nodeId !== "string" || nodeId.length === 0) return null;
+  if (!("key" in event.data) || event.data["key"] === undefined) {
+    const click: NodeActivateData = { nodeId };
+    return click;
+  }
+  return { nodeId, key: event.data["key"] };
+}
+
+function activateKeyOf(value: unknown): KeyboardOrigin["key"] | null {
+  return value === ENTER_KEY || value === SPACE_KEY ? value : null;
 }
 
 function pointerOf(value: unknown): PointerSampleData | null {

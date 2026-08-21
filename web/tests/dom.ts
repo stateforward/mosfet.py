@@ -50,7 +50,14 @@ class FakeElement {
     },
   });
   readonly classList = new FakeClassList();
-  readonly part = { add(_token: string): void { return; } };
+  readonly part = {
+    add: (token: string): void => {
+      const current = this.getAttribute("part");
+      const tokens = current === null || current.length === 0 ? [] : current.split(" ");
+      if (!tokens.includes(token)) tokens.push(token);
+      this.setAttribute("part", tokens.join(" "));
+    },
+  };
   parentNode: FakeElement | null = null;
   shadowRoot: FakeShadowRoot | null = null;
   textContent = "";
@@ -309,13 +316,24 @@ class FakeHTMLInputElement extends FakeHTMLElement {
   }
 }
 
+class FakeHTMLButtonElement extends FakeHTMLElement {
+  constructor() {
+    super("button");
+  }
+}
+
 class FakeDocument {
   readonly body = new FakeElement("body");
+
+  get activeElement(): FakeElement | null {
+    return focusedElement;
+  }
 
   createElement(tag: string): FakeElement {
     const ctor = registry.get(tag);
     if (ctor !== undefined) return new ctor();
     if (tag === "input") return new FakeHTMLInputElement();
+    if (tag === "button") return new FakeHTMLButtonElement();
     return new FakeHTMLElement(tag);
   }
 
@@ -449,6 +467,7 @@ if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined"
     Element: FakeElement,
     HTMLElement: FakeHTMLElement,
     HTMLInputElement: FakeHTMLInputElement,
+    HTMLButtonElement: FakeHTMLButtonElement,
     CSS: {
       escape(value: string): string {
         return [...value].map((ch) => (/[A-Za-z0-9_-]/.test(ch) ? ch : `\\${ch}`)).join("");

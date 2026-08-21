@@ -670,24 +670,26 @@ test("focused flow-node native button activates with Enter and Space", async ({ 
   });
 
   const node = page.getByTestId("state-node").first();
-  const control = node.locator("button");
-  await expect.poll(async () => control.evaluate((element) => element.localName)).toBe("button");
-  await expect.poll(async () => control.evaluate((element) => element.tagName)).toBe("BUTTON");
+  const control = node.getByRole("button");
+  await expect(control).toHaveRole("button");
   await expect(control).toHaveAccessibleName(/.+/);
   await control.focus();
   await expect(control).toBeFocused();
+  const noneActivated = 0;
+  const afterEnter = 1;
+  const afterSpace = 2;
   await control.press(enterKey);
   await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
     return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
-  })).toBeGreaterThan(0);
+  })).toBeGreaterThan(noneActivated);
   await control.press(spaceKey);
   await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
     return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
-  })).toBeGreaterThan(1);
+  })).toBeGreaterThan(afterEnter);
   await control.evaluate((element) => {
     if (element instanceof HTMLButtonElement) element.click();
   });
   await expect.poll(async () => page.getByTestId("frame").evaluate((frame) => {
     return (frame as HTMLElement & { activationCount?: number }).activationCount ?? 0;
-  })).toBeGreaterThan(2);
+  })).toBeGreaterThan(afterSpace);
 });

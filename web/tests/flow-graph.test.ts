@@ -642,23 +642,28 @@ describe("flow-graph", () => {
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const node = graph.querySelector("flow-node");
     assert.ok(node instanceof HTMLElement);
-    const control = node.shadowRoot?.querySelector("button");
-    assert.ok(control instanceof HTMLElement);
-    assert.equal(control.localName, "button");
-    assert.equal(control.tagName, "BUTTON");
+    const controlPart = '[part="control"]';
+    const control = node.querySelector(controlPart);
+    assert.ok(control instanceof HTMLButtonElement);
     assert.equal(node.getAttribute("role"), null);
     assert.equal(control.getAttribute("aria-label"), "A");
     assert.equal(node.getAttribute("data-testid"), "state-node");
     assert.equal(control.tabIndex, expectedTabIndex);
+    const noActivedescendant = null;
     graph.focusTarget({
       kind: "machine",
       machineName: "/A",
       bounds: { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight },
     });
     await flush();
-    const noShadowFocus = null;
-    assert.equal(graph.shadowRoot?.activeElement, noShadowFocus);
-    assert.equal(graph.getAttribute("aria-activedescendant"), noShadowFocus);
+    assert.notEqual(document.activeElement, control);
+    assert.equal(graph.getAttribute("aria-activedescendant"), noActivedescendant);
+    graph.focusTarget({
+      kind: "viewport",
+      bounds: { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight },
+    });
+    await flush();
+    assert.notEqual(document.activeElement, control);
     graph.focusTarget({
       kind: "node",
       nodeId: "a",
@@ -667,7 +672,7 @@ describe("flow-graph", () => {
       bounds: { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight },
     });
     await flush();
-    assert.equal(node.shadowRoot?.activeElement, control);
+    assert.equal(document.activeElement, control);
     const origins: unknown[] = [];
     graph.addEventListener("flow-node-click", (event) => {
       if (event instanceof CustomEvent) origins.push(event.detail.originalEvent);
@@ -724,5 +729,15 @@ describe("flow-graph", () => {
     assert.deepEqual(origins[1], { type: "keydown", key: enterKey });
     assert.deepEqual(origins[2], { type: "keydown", key: spaceKey });
     graph.remove();
+  });
+
+  test("focus_target and node_activate branch through connected choices", () => {
+    const members = FlowGraph.model.members;
+    const focusKind = "/FlowGraph/connected/focusKind";
+    const activateKind = "/FlowGraph/connected/activateKind";
+    assert.equal(Object.hasOwn(members, focusKind), true);
+    assert.equal(Object.hasOwn(members, activateKind), true);
+    assert.equal(members[focusKind]?.kind, hsm.kinds.Choice);
+    assert.equal(members[activateKind]?.kind, hsm.kinds.Choice);
   });
 });

@@ -66,6 +66,11 @@ export type ClickOrigin = {
 
 export type ActivationOrigin = PointerOrigin | KeyboardOrigin | ClickOrigin;
 
+export type NodeActivateData = {
+  readonly nodeId: string;
+  readonly key?: KeyboardOrigin["key"];
+};
+
 export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
 export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };
 export type ViewportChangeDetail = { readonly viewport: Viewport };

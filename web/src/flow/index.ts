@@ -31,6 +31,7 @@ export type {
   KeyboardOrigin,
   ClickOrigin,
   ActivationOrigin,
+  NodeActivateData,
   NodeClickDetail,
   EdgeClickDetail,
   ViewportChangeDetail,
