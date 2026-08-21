@@ -1142,11 +1142,12 @@ export class BotDashboard extends Dashboard {
    * Forward modeled `dashboard.graph.focus` as typed `focus_machine`.
    *
    * Inputs: `machineName` from the dashboard `dashboard.graph.focus` transition,
-   * including replay-step dispatches after cursor updates, and from
+   * including topology raises after replay enter/play/previous/next/seek, and from
    * `dashboard.machine.selected` which shares the same `machineName` payload.
    * Outputs: `BotMachineGraph` consumes `focus_machine`. Snapshot render does
    * not call this. Inspector machine buttons dispatch `dashboard.machine.selected`;
-   * graph focus is a modeled effect on that transition.
+   * graph focus is a modeled effect on that transition. DOM gestures do not
+   * stamp `dashboard.graph.focus`.
    * Ownership: this host owns `#graph`. Lifetime: one focus request.
    * Concurrency: runtime-safe on this host's dispatch thread.
    * Failure modes: empty names are dropped by the dashboard guard before this
@@ -1319,7 +1320,7 @@ export class BotDashboard extends Dashboard {
     if (eventName === undefined || !isDashboardEventName(eventName)) {
       return;
     }
-    if (eventName === "dashboard.machine.selected" || eventName === "dashboard.graph.focus") {
+    if (eventName === "dashboard.machine.selected") {
       const machineName =
         control instanceof HTMLSelectElement ? control.value : control.dataset["machineName"];
       if (machineName === undefined) {

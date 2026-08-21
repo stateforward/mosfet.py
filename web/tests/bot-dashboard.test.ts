@@ -108,6 +108,8 @@ describe("bot-dashboard inspector focus", () => {
     assert.ok(select instanceof HTMLButtonElement);
     const selectedEvent = "dashboard.machine.selected";
     assert.equal(select.dataset["event"], selectedEvent);
+    const graphFocusEvent = '[data-event="dashboard.graph.focus"]';
+    assert.equal(host.querySelector(graphFocusEvent), null);
     const graph = host.querySelector("bot-machine-graph");
     assert.ok(graph instanceof BotMachineGraph);
     const names: string[] = [];
