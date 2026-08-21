@@ -120,7 +120,13 @@ export class BotOtelSource extends OtelSource {
   #render(snapshot: OtelSourceSnapshot): void {
     this.#badge.dataset["phase"] = snapshot.phase;
     this.#badge.textContent = snapshot.phase;
-    this.#badge.setAttribute("aria-label", snapshot.phase);
+    this.#badge.setAttribute("aria-label", `Collector status: ${snapshot.phase}`);
+    this.#badge.disabled = snapshot.phase === "connecting";
+    if (snapshot.phase === "connecting") {
+      this.#badge.setAttribute("aria-busy", "true");
+    } else {
+      this.#badge.removeAttribute("aria-busy");
+    }
     const errorMessage = snapshot.errorMessage ?? "";
     this.#error.textContent = errorMessage;
     if (errorMessage.length > 0) {

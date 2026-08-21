@@ -41,13 +41,11 @@ describe("bot-otel-source", () => {
     document.body.append(host);
     await waitFor(() => host.snapshot().phase === "live");
     const badge = badgeOf(host);
-    const staticCollectorLabel = "Collector status";
-    assert.notEqual(badge.getAttribute("aria-label"), staticCollectorLabel);
-    assert.equal(badge.getAttribute("aria-label") ?? badge.textContent, host.snapshot().phase);
+    assert.equal(badge.getAttribute("aria-label"), `Collector status: ${host.snapshot().phase}`);
     await host.dispatch("source.connect.requested", { origin: "not-a-url" });
     await waitFor(() => host.snapshot().phase === "error");
     const error = errorOf(host);
-    assert.equal(badge.getAttribute("aria-label") ?? badge.textContent, host.snapshot().phase);
+    assert.equal(badge.getAttribute("aria-label"), `Collector status: ${host.snapshot().phase}`);
     assert.equal(error.getAttribute("role"), "status");
     assert.equal(badge.getAttribute("aria-describedby"), error.id);
     assert.ok((host.snapshot().errorMessage ?? "").length > 0);
