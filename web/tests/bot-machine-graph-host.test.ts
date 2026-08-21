@@ -12,6 +12,28 @@ registerFlowElements();
 registerBotMachineGraph();
 
 const YIELD_MS = 0;
+const FRAME_PART = '[part="frame"]';
+
+function flowFrame(host: BotMachineGraph): FlowGraph {
+  const flow = host.querySelector(FRAME_PART);
+  assert.ok(flow instanceof FlowGraph);
+  return flow;
+}
+
+function spyFitView(flow: FlowGraph): { count: () => number; restore: () => void } {
+  let fitViewCount = 0;
+  const originalFitView = flow.fitView.bind(flow);
+  flow.fitView = () => {
+    fitViewCount += 1;
+    originalFitView();
+  };
+  return {
+    count: () => fitViewCount,
+    restore: () => {
+      flow.fitView = originalFitView;
+    },
+  };
+}
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 50; i += 1) {
@@ -64,8 +86,7 @@ describe("bot-machine-graph flow host", () => {
         ? originalDispatch(eventOrCtx as hsm.Event)
         : originalDispatch(eventOrCtx as hsm.Context, maybeEvent);
     }) as BotMachineGraph["dispatch"];
-    const flow = host.shadowRoot?.querySelector("flow-graph");
-    assert.ok(flow instanceof FlowGraph);
+    const flow = flowFrame(host);
     let fitBoundsCount = 0;
     const originalFitBounds = flow.fitBounds.bind(flow);
     flow.fitBounds = (bounds) => {
@@ -130,13 +151,7 @@ describe("bot-machine-graph flow host", () => {
   test("first admit on an empty model ends ready and runs fitView", async () => {
     const host = document.createElement("bot-machine-graph");
     assert.ok(host instanceof BotMachineGraph);
-    let fitViewCount = 0;
-    const originalFitView = FlowGraph.prototype.fitView;
-    const countFitView = function (this: unknown) {
-      fitViewCount += 1;
-      originalFitView.call(this);
-    };
-    FlowGraph.prototype.fitView = countFitView;
+    const spy = spyFitView(flowFrame(host));
     try {
       document.body.append(host);
       await waitUntil(() => host.state().includes("/connected"));
@@ -148,23 +163,17 @@ describe("bot-machine-graph flow host", () => {
       await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
       assert.ok(host.state().endsWith(readyState));
       const oneFit = 1;
-      assert.equal(fitViewCount, oneFit);
+      assert.equal(spy.count(), oneFit);
       host.remove();
     } finally {
-      FlowGraph.prototype.fitView = originalFitView;
+      spy.restore();
     }
   });
 
   test("second admit with the same node count ends ready without another fitView", async () => {
     const host = document.createElement("bot-machine-graph");
     assert.ok(host instanceof BotMachineGraph);
-    let fitViewCount = 0;
-    const originalFitView = FlowGraph.prototype.fitView;
-    const countFitView = function (this: unknown) {
-      fitViewCount += 1;
-      originalFitView.call(this);
-    };
-    FlowGraph.prototype.fitView = countFitView;
+    const spy = spyFitView(flowFrame(host));
     try {
       document.body.append(host);
       await waitUntil(() => host.state().includes("/connected"));
@@ -175,7 +184,7 @@ describe("bot-machine-graph flow host", () => {
       const readyState = "/ready";
       await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
       const oneFit = 1;
-      assert.equal(fitViewCount, oneFit);
+      assert.equal(spy.count(), oneFit);
       const again = [graphFor("/Phone2")];
       const againNodeCount = again.reduce((count, graph) => count + graph.nodes.length, noNodes);
       assert.equal(againNodeCount, nodeCount);
@@ -183,10 +192,10 @@ describe("bot-machine-graph flow host", () => {
       const admittedAgain = "/Phone2";
       await waitUntil(() => host.graphs[0]?.name === admittedAgain && host.state().endsWith(readyState));
       assert.ok(host.state().endsWith(readyState));
-      assert.equal(fitViewCount, oneFit);
+      assert.equal(spy.count(), oneFit);
       host.remove();
     } finally {
-      FlowGraph.prototype.fitView = originalFitView;
+      spy.restore();
     }
   });
 

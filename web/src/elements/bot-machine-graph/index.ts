@@ -64,7 +64,12 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(BotMachineGraph.graphsEvent.name), hsm.effect(BotMachineGraph.admitGraphs)),
       hsm.transition(hsm.on(Graph.drawnEvent.name), hsm.target("afterDraw")),
       hsm.transition(hsm.on(Graph.clearedEvent.name), hsm.effect(BotMachineGraph.applyCleared)),
-      hsm.transition(hsm.on(BotMachineGraph.focusEvent.name), hsm.effect(BotMachineGraph.applyFocus)),
+      hsm.transition(
+        hsm.on(BotMachineGraph.focusEvent.name),
+        hsm.guard(BotMachineGraph.machineFocusable),
+        hsm.effect(BotMachineGraph.applyFocus),
+      ),
+      hsm.transition(hsm.on(BotMachineGraph.focusEvent.name), hsm.effect(BotMachineGraph.ignoreFocus)),
       hsm.transition(hsm.on(BotMachineGraph.fitEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
@@ -152,10 +157,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
    * in `applyFocus`. Lifetime: safe after `connectedCallback`/`start`;
    * unstarted or stopped hosts surface host-drop through `catchFailure(this)`.
    * Concurrency: `#live` queues overlapping calls as HSM events.
-   * Failure modes: a missing machine no-ops inside `applyFocus` (no
-   * `fitBounds`, `data-node-count` unchanged). Callers observe
-   * `data-node-count` and viewport/`fitBounds` effects rather than a boolean
-   * return.
+   * Failure modes: a missing machine is ignored by the unguarded
+   * `focus_machine` fallback (no `fitBounds`, `data-node-count` unchanged).
+   * Callers observe `data-node-count` and viewport/`fitBounds` effects rather
+   * than a boolean return.
    * Classification: runtime-safe.
    */
   focusMachine(machineName: string): void {
@@ -251,6 +256,21 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.#flow.nodes = [];
     instance.#flow.edges = [];
     instance.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(instance.#held)));
+  }
+
+  static ignoreFocus(_ctx: hsm.Context, _instance: hsm.Instance, _event: hsm.Event): void {
+    return;
+  }
+
+  static machineFocusable(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+    if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return false;
+    const machineName = event.data["machineName"];
+    if (typeof machineName !== "string" || machineName.length === 0) return false;
+    const held = instance.#held;
+    for (let index = 0; index < held.length; index += 1) {
+      if (held[index]?.name === machineName) return true;
+    }
+    return false;
   }
 
   static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
