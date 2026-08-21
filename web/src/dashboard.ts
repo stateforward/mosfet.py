@@ -377,6 +377,21 @@ function streamUrlDisallowed(_ctx: hsm.Context, instance: hsm.Instance, event: h
   return collectorUrl({ requested: source.url, origin: controller.origin }) === null;
 }
 
+function stampStreamView(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  const controller = controllerOf(instance);
+  if (controller === null) return;
+  const source = sourceFromEvent(event) ?? controller.selectedSource();
+  let payload: Record<string, unknown>;
+  if (hsm.isRecord(event.data)) {
+    payload = event.data;
+  } else {
+    payload = {};
+    Object.assign(event, { data: payload });
+  }
+  if (source !== null) payload["source"] = source;
+  payload["origin"] = controller.origin;
+}
+
 function failNoStream(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.applyError("no otel stream selected");
 }
@@ -422,7 +437,7 @@ const dashboardModel = hsm.define(
       hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
       hsm.choice(
         "sourceCheck",
-        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
+        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing"), hsm.effect(stampStreamView)),
         hsm.transition(hsm.guard(streamUrlDisallowed), hsm.target("../error"), hsm.effect(failCollectorUrl)),
         hsm.transition(hsm.target("../error"), hsm.effect(failNoStream)),
       ),
@@ -856,8 +871,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
+  /** Viewing activity: connect from stamped event source/origin only, never #source. */
   async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
-    const source = sourceFromEvent(args.event) ?? this.#source;
+    const source = sourceFromEvent(args.event);
+    const origin = stringField({ event: args.event, key: "origin" });
     if (source === null || source.kind !== "stream") {
       await this.dispatch(hsm.typedEvent({
         event: dashboardCompletions["dashboard.load.failed"],
@@ -865,7 +882,14 @@ export class Dashboard extends hsm.from(HTMLElement) {
       })).catch(hsm.catchFailure(this));
       return;
     }
-    const url = collectorUrl({ requested: source.url, origin: this.origin });
+    if (origin === null) {
+      await this.dispatch(hsm.typedEvent({
+        event: dashboardCompletions["dashboard.load.failed"],
+        data: { message: "collector url is not allowed" },
+      })).catch(hsm.catchFailure(this));
+      return;
+    }
+    const url = collectorUrl({ requested: source.url, origin });
     if (url === null) {
       await this.dispatch(hsm.typedEvent({
         event: dashboardCompletions["dashboard.load.failed"],
