@@ -1354,6 +1354,33 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
+  test("SourceConnect restamp requires origin or urlAllowed, not url alone", () => {
+    const commandPayload = { eventName: "phone.ring", dataJson: "{}" };
+    const commandWithUrl = { eventName: "phone.ring", dataJson: "{}", url: "/v1/traces/stream" };
+    const spoofAllowed = true;
+    const payloadIsConnect = true;
+    const payloadIsNotConnect = false;
+    const restampFailClosed = false;
+    assert.equal(isSourceConnectPayload({ origin: "http://localhost" }), payloadIsConnect);
+    assert.equal(isSourceConnectPayload({ urlAllowed: spoofAllowed }), payloadIsConnect);
+    assert.equal(isSourceConnectPayload(commandPayload), payloadIsNotConnect);
+    assert.equal(isSourceConnectPayload(commandWithUrl), payloadIsNotConnect);
+    assert.equal(isSourceConnectPayload({ url: "/v1/traces/stream" }), payloadIsNotConnect);
+    const spoofEvent = eventWithSourceConnect({
+      name: "source.connect.requested",
+      kind: hsm.Kinds.Event,
+      data: { urlAllowed: spoofAllowed },
+    });
+    const restamped = sourceConnectFrom(spoofEvent.data);
+    assert.equal(restamped.urlAllowed, restampFailClosed);
+    const kept = eventWithSourceConnect({
+      name: "dashboard.command.send",
+      kind: hsm.Kinds.Event,
+      data: commandWithUrl,
+    });
+    assert.deepEqual(kept.data, commandWithUrl);
+  });
+
   test("event-path connect without origin fails closed instead of staying connecting", async () => {
     const source = bootSource();
     const spoofAllowed = true;

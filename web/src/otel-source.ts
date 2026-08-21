@@ -240,6 +240,11 @@ export class OtelSource extends hsm.from(HTMLElement) {
     };
   }
 
+  /**
+   * Admit Event-path and controller payloads. Only SourceConnect-shaped data
+   * (`origin` string or `urlAllowed` boolean) is restamped through
+   * `sourceConnectFrom`; other payloads keep their fields.
+   */
   override dispatch(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot>;
   override dispatch(event: hsm.Event): hsm.Completion;
   override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
@@ -366,18 +371,17 @@ export function sourceConnectFrom(data: unknown): SourceConnectData {
 }
 
 /**
- * True when unknown ingress is SourceConnect-shaped.
+ * True when unknown ingress matches SourceConnectData required keys.
  *
- * Selects by payload (`origin` string, `urlAllowed` boolean, `url` string, or
- * `source` stream), not `event.name`. Used so Event-path dispatch restamps
- * `urlAllowed` from `collectorUrl` without a name allowlist.
+ * Selects by payload (`origin` string or `urlAllowed` boolean), not
+ * `event.name` and not optional `url`/`source` alone. Event-path dispatch
+ * restamps matching payloads through `sourceConnectFrom` so `urlAllowed` is
+ * recomputed from `collectorUrl`. A `urlAllowed` spoof without `origin` is
+ * still connect-shaped and restamps fail-closed.
  */
 export function isSourceConnectPayload(data: unknown): boolean {
   if (!hsm.isRecord(data)) return false;
-  return typeof data["origin"] === "string"
-    || typeof data["urlAllowed"] === "boolean"
-    || typeof data["url"] === "string"
-    || isOtelSource(data["source"]);
+  return typeof data["origin"] === "string" || typeof data["urlAllowed"] === "boolean";
 }
 
 /**
