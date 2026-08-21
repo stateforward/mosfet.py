@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import "./dom.ts";
 import * as hsm from "../src/hsm.ts";
-import { Dashboard } from "../src/dashboard.ts";
+import { Dashboard, type DashboardEventName } from "../src/dashboard.ts";
 import { replayEvents, replayPrefix } from "../src/otel/replay.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource } from "../src/otel/source.ts";
@@ -134,10 +134,29 @@ describe("OTEL replay", () => {
   });
 
   test("replay enter next seek and play stamp graph focus without snapshot command", async () => {
+    const graphFocusName = "dashboard.graph.focus";
     class FocusHost extends Dashboard {
       readonly focused: string[] = [];
+      graphFocusRaises = 0;
       override applyGraphFocus(args: { machineName: string }): void {
         this.focused.push(args.machineName);
+      }
+      override dispatch(eventName: DashboardEventName, data?: unknown): Promise<ReturnType<Dashboard["snapshot"]>>;
+      override dispatch(event: hsm.Event): hsm.Completion;
+      override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
+      override dispatch(
+        eventOrContext: DashboardEventName | hsm.Event | hsm.Context,
+        data?: unknown,
+      ): hsm.Completion | Promise<ReturnType<Dashboard["snapshot"]>> {
+        if (typeof eventOrContext === "string") {
+          if (eventOrContext === graphFocusName) this.graphFocusRaises += 1;
+          return super.dispatch(eventOrContext, data);
+        }
+        if (eventOrContext instanceof hsm.Context) {
+          return super.dispatch(eventOrContext, data as hsm.Event);
+        }
+        if (eventOrContext.name === graphFocusName) this.graphFocusRaises += 1;
+        return super.dispatch(eventOrContext);
       }
     }
     const dashboard = new FocusHost();
@@ -177,6 +196,7 @@ describe("OTEL replay", () => {
 
     await dashboard.dispatch("dashboard.replay.play");
     assert.deepEqual(dashboard.focused, ["/PhoneBot", "/Phone", "/PhoneBot", "/PhoneBot", "/PhoneBot"]);
+    assert.equal(dashboard.graphFocusRaises, noneFocused);
     await dashboard.stop();
   });
 });
