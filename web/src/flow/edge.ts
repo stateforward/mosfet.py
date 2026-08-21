@@ -14,7 +14,6 @@ export class FlowEdge extends HTMLElement {
 
   constructor() {
     super();
-    this.style.display = "contents";
     this.path = document.createElementNS(SVG_NS, "path");
     this.path.classList.add("edge-path");
     this.hit = document.createElementNS(SVG_NS, "path");
@@ -32,6 +31,9 @@ export class FlowEdge extends HTMLElement {
   }
 
   connectedCallback(): void {
+    if ((this.style.display ?? "") === "") {
+      this.style.display = "contents";
+    }
     this.mount();
   }
 

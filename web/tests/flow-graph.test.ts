@@ -508,6 +508,16 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("author display survives flow-edge connect", async () => {
+    const edge = document.createElement("flow-edge");
+    const displayUnset = "";
+    assert.equal(edge.style.display ?? "", displayUnset);
+    edge.style.display = "block";
+    document.body.append(edge);
+    assert.equal(edge.style.display, "block");
+    edge.remove();
+  });
+
   test("author accessible name survives connect defaults", async () => {
     const graph = document.createElement("flow-graph");
     graph.setAttribute("aria-label", "Custom graph");
