@@ -6,7 +6,14 @@ import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
-import { MAX_FLOW_EDGES, MAX_FLOW_NODES, type PointerSampleData } from "../src/flow/types.ts";
+import {
+  FIT_PADDING_RATIO,
+  MAX_FLOW_EDGES,
+  MAX_FLOW_NODES,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  type PointerSampleData,
+} from "../src/flow/types.ts";
 
 registerFlowElements();
 
@@ -489,7 +496,19 @@ describe("flow-graph", () => {
       { id: "b", position: { x: 80, y: 40 }, data: {}, width: 20, height: 10 },
     ]);
     assert.deepEqual(bounds, { x: 10, y: 20, width: 90, height: 30 });
-    const viewport = getViewportForBounds(bounds, 180, 90, 0.1, 2, 0);
+    const viewportWidth = 180;
+    const viewportHeight = 90;
+    const minZoom = 0.1;
+    const maxZoom = 2;
+    const noPadding = 0;
+    const viewport = getViewportForBounds({
+      bounds,
+      width: viewportWidth,
+      height: viewportHeight,
+      minZoom,
+      maxZoom,
+      padding: noPadding,
+    });
     assert.equal(viewport.zoom, 2);
     assert.equal(viewport.x, 180 / 2 - (10 + 90 / 2) * 2);
     assert.equal(viewport.y, 90 / 2 - (20 + 30 / 2) * 2);
@@ -880,6 +899,139 @@ describe("flow-graph", () => {
     assert.match(graph.state(), /\/idle$/);
     assert.deepEqual(graph.getViewport(), continued);
     graph.remove();
+  });
+
+  test("fitView, fitBounds, and focusTarget write one getViewport for the same bounds", async () => {
+    const originLeft = 0;
+    const originTop = 0;
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const nodeId = "a";
+    const machineName = "/A";
+    const bounds = { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight };
+    const expected = getViewportForBounds({
+      bounds: { x: originLeft, y: originTop, width: nodeWidth, height: nodeHeight },
+      width: 1000,
+      height: 600,
+      minZoom: MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
+      padding: FIT_PADDING_RATIO,
+    });
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [
+      { id: nodeId, position: { x: originLeft, y: originTop }, data: { label: "A" }, width: nodeWidth, height: nodeHeight },
+    ];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    graph.fitView();
+    await flush();
+    const fitViewPort = graph.getViewport();
+    graph.fitBounds(bounds);
+    await flush();
+    const fitBoundsPort = graph.getViewport();
+    graph.focusTarget({ kind: "machine", machineName, bounds });
+    await flush();
+    const focusPort = graph.getViewport();
+    assert.deepEqual(fitViewPort, expected);
+    assert.deepEqual(fitBoundsPort, expected);
+    assert.deepEqual(focusPort, expected);
+    graph.remove();
+  });
+
+  test("fitView and fitBounds during pan rebase getViewport from the live pointer", async () => {
+    const originLeft = 0;
+    const originTop = 0;
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const pointerOriginX = 20;
+    const pointerOriginY = 20;
+    const midClientX = 40;
+    const midClientY = 48;
+    const panClientX = 60;
+    const panClientY = 70;
+    const buttonsReleased = 0;
+    const nodeId = "a";
+    const bounds = { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight };
+    const pointerOrigin = { x: pointerOriginX, y: pointerOriginY };
+    const midClient = { x: midClientX, y: midClientY };
+    const panClient = { x: panClientX, y: panClientY };
+    const postFitDeltaX = panClientX - midClientX;
+    const postFitDeltaY = panClientY - midClientY;
+    const expected = getViewportForBounds({
+      bounds: { x: originLeft, y: originTop, width: nodeWidth, height: nodeHeight },
+      width: 1000,
+      height: 600,
+      minZoom: MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
+      padding: FIT_PADDING_RATIO,
+    });
+    const applies = [
+      (graph: FlowGraph) => {
+        graph.fitView();
+      },
+      (graph: FlowGraph) => {
+        graph.fitBounds(bounds);
+      },
+    ];
+    for (const apply of applies) {
+      const graph = document.createElement("flow-graph");
+      document.body.append(graph);
+      graph.panOnDrag = true;
+      graph.nodes = [
+        { id: nodeId, position: { x: originLeft, y: originTop }, data: { label: "A" }, width: nodeWidth, height: nodeHeight },
+      ];
+      await waitUntil(() => graph.querySelector("flow-node") !== null);
+      await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+        eventType: "pointerdown",
+        origin: pointerOrigin,
+        client: pointerOrigin,
+        viewport: pointerOrigin,
+        hit: { kind: "empty" },
+      }) }));
+      assert.match(graph.state(), /\/pan$/);
+      await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+        eventType: "pointermove",
+        origin: pointerOrigin,
+        client: midClient,
+        viewport: midClient,
+        hit: { kind: "empty" },
+      }) }));
+      apply(graph);
+      await flush();
+      const fitted = graph.getViewport();
+      assert.deepEqual(fitted, expected);
+      await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+        eventType: "pointermove",
+        origin: pointerOrigin,
+        client: midClient,
+        viewport: midClient,
+        hit: { kind: "empty" },
+      }) }));
+      assert.deepEqual(graph.getViewport(), fitted);
+      await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+        eventType: "pointermove",
+        origin: pointerOrigin,
+        client: panClient,
+        viewport: panClient,
+        hit: { kind: "empty" },
+      }) }));
+      const continued = graph.getViewport();
+      assert.equal(continued.x, fitted.x + postFitDeltaX);
+      assert.equal(continued.y, fitted.y + postFitDeltaY);
+      assert.equal(continued.zoom, fitted.zoom);
+      await graph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+        eventType: "pointerup",
+        buttons: buttonsReleased,
+        origin: pointerOrigin,
+        client: panClient,
+        viewport: panClient,
+        hit: { kind: "empty" },
+      }) }));
+      await flush();
+      assert.match(graph.state(), /\/idle$/);
+      assert.deepEqual(graph.getViewport(), continued);
+      graph.remove();
+    }
   });
 
   test("node_activate_click during pan stays in pan and pointer_up still ends pan", async () => {

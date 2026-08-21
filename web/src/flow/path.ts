@@ -209,20 +209,23 @@ export function getNodesBounds(nodes: readonly Node[]): Rect {
   };
 }
 
-export function getViewportForBounds(
-  bounds: Rect,
-  width: number,
-  height: number,
-  minZoom: number,
-  maxZoom: number,
-  padding = 0.1,
-): Viewport {
-  const paddedWidth = bounds.width * (1 + padding);
-  const paddedHeight = bounds.height * (1 + padding);
-  const zoom = Math.min(maxZoom, Math.max(minZoom, Math.min(width / paddedWidth, height / paddedHeight)));
+export function getViewportForBounds(args: {
+  bounds: Rect;
+  width: number;
+  height: number;
+  minZoom: number;
+  maxZoom: number;
+  padding: number;
+}): Viewport {
+  const paddedWidth = args.bounds.width * (1 + args.padding);
+  const paddedHeight = args.bounds.height * (1 + args.padding);
+  const zoom = Math.min(
+    args.maxZoom,
+    Math.max(args.minZoom, Math.min(args.width / paddedWidth, args.height / paddedHeight)),
+  );
   return {
-    x: width / 2 - (bounds.x + bounds.width / 2) * zoom,
-    y: height / 2 - (bounds.y + bounds.height / 2) * zoom,
+    x: args.width / 2 - (args.bounds.x + args.bounds.width / 2) * zoom,
+    y: args.height / 2 - (args.bounds.y + args.bounds.height / 2) * zoom,
     zoom,
   };
 }

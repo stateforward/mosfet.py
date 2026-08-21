@@ -8,7 +8,7 @@ import { FlowEdge } from "./edge.ts";
 import { Focuser, startFocuser, type FocusTarget } from "./focuser.ts";
 import { FlowNode } from "./node.ts";
 import { Panner, startPanner } from "./panner.ts";
-import { edgePath, getNodesBounds, getViewportForBounds } from "./path.ts";
+import { edgePath, getNodesBounds } from "./path.ts";
 import { Renderer, startRenderer } from "./renderer.ts";
 import { Selection, startSelection, type SelectionBox } from "./selection.ts";
 import { graphStyles } from "./styles.ts";
@@ -18,11 +18,8 @@ import {
   copyNode,
   DEFAULT_NODE_HEIGHT,
   DEFAULT_NODE_WIDTH,
-  FIT_PADDING_RATIO,
   MAX_FLOW_EDGES,
   MAX_FLOW_NODES,
-  MAX_ZOOM,
-  MIN_ZOOM,
   ZOOM_FACTOR,
   type AdmitRejectedDetail,
   type ConnectDetail,
@@ -1166,8 +1163,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const metrics = this.#metrics();
     if (metrics === null || nodes.length === 0) return;
     const box = getNodesBounds(nodes);
-    const viewport = getViewportForBounds(box, metrics.width, metrics.height, MIN_ZOOM, MAX_ZOOM, FIT_PADDING_RATIO);
-    this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.viewportEvent, data: viewport }) });
+    this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: {
+      bounds: { left: box.x, right: box.x + box.width, top: box.y, bottom: box.y + box.height },
+      metrics,
+    } }) });
   }
 
   #worldPoint(client: { x: number; y: number }): { x: number; y: number } {

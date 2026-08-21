@@ -1,6 +1,7 @@
 import * as hsm from "../hsm.ts";
 
-import { MAX_ZOOM, MIN_ZOOM, type Viewport, type XYPosition } from "./types.ts";
+import { getViewportForBounds } from "./path.ts";
+import { FIT_PADDING_RATIO, MAX_ZOOM, MIN_ZOOM, type Viewport, type XYPosition } from "./types.ts";
 
 export type ViewportPoint = XYPosition;
 export type ViewportBounds = {
@@ -33,9 +34,8 @@ export type FitData = {
 };
 export type ViewportData = Viewport;
 
-const FIT_PADDING = 28;
-const MAX_FIT_ZOOM = 1.2;
 const MIN_PINCH_DISTANCE = 1;
+const MIN_BOUNDS_SPAN = 1;
 const ZOOM_STEP = 0.0015;
 
 export class Panner extends hsm.Instance {
@@ -241,20 +241,20 @@ export class Panner extends hsm.Instance {
   }
 
   #fitBounds(bounds: ViewportBounds, metrics: ViewportMetrics): void {
-    const width = Math.max(1, bounds.right - bounds.left + FIT_PADDING * 2);
-    const height = Math.max(1, bounds.bottom - bounds.top + FIT_PADDING * 2);
-    const scale = Math.min(
-      MAX_FIT_ZOOM,
-      Math.max(MIN_ZOOM, Math.min(metrics.width / width, metrics.height / height)),
-    );
-    const center = {
-      x: (bounds.left + bounds.right) / 2 + metrics.origin.x,
-      y: (bounds.top + bounds.bottom) / 2 + metrics.origin.y,
-    };
-    this.#setTransform(scale, {
-      x: metrics.width / 2 - center.x * scale,
-      y: metrics.height / 2 - center.y * scale,
+    const viewport = getViewportForBounds({
+      bounds: {
+        x: bounds.left + metrics.origin.x,
+        y: bounds.top + metrics.origin.y,
+        width: Math.max(MIN_BOUNDS_SPAN, bounds.right - bounds.left),
+        height: Math.max(MIN_BOUNDS_SPAN, bounds.bottom - bounds.top),
+      },
+      width: metrics.width,
+      height: metrics.height,
+      minZoom: MIN_ZOOM,
+      maxZoom: MAX_ZOOM,
+      padding: FIT_PADDING_RATIO,
     });
+    this.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
   }
 
   #setZoom(scale: number, point: ViewportPoint): void {
