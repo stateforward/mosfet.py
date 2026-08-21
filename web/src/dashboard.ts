@@ -305,7 +305,7 @@ function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
   const machineName = event.data["machineName"];
   const visible = event.data["visible"];
   if (typeof machineName !== "string" || typeof visible !== "boolean") return;
-  controllerOf(instance)?.applyVisibility(machineName, visible);
+  controllerOf(instance)?.applyVisibility({ machineName, visible });
 }
 
 function applyVisibilityAction(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -830,13 +830,13 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  applyVisibility(machineName: string, visible: boolean): void {
+  applyVisibility(args: { machineName: string; visible: boolean }): void {
     const document = this.#document;
     const names = document === null
-      ? [machineName]
-      : [...machineNamesInOwnedSubtree(environmentWorkspaceGraphs(document.machines), machineName)];
-    if (names.length === 0) names.push(machineName);
-    for (const name of names) this.#visibleMachines.set(name, visible);
+      ? [args.machineName]
+      : [...machineNamesInOwnedSubtree(environmentWorkspaceGraphs(document.machines), args.machineName)];
+    if (names.length === 0) names.push(args.machineName);
+    for (const name of names) this.#visibleMachines.set(name, args.visible);
     this.#emit();
   }
 

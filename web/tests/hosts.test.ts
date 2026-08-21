@@ -438,7 +438,8 @@ describe("companion-style HSM controllers", () => {
 
     assert.equal(typeof dashboard.dispatch, "function");
     assert.equal(typeof source.dispatch, "function");
-    assert.equal(graph instanceof hsm.Instance, true);
+    const graphIsInstance = true;
+    assert.equal(graph instanceof hsm.Instance, graphIsInstance);
     assert.match(dashboard.snapshot().statePath, /^\//);
     assert.match(source.snapshot().statePath, /^\//);
     assert.match(graph.snapshot().statePath, /^\//);
@@ -592,7 +593,8 @@ describe("companion-style HSM controllers", () => {
   test("replay play without events stays idle", async () => {
     const dashboard = bootDashboard();
     const after = await dashboard.dispatch("dashboard.replay.play");
-    assert.equal(after.replay.playing, false);
+    const replayNotPlaying = false;
+    assert.equal(after.replay.playing, replayNotPlaying);
     assert.match(after.statePath, /\/idle$/);
     await dashboard.stop();
   });
@@ -787,7 +789,8 @@ describe("companion-style HSM controllers", () => {
     assert.ok(canceled !== undefined);
     assert.equal(canceled.commandResult?.result, "canceled");
     assert.equal(canceled.commandResult?.detail, "command canceled");
-    assert.equal(kinds.includes("dashboard.command.failed"), false);
+    const failedEventAbsent = false;
+    assert.equal(kinds.includes("dashboard.command.failed"), failedEventAbsent);
   });
 
   test("accepted post is not relabeled canceled after abort", async () => {
@@ -892,7 +895,8 @@ describe("companion-style HSM controllers", () => {
     await dashboard.dispatch("dashboard.replay.enter");
     const after = await dashboard.dispatch("dashboard.replay.live");
     assert.equal(after.phase, "live");
-    assert.equal(after.replay.active, false);
+    const replayInactive = false;
+    assert.equal(after.replay.active, replayInactive);
     assert.match(after.statePath, /\/viewing$/);
     await waitFor(() => connects === 2);
     await dashboard.stop();

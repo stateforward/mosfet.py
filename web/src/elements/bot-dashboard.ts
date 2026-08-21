@@ -1077,7 +1077,7 @@ export class BotDashboard extends Dashboard {
       visibility.dataset["machineVisibility"] = machine.name;
       visibility.setAttribute("data-testid", "machine-visibility");
       visibility.addEventListener("change", () => {
-        this.#setMachineVisibility(machine.name, visibility.checked);
+        this.#setMachineVisibility({ machineName: machine.name, visible: visibility.checked });
       });
       visibilityLabel.append(visibility);
       item.append(select, visibilityLabel);
@@ -1173,8 +1173,11 @@ export class BotDashboard extends Dashboard {
     void this.dispatch("dashboard.visibility.action", { action }).catch(catchFailure(this));
   }
 
-  #setMachineVisibility(machineName: string, visible: boolean): void {
-    void this.dispatch("dashboard.visibility.set", { machineName, visible }).catch(catchFailure(this));
+  #setMachineVisibility(args: { machineName: string; visible: boolean }): void {
+    void this.dispatch("dashboard.visibility.set", {
+      machineName: args.machineName,
+      visible: args.visible,
+    }).catch(catchFailure(this));
   }
 
   #writeCurrentState(currentState: string | null): void {

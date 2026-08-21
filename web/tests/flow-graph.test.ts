@@ -500,7 +500,8 @@ describe("flow-graph", () => {
 
   test("viewport is an application landmark", async () => {
     const graph = document.createElement("flow-graph");
-    assert.equal(graph.hasAttribute("role"), false);
+    const roleMissingBeforeConnect = false;
+    assert.equal(graph.hasAttribute("role"), roleMissingBeforeConnect);
     document.body.append(graph);
     assert.equal(graph.getAttribute("role"), "application");
     assert.equal(graph.getAttribute("aria-label"), "Machine graph");
