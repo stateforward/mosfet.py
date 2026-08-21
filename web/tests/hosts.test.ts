@@ -759,106 +759,28 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
   });
 
-  test("in-flight command stop records canceled not error", async () => {
-    let started = false;
+  test("resolved accepted command is not relabeled canceled by later stop", async () => {
     const seen: DashboardSnapshot[] = [];
-    const kinds: unknown[] = [];
     const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        started = true;
-        return await new Promise((_resolve, reject) => {
-          const fail = (): void => {
-            const error = new Error("aborted");
-            error.name = "AbortError";
-            reject(error);
-          };
-          if (command.signal?.aborted === true) {
-            fail();
-            return;
-          }
-          command.signal?.addEventListener("abort", fail);
-        });
-      },
+      postCommand: async () => ({ result: "accepted", detail: "committed" }),
     });
     dashboard.onSnapshot = (snapshot) => {
       seen.push(snapshot);
     };
-    const inner = dashboard.dispatch.bind(dashboard) as Dashboard["dispatch"];
-    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
-      if (typeof eventOrContext === "object" && eventOrContext !== null && "name" in eventOrContext) {
-        kinds.push((eventOrContext as { name: string }).name);
-      }
-      return inner(eventOrContext as never, data);
-    }) as Dashboard["dispatch"];
-    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-    await waitFor(() => started);
+    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+    await waitFor(() => dashboard.snapshot().commandResult?.result === "accepted");
     await dashboard.stop();
-    const canceled = seen.find((snapshot) => snapshot.commandResult?.result === "canceled");
-    assert.ok(canceled !== undefined);
-    assert.equal(canceled.commandResult?.result, "canceled");
-    assert.equal(canceled.commandResult?.detail, "command canceled");
-    const failedEventAbsent = false;
-    assert.equal(kinds.includes("dashboard.command.failed"), failedEventAbsent);
+    assert.equal(seen.some((snapshot) => snapshot.commandResult?.result === "canceled"), false);
+    assert.equal(seen.some((snapshot) => snapshot.commandResult?.detail === "committed"), true);
   });
 
-  test("accepted post is not relabeled canceled after abort", async () => {
-    let started = false;
-    const seen: DashboardSnapshot[] = [];
-    const kinds: unknown[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        started = true;
-        return await new Promise((resolve) => {
-          const succeed = (): void => {
-            resolve({ result: "accepted", detail: "committed" });
-          };
-          if (command.signal?.aborted === true) {
-            succeed();
-            return;
-          }
-          command.signal?.addEventListener("abort", succeed);
-        });
-      },
-    });
-    dashboard.onSnapshot = (snapshot) => {
-      seen.push(snapshot);
-    };
-    const inner = dashboard.dispatch.bind(dashboard) as Dashboard["dispatch"];
-    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
-      if (typeof eventOrContext === "object" && eventOrContext !== null && "name" in eventOrContext) {
-        kinds.push((eventOrContext as { name: string }).name);
-      }
-      return inner(eventOrContext as never, data);
-    }) as Dashboard["dispatch"];
-    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-    await waitFor(() => started);
-    await dashboard.stop();
-    const accepted = seen.find((snapshot) => snapshot.commandResult?.result === "accepted");
-    const failedSeen = kinds.includes("dashboard.command.failed");
-    const failedAbsent = false;
-    assert.ok(accepted !== undefined);
-    assert.equal(accepted.commandResult?.result, "accepted");
-    assert.equal(accepted.commandResult?.detail, "committed");
-    assert.equal(failedSeen, failedAbsent);
-  });
-
-  test("stale aborted send cannot cancel the successor send", async () => {
+  test("stale in-flight send cannot cancel the successor send", async () => {
     const holds: Array<{
       resolve: (result: { result: "accepted"; detail: string }) => void;
     }> = [];
     const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        return await new Promise((resolve, reject) => {
-          const fail = (): void => {
-            const error = new Error("aborted");
-            error.name = "AbortError";
-            reject(error);
-          };
-          if (command.signal?.aborted === true) {
-            fail();
-            return;
-          }
-          command.signal?.addEventListener("abort", fail);
+      postCommand: async () => {
+        return await new Promise((resolve) => {
           holds.push({ resolve });
         });
       },
@@ -874,6 +796,7 @@ describe("companion-style HSM controllers", () => {
     holds[1]?.resolve({ result: "accepted", detail: "second" });
     await waitFor(() => dashboard.snapshot().commandResult?.detail === "second");
     await second;
+    holds[0]?.resolve({ result: "accepted", detail: "first" });
     assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
     assert.equal(dashboard.snapshot().commandResult?.detail, "second");
     await dashboard.stop();
@@ -952,6 +875,74 @@ describe("companion-style HSM controllers", () => {
       const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
       assert.equal(result.result, "canceled");
       assert.equal(result.detail, "gateway canceled");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("postCommandHttp returns parsed accepted when the signal is already aborted", async () => {
+    const originalFetch = globalThis.fetch;
+    const abort = new AbortController();
+    globalThis.fetch = (async () => {
+      abort.abort();
+      return {
+        json: async () => ({ result: "accepted", detail: "committed" }),
+      };
+    }) as unknown as typeof fetch;
+    try {
+      const result = await postCommandHttp({
+        eventName: "phone.ring",
+        dataJson: "",
+        signal: abort.signal,
+      });
+      assert.equal(result.result, "accepted");
+      assert.equal(result.detail, "committed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("postCommandHttp maps json AbortError after fetch resolve to interrupted", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      return {
+        json: async () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          throw error;
+        },
+      };
+    }) as unknown as typeof fetch;
+    try {
+      const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
+      assert.equal(result.result, "error");
+      assert.equal(result.detail, "command reply interrupted");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Command.post through postCommandHttp keeps accepted after stop", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => {
+      fetched = true;
+      return {
+        json: async () => ({ result: "accepted", detail: "http committed" }),
+      };
+    }) as unknown as typeof fetch;
+    const dashboard = bootDashboard();
+    const results: DashboardSnapshot["commandResult"][] = [];
+    dashboard.onSnapshot = (snapshot) => {
+      results.push(snapshot.commandResult);
+    };
+    try {
+      void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+      await waitFor(() => fetched && results.some((result) => result?.result === "accepted"));
+      await dashboard.stop();
+      const accepted = results.find((result) => result?.result === "accepted");
+      assert.equal(accepted?.result, "accepted");
+      assert.equal(accepted?.detail, "http committed");
     } finally {
       globalThis.fetch = originalFetch;
     }
