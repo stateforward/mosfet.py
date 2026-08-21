@@ -114,7 +114,7 @@ export class Panner extends hsm.Instance {
     instance.#pointers.set(pointer.pointerId, pointer.point);
     if (instance.#pointers.size === 1) {
       instance.#dragStart = { pointerId: pointer.pointerId, point: pointer.point, pan: { ...instance.pan } };
-      instance.#setPanning(true);
+      instance.#setPanning({ panning: true });
       return;
     }
     instance.#dragStart = null;
@@ -127,7 +127,7 @@ export class Panner extends hsm.Instance {
         scale: instance.scale,
       };
     }
-    instance.#setPanning(false);
+    instance.#setPanning({ panning: false });
   }
 
   static dragPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -173,7 +173,7 @@ export class Panner extends hsm.Instance {
     if (instance.#pointers.size < 2) instance.#pinchStart = null;
     if (instance.#pointers.size === 0) {
       instance.#dragStart = null;
-      instance.#setPanning(false);
+      instance.#setPanning({ panning: false });
     }
   }
 
@@ -182,7 +182,7 @@ export class Panner extends hsm.Instance {
     const [pointerId, point] = [...instance.#pointers.entries()][0] ?? [];
     if (pointerId === undefined || point === undefined) return;
     instance.#dragStart = { pointerId, point, pan: { ...instance.pan } };
-    instance.#setPanning(true);
+    instance.#setPanning({ panning: true });
   }
 
   static applyZoom(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -256,14 +256,26 @@ export class Panner extends hsm.Instance {
     }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 
-  #setPanning(panning: boolean): void {
+  #setPanning(args: { panning: boolean }): void {
     void hsm.notifyOwner({
       instance: this,
-      event: hsm.typedEvent({ event: Panner.panningEvent, data: { panning } }),
+      event: hsm.typedEvent({ event: Panner.panningEvent, data: { panning: args.panning } }),
     }).catch(hsm.catchFailure(hsm.ownerTarget(this)));
   }
 }
 
+/**
+ * Start a Panner under `ctx`.
+ *
+ * Inputs: `ctx` — owner context used as the HSM parent environment.
+ * Outputs: a started Panner in `/Panner/ready/fixed` with identity transform.
+ * Ownership: caller owns the returned actor and must `hsm.stop` it.
+ * Lifetime: until `hsm.stop` or owner context cancel.
+ * Concurrency: one viewport per instance; pointer ids are the pan keys.
+ * Failure modes: malformed pan/zoom payloads are ignored.
+ * Units: pan in CSS pixels, scale unitless.
+ * Classification: runtime-safe.
+ */
 export function startPanner(args: {
   ctx: hsm.Context;
 }): Panner {

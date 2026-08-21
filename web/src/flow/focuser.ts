@@ -80,6 +80,18 @@ export class Focuser extends hsm.Instance {
   }
 }
 
+/**
+ * Start a Focuser under `ctx`.
+ *
+ * Inputs: `ctx` — owner context used as the HSM parent environment.
+ * Outputs: a started Focuser in `/Focuser/unfocused`.
+ * Ownership: caller owns the returned actor and must `hsm.stop` it.
+ * Lifetime: until `hsm.stop` or owner context cancel.
+ * Concurrency: one current focus target per instance.
+ * Failure modes: malformed focus payloads leave `current` null and stay unfocused.
+ * Units: bounds in world pixels.
+ * Classification: runtime-safe.
+ */
 export function startFocuser(args: {
   ctx: hsm.Context;
 }): Focuser {
