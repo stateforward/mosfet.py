@@ -19,5 +19,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["playwright.config.ts", "e2e/**/*.ts", "collector/**/*.ts", "src/otel/otlp.ts", "src/otel/span.ts"]
+  "include": ["playwright.config.ts", "playwright.isolated.config.ts", "e2e/**/*.ts", "collector/**/*.ts", "src/otel/otlp.ts", "src/otel/span.ts"]
 }

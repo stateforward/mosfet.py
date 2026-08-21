@@ -50,6 +50,8 @@ function controlButton(label: string, action: string): HTMLButtonElement {
   button.type = "button";
   button.textContent = label;
   button.dataset["action"] = action;
+  button.part.add(action);
+  button.setAttribute("data-testid", action);
   button.setAttribute("aria-label", action.replace("-", " "));
   return button;
 }

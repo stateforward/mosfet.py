@@ -119,6 +119,9 @@ function totalNodeCount(graphs: readonly VisibleGraph[]): string {
 
 const NODE_COUNT_ATTR = "data-node-count";
 const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
+const GRAPH_HOST = "flow-graph";
+const VIEWPORT_PART = "viewport";
+const VIEWPORT_PART_SELECTOR = `[part="${VIEWPORT_PART}"]`;
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 const NODE_MIN_WIDTH = 105;
 const FOCUS_CENTER_SLACK = 24;
@@ -196,7 +199,7 @@ test("clicking a state node centers and zooms that node", async ({ page, request
   await expect.poll(async () => frameViewport(page)).not.toEqual(before);
 
   const nodeBox = await rightNode.boundingBox();
-  const viewportBox = await page.locator("css=flow-graph::part(viewport)").boundingBox();
+  const viewportBox = await page.locator(GRAPH_HOST).locator(VIEWPORT_PART_SELECTOR).boundingBox();
   if (nodeBox === null || viewportBox === null) throw new Error("focused node geometry is unavailable");
   const dx = nodeBox.x + nodeBox.width / 2 - (viewportBox.x + viewportBox.width / 2);
   const dy = nodeBox.y + nodeBox.height / 2 - (viewportBox.y + viewportBox.height / 2);
@@ -210,7 +213,7 @@ test("dragging a state node pans without refocusing it", async ({ page }) => {
   await openStudio(page);
   const node = page.locator('flow-node[data-testid="state-node"][data-path="/Phone/right"]');
   await expect(node).toBeVisible();
-  const viewport = page.locator("css=flow-graph::part(viewport)");
+  const viewport = page.locator(GRAPH_HOST).locator(VIEWPORT_PART_SELECTOR);
   const beforeView = await frameViewport(page);
   const beforeNode = await node.boundingBox();
   const beforeViewport = await viewport.boundingBox();

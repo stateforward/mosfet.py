@@ -1,3 +1,4 @@
+/** Integration boundary test: live Playwright webServer, not the unit suite. */
 import { expect, test } from "@playwright/test";
 
 type FlowHandleHost = HTMLElement & {
@@ -28,11 +29,15 @@ const DRAW_ORIGIN = 0;
 const DRAW_WIDTH = 16;
 const DRAW_HEIGHT = 12;
 const MINIMAP_NODE_ID = "n";
+const GRAPH_HOST = "flow-graph";
 const MINIMAP_HOST = "flow-minimap";
+const MINIMAP_DRAW_PROBE_ID = "minimap-draw-probe";
 const MINIMAP_CANVAS_PART = "canvas";
-/** Public `part="canvas"` export. Playwright css cannot parse `::part()`. */
+/** Public part export. Playwright cannot parse `::part()`; locate the part attribute. */
 const MINIMAP_CANVAS_PART_SELECTOR = `[part="${MINIMAP_CANVAS_PART}"]`;
 const BOX_HAS_SIZE = 0;
+const DEFAULT_CANVAS_BITMAP_WIDTH = 300;
+const HANDLE_POSITION_INVALID = "nope";
 const BACKGROUND_VARIANT_DOTS: FlowBackgroundHost["variant"] = "dots";
 const BACKGROUND_VARIANT_LINES: FlowBackgroundHost["variant"] = "lines";
 const BACKGROUND_LINES_IMAGE = "linear-gradient";
@@ -51,8 +56,9 @@ test("flow-handle registers, attaches, and reflects kind and position", async ({
     handleKindTarget: FlowHandleHost["handleKind"];
     handlePositionTop: FlowHandleHost["handlePosition"];
     handlePositionLeft: FlowHandleHost["handlePosition"];
+    handlePositionInvalid: string;
   }) => {
-    const { handleKindSource, handleKindTarget, handlePositionTop, handlePositionLeft } = args;
+    const { handleKindSource, handleKindTarget, handlePositionTop, handlePositionLeft, handlePositionInvalid } = args;
     const node = document.createElement("flow-node");
     const handle = document.createElement("flow-handle") as FlowHandleHost;
     node.append(handle);
@@ -79,14 +85,27 @@ test("flow-handle registers, attaches, and reflects kind and position", async ({
       handleKind: handle.handleKind,
       handlePosition: handle.handlePosition,
     };
+    handle.setAttribute("position", handlePositionInvalid);
+    const fromInvalid = {
+      handlePosition: handle.handlePosition,
+      positionAttr: handle.getAttribute("position"),
+      right: getComputedStyle(handle).right,
+    };
+    handle.removeAttribute("position");
+    const fromRemoved = {
+      handlePosition: handle.handlePosition,
+      positionAttr: handle.getAttribute("position"),
+      right: getComputedStyle(handle).right,
+    };
     handle.remove();
     node.remove();
-    return { connected, defaults, fromProperties, fromAttributes, detached: handle.isConnected };
+    return { connected, defaults, fromProperties, fromAttributes, fromInvalid, fromRemoved, detached: handle.isConnected };
   }, {
     handleKindSource: HANDLE_KIND_SOURCE,
     handleKindTarget: HANDLE_KIND_TARGET,
     handlePositionTop: HANDLE_POSITION_TOP,
     handlePositionLeft: HANDLE_POSITION_LEFT,
+    handlePositionInvalid: HANDLE_POSITION_INVALID,
   });
 
   expect(result.connected).toBe(ELEMENT_CONNECTED);
@@ -103,6 +122,16 @@ test("flow-handle registers, attaches, and reflects kind and position", async ({
     handleKind: HANDLE_KIND_SOURCE,
     handlePosition: HANDLE_POSITION_TOP,
   });
+  expect(result.fromInvalid).toEqual({
+    handlePosition: HANDLE_POSITION_RIGHT,
+    positionAttr: HANDLE_POSITION_RIGHT,
+    right: HANDLE_DEFAULT_RIGHT_INSET,
+  });
+  expect(result.fromRemoved).toEqual({
+    handlePosition: HANDLE_POSITION_RIGHT,
+    positionAttr: HANDLE_POSITION_RIGHT,
+    right: HANDLE_DEFAULT_RIGHT_INSET,
+  });
   expect(result.detached).toBe(ELEMENT_DETACHED);
 });
 
@@ -115,7 +144,7 @@ test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", 
   const defined = await page.evaluate(() => customElements.get("flow-minimap") !== undefined);
   expect(defined).toBe(ELEMENT_DEFINED);
 
-  const result = await page.evaluate(({ fill, drawOrigin, drawWidth, drawHeight, nodeId }) => {
+  const result = await page.evaluate(({ fill }) => {
     const graph = document.createElement("flow-graph");
     const minimap = document.createElement("flow-minimap") as FlowMinimapHost;
     minimap.style.setProperty("--flow-minimap-fill", fill);
@@ -123,27 +152,48 @@ test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", 
     document.body.append(graph);
     const slotted = minimap.parentElement === graph && minimap.isConnected;
     const fillStyle = minimap.fillStyle;
-    minimap.draw([
-      { id: nodeId, position: { x: drawOrigin, y: drawOrigin }, data: {}, width: drawWidth, height: drawHeight },
-    ]);
     return { slotted, fillStyle };
   }, {
     fill: MINIMAP_FILL,
+  });
+
+  expect(result.slotted).toBe(ELEMENT_CONNECTED);
+  expect(result.fillStyle).toBe(MINIMAP_FILL);
+  await page.evaluate(({ host, probeId }) => {
+    const minimap = document.createElement(host) as FlowMinimapHost;
+    minimap.id = probeId;
+    document.body.append(minimap);
+  }, { host: MINIMAP_HOST, probeId: MINIMAP_DRAW_PROBE_ID });
+  const canvas = page.locator(`#${MINIMAP_DRAW_PROBE_ID}`).locator(MINIMAP_CANVAS_PART_SELECTOR);
+  await expect(canvas).toBeVisible();
+  const bitmapBefore = await canvas.evaluate((node: HTMLElement) => ({
+    width: node instanceof HTMLCanvasElement ? node.width : 0,
+    height: node instanceof HTMLCanvasElement ? node.height : 0,
+  }));
+  expect(bitmapBefore.width).toBe(DEFAULT_CANVAS_BITMAP_WIDTH);
+  await page.evaluate(({ probeId, drawOrigin, drawWidth, drawHeight, nodeId }) => {
+    const minimap = document.getElementById(probeId) as FlowMinimapHost | null;
+    minimap?.draw([
+      { id: nodeId, position: { x: drawOrigin, y: drawOrigin }, data: {}, width: drawWidth, height: drawHeight },
+    ]);
+  }, {
+    probeId: MINIMAP_DRAW_PROBE_ID,
     drawOrigin: DRAW_ORIGIN,
     drawWidth: DRAW_WIDTH,
     drawHeight: DRAW_HEIGHT,
     nodeId: MINIMAP_NODE_ID,
   });
-
-  expect(result.slotted).toBe(ELEMENT_CONNECTED);
-  expect(result.fillStyle).toBe(MINIMAP_FILL);
-  const canvas = page.locator(MINIMAP_HOST).locator(MINIMAP_CANVAS_PART_SELECTOR);
-  await expect(canvas).toBeVisible();
-  const box = await canvas.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box?.width ?? BOX_HAS_SIZE).toBeGreaterThan(BOX_HAS_SIZE);
-  expect(box?.height ?? BOX_HAS_SIZE).toBeGreaterThan(BOX_HAS_SIZE);
-  await page.evaluate(() => document.querySelector("flow-graph")?.remove());
+  const bitmapAfter = await canvas.evaluate((node: HTMLElement) => ({
+    width: node instanceof HTMLCanvasElement ? node.width : 0,
+    height: node instanceof HTMLCanvasElement ? node.height : 0,
+  }));
+  expect(bitmapAfter.width).not.toBe(DEFAULT_CANVAS_BITMAP_WIDTH);
+  expect(bitmapAfter.width).toBeGreaterThan(BOX_HAS_SIZE);
+  expect(bitmapAfter.height).toBeGreaterThan(BOX_HAS_SIZE);
+  await page.evaluate(({ graphHost, probeId }) => {
+    document.querySelector(graphHost)?.remove();
+    document.getElementById(probeId)?.remove();
+  }, { graphHost: GRAPH_HOST, probeId: MINIMAP_DRAW_PROBE_ID });
 });
 
 test("flow-background variant lines and dots via property and attribute", async ({ page }) => {

@@ -308,6 +308,25 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("incomplete handle pointer_down does not enter connect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [source];
+    const pointerId = 1;
+    const eventType = "pointerdown";
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: {
+        pointerId,
+        eventType,
+        hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
+      },
+    }));
+    assert.doesNotMatch(graph.state(), /\/connect$/);
+    graph.remove();
+  });
+
   test("handle pointer_down connects and finishes on a target handle", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
@@ -1465,7 +1484,8 @@ describe("flow-controls", () => {
       }
     });
     document.body.append(controls);
-    const button = controls.shadowRoot?.querySelector(`[data-action="${zoomIn}"]`);
+    const controlPart = `[part="${zoomIn}"]`;
+    const button = controls.querySelector(controlPart);
     assert.ok(button instanceof HTMLButtonElement);
     const clickBubbles = true;
     const clickComposed = true;
