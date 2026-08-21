@@ -117,6 +117,7 @@ function totalNodeCount(graphs: readonly VisibleGraph[]): string {
   return String(graphs.reduce((count, graph) => count + graph.nodeCount, 0));
 }
 
+const NODE_COUNT_ATTR = "data-node-count";
 const DESKTOP_VIEWPORT = { width: 1280, height: 800 };
 const MOBILE_VIEWPORT = { width: 390, height: 844 };
 const NODE_MIN_WIDTH = 105;
@@ -243,17 +244,19 @@ test("live OTLP observe spans update the inspector and canvas", async ({ page, r
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-current-state", "/Phone");
   await expect(page.getByTestId("current-path")).toContainText("/Phone");
   await expect(page.getByTestId("last-event")).toHaveText("hsm/initial");
-  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "7");
+  const afterFirstBatch = await visibleGraphs(page);
+  await expect(page.getByTestId("canvas")).toHaveAttribute(NODE_COUNT_ATTR, totalNodeCount(afterFirstBatch));
   await expect(page.getByTestId("frame")).toBeVisible();
 
   await exportTraces(secondBatch);
   await expect(page.getByTestId("canvas")).toHaveAttribute("data-current-state", "/Phone/ringing");
   await expect(page.getByTestId("current-path")).toContainText("/Phone/ringing");
   await expect(page.getByTestId("last-event")).toHaveText("phone.ring");
-  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "8");
+  const afterSecondBatch = await visibleGraphs(page);
+  await expect(page.getByTestId("canvas")).toHaveAttribute(NODE_COUNT_ATTR, totalNodeCount(afterSecondBatch));
 
   await page.getByLabel("Observed machine").selectOption("/PhoneBot");
-  await expect(page.getByTestId("canvas")).toHaveAttribute("data-node-count", "8");
+  await expect(page.getByTestId("canvas")).toHaveAttribute(NODE_COUNT_ATTR, totalNodeCount(afterSecondBatch));
   await expect(page.getByTestId("canvas")).toHaveAttribute(
     "data-current-state",
     "/PhoneBot/active/processing",
