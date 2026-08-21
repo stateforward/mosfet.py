@@ -1,18 +1,13 @@
 import * as hsm from "../hsm.ts";
 
+import { type ViewportBounds } from "./types.ts";
+
 export type FocusTarget = {
   readonly kind: "node" | "machine" | "viewport";
   readonly machineName?: string;
   readonly nodePath?: string;
   readonly nodeId?: string;
   readonly bounds: ViewportBounds;
-};
-
-export type ViewportBounds = {
-  readonly left: number;
-  readonly right: number;
-  readonly top: number;
-  readonly bottom: number;
 };
 
 export class Focuser extends hsm.Instance {

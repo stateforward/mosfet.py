@@ -72,8 +72,26 @@ export type NodeActivateData = {
   readonly key?: KeyboardOrigin["key"];
 };
 
+/**
+ * Detail of the `flow-node-click` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type NodeClickDetail = { readonly node: Node; readonly originalEvent: ActivationOrigin };
+/**
+ * Detail of the `flow-edge-click` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };
+/**
+ * Detail of the `flow-viewport-change` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type ViewportChangeDetail = { readonly viewport: Viewport };
 export type ConnectDetail = {
   readonly source: string;

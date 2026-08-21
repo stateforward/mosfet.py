@@ -35,6 +35,7 @@ export type {
   NodeClickDetail,
   EdgeClickDetail,
   ViewportChangeDetail,
+  ViewportBounds,
   ConnectDetail,
   SelectionChangeDetail,
   PointerSampleData,

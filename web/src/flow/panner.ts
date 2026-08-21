@@ -1,15 +1,9 @@
 import * as hsm from "../hsm.ts";
 
 import { getViewportForBounds } from "./path.ts";
-import { FIT_PADDING_RATIO, MAX_ZOOM, MIN_ZOOM, type Viewport, type XYPosition } from "./types.ts";
+import { FIT_PADDING_RATIO, MAX_ZOOM, MIN_ZOOM, type Viewport, type ViewportBounds, type XYPosition } from "./types.ts";
 
 export type ViewportPoint = XYPosition;
-export type ViewportBounds = {
-  readonly left: number;
-  readonly right: number;
-  readonly top: number;
-  readonly bottom: number;
-};
 export type ViewportMetrics = {
   readonly width: number;
   readonly height: number;
@@ -136,9 +130,12 @@ export class Panner extends hsm.Instance {
     if (pointer === null || !instance.#pointers.has(pointer.pointerId)) return;
     instance.#pointers.set(pointer.pointerId, pointer.point);
     if (instance.#dragStart?.pointerId !== pointer.pointerId) return;
-    instance.#setTransform(instance.scale, {
-      x: instance.#dragStart.pan.x + pointer.point.x - instance.#dragStart.point.x,
-      y: instance.#dragStart.pan.y + pointer.point.y - instance.#dragStart.point.y,
+    instance.#setTransform({
+      scale: instance.scale,
+      pan: {
+        x: instance.#dragStart.pan.x + pointer.point.x - instance.#dragStart.point.x,
+        y: instance.#dragStart.pan.y + pointer.point.y - instance.#dragStart.point.y,
+      },
     });
   }
 
@@ -155,7 +152,7 @@ export class Panner extends hsm.Instance {
     const scale = instance.#pinchStart.scale
       * Math.hypot(second.x - first.x, second.y - first.y)
       / instance.#pinchStart.distance;
-    instance.#setZoom(scale, midpoint);
+    instance.#setZoom({ scale, point: midpoint });
   }
 
   static hasTwoPointers(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): boolean {
@@ -194,9 +191,9 @@ export class Panner extends hsm.Instance {
     if (scale === null) return;
     const point = pointOf(record?.["point"]);
     if (point === null) {
-      instance.#setTransform(scale, instance.pan);
+      instance.#setTransform({ scale, pan: instance.pan });
     } else {
-      instance.#setZoom(scale, point);
+      instance.#setZoom({ scale, point });
     }
     instance.#rebaseGestureOrigin();
   }
@@ -215,7 +212,7 @@ export class Panner extends hsm.Instance {
     if (!(instance instanceof Panner)) return;
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
-    instance.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
+    instance.#setTransform({ scale: viewport.zoom, pan: { x: viewport.x, y: viewport.y } });
     instance.#rebaseGestureOrigin();
   }
 
@@ -249,23 +246,26 @@ export class Panner extends hsm.Instance {
       maxZoom: MAX_ZOOM,
       padding: FIT_PADDING_RATIO,
     });
-    this.#setTransform(viewport.zoom, { x: viewport.x, y: viewport.y });
+    this.#setTransform({ scale: viewport.zoom, pan: { x: viewport.x, y: viewport.y } });
   }
 
-  #setZoom(scale: number, point: ViewportPoint): void {
+  #setZoom(args: { scale: number; point: ViewportPoint }): void {
     const worldPoint = {
-      x: (point.x - this.pan.x) / this.scale,
-      y: (point.y - this.pan.y) / this.scale,
+      x: (args.point.x - this.pan.x) / this.scale,
+      y: (args.point.y - this.pan.y) / this.scale,
     };
-    this.#setTransform(scale, {
-      x: point.x - worldPoint.x * scale,
-      y: point.y - worldPoint.y * scale,
+    this.#setTransform({
+      scale: args.scale,
+      pan: {
+        x: args.point.x - worldPoint.x * args.scale,
+        y: args.point.y - worldPoint.y * args.scale,
+      },
     });
   }
 
-  #setTransform(scale: number, pan: ViewportPoint): void {
-    this.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
-    this.pan = { ...pan };
+  #setTransform(args: { scale: number; pan: ViewportPoint }): void {
+    this.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, args.scale));
+    this.pan = { ...args.pan };
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Panner.transformEvent, data: this.viewport }),
