@@ -982,6 +982,7 @@ export class BotDashboard extends Dashboard {
       this.#render(snapshot);
     };
     this.boot();
+    this.requestAttach();
     this.#abort = new AbortController();
     const signal = this.#abort.signal;
     this.#root.addEventListener("click", this.#onGesture, { signal });
@@ -995,7 +996,7 @@ export class BotDashboard extends Dashboard {
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    void this.stop().catch(catchFailure(this));
+    this.requestDetach();
   }
 
   #render(snapshot: DashboardSnapshot): void {

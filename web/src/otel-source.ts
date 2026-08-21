@@ -4,11 +4,14 @@ import { isOtelSource, streamSource, type OtelSource as StreamSource } from "./o
 const sourceCommands = {
   "source.connect.requested": { name: "source.connect.requested", kind: hsm.Kinds.Event },
   "source.disconnect.requested": { name: "source.disconnect.requested", kind: hsm.Kinds.Event },
+  "source.attach": { name: "source.attach", kind: hsm.Kinds.Event },
+  "source.detach": { name: "source.detach", kind: hsm.Kinds.Event },
 } as const;
 
 const sourceCompletions = {
   "source.connected": { name: "source.connected", kind: hsm.Kinds.CompletionEvent },
   "source.connect.failed": { name: "source.connect.failed", kind: hsm.Kinds.ErrorEvent },
+  "source.stopped": { name: "source.stopped", kind: hsm.Kinds.CompletionEvent },
 } as const;
 
 export type OtelSourceEventName = keyof typeof sourceCommands;
@@ -74,33 +77,54 @@ function urlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event
   }) !== null;
 }
 
+async function stopHost(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+  await instance.dispatch(hsm.typedEvent({ event: sourceCompletions["source.stopped"] }));
+}
+
 const otelSourceModel = hsm.define(
   "OtelSource",
-  hsm.initial(hsm.target("idle")),
+  hsm.initial(hsm.target("connected")),
   hsm.state(
-    "idle",
-    hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
-  ),
-  hsm.choice(
-    "validate",
-    hsm.transition(hsm.guard(urlAllowed), hsm.target("connecting")),
-    hsm.transition(hsm.target("error"), hsm.effect(rememberConnectFailure)),
+    "disconnected",
+    hsm.defer("source.connect.requested"),
+    hsm.transition(hsm.on("source.attach"), hsm.target("../connected")),
   ),
   hsm.state(
-    "connecting",
-    hsm.activity(connectCollector),
-    hsm.transition(hsm.on("source.connected"), hsm.target("../live"), hsm.effect(rememberReadySource)),
-    hsm.transition(hsm.on("source.connect.failed"), hsm.target("../error"), hsm.effect(rememberConnectFailure)),
+    "connected",
+    hsm.initial(hsm.target("idle")),
+    hsm.transition(hsm.on("source.detach"), hsm.target("../stopping")),
+    hsm.state(
+      "idle",
+      hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
+    ),
+    hsm.choice(
+      "validate",
+      hsm.transition(hsm.guard(urlAllowed), hsm.target("connecting")),
+      hsm.transition(hsm.target("error"), hsm.effect(rememberConnectFailure)),
+    ),
+    hsm.state(
+      "connecting",
+      hsm.activity(connectCollector),
+      hsm.transition(hsm.on("source.connected"), hsm.target("../live"), hsm.effect(rememberReadySource)),
+      hsm.transition(hsm.on("source.connect.failed"), hsm.target("../error"), hsm.effect(rememberConnectFailure)),
+    ),
+    hsm.state(
+      "live",
+      hsm.entry(emitReady),
+      hsm.transition(hsm.on("source.disconnect.requested"), hsm.target("../idle"), hsm.effect(clearSource)),
+      hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
+    ),
+    hsm.state(
+      "error",
+      hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
+    ),
   ),
   hsm.state(
-    "live",
-    hsm.entry(emitReady),
-    hsm.transition(hsm.on("source.disconnect.requested"), hsm.target("../idle"), hsm.effect(clearSource)),
-    hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
-  ),
-  hsm.state(
-    "error",
-    hsm.transition(hsm.on("source.connect.requested"), hsm.target("../validate")),
+    "stopping",
+    hsm.defer("source.attach"),
+    hsm.defer("source.connect.requested"),
+    hsm.activity(stopHost),
+    hsm.transition(hsm.on("source.stopped"), hsm.target("../disconnected")),
   ),
 );
 
@@ -133,6 +157,14 @@ export class OtelSource extends hsm.from(HTMLElement) {
 
   boot(): void {
     hsm.start(this, otelSourceModel);
+  }
+
+  requestAttach(): void {
+    void super.dispatch(hsm.typedEvent({ event: sourceCommands["source.attach"] })).catch(hsm.catchFailure(this));
+  }
+
+  requestDetach(): void {
+    void super.dispatch(hsm.typedEvent({ event: sourceCommands["source.detach"] })).catch(hsm.catchFailure(this));
   }
 
   snapshot(): OtelSourceSnapshot {

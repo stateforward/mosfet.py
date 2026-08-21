@@ -52,4 +52,18 @@ describe("bot-otel-source", () => {
     assert.equal(error.textContent, host.snapshot().errorMessage);
     host.remove();
   });
+
+  test("remove then append still dispatches connect", async () => {
+    const host = document.createElement("bot-otel-source");
+    document.body.append(host);
+    await waitFor(() => host.snapshot().phase === "live");
+    host.remove();
+    await waitFor(() => host.snapshot().statePath.includes("/disconnected"));
+    document.body.append(host);
+    await waitFor(() => host.snapshot().phase === "live" || host.snapshot().phase === "connecting");
+    await host.dispatch("source.connect.requested", { origin: "http://localhost" });
+    await waitFor(() => host.snapshot().phase === "live" || host.snapshot().phase === "error");
+    assert.notEqual(host.snapshot().phase, "idle");
+    host.remove();
+  });
 });

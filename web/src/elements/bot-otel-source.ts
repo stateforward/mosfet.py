@@ -105,6 +105,7 @@ export class BotOtelSource extends OtelSource {
       );
     };
     this.boot();
+    this.requestAttach();
     this.#abort = new AbortController();
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.snapshot());
@@ -114,7 +115,7 @@ export class BotOtelSource extends OtelSource {
   disconnectedCallback(): void {
     this.#abort?.abort();
     this.#abort = null;
-    void this.stop().catch(catchFailure(this));
+    this.requestDetach();
   }
 
   #render(snapshot: OtelSourceSnapshot): void {

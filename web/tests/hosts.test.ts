@@ -1023,6 +1023,26 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
   });
 
+  test("dashboard detach then attach still admits a stream", async () => {
+    let connects = 0;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(dashboard.snapshot().phase, "live");
+    dashboard.requestDetach();
+    await waitFor(() => dashboard.snapshot().statePath.includes("/disconnected"));
+    dashboard.requestAttach();
+    await waitFor(() => dashboard.snapshot().statePath.includes("/connected"));
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(dashboard.snapshot().phase, "live");
+    assert.ok(connects >= 2);
+    await dashboard.stop();
+  });
+
   test("late stream batches after leaving viewing dispatch stream canceled", async () => {
     const captured: { handlers?: OtelStreamHandlers } = {};
     const kinds: string[] = [];

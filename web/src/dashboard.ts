@@ -39,6 +39,8 @@ const dashboardCommands = {
   "dashboard.replay.live": { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
   "dashboard.visibility.set": { name: "dashboard.visibility.set", kind: hsm.Kinds.Event },
   "dashboard.visibility.action": { name: "dashboard.visibility.action", kind: hsm.Kinds.Event },
+  "dashboard.host.attach": { name: "dashboard.host.attach", kind: hsm.Kinds.Event },
+  "dashboard.host.detach": { name: "dashboard.host.detach", kind: hsm.Kinds.Event },
 } as const;
 
 const dashboardCompletions = {
@@ -48,6 +50,7 @@ const dashboardCompletions = {
   "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
+  "dashboard.host.stopped": { name: "dashboard.host.stopped", kind: hsm.Kinds.CompletionEvent },
 } as const;
 
 export type CommandResult = {
@@ -443,80 +446,120 @@ function applyStreamCanceled(_ctx: hsm.Context, instance: hsm.Instance, event: h
   controllerOf(instance)?.applyError(reason === "stale" ? "stream canceled" : (reason ?? "stream canceled"));
 }
 
+function commandActorFromEvent(event: hsm.Event): Command | null {
+  if (!hsm.isRecord(event.data) || !(event.data["command"] instanceof Command)) return null;
+  return event.data["command"];
+}
+
+async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
+  const command = commandActorFromEvent(event);
+  if (command !== null) await hsm.stop(command);
+  await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
+}
+
+function clearCommandActor(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  controllerOf(instance)?.clearCommandActor();
+}
+
 function replayStep(): number {
   return 700;
 }
 
 const dashboardModel = hsm.define(
   "Dashboard",
-  hsm.initial(hsm.target("session")),
+  hsm.initial(hsm.target("connected")),
   hsm.state(
-    "session",
-    hsm.initial(hsm.target("idle")),
-    hsm.entry(attachCommand),
-    hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
-    hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(forwardCommand)),
-    hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
-    hsm.transition(hsm.on("dashboard.command.failed"), hsm.effect(applyCommandFailed)),
-    hsm.transition(hsm.on("dashboard.command.canceled"), hsm.effect(applyCommandCanceled)),
-    hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
-    hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
-    hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("live/sourceCheck"), hsm.effect(rememberSource)),
-    hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("live/replay/paused"), hsm.effect(enterReplay)),
+    "disconnected",
+    hsm.defer("dashboard.source.selected"),
+    hsm.defer("dashboard.command.send"),
+    hsm.defer("dashboard.replay.play"),
+    hsm.defer("dashboard.replay.enter"),
+    hsm.transition(hsm.on("dashboard.host.attach"), hsm.target("../connected")),
+  ),
+  hsm.state(
+    "connected",
+    hsm.initial(hsm.target("session")),
+    hsm.transition(hsm.on("dashboard.host.detach"), hsm.target("../stopping")),
+    hsm.state(
+      "session",
+      hsm.initial(hsm.target("idle")),
+      hsm.entry(attachCommand),
+      hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
+      hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(forwardCommand)),
+      hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
+      hsm.transition(hsm.on("dashboard.command.failed"), hsm.effect(applyCommandFailed)),
+      hsm.transition(hsm.on("dashboard.command.canceled"), hsm.effect(applyCommandCanceled)),
+      hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
+      hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
+      hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("live/sourceCheck"), hsm.effect(rememberSource)),
+      hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("live/replay/paused"), hsm.effect(enterReplay)),
+      hsm.transition(
+        hsm.on("dashboard.replay.play"),
+        hsm.guard(hasPlayableReplay),
+        hsm.target("live/replay/playing"),
+        hsm.effect(playReplay),
+      ),
+      hsm.state("idle"),
+      hsm.state(
+        "live",
+        hsm.initial(hsm.target("sourceCheck")),
+        hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
+        hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../error"), hsm.effect(applyError)),
+        hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
+        hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+        hsm.choice(
+          "sourceCheck",
+          hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
+          hsm.transition(hsm.guard(streamUrlDisallowed), hsm.target("../error"), hsm.effect(failCollectorUrl)),
+          hsm.transition(hsm.target("../error"), hsm.effect(failNoStream)),
+        ),
+        hsm.state(
+          "viewing",
+          hsm.activity(streamLive),
+          hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
+          hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
+          hsm.transition(
+            hsm.on("dashboard.stream.canceled"),
+            hsm.target("../../error"),
+            hsm.effect(applyStreamCanceled),
+          ),
+        ),
+        hsm.state(
+          "replay",
+          hsm.initial(hsm.target("paused")),
+          hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansReplay)),
+          hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsReplay)),
+          hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
+          hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
+          hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
+          hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
+          hsm.state(
+            "paused",
+            hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
+          ),
+          hsm.state(
+            "playing",
+            hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay)),
+            hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("../paused"), hsm.effect(pauseReplay)),
+          ),
+        ),
+      ),
+      hsm.state(
+        "error",
+        hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      ),
+    ),
+  ),
+  hsm.state(
+    "stopping",
+    hsm.defer("dashboard.host.attach"),
+    hsm.defer("dashboard.source.selected"),
+    hsm.defer("dashboard.command.send"),
+    hsm.activity(stopCommandActor),
     hsm.transition(
-      hsm.on("dashboard.replay.play"),
-      hsm.guard(hasPlayableReplay),
-      hsm.target("live/replay/playing"),
-      hsm.effect(playReplay),
-    ),
-    hsm.state("idle"),
-    hsm.state(
-      "live",
-      hsm.initial(hsm.target("sourceCheck")),
-      hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
-      hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../error"), hsm.effect(applyError)),
-      hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
-      hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
-      hsm.choice(
-        "sourceCheck",
-        hsm.transition(hsm.guard(streamUrlAllowed), hsm.target("viewing")),
-        hsm.transition(hsm.guard(streamUrlDisallowed), hsm.target("../error"), hsm.effect(failCollectorUrl)),
-        hsm.transition(hsm.target("../error"), hsm.effect(failNoStream)),
-      ),
-      hsm.state(
-        "viewing",
-        hsm.activity(streamLive),
-        hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
-        hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
-        hsm.transition(
-          hsm.on("dashboard.stream.canceled"),
-          hsm.target("../../error"),
-          hsm.effect(applyStreamCanceled),
-        ),
-      ),
-      hsm.state(
-        "replay",
-        hsm.initial(hsm.target("paused")),
-        hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansReplay)),
-        hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsReplay)),
-        hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
-        hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
-        hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
-        hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
-        hsm.state(
-          "paused",
-          hsm.transition(hsm.on("dashboard.replay.pause"), hsm.effect(pauseReplay)),
-        ),
-        hsm.state(
-          "playing",
-          hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay)),
-          hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("../paused"), hsm.effect(pauseReplay)),
-        ),
-      ),
-    ),
-    hsm.state(
-      "error",
-      hsm.transition(hsm.on("dashboard.reset"), hsm.target("../idle"), hsm.effect(clearView)),
+      hsm.on("dashboard.host.stopped"),
+      hsm.target("../disconnected"),
+      hsm.effect(clearCommandActor),
     ),
   ),
 );
@@ -697,6 +740,21 @@ export class Dashboard extends hsm.from(HTMLElement) {
 
   boot(): void {
     hsm.start(this, dashboardModel);
+  }
+
+  requestAttach(): void {
+    void super.dispatch(hsm.typedEvent({ event: dashboardCommands["dashboard.host.attach"] })).catch(hsm.catchFailure(this));
+  }
+
+  requestDetach(): void {
+    void super.dispatch(hsm.typedEvent({
+      event: dashboardCommands["dashboard.host.detach"],
+      data: { command: this.#command },
+    })).catch(hsm.catchFailure(this));
+  }
+
+  clearCommandActor(): void {
+    this.#command = null;
   }
 
   snapshot(): DashboardSnapshot {
