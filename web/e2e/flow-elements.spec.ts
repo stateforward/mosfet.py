@@ -14,51 +14,96 @@ type FlowBackgroundHost = HTMLElement & {
   variant: "dots" | "lines";
 };
 
+const ELEMENT_DEFINED = true;
+const ELEMENT_CONNECTED = true;
+const ELEMENT_DETACHED = false;
+const HANDLE_KIND_SOURCE: FlowHandleHost["handleKind"] = "source";
+const HANDLE_KIND_TARGET: FlowHandleHost["handleKind"] = "target";
+const HANDLE_POSITION_TOP: FlowHandleHost["handlePosition"] = "top";
+const HANDLE_POSITION_RIGHT: FlowHandleHost["handlePosition"] = "right";
+const HANDLE_POSITION_LEFT: FlowHandleHost["handlePosition"] = "left";
+const HANDLE_DEFAULT_RIGHT_INSET = "-4px";
+const MINIMAP_FILL = "#ff00aa";
+const DRAW_ORIGIN = 0;
+const DRAW_WIDTH = 16;
+const DRAW_HEIGHT = 12;
+const MINIMAP_NODE_ID = "n";
+const MINIMAP_HOST = "flow-minimap";
+const MINIMAP_CANVAS_PART = "canvas";
+/** Public `part="canvas"` export. Playwright css cannot parse `::part()`. */
+const MINIMAP_CANVAS_PART_SELECTOR = `[part="${MINIMAP_CANVAS_PART}"]`;
+const BOX_HAS_SIZE = 0;
+const BACKGROUND_VARIANT_DOTS: FlowBackgroundHost["variant"] = "dots";
+const BACKGROUND_VARIANT_LINES: FlowBackgroundHost["variant"] = "lines";
+const BACKGROUND_LINES_IMAGE = "linear-gradient";
+const BACKGROUND_DOTS_IMAGE = "radial-gradient";
+
 test("flow-handle registers, attaches, and reflects kind and position", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(async () => {
     await customElements.whenDefined("flow-handle");
   });
   const defined = await page.evaluate(() => customElements.get("flow-handle") !== undefined);
-  expect(defined).toBe(true);
+  expect(defined).toBe(ELEMENT_DEFINED);
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate((args: {
+    handleKindSource: FlowHandleHost["handleKind"];
+    handleKindTarget: FlowHandleHost["handleKind"];
+    handlePositionTop: FlowHandleHost["handlePosition"];
+    handlePositionLeft: FlowHandleHost["handlePosition"];
+  }) => {
+    const { handleKindSource, handleKindTarget, handlePositionTop, handlePositionLeft } = args;
     const node = document.createElement("flow-node");
     const handle = document.createElement("flow-handle") as FlowHandleHost;
     node.append(handle);
     document.body.append(node);
     const connected = handle.isConnected;
-    handle.handleKind = "target";
-    handle.handlePosition = "left";
+    const defaults = {
+      handleKind: handle.handleKind,
+      handlePosition: handle.handlePosition,
+      kindAttr: handle.getAttribute("kind"),
+      positionAttr: handle.getAttribute("position"),
+      right: getComputedStyle(handle).right,
+    };
+    handle.handleKind = handleKindTarget;
+    handle.handlePosition = handlePositionLeft;
     const fromProperties = {
       kindAttr: handle.getAttribute("kind"),
       positionAttr: handle.getAttribute("position"),
       handleKind: handle.handleKind,
       handlePosition: handle.handlePosition,
     };
-    handle.setAttribute("kind", "source");
-    handle.setAttribute("position", "top");
+    handle.setAttribute("kind", handleKindSource);
+    handle.setAttribute("position", handlePositionTop);
     const fromAttributes = {
       handleKind: handle.handleKind,
       handlePosition: handle.handlePosition,
     };
     handle.remove();
     node.remove();
-    return { connected, fromProperties, fromAttributes, detached: handle.isConnected };
+    return { connected, defaults, fromProperties, fromAttributes, detached: handle.isConnected };
+  }, {
+    handleKindSource: HANDLE_KIND_SOURCE,
+    handleKindTarget: HANDLE_KIND_TARGET,
+    handlePositionTop: HANDLE_POSITION_TOP,
+    handlePositionLeft: HANDLE_POSITION_LEFT,
   });
 
-  expect(result.connected).toBe(true);
+  expect(result.connected).toBe(ELEMENT_CONNECTED);
+  expect(result.defaults.handlePosition).toBe(HANDLE_POSITION_RIGHT);
+  expect(result.defaults.positionAttr).toBe(HANDLE_POSITION_RIGHT);
+  expect(result.defaults.right).toBe(HANDLE_DEFAULT_RIGHT_INSET);
   expect(result.fromProperties).toEqual({
-    kindAttr: "target",
-    positionAttr: "left",
-    handleKind: "target",
-    handlePosition: "left",
+    kindAttr: HANDLE_KIND_TARGET,
+    positionAttr: HANDLE_POSITION_LEFT,
+    handleKind: HANDLE_KIND_TARGET,
+    handlePosition: HANDLE_POSITION_LEFT,
   });
   expect(result.fromAttributes).toEqual({
-    handleKind: "source",
-    handlePosition: "top",
+    handleKind: HANDLE_KIND_SOURCE,
+    handlePosition: HANDLE_POSITION_TOP,
   });
-  expect(result.detached).toBe(false);
+  expect(result.detached).toBe(ELEMENT_DETACHED);
 });
 
 test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", async ({ page }) => {
@@ -68,29 +113,37 @@ test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", 
     await customElements.whenDefined("flow-graph");
   });
   const defined = await page.evaluate(() => customElements.get("flow-minimap") !== undefined);
-  expect(defined).toBe(true);
+  expect(defined).toBe(ELEMENT_DEFINED);
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate(({ fill, drawOrigin, drawWidth, drawHeight, nodeId }) => {
     const graph = document.createElement("flow-graph");
     const minimap = document.createElement("flow-minimap") as FlowMinimapHost;
-    const fill = "#ff00aa";
     minimap.style.setProperty("--flow-minimap-fill", fill);
     graph.append(minimap);
     document.body.append(graph);
     const slotted = minimap.parentElement === graph && minimap.isConnected;
     const fillStyle = minimap.fillStyle;
     minimap.draw([
-      { id: "n", position: { x: 0, y: 0 }, data: {}, width: 16, height: 12 },
+      { id: nodeId, position: { x: drawOrigin, y: drawOrigin }, data: {}, width: drawWidth, height: drawHeight },
     ]);
-    const canvas = minimap.shadowRoot?.querySelector("canvas");
-    const drawn = canvas instanceof HTMLCanvasElement && canvas.width > 0 && canvas.height > 0;
-    graph.remove();
-    return { slotted, fillStyle, drawn };
+    return { slotted, fillStyle };
+  }, {
+    fill: MINIMAP_FILL,
+    drawOrigin: DRAW_ORIGIN,
+    drawWidth: DRAW_WIDTH,
+    drawHeight: DRAW_HEIGHT,
+    nodeId: MINIMAP_NODE_ID,
   });
 
-  expect(result.slotted).toBe(true);
-  expect(result.fillStyle).toBe("#ff00aa");
-  expect(result.drawn).toBe(true);
+  expect(result.slotted).toBe(ELEMENT_CONNECTED);
+  expect(result.fillStyle).toBe(MINIMAP_FILL);
+  const canvas = page.locator(MINIMAP_HOST).locator(MINIMAP_CANVAS_PART_SELECTOR);
+  await expect(canvas).toBeVisible();
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.width ?? BOX_HAS_SIZE).toBeGreaterThan(BOX_HAS_SIZE);
+  expect(box?.height ?? BOX_HAS_SIZE).toBeGreaterThan(BOX_HAS_SIZE);
+  await page.evaluate(() => document.querySelector("flow-graph")?.remove());
 });
 
 test("flow-background variant lines and dots via property and attribute", async ({ page }) => {
@@ -99,19 +152,23 @@ test("flow-background variant lines and dots via property and attribute", async 
     await customElements.whenDefined("flow-background");
   });
   const defined = await page.evaluate(() => customElements.get("flow-background") !== undefined);
-  expect(defined).toBe(true);
+  expect(defined).toBe(ELEMENT_DEFINED);
 
-  const result = await page.evaluate(() => {
+  const result = await page.evaluate((args: {
+    variantDots: FlowBackgroundHost["variant"];
+    variantLines: FlowBackgroundHost["variant"];
+  }) => {
+    const { variantDots, variantLines } = args;
     const background = document.createElement("flow-background") as FlowBackgroundHost;
     document.body.append(background);
     const defaultVariant = background.variant;
-    background.variant = "lines";
+    background.variant = variantLines;
     const linesProperty = {
       variant: background.variant,
       attr: background.getAttribute("variant"),
       image: getComputedStyle(background).backgroundImage,
     };
-    background.setAttribute("variant", "dots");
+    background.setAttribute("variant", variantDots);
     const dotsAttribute = {
       variant: background.variant,
       attr: background.getAttribute("variant"),
@@ -119,13 +176,16 @@ test("flow-background variant lines and dots via property and attribute", async 
     };
     background.remove();
     return { defaultVariant, linesProperty, dotsAttribute };
+  }, {
+    variantDots: BACKGROUND_VARIANT_DOTS,
+    variantLines: BACKGROUND_VARIANT_LINES,
   });
 
-  expect(result.defaultVariant).toBe("dots");
-  expect(result.linesProperty.variant).toBe("lines");
-  expect(result.linesProperty.attr).toBe("lines");
-  expect(result.linesProperty.image).toContain("linear-gradient");
-  expect(result.dotsAttribute.variant).toBe("dots");
-  expect(result.dotsAttribute.attr).toBe("dots");
-  expect(result.dotsAttribute.image).toContain("radial-gradient");
+  expect(result.defaultVariant).toBe(BACKGROUND_VARIANT_DOTS);
+  expect(result.linesProperty.variant).toBe(BACKGROUND_VARIANT_LINES);
+  expect(result.linesProperty.attr).toBe(BACKGROUND_VARIANT_LINES);
+  expect(result.linesProperty.image).toContain(BACKGROUND_LINES_IMAGE);
+  expect(result.dotsAttribute.variant).toBe(BACKGROUND_VARIANT_DOTS);
+  expect(result.dotsAttribute.attr).toBe(BACKGROUND_VARIANT_DOTS);
+  expect(result.dotsAttribute.image).toContain(BACKGROUND_DOTS_IMAGE);
 });

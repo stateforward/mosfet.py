@@ -27,6 +27,10 @@ export class FlowHandle extends HTMLElement {
   set handlePosition(value: HandlePosition) {
     this.setAttribute("position", value);
   }
+
+  connectedCallback(): void {
+    if (this.getAttribute("position") === null) this.setAttribute("position", "right");
+  }
 }
 
 export function registerFlowHandle(): void {
