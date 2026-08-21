@@ -68,18 +68,21 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.state("ready"),
       hsm.choice(
         "afterDraw",
-        hsm.transition(hsm.guard(BotMachineGraph.needsFit), hsm.target("drawingFit")),
-        hsm.transition(hsm.target("drawingSkip")),
+        hsm.transition(hsm.guard(BotMachineGraph.needsFit), hsm.target("drawing/fit")),
+        hsm.transition(hsm.target("drawing/skip")),
       ),
       hsm.state(
-        "drawingSkip",
+        "drawing",
         hsm.entry(BotMachineGraph.applyDrawnThenSignal),
-        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../ready")),
-      ),
-      hsm.state(
-        "drawingFit",
-        hsm.entry(BotMachineGraph.applyDrawnThenSignal),
-        hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../fitting")),
+        hsm.initial(hsm.target("skip")),
+        hsm.state(
+          "skip",
+          hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../../ready")),
+        ),
+        hsm.state(
+          "fit",
+          hsm.transition(hsm.on(BotMachineGraph.drawnAppliedEvent.name), hsm.target("../../fitting")),
+        ),
       ),
       hsm.state(
         "fitting",
