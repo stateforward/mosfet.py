@@ -47,7 +47,8 @@ describe("bot-machine-graph flow host", () => {
     host.graphs = graphs;
     assert.equal(host.graphs.length, 1);
     assert.equal(host.graphs[0]?.name, "/Phone");
-    const phoneNodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+    const noNodes = 0;
+    const phoneNodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, noNodes);
     await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
     assert.equal(host.getAttribute("data-node-count"), String(phoneNodeCount));
     assert.match(host.state(), /\/ready$/);
@@ -108,7 +109,8 @@ describe("bot-machine-graph flow host", () => {
       document.body.append(host);
       await waitUntil(() => host.state().includes("/connected"));
       const graphs = [graphFor("/Phone")];
-      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+      const noNodes = 0;
+      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, noNodes);
       host.graphs = graphs;
       const readyState = "/ready";
       await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
@@ -135,14 +137,15 @@ describe("bot-machine-graph flow host", () => {
       document.body.append(host);
       await waitUntil(() => host.state().includes("/connected"));
       const graphs = [graphFor("/Phone")];
-      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, 0);
+      const noNodes = 0;
+      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, noNodes);
       host.graphs = graphs;
       const readyState = "/ready";
       await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
       const oneFit = 1;
       assert.equal(fitViewCount, oneFit);
       const again = [graphFor("/Phone2")];
-      const againNodeCount = again.reduce((count, graph) => count + graph.nodes.length, 0);
+      const againNodeCount = again.reduce((count, graph) => count + graph.nodes.length, noNodes);
       assert.equal(againNodeCount, nodeCount);
       host.graphs = again;
       const admittedAgain = "/Phone2";
