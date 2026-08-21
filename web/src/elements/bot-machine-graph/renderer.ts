@@ -1,4 +1,5 @@
-import { reportMachineGraphFailure, type GraphRenderer, type ViewportBounds, type ViewportMetrics } from "../../machine-graph-hsm.ts";
+import { type ViewportBounds } from "../../focuser-hsm.ts";
+import { type ViewportMetrics } from "../../panner-hsm.ts";
 import {
   environmentBoxPositions,
   machineOwnerIndex,
@@ -44,6 +45,12 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const WORLD_PADDING = 56;
 const EDGE_LABEL_LIMIT = 30;
 
+export type GraphHit = {
+  readonly machineName: string;
+  readonly path: string;
+  readonly bounds: ViewportBounds;
+};
+
 type LayoutNode = {
   id: string;
   machine: string;
@@ -71,30 +78,14 @@ function addSvgElement<K extends keyof SVGElementTagNameMap>(parent: SVGElement,
   return element;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function pointOf(value: unknown): Point | null {
-  if (!isRecord(value)) return null;
-  const x = value["x"];
-  const y = value["y"];
-  return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
-    ? { x, y }
-    : null;
-}
-
-export class NativeGraphRenderer implements GraphRenderer {
-  #viewport: HTMLDivElement;
-  #world: HTMLDivElement;
+export class NativeGraphRenderer {
+  readonly viewport: HTMLDivElement;
+  readonly world: HTMLDivElement;
   #edgeLayer: SVGSVGElement;
   #nodeLayer: HTMLDivElement;
   #container: HTMLElement;
-  #onZoom: (zoom: number) => void;
-  #onEdge: (eventName: string) => void;
   #structure: string | null = null;
   #graphs: readonly MachineGraph[] = [];
-  #resizeObserver: ResizeObserver | null = null;
   #nodes = new Map<string, LayoutNode>();
   #edges: RenderedEdge[] = [];
   #initialNodes: Array<{ element: HTMLDivElement; point: Point }> = [];
@@ -102,29 +93,20 @@ export class NativeGraphRenderer implements GraphRenderer {
   #origin: Point = { x: WORLD_PADDING, y: WORLD_PADDING };
   #worldSize: Size = { width: 1, height: 1 };
 
-  constructor(container: HTMLElement, onZoom: (zoom: number) => void, onEdge: (eventName: string) => void) {
+  constructor(container: HTMLElement) {
     this.#container = container;
-    this.#onZoom = onZoom;
-    this.#onEdge = onEdge;
-    this.#viewport = document.createElement("div");
-    this.#viewport.className = "viewport";
-    this.#world = document.createElement("div");
-    this.#world.className = "world";
+    this.viewport = document.createElement("div");
+    this.viewport.className = "viewport";
+    this.world = document.createElement("div");
+    this.world.className = "world";
     this.#edgeLayer = document.createElementNS(SVG_NS, "svg");
     this.#edgeLayer.classList.add("edge-layer");
     this.#edgeLayer.setAttribute("aria-hidden", "true");
     this.#nodeLayer = document.createElement("div");
     this.#nodeLayer.className = "node-layer";
-    this.#world.append(this.#edgeLayer, this.#nodeLayer);
-    this.#viewport.append(this.#world);
-    this.#container.append(this.#viewport);
-    this.#viewport.addEventListener("pointerdown", this.#onPointerDown);
-    this.#viewport.addEventListener("pointermove", this.#onPointerMove);
-    this.#viewport.addEventListener("pointerup", this.#onPointerUp);
-    this.#viewport.addEventListener("pointercancel", this.#onPointerUp);
-    this.#viewport.addEventListener("wheel", this.#onWheel, { passive: false });
-    this.#edgeLayer.addEventListener("click", this.#onEdgeClick);
-    this.#ensureResizeObserver();
+    this.world.append(this.#edgeLayer, this.#nodeLayer);
+    this.viewport.append(this.world);
+    this.#container.append(this.viewport);
   }
 
   draw(graphs: readonly MachineGraph[]): boolean {
@@ -143,30 +125,19 @@ export class NativeGraphRenderer implements GraphRenderer {
   destroy(): void {
     this.#edgeLayer.replaceChildren();
     this.#nodeLayer.replaceChildren();
-    this.#world.style.width = "1px";
-    this.#world.style.height = "1px";
+    this.world.style.width = "1px";
+    this.world.style.height = "1px";
     this.#structure = null;
     this.#graphs = [];
     this.#nodes.clear();
     this.#edges = [];
     this.#initialNodes = [];
-    this.#world.style.transform = "none";
-    this.#container.classList.remove("is-dragging");
+    this.world.style.transform = "none";
   }
 
   dispose(): void {
     this.destroy();
-    this.#resizeObserver?.disconnect();
-    this.#resizeObserver = null;
-    this.#viewport.removeEventListener("pointerdown", this.#onPointerDown);
-    this.#viewport.removeEventListener("pointermove", this.#onPointerMove);
-    this.#viewport.removeEventListener("pointerup", this.#onPointerUp);
-    this.#viewport.removeEventListener("pointercancel", this.#onPointerUp);
-    this.#viewport.removeEventListener("wheel", this.#onWheel);
-    this.#edgeLayer.removeEventListener("click", this.#onEdgeClick);
-    this.#interactionDispatch = null;
-    this.#onZoom = () => undefined;
-    this.#onEdge = () => undefined;
+    this.viewport.remove();
   }
 
   #renderStructure(graphs: readonly MachineGraph[]): void {
@@ -321,8 +292,8 @@ export class NativeGraphRenderer implements GraphRenderer {
       width: Math.max(1, bounds.right - bounds.left + WORLD_PADDING * 2),
       height: Math.max(1, bounds.bottom - bounds.top + WORLD_PADDING * 2),
     };
-    this.#world.style.width = `${this.#worldSize.width}px`;
-    this.#world.style.height = `${this.#worldSize.height}px`;
+    this.world.style.width = `${this.#worldSize.width}px`;
+    this.world.style.height = `${this.#worldSize.height}px`;
     this.#edgeLayer.setAttribute("viewBox", `0 0 ${this.#worldSize.width} ${this.#worldSize.height}`);
     this.#edgeLayer.setAttribute("width", String(this.#worldSize.width));
     this.#edgeLayer.setAttribute("height", String(this.#worldSize.height));
@@ -409,13 +380,32 @@ export class NativeGraphRenderer implements GraphRenderer {
   }
 
   viewportMetrics(): ViewportMetrics | null {
-    if (!this.#hasViewport()) return null;
+    if (this.viewport.clientWidth <= 0 || this.viewport.clientHeight <= 0) return null;
     return {
-      width: this.#viewport.clientWidth,
-      height: this.#viewport.clientHeight,
+      width: this.viewport.clientWidth,
+      height: this.viewport.clientHeight,
       bounds: { ...this.#bounds },
       origin: { ...this.#origin },
     };
+  }
+
+  hitTestNode(event: Event): GraphHit | null {
+    const node = this.#nodeFromEvent(event);
+    if (node === null) return null;
+    return {
+      machineName: node.machineName,
+      path: node.path,
+      bounds: rectFor(node.center, node.size),
+    };
+  }
+
+  hitTestEdge(event: Event): string | null {
+    for (const target of event.composedPath()) {
+      if (!(target instanceof Element)) continue;
+      const eventName = target.closest<SVGPathElement>(".edge-hit")?.dataset["eventName"];
+      if (eventName !== undefined && eventName.length > 0) return eventName;
+    }
+    return null;
   }
 
   focusBounds(machineName: string): ViewportBounds | null {
@@ -447,10 +437,6 @@ export class NativeGraphRenderer implements GraphRenderer {
     return bounds;
   }
 
-  #hasViewport(): boolean {
-    return this.#viewport.clientWidth > 0 && this.#viewport.clientHeight > 0;
-  }
-
   #positionElements(): void {
     for (const node of this.#nodes.values()) {
       node.element.style.left = `${node.center.x + this.#origin.x}px`;
@@ -473,83 +459,21 @@ export class NativeGraphRenderer implements GraphRenderer {
     }
   }
 
-  #ensureResizeObserver(): void {
-    if (this.#resizeObserver !== null || typeof ResizeObserver === "undefined") return;
-    this.#resizeObserver = new ResizeObserver(() => this.#resizeForContainer());
-    this.#resizeObserver.observe(this.#container);
+  #nodeFromTarget(target: EventTarget | null): LayoutNode | null {
+    if (!(target instanceof Element)) return null;
+    const nodeElement = target.closest<HTMLDivElement>(".state-node");
+    if (nodeElement === null || !this.#nodeLayer.contains(nodeElement)) return null;
+    const machine = nodeElement.dataset["machine"];
+    const path = nodeElement.dataset["path"];
+    if (machine === undefined || path === undefined) return null;
+    return this.#nodes.get(namespacedPath(machine, path)) ?? null;
   }
 
-  #resizeForContainer(): void {
-    if (!this.#hasViewport()) return;
-    this.#dispatchInteraction("viewport.fit", { reason: "resize" });
+  #nodeFromEvent(event: Event): LayoutNode | null {
+    for (const target of event.composedPath()) {
+      const node = this.#nodeFromTarget(target);
+      if (node !== null) return node;
+    }
+    return this.#nodeFromTarget(event.target);
   }
-
-  #dispatchInteraction(
-    eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
-    data?: unknown,
-  ): void {
-    const dispatch = this.#interactionDispatch?.(eventName, data);
-    if (dispatch !== undefined) void dispatch.catch(reportMachineGraphFailure);
-  }
-
-  #interactionDispatch: ((
-    eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
-    data?: unknown,
-  ) => void | Promise<void>) | null = null;
-
-  setInteractionDispatcher(dispatch: (
-    eventName: "viewport.fit" | "viewport.focus" | "viewport.pan.start" | "viewport.pan" | "viewport.pan.end" | "viewport.zoom",
-    data?: unknown,
-  ) => void | Promise<void>): void {
-    this.#interactionDispatch = dispatch;
-  }
-
-  applyViewport(data: unknown): void {
-    const record = isRecord(data) ? data : null;
-    const panning = record?.["panning"];
-    if (typeof panning === "boolean") this.#container.classList.toggle("is-dragging", panning);
-    const scale = record?.["scale"];
-    const pan = pointOf(record?.["pan"]);
-    if (typeof scale !== "number" || pan === null) return;
-    this.#world.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${scale})`;
-    this.#onZoom(scale);
-  }
-
-  #onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0 && event.pointerType === "mouse") return;
-    this.#viewport.setPointerCapture(event.pointerId);
-    const rect = this.#viewport.getBoundingClientRect();
-    this.#dispatchInteraction("viewport.pan.start", {
-      pointerId: event.pointerId,
-      point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
-    });
-  };
-
-  #onPointerMove = (event: PointerEvent): void => {
-    const rect = this.#viewport.getBoundingClientRect();
-    this.#dispatchInteraction("viewport.pan", {
-      pointerId: event.pointerId,
-      point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
-    });
-  };
-
-  #onPointerUp = (event: PointerEvent): void => {
-    this.#dispatchInteraction("viewport.pan.end", { pointerId: event.pointerId });
-  };
-
-  #onWheel = (event: WheelEvent): void => {
-    event.preventDefault();
-    const rect = this.#viewport.getBoundingClientRect();
-    this.#dispatchInteraction("viewport.zoom", {
-      deltaY: event.deltaY,
-      point: { x: event.clientX - rect.left, y: event.clientY - rect.top },
-    });
-  };
-
-  #onEdgeClick = (event: MouseEvent): void => {
-    const target = event.target;
-    if (!(target instanceof SVGElement)) return;
-    const eventName = target.closest<SVGPathElement>(".edge-hit")?.dataset["eventName"];
-    if (eventName !== undefined && eventName.length > 0) this.#onEdge(eventName);
-  };
 }

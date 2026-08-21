@@ -6,13 +6,42 @@ const EXPECTED_HSM_SHUTDOWN_ERRORS = new Set([
   "set requires a started HSM",
   "operation requires a started HSM",
   "restart requires a started HSM",
-  "MachineGraphController is stopped",
 ]);
 
-export function startMachine<I extends hsm.Instance, M>(instance: I, model: M): I {
+type HostConstructor<T = object> = new () => T;
+
+export function From<TBase extends HostConstructor>(
+  Base: TBase,
+): new () => InstanceType<TBase> & hsm.Instance {
+  const Super = Base as HostConstructor;
+  class HsmHost extends Super {
+    constructor() {
+      super();
+    }
+  }
+  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(hsm.Instance.prototype))) {
+    if (key === "constructor") continue;
+    Object.defineProperty(HsmHost.prototype, key, descriptor);
+  }
+  return HsmHost as unknown as new () => InstanceType<TBase> & hsm.Instance;
+}
+
+export function startMachine<I extends hsm.Instance, M>(instance: I, model: M): I;
+export function startMachine<I extends hsm.Instance, M>(ctx: hsm.Context, instance: I, model: M): I;
+export function startMachine<I extends hsm.Instance, M>(
+  ctxOrInstance: hsm.Context | I,
+  instanceOrModel: I | M,
+  maybeModel?: M,
+): I {
   // Isolated interop: hsm.ts models use optional `id` fields that fail exactOptionalPropertyTypes.
-  const start = hsm.start as unknown as (runtime: I, defined: M) => I;
-  return start(instance, model);
+  const start = hsm.start as unknown as {
+    (runtime: I, defined: M): I;
+    (ctx: hsm.Context, runtime: I, defined: M): I;
+  };
+  if (maybeModel !== undefined) {
+    return start(ctxOrInstance as hsm.Context, instanceOrModel as I, maybeModel);
+  }
+  return start(ctxOrInstance as I, instanceOrModel as M);
 }
 
 export async function stopMachine(machine: hsm.Instance): Promise<void> {

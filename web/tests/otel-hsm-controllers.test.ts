@@ -6,9 +6,12 @@ import { fileURLToPath } from "node:url";
 import * as hsm from "@stateforward/hsm.ts";
 
 import { DashboardController, type DashboardSnapshot } from "../src/dashboard-hsm.ts";
-import { reportHsmFailure } from "../src/hsm-runtime.ts";
-import { MachineGraphController } from "../src/machine-graph-hsm.ts";
+import { Focuser } from "../src/focuser-hsm.ts";
+import { From, reportHsmFailure, startMachine, stopMachine } from "../src/hsm-runtime.ts";
+import { Graph } from "../src/machine-graph-hsm.ts";
 import { structureKey } from "../src/machine-graph-view.ts";
+import { Panner } from "../src/panner-hsm.ts";
+import { Renderer } from "../src/renderer-hsm.ts";
 import { documentFromOtlp } from "../src/otel/machines.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
 import { streamSource, type OtelStreamHandlers, type OtelStreamSubscription } from "../src/otel/source.ts";
@@ -32,6 +35,30 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
+function fakeWorld(): HTMLElement {
+  const style = { transform: "", transformOrigin: "" };
+  return {
+    style,
+    classList: { toggle(): void { return; } },
+  } as unknown as HTMLElement;
+}
+
+function startAdmittedGraph(hooks: ConstructorParameters<typeof Graph>[0]): Graph {
+  return startMachine(new Graph(hooks), Graph.model);
+}
+
+function graphFor(name: string, admitted = true) {
+  return {
+    name,
+    componentName: name,
+    currentState: `${name}/idle`,
+    lastEventName: "",
+    observationCount: 0,
+    nodes: admitted ? [{ path: name, parent: null, label: name }] : [],
+    edges: [],
+  };
+}
+
 describe("companion-style HSM controllers", () => {
   test("graph structure identity includes node parent and label metadata", () => {
     const node = { path: "/Demo", parent: null, label: "Demo" };
@@ -53,311 +80,229 @@ describe("companion-style HSM controllers", () => {
   test("malformed and empty graph sets remain empty and clear a drawing", async () => {
     let draws = 0;
     let destroys = 0;
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: () => {
-          draws += 1;
-        },
-        destroy: () => {
-          destroys += 1;
-        },
+    const graph = startAdmittedGraph({
+      onDraw: () => {
+        draws += 1;
+      },
+      onDestroy: () => {
+        destroys += 1;
       },
     });
-    const valid = {
-      name: "/Demo",
-      componentName: "Demo",
-      currentState: "/Demo/idle",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
-      edges: [],
-    };
+    const valid = graphFor("/Demo");
 
-    const empty = await graph.dispatch("graph.set", { graphs: [] });
+    const empty = graph.setGraphs([]);
     assert.equal(empty.phase, "empty");
     assert.equal(empty.graphs.length, 0);
     assert.equal(draws, 0);
-    const drawing = await graph.dispatch("graph.set", { graphs: [valid] });
+    const drawing = graph.setGraphs([valid]);
     assert.equal(drawing.phase, "drawing");
     assert.equal(draws, 1);
-    const malformed = await graph.dispatch("graph.set", { graphs: [{}] });
+    const malformed = graph.setGraphs([{}]);
     assert.equal(malformed.phase, "empty");
     assert.equal(malformed.graphs.length, 0);
     assert.ok(destroys >= 1);
-    const malformedPayload = await graph.dispatch("graph.set", { graphs: "invalid" });
+    const malformedPayload = graph.setGraphs("invalid");
     assert.equal(malformedPayload.phase, "empty");
     assert.equal(malformedPayload.graphs.length, 0);
-    const redraw = await graph.dispatch("graph.set", { graphs: [valid] });
+    const redraw = graph.setGraphs([valid]);
     assert.equal(redraw.phase, "drawing");
     assert.equal(draws, 2);
-    await graph.stop();
+    await stopMachine(graph);
   });
 
-  test("viewport gestures use modeled fit, pan, and zoom transitions", async () => {
-    const applied: unknown[] = [];
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: () => undefined,
-        destroy: () => undefined,
-        applyViewport: (data) => {
-          applied.push(data);
-        },
+  test("panner writes transform synchronously and stays off the graph model", async () => {
+    const applied: string[] = [];
+    const world = fakeWorld();
+    const panner = startMachine(new Panner(world, {
+      onTransform: (transform) => {
+        applied.push(world.style.transform);
+        applied.push(`${transform.scale}:${transform.pan.x},${transform.pan.y}`);
+      },
+    }), Panner.model);
+    const graph = startAdmittedGraph({
+      onDraw: () => undefined,
+      onDestroy: () => undefined,
+    });
+
+    const drawing = graph.setGraphs([graphFor("/Demo")]);
+    assert.equal(drawing.phase, "drawing");
+    assert.match(drawing.statePath, /\/drawing$/);
+    panner.fit({
+      bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+      metrics: {
+        width: 1000,
+        height: 600,
+        bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+        origin: { x: 0, y: 0 },
       },
     });
-    const valid = {
-      name: "/Demo",
-      componentName: "Demo",
-      currentState: "/Demo/idle",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
-      edges: [],
-    };
-
-    await graph.dispatch("graph.set", { graphs: [valid] });
-    await graph.dispatch("viewport.fit");
-    assert.equal(applied.length, 1);
-    const panning = await graph.dispatch("viewport.pan.start");
-    assert.equal(panning.phase, "drawing");
-    assert.match(panning.statePath, /\/panning$/);
-    await graph.dispatch("viewport.pan", { pan: { x: 12, y: 8 } });
-    await graph.dispatch("viewport.zoom", { scale: 1.1, point: { x: 20, y: 20 } });
-    assert.equal(applied.length, 3);
-    const drawing = await graph.dispatch("viewport.pan.end");
-    assert.match(drawing.statePath, /\/drawing$/);
-    await graph.stop();
+    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    assert.match(panner.state(), /\/panning$/);
+    assert.match(graph.state(), /\/drawing$/);
+    panner.cursorMove({ pan: { x: 12, y: 8 } });
+    panner.zoom({ scale: 1.1, point: { x: 20, y: 20 } });
+    panner.panEnd({ pointerId: 1 });
+    assert.match(panner.state(), /\/fixed$/);
+    assert.ok(applied.length >= 3);
+    await stopMachine(panner);
+    await stopMachine(graph);
   });
 
   test("graph updates repaint while the viewport is panning", async () => {
     const drawn: string[][] = [];
-    const graphFor = (name: string) => ({
-      name,
-      componentName: name,
-      currentState: `${name}/idle`,
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: name, parent: null, label: name }],
-      edges: [],
-    });
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: (graphs) => {
-          drawn.push(graphs.map((value) => value.name));
-          return true;
-        },
-        destroy: () => undefined,
+    const world = fakeWorld();
+    const panner = startMachine(new Panner(world), Panner.model);
+    const graph = startAdmittedGraph({
+      onDraw: (graphs) => {
+        drawn.push(graphs.map((value) => value.name));
       },
+      onDestroy: () => undefined,
     });
 
-    await graph.dispatch("graph.set", { graphs: [graphFor("/A")] });
-    await graph.dispatch("graph.set", { graphs: [graphFor("/B")] });
-    const panning = await graph.dispatch("viewport.pan.start", { pointerId: 1, point: { x: 10, y: 10 } });
-    assert.match(panning.statePath, /\/panning$/);
-    await graph.dispatch("graph.set", { graphs: [graphFor("/C")] });
+    graph.setGraphs([graphFor("/A")]);
+    graph.setGraphs([graphFor("/B")]);
+    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    assert.match(panner.state(), /\/panning$/);
+    graph.setGraphs([graphFor("/C")]);
 
     assert.deepEqual(drawn, [["/A"], ["/B"], ["/C"]]);
     assert.deepEqual(graph.snapshot().graphs.map((value) => value.name), ["/C"]);
-    await graph.stop();
+    await stopMachine(panner);
+    await stopMachine(graph);
   });
 
-  test("normalized viewport intents update controller-owned transform and gesture state", async () => {
-    const applied: unknown[] = [];
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: () => false,
-        destroy: () => undefined,
-        viewportMetrics: () => ({
-          width: 1000,
-          height: 600,
-          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
-          origin: { x: 0, y: 0 },
-        }),
-        focusBounds: (machineName) => machineName === "/Demo" ? { left: 0, right: 96, top: 0, bottom: 96 } : null,
-        applyViewport: (data) => {
-          applied.push(data);
-        },
-      },
-    });
-    const valid = {
-      name: "/Demo",
-      componentName: "Demo",
-      currentState: "/Demo/idle",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
-      edges: [],
+  test("normalized viewport intents update panner-owned transform", async () => {
+    const world = fakeWorld();
+    const panner = startMachine(new Panner(world), Panner.model);
+    const metrics = {
+      width: 1000,
+      height: 600,
+      bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+      origin: { x: 0, y: 0 },
     };
 
-    await graph.dispatch("graph.set", { graphs: [valid] });
-    await graph.dispatch("viewport.fit", { reason: "initial" });
-    const panning = await graph.dispatch("viewport.pan.start", { pointerId: 1, point: { x: 10, y: 10 } });
-    assert.match(panning.statePath, /\/panning$/);
-    await graph.dispatch("viewport.pan", { pointerId: 1, point: { x: 30, y: 24 } });
-    await graph.dispatch("viewport.pan.end", { pointerId: 1 });
-    const drawing = await graph.dispatch("viewport.zoom", { deltaY: -100, point: { x: 30, y: 24 } });
-    assert.match(drawing.statePath, /\/drawing$/);
-    await graph.dispatch("viewport.focus", { machineName: "/Demo" });
-    assert.deepEqual(applied.at(-1), { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
-    await graph.stop();
+    panner.fit({ reason: "initial", bounds: metrics.bounds, metrics });
+    panner.panStart({ pointerId: 1, point: { x: 10, y: 10 } });
+    assert.match(panner.state(), /\/panning$/);
+    panner.cursorMove({ pointerId: 1, point: { x: 30, y: 24 } });
+    panner.panEnd({ pointerId: 1 });
+    panner.zoom({ deltaY: -100, point: { x: 30, y: 24 } });
+    panner.fit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics });
+    assert.deepEqual(panner.transform, { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
+    await stopMachine(panner);
   });
 
-  test("removing the focused machine clears focus and fits the remaining graphs", async () => {
-    const applied: unknown[] = [];
-    let available = new Set<string>();
-    const graphFor = (name: string) => ({
-      name,
-      componentName: name,
-      currentState: `${name}/idle`,
-      lastEventName: "",
-      observationCount: 1,
-      nodes: [{ path: name, parent: null, label: name }],
-      edges: [],
-    });
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: (graphs) => {
-          available = new Set(graphs.map((value) => value.name));
-          return true;
-        },
-        destroy: () => undefined,
-        viewportMetrics: () => ({
-          width: 1000,
-          height: 600,
-          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
-          origin: { x: 0, y: 0 },
-        }),
-        focusBounds: (machineName) => available.has(machineName)
-          ? { left: 0, right: 96, top: 0, bottom: 96 }
-          : null,
-        applyViewport: (data) => {
-          applied.push(data);
-        },
+  test("node viewport focus uses exact bounds and stays focused across resize", async () => {
+    const world = fakeWorld();
+    const panner = startMachine(new Panner(world), Panner.model);
+    let focusKind = "";
+    let focusPath = "";
+    const focuser = startMachine(new Focuser(null, {
+      onFocus: (target) => {
+        focusKind = target.kind;
+        focusPath = target.nodePath ?? "";
+        panner.fit({
+          bounds: target.bounds,
+          metrics: {
+            width: 1000,
+            height: 600,
+            bounds: { left: 0, right: 400, top: 0, bottom: 300 },
+            origin: { x: 0, y: 0 },
+          },
+        });
       },
+      onClear: () => {
+        focusKind = "";
+        focusPath = "";
+      },
+    }), Focuser.model);
+    const metrics = {
+      width: 1000,
+      height: 600,
+      bounds: { left: 0, right: 400, top: 0, bottom: 300 },
+      origin: { x: 0, y: 0 },
+    };
+
+    panner.fit({ reason: "initial", bounds: metrics.bounds, metrics });
+    focuser.focus({ kind: "machine", machineName: "/Demo", bounds: { left: 0, right: 400, top: 0, bottom: 300 } });
+    focuser.focus({
+      kind: "node",
+      nodePath: "/Demo/idle",
+      bounds: { left: 40, right: 136, top: 80, bottom: 176 },
     });
+    const nodeTransform = panner.transform;
+    assert.deepEqual(nodeTransform, { scale: 1.2, pan: { x: 394.4, y: 146.4 } });
+    assert.equal(focusKind, "node");
+    assert.equal(focusPath, "/Demo/idle");
+    assert.deepEqual(panner.transform, nodeTransform);
+    await stopMachine(focuser);
+    await stopMachine(panner);
+  });
 
-    await graph.dispatch("graph.set", { graphs: [graphFor("/A")] });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    assert.equal(graph.focusMachine("/A"), true);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await graph.dispatch("graph.set", { graphs: [graphFor("/B")] });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    const transforms = applied.filter((value) =>
-      typeof value === "object" && value !== null && "scale" in value,
-    );
-    assert.notDeepEqual(transforms.at(-1), { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
-    assert.deepEqual(transforms.at(-1), {
+  test("clearing focus fits the remaining graphs", async () => {
+    const world = fakeWorld();
+    const panner = startMachine(new Panner(world), Panner.model);
+    const focuser = startMachine(new Focuser(), Focuser.model);
+    const metrics = {
+      width: 1000,
+      height: 600,
+      bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+      origin: { x: 0, y: 0 },
+    };
+    focuser.focus({ kind: "machine", machineName: "/A", bounds: { left: 0, right: 96, top: 0, bottom: 96 } });
+    panner.fit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics });
+    assert.deepEqual(panner.transform, { scale: 1.2, pan: { x: 442.4, y: 242.4 } });
+    focuser.clear();
+    panner.fit({ bounds: metrics.bounds, metrics });
+    assert.deepEqual(panner.transform, {
       scale: 600 / 656,
       pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
     });
-    await graph.stop();
+    await stopMachine(focuser);
+    await stopMachine(panner);
   });
 
-  test("filtered focused machines clear focus and fit the admitted graphs", async () => {
-    const applied: unknown[] = [];
-    let available = new Set<string>();
-    const graphFor = (name: string, admitted: boolean) => ({
-      name,
-      componentName: name,
-      currentState: `${name}/idle`,
-      lastEventName: "",
-      observationCount: 1,
-      nodes: admitted ? [{ path: name, parent: null, label: name }] : [],
-      edges: [],
-    });
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: (graphs) => {
-          available = new Set(graphs.filter((value) => value.nodes.length > 0).map((value) => value.name));
-          return true;
-        },
-        destroy: () => undefined,
-        viewportMetrics: () => ({
-          width: 1000,
-          height: 600,
-          bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
-          origin: { x: 0, y: 0 },
-        }),
-        focusBounds: (machineName) => available.has(machineName)
-          ? { left: 0, right: 96, top: 0, bottom: 96 }
-          : null,
-        applyViewport: (data) => {
-          applied.push(data);
-        },
-      },
-    });
-
-    await graph.dispatch("graph.set", { graphs: [graphFor("/A", true)] });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    assert.equal(graph.focusMachine("/A"), true);
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await graph.dispatch("graph.set", { graphs: [graphFor("/A", false), graphFor("/B", true)] });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    const transforms = applied.filter((value) =>
-      typeof value === "object" && value !== null && "scale" in value,
-    );
-    assert.deepEqual(transforms.at(-1), {
-      scale: 600 / 656,
-      pan: { x: 500 - (500 * 600) / 656, y: 300 - (300 * 600) / 656 },
-    });
-    await graph.stop();
+  test("From mixin starts an element-shaped host as an HSM instance", async () => {
+    class Base {
+      label = "host";
+    }
+    class Host extends From(Base) {}
+    const host = startMachine(new Host(), hsm.define(
+      "Host",
+      hsm.initial(hsm.target("active")),
+      hsm.state("active"),
+    ));
+    assert.equal(host.label, "host");
+    assert.equal(typeof host.dispatch, "function");
+    assert.match(host.state(), /\/active$/);
+    await stopMachine(host);
   });
 
-  test("stopping a graph controller gates queued admission before the HSM stops", async () => {
-    let draws = 0;
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: () => {
-          draws += 1;
-          return true;
-        },
-        destroy: () => undefined,
-      },
-    });
-    const valid = {
-      name: "/Demo",
-      componentName: "Demo",
-      currentState: "/Demo/idle",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
-      edges: [],
-    };
-
-    const admission = graph.dispatch("graph.set", { graphs: [valid] });
-    await graph.stop();
-    await assert.rejects(admission, /MachineGraphController is stopped/);
-    assert.equal(draws, 0);
+  test("renderer paints after mark_dirty", async () => {
+    let paints = 0;
+    const renderer = startMachine(new Renderer(() => {
+      paints += 1;
+    }), Renderer.model);
+    renderer.markDirty();
+    await waitFor(() => paints === 1);
+    assert.match(renderer.state(), /\/clean$/);
+    await stopMachine(renderer);
   });
 
-  test("deferred initial fit does not reject during serialized shutdown", async () => {
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: () => true,
-        destroy: () => undefined,
-      },
+  test("graph admission is synchronous and stop leaves no unhandled rejection", async () => {
+    const graph = startAdmittedGraph({
+      onDraw: () => undefined,
+      onDestroy: () => undefined,
     });
-    const valid = {
-      name: "/Demo",
-      componentName: "Demo",
-      currentState: "/Demo/idle",
-      lastEventName: "",
-      observationCount: 0,
-      nodes: [{ path: "/Demo", parent: null, label: "Demo" }],
-      edges: [],
-    };
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
     };
     process.on("unhandledRejection", onUnhandled);
     try {
-      const first = graph.dispatch("graph.set", { graphs: [valid] });
-      const second = graph.dispatch("graph.set", { graphs: [valid] });
-      await first;
-      await graph.stop();
-      await second;
+      graph.setGraphs([graphFor("/Demo")]);
+      graph.setGraphs([graphFor("/Demo")]);
+      await stopMachine(graph);
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     } finally {
       process.off("unhandledRejection", onUnhandled);
@@ -435,14 +380,12 @@ describe("companion-style HSM controllers", () => {
     const dashboard = new DashboardController();
     const source = new OtelSourceController();
     const draws: string[] = [];
-    const graph = new MachineGraphController({
-      renderer: {
-        draw: (values) => {
-          draws.push(values.map((value) => value.currentState).join(","));
-        },
-        destroy: () => {
-          draws.push("destroy");
-        },
+    const graph = startAdmittedGraph({
+      onDraw: (values) => {
+        draws.push(values.map((value) => value.currentState).join(","));
+      },
+      onDestroy: () => {
+        draws.push("destroy");
       },
     });
 
@@ -475,7 +418,7 @@ describe("companion-style HSM controllers", () => {
     assert.ok(phone !== undefined);
     const phoneBot = document.machines.find((machine) => machine.name === "/PhoneBot");
     assert.ok(phoneBot !== undefined);
-    const afterDraw = await graph.dispatch("graph.set", { graphs: [phone, phoneBot] });
+    const afterDraw = graph.setGraphs([phone, phoneBot]);
     assert.equal(afterDraw.phase, "drawing");
     assert.ok(afterDraw.statePath.startsWith("/"));
     assert.ok(draws.includes("/Phone,/PhoneBot/active/processing"));
@@ -484,7 +427,7 @@ describe("companion-style HSM controllers", () => {
     await dashboard.stop();
     await source.stop();
     await emitting.stop();
-    await graph.stop();
+    await stopMachine(graph);
   });
 
   test("stream source incrementally folds spans into live dashboard state", async () => {

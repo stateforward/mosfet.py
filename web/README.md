@@ -71,21 +71,22 @@ Send a named event from the inspector; with a bot attached to an environment
 the collector fans that command to `Control.Subscribe` and the bot
 `hsm.dispatch_all`s it.
 
-## Companion controller pattern
+## Element machines
 
-Every custom element follows the Companion `Controller` + `Runtime` split
-(`companion/web/src/app/companion-app-state.ts`,
-`companion/web/src/components/companion-app-element.ts`):
+Low-rate session and transport elements (`bot-dashboard`, `bot-otel-source`)
+still use a Companion-style controller: the element is an `HTMLElement`, a
+controller owns `hsm.start`, and clicks map to named events.
 
-1. The element extends `HTMLElement`, never `hsm.Instance`.
-2. A controller owns `hsm.start(new Runtime(), model)`.
-3. `connectedCallback` constructs the controller and binds gestures.
-4. Gestures use `data-event="…"` or an equivalent named event and call
-   `controller.dispatch(eventName)`. They do not mutate fields and then maybe
-   dispatch.
-5. `#render(controller.snapshot())` projects `machine.takeSnapshot().state`
-   plus documented view fields.
-6. `disconnectedCallback` calls `controller.stop()` → `hsm.stop(machine)`.
+Interactive graph pieces use gogo's `From(HTMLElement)` split:
+
+1. `From` is exported from `src/hsm-runtime.ts`. Any custom element can
+   `extends From(HTMLElement)` and `startMachine(this, model)`.
+2. `bot-machine-graph` is that host. It owns hit-testing and graph admission.
+3. Sibling machines own the rest: `Renderer` (`clean` / `dirty` / `rendering`)
+   coalesces paints; `Panner` (`fixed` / `panning`) writes CSS translate+scale
+   synchronously; `Focuser` (`unfocused` / `focused`) is orthogonal to pan.
+4. Graph empty/drawing is a separate `Graph` model. Pointer motion does not
+   share a dispatch tail with `graph.set`.
 
 Machines:
 
@@ -94,16 +95,15 @@ Machines:
   `dashboard.command.send` posts `/v1/commands`
 - `bot-otel-source` → `OtelSourceController` (`idle` / `connecting` / `live` / `error`);
   the composed `bot-otel-source` event is an **effect** of entering `live`
-- `bot-machine-graph` → `MachineGraphController` (`empty` / `drawing`), with
-  HSM-backed viewport transitions for fit, focus, pan, and zoom; the native
-  HTML/SVG renderer creates and updates the graph from controller effects
+- `bot-machine-graph` → `From(HTMLElement)` host plus `Graph` / `Renderer` /
+  `Panner` / `Focuser`; the native HTML/SVG painter draws from Renderer
 
 ## Stack
 
 - TypeScript (strict, `noUncheckedIndexedAccess`)
 - Autonomous custom elements: `bot-dashboard`, `bot-machine-graph`, `bot-otel-source`
 - CSS via component stylesheets plus `src/dashboard.css`
-- `@stateforward/hsm.ts` 1.3.3 for every element controller and graph viewport
+- `@stateforward/hsm.ts` 1.3.3 for every element machine and companion controller
 - Native HTML/SVG web-component rendering for nodes and edges
 - `@grpc/grpc-js` + `@grpc/proto-loader` for the in-process OTLP/control collector
 - Vite for local serve/build
