@@ -423,6 +423,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       detail,
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   }
 
@@ -813,6 +814,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
     instance.#dirty();
   }
@@ -847,6 +849,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   }
 

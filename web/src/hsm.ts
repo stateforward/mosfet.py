@@ -249,6 +249,12 @@ export class HostDropError extends Error {
   }
 }
 
+/**
+ * Detail of the `host-drop` CustomEvent emitted by `reportFailure`/`catchFailure`.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type HostDropDetail = {
   readonly reason: "unstarted" | "stopped";
   readonly operation: string;
@@ -271,6 +277,7 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
     detail: { reason: drop.reason, operation: drop.operation },
     bubbles: true,
     composed: true,
+    cancelable: false,
   }));
 }
 

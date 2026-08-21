@@ -93,12 +93,24 @@ export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: Poi
  * `preventDefault()` and the event cannot be canceled.
  */
 export type ViewportChangeDetail = { readonly viewport: Viewport };
+/**
+ * Detail of the `flow-connect` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type ConnectDetail = {
   readonly source: string;
   readonly target: string;
   readonly sourceHandle?: string;
   readonly targetHandle?: string;
 };
+/**
+ * Detail of the `flow-selection-change` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type SelectionChangeDetail = {
   readonly nodes: readonly Node[];
   readonly edges: readonly Edge[];
@@ -146,6 +158,12 @@ export type ViewportBounds = {
   readonly bottom: number;
 };
 
+/**
+ * Detail of the `flow-admit-rejected` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type AdmitRejectedDetail = {
   readonly reason: "too_many_nodes" | "too_many_edges" | "invalid";
   readonly nodeCount: number;

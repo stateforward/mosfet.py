@@ -7,6 +7,12 @@ import { catchFailure } from "../hsm.ts";
 import { type OtelSource as StreamSource } from "../otel/source.ts";
 import { applyStyles } from "./styles.ts";
 
+/**
+ * Detail of the `bot-otel-source` CustomEvent emitted when the source is ready.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type OtelSourceDetail = {
   source: StreamSource;
 };
@@ -103,6 +109,7 @@ export class BotOtelSource extends OtelSource {
           detail: { source },
           bubbles: true,
           composed: true,
+          cancelable: false,
         }),
       );
     };
