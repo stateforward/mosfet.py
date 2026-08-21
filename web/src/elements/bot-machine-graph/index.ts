@@ -10,6 +10,8 @@ import { graphStyles } from "./styles.ts";
 const ELEMENT_NAME = "bot-machine-graph";
 /** Public attribute. This host is the only writer; value is `graphNodeCount(#held)`. */
 const NODE_COUNT_ATTR = "data-node-count";
+const NESTED_NODES_DRAGGABLE = false;
+const NESTED_PAN_ON_DRAG = true;
 
 /**
  * Detail of the `bot-machine-graph-zoom` CustomEvent.
@@ -134,6 +136,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     const background = document.createElement("flow-background");
     const controls = document.createElement("flow-controls");
     this.#flow.append(background, controls);
+    this.#flow.nodesDraggable = NESTED_NODES_DRAGGABLE;
+    this.#flow.panOnDrag = NESTED_PAN_ON_DRAG;
     this.#root.append(this.#flow);
   }
 
@@ -188,8 +192,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static onConnected(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph)) return;
     const ctx = instance.context();
-    instance.#flow.nodesDraggable = false;
-    instance.#flow.panOnDrag = true;
     instance.#graph = hsm.start(ctx, new Graph(), Graph.model);
     instance.addEventListener("flow-node-click", instance.#onNodeClick);
     instance.addEventListener("flow-edge-click", instance.#onEdgeClick);
@@ -309,7 +311,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#held = copyGraphs(graphs);
     const model = flowModelFromGraphs(this.#held);
     this.#model = model;
-    this.#focusableNames = focusableMachineNames(this.#held, model);
+    this.#focusableNames = focusableMachineNames({ graphs: this.#held, model });
     this.#flow.nodes = model.nodes;
     this.#flow.edges = model.edges;
     this.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(this.#held)));
@@ -396,10 +398,13 @@ function graphFromEvent(event: hsm.Event): Graph | null {
   return event.data["graph"];
 }
 
-function focusableMachineNames(graphs: readonly MachineGraph[], model: FlowGraphModel): ReadonlySet<string> {
+function focusableMachineNames(args: {
+  graphs: readonly MachineGraph[];
+  model: FlowGraphModel;
+}): ReadonlySet<string> {
   const names = new Set<string>();
-  for (const graph of graphs) {
-    if (focusBoundsForMachine(graphs, graph.name, model) !== null) names.add(graph.name);
+  for (const graph of args.graphs) {
+    if (focusBoundsForMachine(args.graphs, graph.name, args.model) !== null) names.add(graph.name);
   }
   return names;
 }

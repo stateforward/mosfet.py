@@ -13,6 +13,8 @@ registerBotMachineGraph();
 
 const YIELD_MS = 0;
 const FRAME_PART = '[part="frame"]';
+const NESTED_NODES_DRAGGABLE = false;
+const NESTED_PAN_ON_DRAG = true;
 
 function flowFrame(host: BotMachineGraph): FlowGraph {
   const flow = host.shadowRoot?.querySelector(FRAME_PART);
@@ -61,6 +63,16 @@ function graphFor(name: string) {
 }
 
 describe("bot-machine-graph flow host", () => {
+  test("nested connect admits nodesDraggable false after the child starts", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    const flow = flowFrame(host);
+    await waitUntil(() => flow.isConnected);
+    assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
+    assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
+    host.remove();
+  });
+
   test("admits graphs and focuses a machine on a defined element", async () => {
     const host = document.createElement("bot-machine-graph");
     assert.ok(host instanceof BotMachineGraph);

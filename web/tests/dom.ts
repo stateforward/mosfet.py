@@ -86,8 +86,7 @@ class FakeElement {
       if (typeof node === "string") child.textContent = node;
       child.parentNode = this;
       this.childNodes.push(child);
-      const connected = (child as FakeElement & { connectedCallback?: () => void }).connectedCallback;
-      if (typeof connected === "function") connected.call(child);
+      if (this.isConnected) connectTree(child);
     }
   }
 
@@ -193,7 +192,16 @@ class FakeElement {
   }
 
   get isConnected(): boolean {
-    return this.parentNode !== null;
+    let current: FakeElement | null = this;
+    while (current !== null) {
+      if (current.localName === "body") return true;
+      if (current instanceof FakeShadowRoot) {
+        current = current.host;
+        continue;
+      }
+      current = current.parentNode;
+    }
+    return false;
   }
 
   closest(selector: string): FakeElement | null {
@@ -277,11 +285,28 @@ function matchSelector(element: FakeElement, selector: string): boolean {
   return element.localName === selector;
 }
 
+const treeConnected = new WeakSet<FakeElement>();
+
+function connectTree(element: FakeElement): void {
+  if (treeConnected.has(element)) return;
+  treeConnected.add(element);
+  const connected = (element as FakeElement & { connectedCallback?: () => void }).connectedCallback;
+  if (typeof connected === "function") connected.call(element);
+  if (element.shadowRoot !== null) {
+    for (const child of [...element.shadowRoot.childNodes]) connectTree(child);
+  }
+  for (const child of [...element.childNodes]) connectTree(child);
+}
+
 function disconnectTree(element: FakeElement): void {
+  if (!treeConnected.has(element)) return;
   const disconnected = (element as FakeElement & { disconnectedCallback?: () => void }).disconnectedCallback;
   if (typeof disconnected === "function") disconnected.call(element);
+  treeConnected.delete(element);
   for (const child of [...element.childNodes]) disconnectTree(child);
-  if (element.shadowRoot !== null) disconnectTree(element.shadowRoot);
+  if (element.shadowRoot !== null) {
+    for (const child of [...element.shadowRoot.childNodes]) disconnectTree(child);
+  }
 }
 
 class FakeShadowRoot extends FakeElement {
