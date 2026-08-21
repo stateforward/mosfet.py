@@ -51,5 +51,7 @@ describe("hsm.from(HTMLElement)", () => {
     assert.equal(typeof nested, "function");
     // @ts-expect-error -- random objects are not define() results
     hsm.submachineState({ name: "region", machine: { not: "a model" } });
+    // @ts-expect-error -- members-only objects are not define() results
+    hsm.submachineState({ name: "region", machine: { members: {} } });
   });
 });

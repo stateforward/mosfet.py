@@ -30,27 +30,29 @@ export {
 export type { Completion, Dispatchable, DispatchEvent, Event, Model, Snapshot } from "@stateforward/hsm.ts";
 
 type DefinedModel = {
-  readonly members: object;
+  readonly [K in keyof library.Model & string]: library.Model[K];
 };
 
 /**
  * Nest a `define()` result as a region.
  *
- * Inputs: `name` is the region name; `machine` is a `define()` result (must
- * carry `members`). Outputs: the library region builder used inside `define()`.
+ * Inputs: `name` is the region name; `machine` is a `define()` result
+ * (homomorphic with `library.Model`, so `{ members: {} }` is a type error).
+ * Outputs: the library region builder used inside `define()`.
  * Ownership: this module is the only site allowed to talk to library
  * `submachineState`. Lifetime: the returned builder is consumed by `define()`.
- * Concurrency: construction-only. Failure modes: a value without `members` is
- * a type error; library `Model` assignability is isolated below.
+ * Concurrency: construction-only. Failure modes: a members-only object or a
+ * value missing `Model` keys is a type error; library `Model` assignability
+ * under `exactOptionalPropertyTypes` is isolated below.
  * Classification: initialization-only.
  *
  * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at
- * `args.machine as unknown as library.Model`. Owner: web/src/hsm.ts.
+ * `args.machine as library.Model`. Owner: web/src/hsm.ts.
  * Rationale: library `submachineState` takes `machine: Model`. `define()`
  * returns `TypedModelFromInfer`, which maps optional `Model` keys to
  * `T | undefined` under `exactOptionalPropertyTypes`, so a `define()` result
- * is not assignable to `Model`. Isolated to this boundary. Do not pass
- * `machine: object`.
+ * is not assignable to `Model`. Isolated to this boundary as a single
+ * assertion. Do not pass `machine: object` or `{ members: object }`.
  * Risk tests: web/tests/from.test.ts, web/tests/flow-graph.test.ts.
  * Expiration: library `submachineState` accepts `define()` results without
  * assertion.
@@ -60,7 +62,7 @@ type DefinedModel = {
 export function submachineState<Name extends string, Machine extends DefinedModel>(
   args: { name: Name; machine: Machine },
 ): ReturnType<typeof library.submachineState> {
-  return library.submachineState(args.name, args.machine as unknown as library.Model);
+  return library.submachineState(args.name, args.machine as library.Model);
 }
 
 /**
