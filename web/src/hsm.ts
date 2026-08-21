@@ -69,6 +69,8 @@ export function submachineState<Name extends string, Machine extends DefinedMode
  * Host protocol after `start(this, model)`.
  * The host remains a custom element. It is not `instanceof Instance`.
  * `start` binds the library runtime onto `this`.
+ * `stop` unbinds the same way as module `stop`: further dispatch is a host-drop
+ * with reason `"stopped"`, not `"unstarted"`.
  */
 export type Host = {
   dispatch(event: library.DispatchEvent): library.Completion;
@@ -139,6 +141,13 @@ export function from<TBase extends HostConstructor>(
     if (key === "constructor") continue;
     Object.defineProperty(HostElement.prototype, key, descriptor);
   }
+  Object.defineProperty(HostElement.prototype, "stop", {
+    configurable: true,
+    writable: true,
+    value(this: object): Promise<void> {
+      return stop(this);
+    },
+  });
   return HostElement as unknown as new () => InstanceType<TBase> & Host;
 }
 
@@ -270,16 +279,32 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error), { cause: error });
 }
 
-export function hostDropFrom(error: unknown, host?: object): HostDropError | null {
-  if (error instanceof HostDropError) return error;
-  if (!(error instanceof Error) || !error.message.endsWith("requires a started HSM")) return null;
-  const operation = error.message.replace(/ requires a started HSM$/, "");
-  const reason = hostWasStopped(host) ? "stopped" : "unstarted";
-  return new HostDropError({ reason, operation, cause: error });
+/**
+ * Classify a library "requires a started HSM" rejection as a host-drop.
+ *
+ * Inputs: `error` is the rejection; `host` is the machine that refused the
+ * operation and is required at this boundary. Outputs: a `HostDropError` with
+ * `reason` `"stopped"` when this module has seen `start` then `stop` on
+ * `host`, otherwise `"unstarted"`; `null` when `error` is not a started-HSM
+ * rejection. Precondition: `host` must be the host object whose bind tokens
+ * this module owns. Omitting `host` is a caller contract violation and does
+ * not classify the drop (`null`); it never reports `"unstarted"` for an
+ * unknown host. Ownership: does not retain `host`. Lifetime: `host` must
+ * still carry this module's bind tokens from `start`/`stop`. Concurrency:
+ * synchronous. Failure modes: missing host returns `null`; an already
+ * constructed `HostDropError` is returned as-is.
+ * Classification: runtime-safe.
+ */
+export function hostDropFrom(args: { error: unknown; host: object }): HostDropError | null {
+  if (args.error instanceof HostDropError) return args.error;
+  if (!(args.error instanceof Error) || !args.error.message.endsWith("requires a started HSM")) return null;
+  if (args.host === undefined || args.host === null) return null;
+  const operation = args.error.message.replace(/ requires a started HSM$/, "");
+  const reason = hostWasStopped(args.host) ? "stopped" : "unstarted";
+  return new HostDropError({ reason, operation, cause: args.error });
 }
 
-function hostWasStopped(host: object | undefined): boolean {
-  if (host === undefined) return false;
+function hostWasStopped(host: object): boolean {
   const bound = host as BoundHost;
   return bound[WAS_STARTED] === true && bound[BIND] !== true;
 }
@@ -307,7 +332,7 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
  * Classification: runtime-safe.
  */
 export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
-  const drop = hostDropFrom(args.error, args.host);
+  const drop = args.host === undefined ? null : hostDropFrom({ error: args.error, host: args.host });
   if (drop !== null) {
     emitDrop(args.host, drop);
     throw drop;
@@ -334,7 +359,7 @@ export function reportFailure(args: { error: unknown; host?: EventTarget }): Err
  */
 export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {
-    const drop = hostDropFrom(error, host);
+    const drop = host === undefined ? null : hostDropFrom({ error, host });
     if (drop !== null) {
       emitDrop(host, drop);
       return;

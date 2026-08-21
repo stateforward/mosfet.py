@@ -512,12 +512,19 @@ describe("companion-style HSM controllers", () => {
     globalWithReportError.reportError = (error) => {
       reports.push(error);
     };
+    const startedHsmError = new Error("dispatch requires a started HSM");
+    const unstarted = "unstarted";
+    const host = document.createElement("div");
     try {
-      assert.throws(() => hsm.reportFailure({ error: new Error("dispatch requires a started HSM") }), hsm.HostDropError);
-      hsm.catchFailure()(new Error("dispatch requires a started HSM"));
+      assert.throws(
+        () => hsm.reportFailure({ error: startedHsmError, host }),
+        (error: unknown) => error instanceof hsm.HostDropError && error.reason === unstarted,
+      );
+      hsm.reportFailure({ error: startedHsmError });
+      hsm.catchFailure()(startedHsmError);
       const unexpected = new Error("unexpected HSM failure");
       hsm.reportFailure({ error: unexpected });
-      assert.deepEqual(reports, [unexpected]);
+      assert.deepEqual(reports, [startedHsmError, startedHsmError, unexpected]);
     } finally {
       if (previous === undefined) {
         delete globalWithReportError.reportError;

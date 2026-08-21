@@ -1347,7 +1347,7 @@ describe("flow-graph", () => {
         });
       }
     });
-    await hsm.stop(graph);
+    await graph.stop();
     graph.nodes = [{ id: rejectedNodeId, position: { x: 1, y: 1 }, data: {} }];
     await flush();
     assert.equal(graph.nodes[0]?.id, priorNodeId);

@@ -149,7 +149,7 @@ describe("hsm.from(HTMLElement)", () => {
     hsm.start(host, StopDropHost.model);
     await host.dispatch(hsm.typedEvent({ event: StopDropHost.pingEvent }));
     assert.match(host.state(), /\/active$/);
-    await hsm.stop(host);
+    await host.stop();
     assert.equal(host.state(), "");
     host.requestPing();
     await Promise.resolve();
@@ -162,6 +162,32 @@ describe("hsm.from(HTMLElement)", () => {
     }
     assert.ok(drops.some((drop) => drop.reason === stopped));
     assert.equal(host.state(), "");
+    host.remove();
+  });
+
+  test("hostDropFrom requires host and classifies stopped versus unstarted", async () => {
+    class ClassifyHost extends hsm.from(HTMLElement) {
+      static readonly model = hsm.define(
+        "ClassifyHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+      );
+    }
+
+    if (customElements.get("test-classify-host") === undefined) {
+      customElements.define("test-classify-host", ClassifyHost);
+    }
+    const host = document.createElement("test-classify-host");
+    assert.ok(host instanceof ClassifyHost);
+    const startedHsmError = new Error("dispatch requires a started HSM");
+    const unstarted = "unstarted";
+    const stopped = "stopped";
+    assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, unstarted);
+    // @ts-expect-error host is required to classify unstarted versus stopped
+    assert.equal(hsm.hostDropFrom({ error: startedHsmError }), null);
+    hsm.start(host, ClassifyHost.model);
+    await host.stop();
+    assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, stopped);
     host.remove();
   });
 });
