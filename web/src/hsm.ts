@@ -153,8 +153,9 @@ export function from<TBase extends HostConstructor>(
 
 const BIND = Symbol("hsm-bind");
 const WAS_STARTED = Symbol("hsm-was-started");
+const STOP = Symbol("host-stop");
 
-type BoundHost = { [BIND]?: true; [WAS_STARTED]?: true };
+type BoundHost = { [BIND]?: true; [WAS_STARTED]?: true; [STOP]?: Promise<void> };
 
 /**
  * Bind library runtime onto `instance` and enter the model.
@@ -196,13 +197,35 @@ export function start<I extends object, M>(
   return started as I & Host;
 }
 
-/** Stop the library runtime on `machine`. Further dispatch is a host-drop. */
+/**
+ * Stop the library runtime on `machine`. Further dispatch is a host-drop.
+ *
+ * BIND stays set until library `Instance.prototype.stop` settles so `start()`
+ * no-ops for the whole RTC. Unbind in `finally` after that await (success or
+ * reject). Overlapping `stop()` awaits the in-flight library stop and classifies
+ * mid-stop dispatch as `"stopped"`, not `"unstarted"`.
+ */
 export async function stop(machine: object): Promise<void> {
-  delete (machine as BoundHost)[BIND];
+  const bound = machine as BoundHost;
+  const inflight = bound[STOP];
+  if (inflight !== undefined) {
+    await inflight;
+    return;
+  }
+  const run = stopBound(bound);
+  bound[STOP] = run;
   try {
-    await library.Instance.prototype.stop.call(machine);
+    await run;
   } finally {
-    delete (machine as BoundHost)[BIND];
+    delete bound[STOP];
+  }
+}
+
+async function stopBound(bound: BoundHost): Promise<void> {
+  try {
+    await library.Instance.prototype.stop.call(bound);
+  } finally {
+    delete bound[BIND];
   }
 }
 
@@ -279,7 +302,7 @@ export class HostRequiredError extends Error {
   }
 }
 
-function isStartedHsmRejection(error: unknown): error is Error {
+function isStartedRuntimeRejection(error: unknown): error is Error {
   return error instanceof Error && error.message.endsWith("requires a started HSM");
 }
 
@@ -321,7 +344,7 @@ function toError(error: unknown): Error {
  */
 export function hostDropFrom(args: { error: unknown; host: object }): HostDropError | null {
   if (args.error instanceof HostDropError) return args.error;
-  if (!isStartedHsmRejection(args.error)) return null;
+  if (!isStartedRuntimeRejection(args.error)) return null;
   if (args.host === undefined || args.host === null) throw new HostRequiredError();
   const operation = args.error.message.replace(/ requires a started HSM$/, "");
   const reason = hostWasStopped(args.host) ? "stopped" : "unstarted";
@@ -330,7 +353,7 @@ export function hostDropFrom(args: { error: unknown; host: object }): HostDropEr
 
 function hostWasStopped(host: object): boolean {
   const bound = host as BoundHost;
-  return bound[WAS_STARTED] === true && bound[BIND] !== true;
+  return bound[WAS_STARTED] === true && (bound[BIND] !== true || bound[STOP] !== undefined);
 }
 
 function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
@@ -362,7 +385,7 @@ function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
 export function reportFailure(args: { error: unknown; host?: EventTarget }): Error {
   if (args.host === undefined) {
     if (args.error instanceof HostDropError) throw args.error;
-    if (isStartedHsmRejection(args.error)) throw new HostRequiredError();
+    if (isStartedRuntimeRejection(args.error)) throw new HostRequiredError();
   } else {
     const drop = hostDropFrom({ error: args.error, host: args.host });
     if (drop !== null) {
@@ -396,7 +419,7 @@ export function catchFailure(host?: EventTarget): (error: unknown) => void {
   return (error: unknown): void => {
     if (host === undefined) {
       if (error instanceof HostDropError) return;
-      if (isStartedHsmRejection(error)) throw new HostRequiredError();
+      if (isStartedRuntimeRejection(error)) throw new HostRequiredError();
       reportFailure({ error });
       return;
     }

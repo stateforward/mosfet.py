@@ -179,20 +179,20 @@ describe("hsm.from(HTMLElement)", () => {
     }
     const host = document.createElement("test-classify-host");
     assert.ok(host instanceof ClassifyHost);
-    const startedHsmError = new Error("dispatch requires a started HSM");
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
     const unstarted = "unstarted";
     const stopped = "stopped";
-    assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, unstarted);
+    assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, unstarted);
     assert.throws(
       () => {
         // @ts-expect-error host is required to classify unstarted versus stopped
-        hsm.hostDropFrom({ error: startedHsmError });
+        hsm.hostDropFrom({ error: startedRuntimeError });
       },
       (error: unknown) => error instanceof hsm.HostRequiredError,
     );
     hsm.start(host, ClassifyHost.model);
     await host.stop();
-    assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, stopped);
+    assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
     host.remove();
   });
 
@@ -211,7 +211,7 @@ describe("hsm.from(HTMLElement)", () => {
     }
     const host = document.createElement("test-reject-stop-host");
     assert.ok(host instanceof RejectStopHost);
-    const startedHsmError = new Error("dispatch requires a started HSM");
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
     const stopped = "stopped";
     const libraryStopFailed = "library stop failed";
     const originalStop = library.Instance.prototype.stop;
@@ -221,7 +221,48 @@ describe("hsm.from(HTMLElement)", () => {
     hsm.start(host, RejectStopHost.model);
     try {
       await assert.rejects(() => host.stop(), (error: unknown) => error instanceof Error && error.message === libraryStopFailed);
-      assert.equal(hsm.hostDropFrom({ error: startedHsmError, host })?.reason, stopped);
+      assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
+    } finally {
+      library.Instance.prototype.stop = originalStop;
+      host.remove();
+    }
+  });
+
+  test("overlapping Host.stop does not classify mid-stop as unstarted", async () => {
+    class OverlapStopHost extends hsm.from(HTMLElement) {
+      static readonly model = hsm.define(
+        "OverlapStopHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+      );
+    }
+
+    if (customElements.get("test-overlap-stop-host") === undefined) {
+      customElements.define("test-overlap-stop-host", OverlapStopHost);
+    }
+    const host = document.createElement("test-overlap-stop-host");
+    assert.ok(host instanceof OverlapStopHost);
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
+    const stopped = "stopped";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalStop = library.Instance.prototype.stop;
+    library.Instance.prototype.stop = async function (this: object): Promise<void> {
+      await gate;
+      return originalStop.call(this);
+    };
+    hsm.start(host, OverlapStopHost.model);
+    try {
+      const first = host.stop();
+      const second = host.stop();
+      assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
+      hsm.start(host, OverlapStopHost.model);
+      assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
+      release();
+      await Promise.all([first, second]);
+      assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
     } finally {
       library.Instance.prototype.stop = originalStop;
       host.remove();
