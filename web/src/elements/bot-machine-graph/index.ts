@@ -143,6 +143,21 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.fitEvent }));
   }
 
+  /**
+   * Dispatch `focus_machine` with `machineName`.
+   *
+   * Inputs: `machineName` is the machine path to focus. Outputs: void; this
+   * method always dispatches and does not report whether a machine exists.
+   * Ownership: this host owns the dispatch; the inner graph applies or no-ops
+   * in `applyFocus`. Lifetime: safe after `connectedCallback`/`start`;
+   * unstarted or stopped hosts surface host-drop through `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: a missing machine no-ops inside `applyFocus` (no
+   * `fitBounds`, `data-node-count` unchanged). Callers observe
+   * `data-node-count` and viewport/`fitBounds` effects rather than a boolean
+   * return.
+   * Classification: runtime-safe.
+   */
   focusMachine(machineName: string): void {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.focusEvent, data: { machineName } satisfies FocusData }));
   }
