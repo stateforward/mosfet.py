@@ -822,8 +822,10 @@ describe("companion-style HSM controllers", () => {
 
   test("postCommandHttp maps abort to canceled", async () => {
     const originalFetch = globalThis.fetch;
+    let fetched = false;
     const abort = new AbortController();
     globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
+      fetched = true;
       const signal = init?.signal;
       return await new Promise((_resolve, reject) => {
         const fail = (): void => {
@@ -846,6 +848,43 @@ describe("companion-style HSM controllers", () => {
         signal: abort.signal,
       });
       assert.equal(result.result, "canceled");
+      assert.equal(fetched, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("postCommandHttp maps abort after fetch is entered to interrupted", async () => {
+    const originalFetch = globalThis.fetch;
+    const abort = new AbortController();
+    let entered = false;
+    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
+      entered = true;
+      const signal = init?.signal;
+      return await new Promise((_resolve, reject) => {
+        const fail = (): void => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (signal?.aborted === true) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail);
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const pending = postCommandHttp({
+        eventName: "phone.ring",
+        dataJson: "",
+        signal: abort.signal,
+      });
+      await waitFor(() => entered);
+      abort.abort();
+      const result = await pending;
+      assert.equal(result.result, "error");
+      assert.equal(result.detail, "command reply interrupted");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -904,6 +943,44 @@ describe("companion-style HSM controllers", () => {
       const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
       assert.equal(result.result, "error");
       assert.equal(result.detail, "command reply interrupted");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Command.post abort after fetch is entered is interrupted", async () => {
+    const originalFetch = globalThis.fetch;
+    let entered = false;
+    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
+      entered = true;
+      const signal = init?.signal;
+      return await new Promise((_resolve, reject) => {
+        const fail = (): void => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (signal?.aborted === true) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail);
+      });
+    }) as unknown as typeof fetch;
+    let posted: DashboardSnapshot["commandResult"] | undefined;
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted = await postCommandHttp(command);
+        return posted;
+      },
+    });
+    try {
+      void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
+      await waitFor(() => entered);
+      await dashboard.stop();
+      await waitFor(() => posted !== undefined);
+      assert.equal(posted?.result, "error");
+      assert.equal(posted?.detail, "command reply interrupted");
     } finally {
       globalThis.fetch = originalFetch;
     }

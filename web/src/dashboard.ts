@@ -60,10 +60,19 @@ export type CommandResult = {
  *
  * Inputs: `eventName`, `dataJson`, optional `signal`.
  * Outputs: a `CommandResult`. A resolved result is final even if `signal` later
- * aborts. Throwing `AbortError` means the command was not issued (`canceled`).
- * Classification: external-system. Cancellation: abort before the request is
- * sent is unsent; after send the adapter must return the gateway result or an
- * unknown-commit `error`, never relabel a committed POST as unsent `canceled`.
+ * aborts.
+ * Ownership: caller owns `signal` and the returned promise; this type does not
+ * retain the command.
+ * Lifetime: one HTTP round-trip; settling the promise ends the call.
+ * Concurrency: overlapping posts are independent; the dashboard sequences them
+ * with `id`.
+ * Failure modes:
+ * - abort observed before `fetch` is invoked => `canceled` / unsent
+ * - abort after `fetch` is invoked => `error` / "command reply interrupted"
+ *   (unknown commit); never relabel a sent POST as unsent `canceled`
+ * - illegal `eventName` => `error`
+ * Units: none.
+ * Classification: external-system.
  */
 export type CommandPost = (command: {
   eventName: string;
@@ -156,6 +165,10 @@ function replayPositionFromEvent(event: hsm.Event): number | null {
   return event.data["position"];
 }
 
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted;
+}
+
 /**
  * POST `/v1/commands`.
  *
@@ -166,8 +179,10 @@ function replayPositionFromEvent(event: hsm.Event): number | null {
  * Concurrency: overlapping calls are independent fetches.
  * Failure modes:
  * - illegal `eventName` => `error` / "event_name is not an allowed command"
- * - abort before `fetch` resolves => `canceled` / "command canceled" (HTTP did
- *   not commit)
+ * - abort observed before `fetch` is invoked => `canceled` / "command canceled"
+ *   (HTTP did not commit)
+ * - abort after `fetch` is invoked, including AbortError before the response
+ *   resolves => `error` / "command reply interrupted" (commit unknown)
  * - `fetch` resolves and JSON is a CommandResult, including gateway `canceled`
  *   => that payload as-is even if `signal` is already aborted (HTTP committed;
  *   gateway `canceled` is a domain cancel, not an unsent request)
@@ -185,7 +200,9 @@ export async function postCommandHttp(command: {
   if (!COMMAND_EVENT_NAME.test(command.eventName)) {
     return { result: "error", detail: "event_name is not an allowed command" };
   }
-  let committed = false;
+  if (signalAborted(command.signal)) {
+    return { result: "canceled", detail: "command canceled" };
+  }
   try {
     const response = await fetch("/v1/commands", {
       method: "POST",
@@ -193,7 +210,6 @@ export async function postCommandHttp(command: {
       body: JSON.stringify({ event_name: command.eventName, data_json: command.dataJson }),
       ...(command.signal !== undefined ? { signal: command.signal } : {}),
     });
-    committed = true;
     const payload: unknown = await response.json();
     if (!hsm.isRecord(payload) || typeof payload["result"] !== "string" || typeof payload["detail"] !== "string") {
       return { result: "error", detail: "invalid command reply" };
@@ -208,11 +224,8 @@ export async function postCommandHttp(command: {
     }
     return { result: "error", detail: payload["detail"] };
   } catch (error) {
-    const aborted = command.signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
-    if (!committed && aborted) {
-      return { result: "canceled", detail: "command canceled" };
-    }
-    if (committed && aborted) {
+    const aborted = signalAborted(command.signal) || (error instanceof Error && error.name === "AbortError");
+    if (aborted) {
       return { result: "error", detail: "command reply interrupted" };
     }
     return { result: "error", detail: "command request failed" };
@@ -587,11 +600,11 @@ class Command extends hsm.Instance {
   }
 
   /**
-   * Failure effect: abort before `instance.post` is invoked means the HTTP
-   * command did not commit (`canceled`). `instance.post` is not aborted after
-   * it is invoked; its resolved `CommandResult` is final — including
-   * accepted/no_subscriber after `ctx.done`. Thrown `AbortError` means the
-   * adapter did not issue the command (`canceled`).
+   * Failure effect: abort observed before `instance.post` is invoked is unsent
+   * `canceled`. `ctx.done` is wired to `CommandPost.signal`. Abort after the
+   * adapter is invoked uses the adapter result: unsent `canceled` only when the
+   * adapter reports that, otherwise unknown-commit `error` / interrupted.
+   * A resolved `CommandResult` is final.
    */
   static async post(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
     if (!(instance instanceof Command)) return;
@@ -611,20 +624,39 @@ class Command extends hsm.Instance {
       });
     };
     const canceled: CommandResult = { result: "canceled", detail: "command canceled" };
+    const interrupted: CommandResult = { result: "error", detail: "command reply interrupted" };
     if (ctx.done) {
       await finish({ event: Command.canceledEvent, result: canceled });
       return;
     }
+    const abort = new AbortController();
+    const onDone = (): void => {
+      abort.abort();
+    };
+    ctx.addEventListener("done", onDone);
+    if (ctx.done) {
+      onDone();
+      ctx.removeEventListener("done", onDone);
+      await finish({ event: Command.canceledEvent, result: canceled });
+      return;
+    }
+    let invoked = false;
     let posted: CommandResult | undefined;
     try {
-      posted = await instance.post({ eventName: name, dataJson: payload });
+      invoked = true;
+      posted = await instance.post({ eventName: name, dataJson: payload, signal: abort.signal });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
-        await finish({ event: Command.canceledEvent, result: canceled });
+        await finish({
+          event: invoked ? Command.failedEvent : Command.canceledEvent,
+          result: invoked ? interrupted : canceled,
+        });
         return;
       }
       await finish({ event: Command.failedEvent, result: { result: "error", detail: "command request failed" } });
       return;
+    } finally {
+      ctx.removeEventListener("done", onDone);
     }
     if (posted === undefined) return;
     if (posted.result === "accepted" || posted.result === "no_subscriber") {
