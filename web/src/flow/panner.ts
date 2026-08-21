@@ -35,6 +35,7 @@ export type ViewportData = Viewport;
 
 const FIT_PADDING = 28;
 const MAX_FIT_ZOOM = 1.2;
+const MIN_PINCH_DISTANCE = 1;
 const ZOOM_STEP = 0.0015;
 
 export class Panner extends hsm.Instance {
@@ -123,7 +124,7 @@ export class Panner extends hsm.Instance {
     const second = points[1];
     if (first !== undefined && second !== undefined) {
       instance.#pinchStart = {
-        distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+        distance: Math.max(MIN_PINCH_DISTANCE, Math.hypot(second.x - first.x, second.y - first.y)),
         scale: instance.scale,
       };
     }
@@ -234,7 +235,7 @@ export class Panner extends hsm.Instance {
     const second = points[1];
     if (first === undefined || second === undefined) return;
     this.#pinchStart = {
-      distance: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+      distance: Math.max(MIN_PINCH_DISTANCE, Math.hypot(second.x - first.x, second.y - first.y)),
       scale: this.scale,
     };
   }
