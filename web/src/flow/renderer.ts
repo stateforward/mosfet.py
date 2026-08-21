@@ -23,6 +23,7 @@ export class Renderer extends hsm.Instance {
       hsm.entry(Renderer.notifyStarted),
       hsm.exit(Renderer.notifyStopped),
       hsm.defer(Renderer.markDirtyEvent.name),
+      hsm.activity(Renderer.reportParentCancel),
       hsm.initial(hsm.target("waiting")),
       hsm.transition(hsm.on(Renderer.renderCanceledEvent.name), hsm.target("../clean")),
       hsm.transition(hsm.on(hsm.ErrorEvent.name), hsm.target("../failed")),
@@ -66,15 +67,31 @@ export class Renderer extends hsm.Instance {
     }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
-  static async paintFrame(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+  static async reportParentCancel(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+    if (!(instance instanceof Renderer)) return;
+    const machineCtx = instance.context();
+    const onMachineDone = (): void => {
+      machineCtx.removeEventListener("done", onMachineDone);
+      void instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
+    };
+    machineCtx.addEventListener("done", onMachineDone);
+    if (machineCtx.done) onMachineDone();
+    await new Promise<void>((resolve) => {
+      const onActivityDone = (): void => {
+        ctx.removeEventListener("done", onActivityDone);
+        machineCtx.removeEventListener("done", onMachineDone);
+        resolve();
+      };
+      ctx.addEventListener("done", onActivityDone);
+      if (ctx.done) onActivityDone();
+    });
+  }
+
+  static async paintFrame(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof Renderer)) return;
     try {
       await hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Renderer.paintEvent }) });
     } catch (error) {
-      if (ctx.done) {
-        await instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
-        return;
-      }
       await instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }
   }
@@ -91,9 +108,8 @@ export class Renderer extends hsm.Instance {
  * Concurrency: one dirty/frame protocol per instance; overlapping mark_dirty is
  * deferred while rendering.
  * Failure modes: owner paint notify rejection while still painting enters
- * `/failed`; notify rejection after the activity context is already canceled
- * emits `render_canceled` on `rendering` (parent-owned cancel) and returns to
- * `/clean`. Units: none.
+ * `/failed` via `ErrorEvent`. Parent-owned cancel of the renderer context
+ * emits `render_canceled` on `rendering` and returns to `/clean`. Units: none.
  * Classification: runtime-safe.
  */
 export function startRenderer(args: {
