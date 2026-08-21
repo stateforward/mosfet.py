@@ -20,9 +20,9 @@ export class FlowControls extends HTMLElement {
     const root = this.attachShadow({ mode: "open" });
     applyStyles(root, controlsStyles);
     root.append(
-      controlButton("+", "zoom-in"),
-      controlButton("−", "zoom-out"),
-      controlButton("fit", "fit"),
+      controlButton({ label: "+", action: "zoom-in" }),
+      controlButton({ label: "−", action: "zoom-out" }),
+      controlButton({ label: "fit", action: "fit" }),
     );
     root.addEventListener("click", this.#onClick);
   }
@@ -45,14 +45,16 @@ export class FlowControls extends HTMLElement {
   };
 }
 
-function controlButton(label: string, action: string): HTMLButtonElement {
+const TEST_ID_ATTR = "data-testid";
+
+function controlButton(args: { label: string; action: FlowControlDetail["action"] }): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = label;
-  button.dataset["action"] = action;
-  button.part.add(action);
-  button.setAttribute("data-testid", action);
-  button.setAttribute("aria-label", action.replace("-", " "));
+  button.textContent = args.label;
+  button.dataset["action"] = args.action;
+  button.part.add(args.action);
+  button.setAttribute(TEST_ID_ATTR, args.action);
+  button.setAttribute("aria-label", args.action.replace("-", " "));
   return button;
 }
 

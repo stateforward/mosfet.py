@@ -239,3 +239,51 @@ test("flow-background variant lines and dots via property and attribute", async 
   expect(result.dotsAttribute.attr).toBe(BACKGROUND_VARIANT_DOTS);
   expect(result.dotsAttribute.image).toContain(BACKGROUND_DOTS_IMAGE);
 });
+
+test("flow-controls click emits composed flow-control and does not zoom", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(async () => {
+    await customElements.whenDefined("flow-controls");
+  });
+  const defined = await page.evaluate(() => customElements.get("flow-controls") !== undefined);
+  expect(defined).toBe(ELEMENT_DEFINED);
+
+  const probeId = "controls-probe";
+  const zoomIn = "zoom-in";
+  await page.evaluate((id) => {
+    const controls = document.createElement("flow-controls");
+    controls.id = id;
+    const actions: Array<{ action: string; cancelable: boolean; bubbles: boolean; composed: boolean }> = [];
+    controls.addEventListener("flow-control", (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail as { action?: unknown };
+      if (typeof detail.action !== "string") return;
+      actions.push({
+        action: detail.action,
+        cancelable: event.cancelable,
+        bubbles: event.bubbles,
+        composed: event.composed,
+      });
+    });
+    (globalThis as typeof globalThis & { __flowControlActions?: typeof actions }).__flowControlActions = actions;
+    document.body.append(controls);
+  }, probeId);
+
+  await page.locator(`#${probeId}`).getByTestId(zoomIn).click();
+  const result = await page.evaluate(() => {
+    const actions = (globalThis as typeof globalThis & {
+      __flowControlActions?: Array<{ action: string; cancelable: boolean; bubbles: boolean; composed: boolean }>;
+    }).__flowControlActions ?? [];
+    return { actions, zoom: document.body.style.zoom };
+  });
+  expect(result.actions).toEqual([{
+    action: zoomIn,
+    cancelable: false,
+    bubbles: true,
+    composed: true,
+  }]);
+  expect(result.zoom === "" || result.zoom === "1").toBe(true);
+  await page.evaluate((id) => {
+    document.getElementById(id)?.remove();
+  }, probeId);
+});
