@@ -4,6 +4,12 @@ import { controlsStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-controls";
 
+/**
+ * Detail of the `flow-control` CustomEvent.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Side-effect owner: the listener; the dispatcher does not interpret
+ * `preventDefault()` and the event cannot be canceled.
+ */
 export type FlowControlDetail = { readonly action: "zoom-in" | "zoom-out" | "fit" };
 
 export class FlowControls extends HTMLElement {
@@ -32,6 +38,7 @@ export class FlowControls extends HTMLElement {
       detail: { action },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   };
 }

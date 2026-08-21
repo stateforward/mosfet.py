@@ -613,6 +613,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       detail: { node: copyNode(sample.hit.node), originalEvent: sample.originalEvent },
       bubbles: EVENT_BUBBLES,
       composed: EVENT_COMPOSED,
+      cancelable: false,
     }));
   }
 
@@ -668,6 +669,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       detail: { edge: copyEdge(sample.hit.edge), originalEvent: sample.originalEvent },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   }
 
@@ -772,6 +774,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       detail: { viewport },
       bubbles: true,
       composed: true,
+      cancelable: false,
     }));
   }
 
@@ -898,6 +901,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       detail: { node: copyNode(node), originalEvent: args.origin },
       bubbles: EVENT_BUBBLES,
       composed: EVENT_COMPOSED,
+      cancelable: false,
     }));
   }
 
