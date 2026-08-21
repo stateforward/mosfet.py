@@ -1151,8 +1151,10 @@ export class BotDashboard extends Dashboard {
    * stamp `dashboard.graph.focus`. Replay steps do not raise `dashboard.graph.focus`.
    * Ownership: this host owns `#graph`. Lifetime: one focus request.
    * Concurrency: runtime-safe on this host's dispatch thread.
-   * Failure modes: empty names are dropped by the dashboard guard before this
-   * method; dispatch rejection is `catchFailure` host-drop or report.
+   * Failure modes: empty or non-string names never reach this method;
+   * the `dashboard.graph.focus` and `dashboard.machine.selected` guards drop
+   * them, and replay steps skip when `replayGraphName()` is empty. Dispatch
+   * rejection is `catchFailure` host-drop or report.
    * Classification: runtime-safe.
    */
   override applyGraphFocus(args: { machineName: string }): void {
