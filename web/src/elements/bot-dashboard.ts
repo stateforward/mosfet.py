@@ -652,6 +652,15 @@ function isVisibilityAction(value: string | undefined): value is VisibilityActio
   return value === "show-all" || value === "hide-all" || value === "hide-unobserved";
 }
 
+/**
+ * Environment workspace host.
+ *
+ * Inspector-control focus: if the observed-machine picker, a member
+ * `machine-select`, or a member visibility checkbox is focused when `#render`
+ * rebuilds those nodes, the same control kind for the same machine is focused
+ * after the snapshot rebuild. Missing or empty names are not restored.
+ * CSS-special machine names are selected with `CSS.escape`.
+ */
 export class BotDashboard extends Dashboard {
   readonly #root: ShadowRoot;
   readonly #inspectorStatus: HTMLParagraphElement;

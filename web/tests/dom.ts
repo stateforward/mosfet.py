@@ -27,7 +27,16 @@ class FakeElement {
   readonly localName: string;
   readonly childNodes: FakeElement[] = [];
   readonly attributes = new Map<string, string>();
-  readonly dataset: Record<string, string> = {};
+  readonly dataset: Record<string, string> = new Proxy({} as Record<string, string>, {
+    get: (target, key) => Reflect.get(target, key),
+    set: (target, key, value): boolean => {
+      if (typeof key !== "string") return false;
+      target[key] = String(value);
+      const attr = `data-${key.replace(/[A-Z]/g, (ch) => `-${ch.toLowerCase()}`)}`;
+      this.attributes.set(attr, String(value));
+      return true;
+    },
+  });
   readonly style: Record<string, string> & {
     setProperty(name: string, value: string): void;
     getPropertyValue(name: string): string;
@@ -76,6 +85,9 @@ class FakeElement {
   }
 
   replaceChildren(...nodes: Array<FakeElement | string>): void {
+    for (const child of this.childNodes) {
+      child.parentNode = null;
+    }
     this.childNodes.length = 0;
     this.append(...nodes);
   }
@@ -227,12 +239,26 @@ class FakeElement {
   tabIndex = 0;
 
   focus(): void {
-    return;
+    focusedElement = this;
   }
+}
+
+let focusedElement: FakeElement | null = null;
+
+function unescapeCss(value: string): string {
+  return value.replace(/\\(.)/g, "$1");
 }
 
 function matchSelector(element: FakeElement, selector: string): boolean {
   if (selector.startsWith(".")) return element.classList.contains(selector.slice(1));
+  const attr = selector.match(/^(?:([a-z][\w-]*)|)\[([^\s=\]]+)="((?:\\.|[^"\\])*)"\]$/i);
+  if (attr !== null) {
+    const tag = attr[1];
+    const name = attr[2];
+    const expected = unescapeCss(attr[3] ?? "");
+    if (tag !== undefined && element.localName !== tag) return false;
+    return element.getAttribute(name ?? "") === expected;
+  }
   if (selector.startsWith("[data-testid=")) {
     const value = selector.slice("[data-testid=".length).replace(/^["']|["'\]]$]/g, "").replace(/\]$/, "").replace(/^["']|["']$/g, "");
     return element.getAttribute("data-testid") === value;
@@ -254,12 +280,28 @@ class FakeShadowRoot extends FakeElement {
     super("shadow");
     this.host = host;
   }
+
+  get activeElement(): FakeElement | null {
+    let current: FakeElement | null = focusedElement;
+    while (current !== null) {
+      if (current === this) return focusedElement;
+      current = current.parentNode;
+    }
+    return null;
+  }
 }
 
 class FakeHTMLElement extends FakeElement {
-  constructor() {
-    const name = new.target.name.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
+  constructor(tagName?: string) {
+    const fromClass = new.target.name.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
+    const name = tagName ?? fromClass;
     super(name.startsWith("html") ? "div" : name);
+  }
+}
+
+class FakeHTMLInputElement extends FakeHTMLElement {
+  constructor() {
+    super("input");
   }
 }
 
@@ -269,11 +311,18 @@ class FakeDocument {
   createElement(tag: string): FakeElement {
     const ctor = registry.get(tag);
     if (ctor !== undefined) return new ctor();
-    return new FakeElement(tag);
+    if (tag === "input") return new FakeHTMLInputElement();
+    return new FakeHTMLElement(tag);
   }
 
   createElementNS(_ns: string, tag: string): FakeElement {
     return new FakeElement(tag);
+  }
+
+  createTextNode(text: string): FakeElement {
+    const node = new FakeElement("#text");
+    node.textContent = text;
+    return node;
   }
 }
 
@@ -395,6 +444,12 @@ if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined"
   Object.assign(globalThis, {
     Element: FakeElement,
     HTMLElement: FakeHTMLElement,
+    HTMLInputElement: FakeHTMLInputElement,
+    CSS: {
+      escape(value: string): string {
+        return [...value].map((ch) => (/[A-Za-z0-9_-]/.test(ch) ? ch : `\\${ch}`)).join("");
+      },
+    },
     document: new FakeDocument(),
     customElements: new FakeCustomElements(),
     CSSStyleSheet: FakeStyleSheet,
