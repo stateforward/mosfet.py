@@ -40,4 +40,16 @@ describe("hsm.from(HTMLElement)", () => {
     assert.match(host.state(), /\/active$/);
     await hsm.stop(host);
   });
+
+  test("submachineState accepts define() results and rejects random objects", () => {
+    const model = hsm.define(
+      "Nested",
+      hsm.initial(hsm.target("idle")),
+      hsm.state("idle"),
+    );
+    const nested = hsm.submachineState({ name: "region", machine: model });
+    assert.equal(typeof nested, "function");
+    // @ts-expect-error -- random objects are not define() results
+    hsm.submachineState({ name: "region", machine: { not: "a model" } });
+  });
 });

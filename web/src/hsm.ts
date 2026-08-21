@@ -23,12 +23,45 @@ export {
   Kinds,
   on,
   state,
-  submachineState,
   target,
   transition,
 } from "@stateforward/hsm.ts";
 
 export type { Completion, Dispatchable, DispatchEvent, Event, Model, Snapshot } from "@stateforward/hsm.ts";
+
+type DefinedModel = {
+  readonly members: object;
+};
+
+/**
+ * Nest a `define()` result as a region.
+ *
+ * Inputs: `name` is the region name; `machine` is a `define()` result (must
+ * carry `members`). Outputs: the library region builder used inside `define()`.
+ * Ownership: this module is the only site allowed to talk to library
+ * `submachineState`. Lifetime: the returned builder is consumed by `define()`.
+ * Concurrency: construction-only. Failure modes: a value without `members` is
+ * a type error; library `Model` assignability is isolated below.
+ * Classification: initialization-only.
+ *
+ * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at
+ * `args.machine as unknown as library.Model`. Owner: web/src/hsm.ts.
+ * Rationale: library `submachineState` takes `machine: Model`. `define()`
+ * returns `TypedModelFromInfer`, which maps optional `Model` keys to
+ * `T | undefined` under `exactOptionalPropertyTypes`, so a `define()` result
+ * is not assignable to `Model`. Isolated to this boundary. Do not pass
+ * `machine: object`.
+ * Risk tests: web/tests/from.test.ts, web/tests/flow-graph.test.ts.
+ * Expiration: library `submachineState` accepts `define()` results without
+ * assertion.
+ * Removal plan: re-export library `submachineState` and pass `pointerModel`
+ * through without this adapter.
+ */
+export function submachineState<Name extends string, Machine extends DefinedModel>(
+  args: { name: Name; machine: Machine },
+): ReturnType<typeof library.submachineState> {
+  return library.submachineState(args.name, args.machine as unknown as library.Model);
+}
 
 /**
  * Host protocol after `start(this, model)`.
