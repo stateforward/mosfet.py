@@ -1081,7 +1081,8 @@ export class BotDashboard extends Dashboard {
       const select = document.createElement("button");
       select.type = "button";
       select.className = "machine-select";
-      select.dataset["event"] = "dashboard.machine.selected";
+      const inspectorMachineEvents = ["dashboard.machine.selected", "dashboard.graph.focus"] as const;
+      select.dataset["event"] = inspectorMachineEvents.join(",");
       select.dataset["machineName"] = machine.name;
       select.setAttribute("aria-current", machine.name === selectedMachine ? "true" : "false");
       const name = document.createElement("span");
@@ -1313,20 +1314,20 @@ export class BotDashboard extends Dashboard {
     if (!(control instanceof HTMLElement)) {
       return;
     }
-    const eventName = control.dataset["event"];
-    if (eventName === undefined || !isDashboardEventName(eventName)) {
+    const offered = (control.dataset["event"] ?? "").split(",").map((name) => name.trim()).filter(isDashboardEventName);
+    const eventName = offered[0];
+    if (eventName === undefined) {
       return;
     }
-    if (eventName === "dashboard.machine.selected") {
+    if (offered.includes("dashboard.machine.selected")) {
       const machineName =
         control instanceof HTMLSelectElement ? control.value : control.dataset["machineName"];
       if (machineName === undefined) {
         return;
       }
-      if (!(control instanceof HTMLSelectElement)) {
-        void this.dispatch("dashboard.graph.focus", { machineName }).catch(catchFailure(this));
+      for (const name of offered) {
+        void this.dispatch(name, { machineName }).catch(catchFailure(this));
       }
-      void this.dispatch(eventName, { machineName }).catch(catchFailure(this));
       return;
     }
     if (eventName === "dashboard.command.send") {

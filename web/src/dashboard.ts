@@ -414,6 +414,12 @@ function applyGraphFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
   controllerOf(instance)?.applyGraphFocus({ machineName });
 }
 
+function applyReplayGraphFocus(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  const machineName = controllerOf(instance)?.replayGraphName() ?? null;
+  if (machineName === null) return;
+  controllerOf(instance)?.applyGraphFocus({ machineName });
+}
+
 async function streamLive(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
   const controller = controllerOf(instance);
   if (controller === null) {
@@ -508,14 +514,18 @@ const dashboardModel = hsm.define(
         hsm.effect(applyGraphFocus),
       ),
       hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("live/sourceCheck"), hsm.effect(rememberSource)),
-      hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("live/replay/paused"), hsm.effect(enterReplay)),
+      hsm.transition(
+        hsm.on("dashboard.replay.enter"),
+        hsm.target("live/replay/paused"),
+        hsm.effect(enterReplay, applyReplayGraphFocus),
+      ),
       hsm.state(
         "idle",
         hsm.transition(
           hsm.on("dashboard.replay.play"),
           hsm.guard(hasPlayableReplay),
           hsm.target("../live/replay/playing"),
-          hsm.effect(playReplay),
+          hsm.effect(playReplay, applyReplayGraphFocus),
         ),
       ),
       hsm.state(
@@ -543,21 +553,21 @@ const dashboardModel = hsm.define(
           hsm.initial(hsm.target("paused")),
           hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansReplay)),
           hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsReplay)),
-          hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
-          hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
-          hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
+          hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay, applyReplayGraphFocus)),
+          hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay, applyReplayGraphFocus)),
+          hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay, applyReplayGraphFocus)),
           hsm.transition(hsm.on("dashboard.replay.live"), hsm.target("../sourceCheck"), hsm.effect(returnToLive)),
           hsm.transition(
             hsm.on("dashboard.replay.play"),
             hsm.guard(hasPlayableReplay),
             hsm.target("playing"),
-            hsm.effect(playReplay),
+            hsm.effect(playReplay, applyReplayGraphFocus),
           ),
           hsm.transition(hsm.on("dashboard.replay.pause"), hsm.target("paused"), hsm.effect(pauseReplay)),
           hsm.state("paused"),
           hsm.state(
             "playing",
-            hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay)),
+            hsm.transition(hsm.every(replayStep), hsm.effect(nextReplay, applyReplayGraphFocus)),
           ),
         ),
       ),
@@ -968,12 +978,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = 0;
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#dispatchReplayGraphFocus();
   }
 
   playReplay(): void {
     this.#emit();
-    this.#dispatchReplayGraphFocus();
   }
 
   pauseReplay(): void {
@@ -984,61 +992,41 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#replayPosition = clampReplayPosition(this.#replayPosition - 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#dispatchReplayGraphFocus();
   }
 
   nextReplay(): void {
     this.#replayPosition = clampReplayPosition(this.#replayPosition + 1, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#dispatchReplayGraphFocus();
   }
 
   seekReplay(args: { position: number }): void {
     this.#replayPosition = clampReplayPosition(args.position, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
-    this.#dispatchReplayGraphFocus();
   }
 
   /**
-   * Forward a modeled `dashboard.graph.focus` command to a host-owned graph.
+   * Forward a modeled graph-focus request to a host-owned graph.
    *
    * Inputs: `machineName` from `dashboard.graph.focus` after the non-empty
-   * string guard. Outputs: none on this dashboard. Hosts that own a
-   * `BotMachineGraph` dispatch `focus_machine`. Snapshot render must not call
-   * this.
+   * string guard, or from `replayGraphName()` after a replay step effect.
+   * Outputs: none on this dashboard. Hosts that own a `BotMachineGraph`
+   * dispatch `focus_machine`. Snapshot render must not call this.
    * Ownership: this dashboard. Lifetime: one focus request.
    * Concurrency: runtime-safe on the dashboard dispatch thread.
-   * Failure modes: empty or non-string names never reach this method; the
-   * `dashboard.graph.focus` guard drops them. Missing replay names are not
-   * dispatched by `#dispatchReplayGraphFocus`.
+   * Failure modes: empty or non-string command names never reach this method;
+   * the `dashboard.graph.focus` guard drops them. Missing replay names make
+   * `applyReplayGraphFocus` a no-op.
    * Classification: runtime-safe.
    */
   applyGraphFocus(_args: { machineName: string }): void {
     return;
   }
 
-  #replayMachineName(): string | null {
+  replayGraphName(): string | null {
     const name = this.#replayEvents[this.#replayPosition - 1]?.span.attributes["hsm.machine.name"];
     return typeof name === "string" && name.length > 0 ? name : null;
-  }
-
-  /**
-   * Dispatch `dashboard.graph.focus` for the current replay machine.
-   *
-   * Inputs: `#replayMachineName()`. Outputs: a typed `dashboard.graph.focus`
-   * event when the name is a non-empty string.
-   * Failure modes: missing or empty names are not dispatched.
-   * Classification: runtime-safe.
-   */
-  #dispatchReplayGraphFocus(): void {
-    const machineName = this.#replayMachineName();
-    if (machineName === null) return;
-    void super.dispatch(hsm.typedEvent({
-      event: dashboardCommands["dashboard.graph.focus"],
-      data: { machineName },
-    })).catch(hsm.catchFailure(this));
   }
 
   returnToLive(): void {
