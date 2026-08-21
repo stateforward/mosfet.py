@@ -47,7 +47,8 @@ describe("Renderer dirty coalescing", () => {
     }) as Renderer["dispatch"];
     void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     await waitFor(() => /\/clean$/.test(renderer.state()) && paints >= 1);
-    assert.equal(canceled, 0);
+    const noCanceledFrames = 0;
+    assert.equal(canceled, noCanceledFrames);
     assert.ok(paints >= 1);
     await hsm.stop(renderer);
   });
@@ -65,7 +66,40 @@ describe("Renderer dirty coalescing", () => {
     }) as Renderer["dispatch"];
     void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     await waitFor(() => /\/failed$/.test(renderer.state()));
-    assert.equal(canceled, 0);
+    const noCanceledFrames = 0;
+    assert.equal(canceled, noCanceledFrames);
+    await hsm.stop(renderer);
+  });
+
+  test("paint notify rejection after activity cancel leaves painting via render_canceled", async () => {
+    const noCanceledFrames = 0;
+    let canceled = 0;
+    let rejectPaint: (error: Error) => void = () => {};
+    let paintStarted = (): void => {};
+    const started = new Promise<void>((resolve) => {
+      paintStarted = resolve;
+    });
+    const [ctx, cancel] = new hsm.Context().withCancel();
+    const renderer = hsm.start(ctx, new Renderer(), Renderer.model);
+    const inner = renderer.dispatch.bind(renderer);
+    renderer.dispatch = ((event: hsm.DispatchEvent) => {
+      if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;
+      if (event.name === Renderer.paintEvent.name) {
+        paintStarted();
+        return new Promise<void>((_resolve, reject) => {
+          rejectPaint = reject;
+        });
+      }
+      return inner(event);
+    }) as Renderer["dispatch"];
+    void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
+    await started;
+    assert.match(renderer.state(), /\/painting$/);
+    cancel();
+    rejectPaint(new Error("paint notify rejected after cancel"));
+    await waitFor(() => canceled > noCanceledFrames && !/\/painting$/.test(renderer.state()));
+    assert.ok(canceled > noCanceledFrames);
+    assert.match(renderer.state(), /\/clean$/);
     await hsm.stop(renderer);
   });
 });

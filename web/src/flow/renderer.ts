@@ -68,14 +68,13 @@ export class Renderer extends hsm.Instance {
 
   static async paintFrame(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof Renderer)) return;
-    if (ctx.done) {
-      await instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
-      return;
-    }
     try {
       await hsm.notifyOwner({ instance, event: hsm.typedEvent({ event: Renderer.paintEvent }) });
     } catch (error) {
-      if (ctx.done) return;
+      if (ctx.done) {
+        await instance.dispatch(hsm.typedEvent({ event: Renderer.renderCanceledEvent }));
+        return;
+      }
       await instance.dispatch({ ...hsm.ErrorEvent, data: error });
     }
   }
@@ -92,8 +91,9 @@ export class Renderer extends hsm.Instance {
  * Concurrency: one dirty/frame protocol per instance; overlapping mark_dirty is
  * deferred while rendering.
  * Failure modes: owner paint notify rejection while still painting enters
- * `/failed`; activity cancel before notify emits `render_canceled` and returns
- * to `/clean`. Units: none.
+ * `/failed`; notify rejection after the activity context is already canceled
+ * emits `render_canceled` on `rendering` (parent-owned cancel) and returns to
+ * `/clean`. Units: none.
  * Classification: runtime-safe.
  */
 export function startRenderer(args: {
