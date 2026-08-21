@@ -80,6 +80,22 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("remove then append still admits nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await flush();
+    assert.equal(graph.nodes[0]?.id, "a");
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    graph.nodes = [{ id: "b", position: { x: 8, y: 8 }, data: { label: "B" }, width: 80, height: 40 }];
+    await flush();
+    assert.equal(graph.nodes[0]?.id, "b");
+    graph.remove();
+  });
+
   test("pans through dispatched pointer events", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);

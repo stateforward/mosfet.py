@@ -67,7 +67,11 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
       hsm.defer(BotMachineGraph.focusEvent.name),
       hsm.defer(BotMachineGraph.nodeClickEvent.name),
       hsm.activity(BotMachineGraph.stopActors),
-      hsm.transition(hsm.on(BotMachineGraph.stoppedEvent.name), hsm.target("../disconnected")),
+      hsm.transition(
+        hsm.on(BotMachineGraph.stoppedEvent.name),
+        hsm.target("../disconnected"),
+        hsm.effect(BotMachineGraph.clearActors),
+      ),
     ),
   );
 
@@ -120,7 +124,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   disconnectedCallback(): void {
-    this.#live(hsm.typedEvent({ event: BotMachineGraph.detachEvent }));
+    this.#live(hsm.typedEvent({
+      event: BotMachineGraph.detachEvent,
+      data: { graph: this.#graph },
+    }));
   }
 
   #live(event: hsm.DispatchEvent): void {
@@ -148,17 +155,17 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.removeEventListener("flow-viewport-change", instance.#onViewport);
   }
 
-  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
     if (!(instance instanceof BotMachineGraph)) return;
-    await instance.terminateActors();
+    const graph = graphFromEvent(event);
+    if (graph !== null) await hsm.stop(graph);
     await instance.dispatch(hsm.typedEvent({ event: BotMachineGraph.stoppedEvent }));
   }
 
-  terminateActors(): Promise<void> {
-    const graph = this.#graph;
-    this.#graph = null;
-    this.#model = null;
-    return graph === null ? Promise.resolve() : hsm.stop(graph);
+  static clearActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof BotMachineGraph)) return;
+    instance.#graph = null;
+    instance.#model = null;
   }
 
   static admitGraphs(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -301,6 +308,11 @@ function eventNameFromEdgeDetail(value: unknown): string | null {
   const data = value["edge"]["data"];
   if (!hsm.isRecord(data) || typeof data["eventName"] !== "string" || data["eventName"].length === 0) return null;
   return data["eventName"];
+}
+
+function graphFromEvent(event: hsm.Event): Graph | null {
+  if (!hsm.isRecord(event.data) || !(event.data["graph"] instanceof Graph)) return null;
+  return event.data["graph"];
 }
 
 function graphNodeCount(graphs: readonly MachineGraph[]): number {

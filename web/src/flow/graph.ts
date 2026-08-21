@@ -82,7 +82,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.initial(hsm.target("idle")),
       hsm.entry(FlowGraph.onConnected),
       hsm.exit(FlowGraph.onConnectedExit),
-      hsm.transition(hsm.on(FlowGraph.detachEvent.name), hsm.target("../stopping")),
+      hsm.transition(
+        hsm.on(FlowGraph.detachEvent.name),
+        hsm.target("../stopping"),
+      ),
       hsm.transition(hsm.on(FlowGraph.fitViewEvent.name), hsm.effect(FlowGraph.applyFitView)),
       hsm.transition(hsm.on(FlowGraph.fitBoundsEvent.name), hsm.effect(FlowGraph.applyFitBounds)),
       hsm.transition(hsm.on(FlowGraph.zoomInEvent.name), hsm.effect(FlowGraph.applyZoomIn)),
@@ -221,7 +224,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.defer(FlowGraph.setEdgesEvent.name),
       hsm.defer(FlowGraph.setPolicyEvent.name),
       hsm.activity(FlowGraph.stopActors),
-      hsm.transition(hsm.on(FlowGraph.stoppedEvent.name), hsm.target("../disconnected")),
+      hsm.transition(
+        hsm.on(FlowGraph.stoppedEvent.name),
+        hsm.target("../disconnected"),
+        hsm.effect(FlowGraph.clearActors),
+      ),
     ),
   );
 
@@ -348,7 +355,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   disconnectedCallback(): void {
-    this.#live(hsm.typedEvent({ event: FlowGraph.detachEvent }));
+    this.#live(hsm.typedEvent({
+      event: FlowGraph.detachEvent,
+      data: { actors: this.#childActors() },
+    }));
   }
 
   #live(event: hsm.DispatchEvent): void {
@@ -385,28 +395,20 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#unlisten = null;
   }
 
-  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+  static async stopActors(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
     if (!(instance instanceof FlowGraph)) return;
-    await instance.terminateActors();
+    await Promise.all(actorsFromEvent(event).map((actor) => hsm.stop(actor)));
     await instance.dispatch(hsm.typedEvent({ event: FlowGraph.stoppedEvent }));
   }
 
-  terminateActors(): Promise<void> {
-    const machines = [
-      this.#renderer,
-      this.#panner,
-      this.#dragger,
-      this.#focuser,
-      this.#selection,
-      this.#connection,
-    ];
-    this.#renderer = null;
-    this.#panner = null;
-    this.#dragger = null;
-    this.#focuser = null;
-    this.#selection = null;
-    this.#connection = null;
-    return Promise.all(machines.map((machine) => machine === null ? undefined : hsm.stop(machine))).then(() => undefined);
+  static clearActors(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#renderer = null;
+    instance.#panner = null;
+    instance.#dragger = null;
+    instance.#focuser = null;
+    instance.#selection = null;
+    instance.#connection = null;
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
@@ -777,6 +779,21 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.fitEvent, data: { bounds, metrics } }) });
   }
 
+  #childActors(): object[] {
+    const actors: object[] = [];
+    for (const actor of [
+      this.#renderer,
+      this.#panner,
+      this.#dragger,
+      this.#focuser,
+      this.#selection,
+      this.#connection,
+    ]) {
+      if (actor !== null) actors.push(actor);
+    }
+    return actors;
+  }
+
   #startActors(): void {
     const ctx = this.context();
     this.#renderer = startRenderer({ ctx });
@@ -1110,6 +1127,11 @@ function isEdge(value: unknown): value is Edge {
     && typeof value["id"] === "string"
     && typeof value["source"] === "string"
     && typeof value["target"] === "string";
+}
+
+function actorsFromEvent(event: hsm.Event): object[] {
+  if (!hsm.isRecord(event.data) || !Array.isArray(event.data["actors"])) return [];
+  return event.data["actors"].filter((actor): actor is object => typeof actor === "object" && actor !== null);
 }
 
 function pointOf(value: unknown): { x: number; y: number } | null {
