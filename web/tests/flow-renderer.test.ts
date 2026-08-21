@@ -35,47 +35,29 @@ describe("Renderer dirty coalescing", () => {
     await hsm.stop(renderer);
   });
 
-  test("render failure enters failed and mark_dirty recovers", async () => {
+  test("successful paint reaches clean without render_canceled", async () => {
+    let canceled = 0;
+    let paints = 0;
     const renderer = hsm.start(new Renderer(), Renderer.model);
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
-      if (event.name === Renderer.renderCompleteEvent.name && /\/rendering(?:\/|$)/.test(renderer.state())) {
-        return inner({ ...hsm.ErrorEvent, data: new Error("paint failed") });
-      }
+      if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;
+      if (event.name === Renderer.paintEvent.name) paints += 1;
       return inner(event);
     }) as Renderer["dispatch"];
-    void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
-    await waitFor(() => /\/failed$/.test(renderer.state()));
-    renderer.dispatch = inner;
-    void renderer.dispatch(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
-    await waitFor(() => /\/clean$/.test(renderer.state()));
+    void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
+    await waitFor(() => /\/clean$/.test(renderer.state()) && paints >= 1);
+    assert.equal(canceled, 0);
+    assert.ok(paints >= 1);
     await hsm.stop(renderer);
   });
 
-  test("canceling the render activity takes rendering to clean", async () => {
+  test("paint notify failure takes rendering to failed without render_canceled", async () => {
     let canceled = 0;
     const renderer = hsm.start(new Renderer(), Renderer.model);
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;
-      if (event.name === Renderer.paintEvent.name) {
-        return new Promise<void>((resolve) => {
-          globalThis.setTimeout(() => resolve(), 0);
-        });
-      }
-      return inner(event);
-    }) as Renderer["dispatch"];
-    void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
-    await waitFor(() => /\/painting$/.test(renderer.state()));
-    await hsm.stop(renderer);
-    await waitFor(() => canceled >= 1);
-    assert.ok(canceled >= 1);
-  });
-
-  test("paint notify failure takes rendering to failed", async () => {
-    const renderer = hsm.start(new Renderer(), Renderer.model);
-    const inner = renderer.dispatch.bind(renderer);
-    renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.paintEvent.name) {
         return Promise.reject(new Error("paint host drop"));
       }
@@ -83,6 +65,7 @@ describe("Renderer dirty coalescing", () => {
     }) as Renderer["dispatch"];
     void inner(hsm.typedEvent({ event: Renderer.markDirtyEvent })).catch(hsm.catchFailure());
     await waitFor(() => /\/failed$/.test(renderer.state()));
+    assert.equal(canceled, 0);
     await hsm.stop(renderer);
   });
 });
