@@ -94,11 +94,14 @@ export const handleStyles = `
   background: #2dd4bf;
   border: 1px solid #0b0d12;
   z-index: 5;
+  right: -4px;
+  top: 50%;
+  transform: translateY(-50%);
 }
-:host([position="top"]) { top: -4px; left: 50%; transform: translateX(-50%); }
-:host([position="right"]) { right: -4px; top: 50%; transform: translateY(-50%); }
-:host([position="bottom"]) { bottom: -4px; left: 50%; transform: translateX(-50%); }
-:host([position="left"]) { left: -4px; top: 50%; transform: translateY(-50%); }
+:host([position="top"]) { top: -4px; right: auto; left: 50%; transform: translateX(-50%); }
+:host([position="right"]) { right: -4px; top: 50%; left: auto; transform: translateY(-50%); }
+:host([position="bottom"]) { bottom: -4px; right: auto; left: 50%; top: auto; transform: translateX(-50%); }
+:host([position="left"]) { left: -4px; top: 50%; right: auto; transform: translateY(-50%); }
 `;
 
 export const backgroundStyles = `
