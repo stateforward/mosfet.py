@@ -5,6 +5,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./dom.ts";
+import * as hsm from "../src/hsm.ts";
 import { Dashboard } from "../src/dashboard.ts";
 import { replayEvents, replayPrefix } from "../src/otel/replay.ts";
 import { parseExportTraceServiceRequest } from "../src/otel/otlp.ts";
@@ -80,14 +81,18 @@ describe("OTEL replay", () => {
 
   test("controller replays a prefix, selects the event machine, and returns to live", async () => {
     const dashboard = new Dashboard();
+    dashboard.origin = "http://localhost";
     dashboard.connectStream = () => ({ close(): void {} });
     dashboard.boot();
     await dashboard.dispatch("dashboard.source.selected", { source: streamSource() });
-    await dashboard.dispatch("dashboard.load.completed", {
+    await dashboard.dispatch(hsm.typedEvent({
+      name: "dashboard.load.completed",
+      kind: hsm.Kinds.CompletionEvent,
+    }, {
       mode: "replace",
       skipped: 0,
       observeSpans: fixtureSpans(),
-    });
+    }));
 
     const entered = await dashboard.dispatch("dashboard.replay.enter");
     assert.deepEqual(entered.replay, { active: true, playing: false, position: 0, total: 5, current: null });
@@ -106,11 +111,15 @@ describe("OTEL replay", () => {
       ...last,
       attributes: { ...last.attributes, "hsm.event.name": "replay.extra" },
     }];
-    const whileReplaying = await dashboard.dispatch("dashboard.load.completed", {
+    await dashboard.dispatch(hsm.typedEvent({
+      name: "dashboard.load.completed",
+      kind: hsm.Kinds.CompletionEvent,
+    }, {
       mode: "append",
       skipped: 0,
       observeSpans: liveBatch,
-    });
+    }));
+    const whileReplaying = dashboard.snapshot();
     assert.equal(whileReplaying.replay.position, 1);
     assert.equal(whileReplaying.replay.total, 6);
     assert.equal(whileReplaying.document?.observeCount, 1);

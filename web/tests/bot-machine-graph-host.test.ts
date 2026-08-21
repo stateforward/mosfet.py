@@ -41,10 +41,9 @@ describe("bot-machine-graph flow host", () => {
       path: "/Phone/ready",
       bounds: { left: 0, right: 40, top: 0, bottom: 20 },
     }));
-    assert.match(host.state(), /\/connected$/);
-    const flow = host.shadowRoot?.querySelector("flow-graph");
-    flow?.dispatchEvent(new CustomEvent("flow-node-click", { detail: { node: {} } }));
-    flow?.dispatchEvent(new CustomEvent("flow-node-click", {
+    assert.match(host.state(), /\/connected/);
+    host.dispatchEvent(new CustomEvent("flow-node-click", { detail: { node: {} }, bubbles: true, composed: true }));
+    host.dispatchEvent(new CustomEvent("flow-node-click", {
       detail: {
         node: {
           id: "n",
@@ -53,8 +52,10 @@ describe("bot-machine-graph flow host", () => {
           width: 40,
           height: 20,
         },
-        originalEvent: new Event("pointerup"),
+        originalEvent: { pointerId: 1, clientX: 0, clientY: 0, type: "pointerup" },
       },
+      bubbles: true,
+      composed: true,
     }));
     host.remove();
   });

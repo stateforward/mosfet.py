@@ -36,7 +36,6 @@ export class Focuser extends hsm.Instance {
       hsm.exit(Focuser.onFocusedExit),
       hsm.transition(
         hsm.on(Focuser.focusEvent.name),
-        hsm.target("."),
         hsm.effect(Focuser.setFocus),
       ),
       hsm.transition(
@@ -48,18 +47,11 @@ export class Focuser extends hsm.Instance {
   );
 
   readonly host: HTMLElement | null;
-  readonly onFocus: ((target: FocusTarget) => void) | null;
-  readonly onClear: (() => void) | null;
   current: FocusTarget | null = null;
 
-  constructor(
-    host: HTMLElement | null = null,
-    config: { onFocus?: (target: FocusTarget) => void; onClear?: () => void } = {},
-  ) {
+  constructor(host: HTMLElement | null = null) {
     super();
     this.host = host;
-    this.onFocus = config.onFocus ?? null;
-    this.onClear = config.onClear ?? null;
   }
 
   focus(target: FocusTarget): void {
@@ -83,26 +75,19 @@ export class Focuser extends hsm.Instance {
   static onFocusedEntry(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Focuser) || instance.current === null) return;
     instance.host?.classList.add("is-focused");
-    instance.onFocus?.(instance.current);
   }
 
   static onFocusedExit(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Focuser)) return;
     instance.host?.classList.remove("is-focused");
-    instance.onClear?.();
   }
 }
 
 export function startFocuser(args: {
   ctx: hsm.Context;
   host?: HTMLElement | null;
-  onFocus?: (target: FocusTarget) => void;
-  onClear?: () => void;
 }): Focuser {
-  return hsm.start(args.ctx, new Focuser(args.host ?? null, {
-    ...(args.onFocus !== undefined ? { onFocus: args.onFocus } : {}),
-    ...(args.onClear !== undefined ? { onClear: args.onClear } : {}),
-  }), Focuser.model);
+  return hsm.start(args.ctx, new Focuser(args.host ?? null), Focuser.model);
 }
 
 function focusTargetOf(value: unknown): FocusTarget | null {

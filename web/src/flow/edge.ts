@@ -31,10 +31,20 @@ export class FlowEdge extends HTMLElement {
     this.#edge = value;
   }
 
+  connectedCallback(): void {
+    this.mount();
+  }
+
   disconnectedCallback(): void {
     this.path.remove();
     this.hit.remove();
     this.label.remove();
+  }
+
+  mount(layer?: ParentNode | null): void {
+    const parent = layer ?? this.parentElement?.querySelector(".edge-layer") ?? this.parentNode;
+    if (parent === null || parent === undefined) return;
+    parent.append(this.path, this.hit, this.label);
   }
 
   paint(source: Node, target: Node): void {

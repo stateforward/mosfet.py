@@ -23,10 +23,8 @@ import { collectorUrl } from "./otel-source.ts";
 import { type ObserveSpan } from "./otel/span.ts";
 import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } from "./otel/replay.ts";
 
-const dashboardEvents = {
+const dashboardCommands = {
   "dashboard.source.selected": { name: "dashboard.source.selected", kind: hsm.Kinds.Event },
-  "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
-  "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.machine.selected": { name: "dashboard.machine.selected", kind: hsm.Kinds.Event },
   "dashboard.command.prefill": { name: "dashboard.command.prefill", kind: hsm.Kinds.Event },
   "dashboard.command.send": { name: "dashboard.command.send", kind: hsm.Kinds.Event },
@@ -39,10 +37,15 @@ const dashboardEvents = {
   "dashboard.replay.next": { name: "dashboard.replay.next", kind: hsm.Kinds.Event },
   "dashboard.replay.seek": { name: "dashboard.replay.seek", kind: hsm.Kinds.Event },
   "dashboard.replay.live": { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
-  "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
-  "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.visibility.set": { name: "dashboard.visibility.set", kind: hsm.Kinds.Event },
   "dashboard.visibility.action": { name: "dashboard.visibility.action", kind: hsm.Kinds.Event },
+} as const;
+
+const dashboardCompletions = {
+  "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
+  "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
+  "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
+  "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
 } as const;
 
 export type CommandResult = {
@@ -50,9 +53,13 @@ export type CommandResult = {
   readonly detail: string;
 };
 
-export type CommandPost = (command: { eventName: string; dataJson: string }) => Promise<CommandResult>;
+export type CommandPost = (command: {
+  eventName: string;
+  dataJson: string;
+  signal?: AbortSignal;
+}) => Promise<CommandResult>;
 
-export type DashboardEventName = keyof typeof dashboardEvents;
+export type DashboardEventName = keyof typeof dashboardCommands;
 
 export type DashboardPhase = "idle" | "live" | "error";
 
@@ -134,7 +141,11 @@ function replayPositionFromEvent(event: hsm.Event): number | null {
   return event.data["position"];
 }
 
-export async function postCommandHttp(command: { eventName: string; dataJson: string }): Promise<CommandResult> {
+export async function postCommandHttp(command: {
+  eventName: string;
+  dataJson: string;
+  signal?: AbortSignal;
+}): Promise<CommandResult> {
   if (!COMMAND_EVENT_NAME.test(command.eventName)) {
     return { result: "error", detail: "event_name is not an allowed command" };
   }
@@ -143,6 +154,7 @@ export async function postCommandHttp(command: { eventName: string; dataJson: st
       method: "POST",
       headers: { "content-type": "application/json", "x-requested-with": "bot-dashboard" },
       body: JSON.stringify({ event_name: command.eventName, data_json: command.dataJson }),
+      ...(command.signal !== undefined ? { signal: command.signal } : {}),
     });
     const payload: unknown = await response.json();
     if (!hsm.isRecord(payload) || typeof payload["result"] !== "string" || typeof payload["detail"] !== "string") {
@@ -166,13 +178,26 @@ function rememberSource(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Ev
   controller.applySource(source);
 }
 
-function applySpans(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const controller = controllerOf(instance);
-  const batch = batchFromEvent(event);
+function applySpansLive(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  applySpansAt({ instance, event, replay: false });
+}
+
+function applySpansReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  applySpansAt({ instance, event, replay: true });
+}
+
+function applySpansAt(args: { instance: hsm.Instance; event: hsm.Event; replay: boolean }): void {
+  const controller = controllerOf(args.instance);
+  const batch = batchFromEvent(args.event);
   if (controller === null || batch === null) {
     return;
   }
-  controller.applySpans(batch.observeSpans, batch.skipped, batch.mode);
+  controller.applySpans({
+    spans: batch.observeSpans,
+    skipped: batch.skipped,
+    mode: batch.mode,
+    replay: args.replay,
+  });
 }
 
 function applyError(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -205,12 +230,20 @@ function modelsFromEvent(event: hsm.Event): PublishedModel[] | null {
   return parsePublishedModels(event.data);
 }
 
-function applyModels(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const models = modelsFromEvent(event);
+function applyModelsLive(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  applyModelsAt({ instance, event, replay: false });
+}
+
+function applyModelsReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  applyModelsAt({ instance, event, replay: true });
+}
+
+function applyModelsAt(args: { instance: hsm.Instance; event: hsm.Event; replay: boolean }): void {
+  const models = modelsFromEvent(args.event);
   if (models === null) {
     return;
   }
-  controllerOf(instance)?.applyModels(models);
+  controllerOf(args.instance)?.applyModels({ models, replay: args.replay });
 }
 
 function applySend(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -218,7 +251,11 @@ function applySend(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event):
   if (controller === null) {
     return;
   }
-  void controller.sendCommand(stringField(event, "eventName"), stringField(event, "dataJson")).catch(hsm.catchFailure(controller));
+  void controller.sendCommand({
+    ctx: controller.context(),
+    eventName: stringField(event, "eventName"),
+    dataJson: stringField(event, "dataJson"),
+  }).catch(hsm.catchFailure(controller));
 }
 
 function applyCommandCompleted(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -229,11 +266,16 @@ function applyCommandFailed(_ctx: hsm.Context, instance: hsm.Instance, event: hs
   controllerOf(instance)?.rememberCommand(commandResultFromEvent(event) ?? { result: "error", detail: "command request failed" });
 }
 
-function commandResultFromEvent(event: hsm.Event): CommandResult | null {
+function commandResultFromEvent(event: hsm.Event): (CommandResult & { id?: number }) | null {
   if (!hsm.isRecord(event.data) || typeof event.data["detail"] !== "string") return null;
   const result = event.data["result"];
   if (result !== "accepted" && result !== "no_subscriber" && result !== "error") return null;
-  return { result, detail: event.data["detail"] };
+  const id = event.data["id"];
+  return {
+    result,
+    detail: event.data["detail"],
+    ...(typeof id === "number" ? { id } : {}),
+  };
 }
 
 function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -277,7 +319,7 @@ function nextReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event
 function seekReplay(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   const position = replayPositionFromEvent(event);
   if (position !== null) {
-    controllerOf(instance)?.seekReplay(position);
+    controllerOf(instance)?.seekReplay({ position });
   }
 }
 
@@ -307,7 +349,6 @@ const dashboardModel = hsm.define(
     hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(applySend)),
     hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
     hsm.transition(hsm.on("dashboard.command.failed"), hsm.effect(applyCommandFailed)),
-    hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModels)),
     hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
     hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
     hsm.state(
@@ -319,7 +360,6 @@ const dashboardModel = hsm.define(
     hsm.state(
       "live",
       hsm.initial(hsm.target("viewing")),
-      hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpans)),
       hsm.transition(hsm.on("dashboard.load.failed"), hsm.target("../error"), hsm.effect(applyError)),
       hsm.transition(hsm.on("dashboard.source.selected"), hsm.target("."), hsm.effect(rememberSource)),
       hsm.transition(hsm.on("dashboard.machine.selected"), hsm.effect(applyMachine)),
@@ -327,12 +367,16 @@ const dashboardModel = hsm.define(
       hsm.state(
         "viewing",
         hsm.activity(streamLive),
+        hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansLive)),
+        hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsLive)),
         hsm.transition(hsm.on("dashboard.replay.enter"), hsm.target("../replay/paused"), hsm.effect(enterReplay)),
         hsm.transition(hsm.on("dashboard.replay.play"), hsm.target("../replay/playing"), hsm.effect(playReplay)),
       ),
       hsm.state(
         "replay",
         hsm.initial(hsm.target("paused")),
+        hsm.transition(hsm.on("dashboard.load.completed"), hsm.effect(applySpansReplay)),
+        hsm.transition(hsm.on("dashboard.model.published"), hsm.effect(applyModelsReplay)),
         hsm.transition(hsm.on("dashboard.replay.previous"), hsm.effect(previousReplay)),
         hsm.transition(hsm.on("dashboard.replay.next"), hsm.effect(nextReplay)),
         hsm.transition(hsm.on("dashboard.replay.seek"), hsm.effect(seekReplay)),
@@ -370,7 +414,7 @@ function phaseFromStatePath(statePath: string): DashboardPhase {
 }
 
 export function isDashboardEventName(value: string): value is DashboardEventName {
-  return Object.hasOwn(dashboardEvents, value);
+  return Object.hasOwn(dashboardCommands, value);
 }
 
 export class Dashboard extends hsm.from(HTMLElement) {
@@ -386,7 +430,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
   #commandDataJson = "";
   #commandResult: CommandResult | null = null;
   #visibleMachines = new Map<string, boolean>();
-  origin = platformOrigin();
+  origin = "";
+  #commandSeq = 0;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
   postCommand: CommandPost = postCommandHttp;
@@ -436,7 +481,17 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    await super.dispatch(hsm.namedEvent(dashboardEvents[eventName].name, data));
+    if (eventName === "dashboard.command.send") {
+      const record = hsm.isRecord(data) ? data : {};
+      await this.sendCommand({
+        ctx: this.context(),
+        eventName: typeof record["eventName"] === "string" ? record["eventName"] : null,
+        dataJson: typeof record["dataJson"] === "string" ? record["dataJson"] : null,
+      });
+      this.#emit();
+      return this.snapshot();
+    }
+    await super.dispatch(hsm.namedEvent(dashboardCommands[eventName].name, data));
     this.#emit();
     return this.snapshot();
   }
@@ -451,28 +506,33 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  applySpans(spans: readonly ObserveSpan[], skipped: number, mode: "replace" | "append"): void {
-    if (mode === "replace") {
-      this.#spans = [...spans];
-      this.#skipped = skipped;
+  applySpans(args: {
+    spans: readonly ObserveSpan[];
+    skipped: number;
+    mode: "replace" | "append";
+    replay: boolean;
+  }): void {
+    if (args.mode === "replace") {
+      this.#spans = [...args.spans];
+      this.#skipped = args.skipped;
     } else {
-      this.#spans = [...this.#spans, ...spans];
-      this.#skipped += skipped;
+      this.#spans = [...this.#spans, ...args.spans];
+      this.#skipped += args.skipped;
     }
     this.#replayEvents = replayEvents(this.#spans);
     this.#replayPosition = clampReplayPosition(this.#replayPosition, this.#replayEvents.length);
-    this.#rebuildDocument({ replay: this.takeSnapshot().state.includes("/replay") });
+    this.#rebuildDocument({ replay: args.replay });
     this.#errorMessage = null;
     this.#emit();
   }
 
-  applyModels(models: readonly PublishedModel[]): void {
+  applyModels(args: { models: readonly PublishedModel[]; replay: boolean }): void {
     const byName = new Map(this.#models.map((model) => [model.name, model]));
-    for (const model of models) {
+    for (const model of args.models) {
       byName.set(model.name, mergePublishedModel(byName.get(model.name), model));
     }
     this.#models = [...byName.values()];
-    this.#rebuildDocument({ replay: this.takeSnapshot().state.includes("/replay") });
+    this.#rebuildDocument({ replay: args.replay });
     this.#errorMessage = null;
     this.#emit();
   }
@@ -540,8 +600,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  seekReplay(position: number): void {
-    this.#replayPosition = clampReplayPosition(position, this.#replayEvents.length);
+  seekReplay(args: { position: number }): void {
+    this.#replayPosition = clampReplayPosition(args.position, this.#replayEvents.length);
     this.#rebuildDocument({ replay: true });
     this.#emit();
   }
@@ -552,8 +612,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  rememberCommand(result: CommandResult): void {
-    this.#commandResult = result;
+  rememberCommand(result: CommandResult & { id?: number }): void {
+    if (typeof result.id === "number" && result.id !== this.#commandSeq) return;
+    this.#commandResult = { result: result.result, detail: result.detail };
     this.#emit();
   }
 
@@ -583,49 +644,68 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  async sendCommand(eventName: string | null, dataJson: string | null): Promise<void> {
-    const name = (eventName ?? this.#commandEventName).trim();
-    const payload = dataJson ?? this.#commandDataJson;
+  async sendCommand(args: {
+    ctx: hsm.Context;
+    eventName: string | null;
+    dataJson: string | null;
+  }): Promise<void> {
+    const name = (args.eventName ?? this.#commandEventName).trim();
+    const payload = args.dataJson ?? this.#commandDataJson;
     this.#commandEventName = name;
     this.#commandDataJson = payload;
-    if (name.length === 0) {
-      this.dispatch(hsm.namedEvent(dashboardEvents["dashboard.command.failed"].name, {
+    const id = this.#commandSeq + 1;
+    this.#commandSeq = id;
+    const fail = (detail: string): void => {
+      this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.failed"].name, {
         result: "error",
-        detail: "event_name is required",
+        detail,
+        id,
       }));
+    };
+    if (name.length === 0) {
+      fail("event_name is required");
       return;
     }
     if (!COMMAND_EVENT_NAME.test(name)) {
-      this.dispatch(hsm.namedEvent(dashboardEvents["dashboard.command.failed"].name, {
-        result: "error",
-        detail: "event_name is not an allowed command",
-      }));
+      fail("event_name is not an allowed command");
       return;
     }
+    const abort = new AbortController();
+    const onDone = (): void => {
+      abort.abort();
+    };
+    args.ctx.addEventListener("done", onDone);
+    if (args.ctx.done) abort.abort();
     try {
-      const result = await this.postCommand({ eventName: name, dataJson: payload });
+      const result = await this.postCommand({ eventName: name, dataJson: payload, signal: abort.signal });
+      if (args.ctx.done || abort.signal.aborted) return;
       if (result.result === "error") {
-        this.dispatch(hsm.namedEvent(dashboardEvents["dashboard.command.failed"].name, result));
+        this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.failed"].name, { ...result, id }));
         return;
       }
-      this.dispatch(hsm.namedEvent(dashboardEvents["dashboard.command.completed"].name, result));
-    } catch {
-      this.dispatch(hsm.namedEvent(dashboardEvents["dashboard.command.failed"].name, {
-        result: "error",
-        detail: "command request failed",
-      }));
+      this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.command.completed"].name, { ...result, id }));
+    } catch (error) {
+      if (args.ctx.done || abort.signal.aborted) return;
+      if (error instanceof Error && error.name === "AbortError") return;
+      fail("command request failed");
+    } finally {
+      args.ctx.removeEventListener("done", onDone);
     }
   }
 
   async streamSource(ctx: hsm.Context): Promise<void> {
     const source = this.#source;
     if (source === null || source.kind !== "stream") {
-      await this.dispatch("dashboard.load.failed", { message: "no otel stream selected" });
+      await this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+        message: "no otel stream selected",
+      }));
       return;
     }
     const url = collectorUrl({ requested: source.url, origin: this.origin });
     if (url === null) {
-      await this.dispatch("dashboard.load.failed", { message: "collector url is not allowed" });
+      await this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+        message: "collector url is not allowed",
+      }));
       return;
     }
     const finished = new Promise<void>((resolve) => {
@@ -643,13 +723,19 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "replace" }).catch(hsm.catchFailure(this));
+        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.completed"].name, {
+          ...batch,
+          mode: "replace",
+        })).catch(hsm.catchFailure(this));
       },
       onSpans: (batch) => {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.completed", { ...batch, mode: "append" }).catch(hsm.catchFailure(this));
+        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.completed"].name, {
+          ...batch,
+          mode: "append",
+        })).catch(hsm.catchFailure(this));
       },
       onModels: (models) => {
         if (ctx.done) {
@@ -661,7 +747,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (ctx.done) {
           return;
         }
-        void this.dispatch("dashboard.load.failed", { message }).catch(hsm.catchFailure(this));
+        void this.dispatch(hsm.namedEvent(dashboardCompletions["dashboard.load.failed"].name, {
+          message,
+        })).catch(hsm.catchFailure(this));
       },
     });
     try {
@@ -696,7 +784,4 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 }
 
-function platformOrigin(): string {
-  const origin = globalThis.location?.origin;
-  return typeof origin === "string" && origin.length > 0 ? origin : "http://localhost";
-}
+

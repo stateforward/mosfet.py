@@ -48,8 +48,15 @@ export type Edge = {
   readonly className?: string;
 };
 
-export type NodeClickDetail = { readonly node: Node; readonly originalEvent: Event };
-export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: Event };
+export type PointerOrigin = {
+  readonly pointerId: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel";
+};
+
+export type NodeClickDetail = { readonly node: Node; readonly originalEvent: PointerOrigin };
+export type EdgeClickDetail = { readonly edge: Edge; readonly originalEvent: PointerOrigin };
 export type ViewportChangeDetail = { readonly viewport: Viewport };
 export type ConnectDetail = {
   readonly source: string;
@@ -89,6 +96,7 @@ export type PointerSampleData = {
   readonly origin: XYPosition;
   readonly hit: PointerHit;
   readonly eventType: "pointerdown" | "pointermove" | "pointerup" | "pointercancel";
+  readonly originalEvent: PointerOrigin;
 };
 
 export type WheelSampleData = {

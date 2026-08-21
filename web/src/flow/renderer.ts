@@ -2,6 +2,7 @@ import * as hsm from "../hsm.ts";
 
 export class Renderer extends hsm.Instance {
   static readonly markDirtyEvent = { name: "mark_dirty", kind: hsm.Kinds.Event } as const;
+  static readonly paintEvent = { name: "paint", kind: hsm.Kinds.Event } as const;
   static readonly renderCompleteEvent = { name: "render_complete", kind: hsm.Kinds.CompletionEvent } as const;
 
   static readonly model = hsm.define(
@@ -31,11 +32,9 @@ export class Renderer extends hsm.Instance {
   );
 
   readonly host: HTMLElement | null;
-  readonly onRender: () => void | Promise<void>;
 
-  constructor(onRender: () => void | Promise<void>, host: HTMLElement | null = null) {
+  constructor(host: HTMLElement | null = null) {
     super();
-    this.onRender = onRender;
     this.host = host;
   }
 
@@ -60,7 +59,10 @@ export class Renderer extends hsm.Instance {
   static async performRender(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
     if (!(instance instanceof Renderer) || ctx.done) return;
     try {
-      await instance.onRender();
+      await Promise.resolve();
+      await Promise.resolve();
+      if (ctx.done) return;
+      await hsm.notifyOwner({ instance, event: hsm.typedEvent(Renderer.paintEvent) });
       if (ctx.done) return;
       instance.dispatch(hsm.typedEvent(Renderer.renderCompleteEvent));
     } catch (error) {
@@ -71,8 +73,7 @@ export class Renderer extends hsm.Instance {
 
 export function startRenderer(args: {
   ctx: hsm.Context;
-  onRender: () => void | Promise<void>;
   host?: HTMLElement | null;
 }): Renderer {
-  return hsm.start(args.ctx, new Renderer(args.onRender, args.host ?? null), Renderer.model);
+  return hsm.start(args.ctx, new Renderer(args.host ?? null), Renderer.model);
 }

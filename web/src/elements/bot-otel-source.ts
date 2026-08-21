@@ -106,7 +106,7 @@ export class BotOtelSource extends OtelSource {
     this.#abort = new AbortController();
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.snapshot());
-    void this.dispatch("source.connect.requested").catch(catchFailure(this));
+    void this.dispatch("source.connect.requested", { origin: documentOrigin(this) }).catch(catchFailure(this));
   }
 
   disconnectedCallback(): void {
@@ -134,8 +134,14 @@ export class BotOtelSource extends OtelSource {
     if (eventName === undefined || !isOtelSourceEventName(eventName)) {
       return;
     }
-    void this.dispatch(eventName).catch(catchFailure(this));
+    void this.dispatch(eventName, eventName === "source.connect.requested" ? { origin: documentOrigin(this) } : undefined)
+      .catch(catchFailure(this));
   };
+}
+
+function documentOrigin(host: HTMLElement): string {
+  const origin = host.ownerDocument?.defaultView?.location.origin;
+  return typeof origin === "string" && origin.length > 0 ? origin : "http://localhost";
 }
 
 export function registerBotOtelSource(): void {

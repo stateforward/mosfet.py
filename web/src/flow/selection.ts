@@ -26,32 +26,31 @@ export class Selection extends hsm.Instance {
 
   static readonly model = hsm.define(
     "Selection",
-    hsm.initial(hsm.target("none")),
+    hsm.initial(hsm.target("idle")),
     hsm.state(
-      "none",
-      hsm.transition(
-        hsm.on(Selection.clickEvent.name),
-        hsm.target("../picking"),
-        hsm.effect(Selection.applyClick),
-      ),
+      "idle",
+      hsm.initial(hsm.target("none")),
       hsm.transition(
         hsm.on(Selection.boxStartEvent.name),
         hsm.target("../box"),
         hsm.effect(Selection.startBox),
       ),
-    ),
-    hsm.state(
-      "picking",
-      hsm.transition(hsm.on(Selection.clickEvent.name), hsm.effect(Selection.applyClick)),
-      hsm.transition(
-        hsm.on(Selection.clearEvent.name),
-        hsm.target("../none"),
-        hsm.effect(Selection.clearAll),
+      hsm.state(
+        "none",
+        hsm.transition(
+          hsm.on(Selection.clickEvent.name),
+          hsm.target("../picking"),
+          hsm.effect(Selection.applyClick),
+        ),
       ),
-      hsm.transition(
-        hsm.on(Selection.boxStartEvent.name),
-        hsm.target("../box"),
-        hsm.effect(Selection.startBox),
+      hsm.state(
+        "picking",
+        hsm.transition(hsm.on(Selection.clickEvent.name), hsm.effect(Selection.applyClick)),
+        hsm.transition(
+          hsm.on(Selection.clearEvent.name),
+          hsm.target("../none"),
+          hsm.effect(Selection.clearAll),
+        ),
       ),
     ),
     hsm.state(
@@ -59,12 +58,12 @@ export class Selection extends hsm.Instance {
       hsm.transition(hsm.on(Selection.boxMoveEvent.name), hsm.effect(Selection.moveBox)),
       hsm.transition(
         hsm.on(Selection.boxEndEvent.name),
-        hsm.target("../picking"),
+        hsm.target("../idle/picking"),
         hsm.effect(Selection.endBox),
       ),
       hsm.transition(
         hsm.on(Selection.clearEvent.name),
-        hsm.target("../none"),
+        hsm.target("../idle/none"),
         hsm.effect(Selection.clearAll),
       ),
     ),

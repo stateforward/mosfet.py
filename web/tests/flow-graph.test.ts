@@ -6,9 +6,11 @@ import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
-import type { PointerSampleData } from "../src/flow/types.ts";
+import { MAX_FLOW_EDGES, MAX_FLOW_NODES, type PointerSampleData } from "../src/flow/types.ts";
 
 registerFlowElements();
+
+const YIELD_MS = 0;
 
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -19,7 +21,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 50; i += 1) {
     if (predicate()) return;
     await new Promise<void>((resolve) => {
-      globalThis.setTimeout(resolve, 0);
+      globalThis.setTimeout(resolve, YIELD_MS);
     });
   }
   throw new Error("timed out waiting for flow-graph");
@@ -28,6 +30,7 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 function pointerData(overrides: Partial<PointerSampleData> = {}): PointerSampleData {
   const origin = overrides.origin ?? { x: 10, y: 10 };
   const client = overrides.client ?? origin;
+  const eventType = overrides.eventType ?? "pointerdown";
   return {
     pointerId: 1,
     client,
@@ -41,7 +44,13 @@ function pointerData(overrides: Partial<PointerSampleData> = {}): PointerSampleD
     ctrlKey: false,
     origin,
     hit: overrides.hit ?? { kind: "empty" },
-    eventType: overrides.eventType ?? "pointerdown",
+    eventType,
+    originalEvent: overrides.originalEvent ?? {
+      pointerId: 1,
+      clientX: client.x,
+      clientY: client.y,
+      type: eventType,
+    },
     ...overrides,
   };
 }
@@ -193,7 +202,9 @@ describe("flow-graph", () => {
     graph.nodes = [node];
     graph.nodesDraggable = true;
     graph.panOnDrag = true;
-    const hit = { kind: "node" as const, node: graph.nodes[0]! };
+    const admitted = graph.nodes[0];
+    assert.ok(admitted !== undefined);
+    const hit = { kind: "node" as const, node: admitted };
     graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
       eventType: "pointerdown",
       origin: { x: 10, y: 10 },
@@ -243,8 +254,10 @@ describe("flow-graph", () => {
       { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 },
       { id: "b", position: { x: 200, y: 0 }, data: { label: "B" }, width: 80, height: 40 },
     ];
-    const source = graph.nodes[0]!;
-    const target = graph.nodes[1]!;
+    const source = graph.nodes[0];
+    const target = graph.nodes[1];
+    assert.ok(source !== undefined);
+    assert.ok(target !== undefined);
     const connected: Array<{ source: string; target: string }> = [];
     graph.addEventListener("flow-connect", (event: Event) => {
       if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail)) return;
@@ -292,6 +305,137 @@ describe("flow-graph", () => {
     assert.match(graph.state(), /\/connected\//);
     graph.remove();
     await waitUntil(() => /\/disconnected$/.test(graph.state()));
+  });
+
+  test("dropping a connect on empty cancels without flow-connect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [source];
+    const connected: string[] = [];
+    graph.addEventListener("flow-connect", () => {
+      connected.push("connected");
+    });
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerDownEvent, pointerData({
+      eventType: "pointerdown",
+      hit: { kind: "handle", node: source, handleKind: "source", position: "right" },
+    })));
+    assert.match(graph.state(), /\/connect$/);
+    graph.dispatch(hsm.typedEvent(FlowGraph.pointerUpEvent, pointerData({
+      eventType: "pointerup",
+      buttons: 0,
+      hit: { kind: "empty" },
+    })));
+    await flush();
+    assert.match(graph.state(), /\/idle$/);
+    assert.deepEqual(connected, []);
+    graph.remove();
+  });
+
+  test("overflow and invalid admits reject without mutating the graph", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const rejected: Array<{ reason: string; nodeCount: number; edgeCount: number }> = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail)) return;
+      const reason = event.detail["reason"];
+      const nodeCount = event.detail["nodeCount"];
+      const edgeCount = event.detail["edgeCount"];
+      if (typeof reason === "string" && typeof nodeCount === "number" && typeof edgeCount === "number") {
+        rejected.push({ reason, nodeCount, edgeCount });
+      }
+    });
+    const valid = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [valid];
+    assert.equal(graph.nodes.length, 1);
+    graph.nodes = Array.from({ length: MAX_FLOW_NODES + 1 }, (_item, index) => ({
+      id: `n${index}`,
+      position: { x: index, y: 0 },
+      data: { label: `${index}` },
+    }));
+    assert.equal(graph.nodes.length, 1);
+    graph.edges = Array.from({ length: MAX_FLOW_EDGES + 1 }, (_item, index) => ({
+      id: `e${index}`,
+      source: "a",
+      target: "a",
+    }));
+    assert.equal(graph.edges.length, 0);
+    graph.nodes = [{ id: "bad" } as never];
+    assert.equal(graph.nodes.length, 1);
+    assert.deepEqual(rejected.map((item) => item.reason), ["too_many_nodes", "too_many_edges", "invalid"]);
+    const snapshot = [...graph.nodes];
+    snapshot[0] = { id: "mutated", position: { x: 1, y: 1 }, data: {} };
+    assert.equal(graph.nodes[0]?.id, "a");
+    graph.remove();
+  });
+
+  test("PointerEvent pan and box run on the defined element", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.panOnDrag = true;
+    const before = graph.getViewport();
+    graph.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 20,
+      clientY: 20,
+      pointerId: 1,
+      bubbles: true,
+      composed: true,
+    }));
+    assert.match(graph.state(), /\/pan$/);
+    graph.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 60,
+      clientY: 70,
+      pointerId: 1,
+      bubbles: true,
+      composed: true,
+    }));
+    await waitUntil(() => {
+      const now = graph.getViewport();
+      return Math.abs(now.x - before.x) + Math.abs(now.y - before.y) > 0;
+    });
+    graph.dispatchEvent(new PointerEvent("pointerup", {
+      clientX: 60,
+      clientY: 70,
+      pointerId: 1,
+      bubbles: true,
+      composed: true,
+    }));
+    await flush();
+    const after = graph.getViewport();
+    assert.ok(Math.abs(after.x - before.x) + Math.abs(after.y - before.y) > 0);
+    graph.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 10,
+      clientY: 10,
+      pointerId: 1,
+      shiftKey: true,
+      bubbles: true,
+      composed: true,
+    }));
+    assert.match(graph.state(), /\/box$/);
+    assert.doesNotMatch(graph.state(), /\/pan$/);
+    graph.remove();
+  });
+
+  test("edge paint nodes remount after detach and reconnect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 },
+      { id: "b", position: { x: 200, y: 0 }, data: { label: "B" }, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "a-b", source: "a", target: "b", type: "bezier" }];
+    await flush();
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    document.body.append(graph);
+    await waitUntil(() => {
+      const path = graph.querySelector(".edge-path");
+      return path !== null && (path.getAttribute("d") ?? "").length > 0;
+    });
+    const path = graph.querySelector(".edge-path");
+    assert.ok(path !== null);
+    assert.ok((path.getAttribute("d") ?? "").length > 0);
+    graph.remove();
   });
 
   test("path helpers cover bezier, straight, bounds, and viewport", () => {

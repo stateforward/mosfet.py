@@ -12,34 +12,36 @@ export type MachineGraphSnapshot = {
 export class Graph extends hsm.Instance {
   static readonly setEvent = { name: "graph.set", kind: hsm.Kinds.Event } as const;
   static readonly clearEvent = { name: "graph.clear", kind: hsm.Kinds.Event } as const;
+  static readonly drawnEvent = { name: "graph.drawn", kind: hsm.Kinds.Event } as const;
+  static readonly clearedEvent = { name: "graph.cleared", kind: hsm.Kinds.Event } as const;
 
   static readonly model = hsm.define(
     "Graph",
     hsm.initial(hsm.target("empty")),
+    hsm.choice(
+      "admit",
+      hsm.transition(
+        hsm.guard(Graph.hasGraphs),
+        hsm.target("drawing"),
+        hsm.effect(Graph.remember),
+      ),
+      hsm.transition(hsm.target("empty"), hsm.effect(Graph.clear)),
+    ),
     hsm.state(
       "empty",
-      hsm.entry(Graph.destroyPaint),
-      hsm.transition(hsm.on(Graph.clearEvent.name), hsm.target("."), hsm.effect(Graph.clear)),
-      hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("../drawing"), hsm.effect(Graph.remember)),
+      hsm.entry(Graph.notifyCleared),
+      hsm.transition(hsm.on(Graph.clearEvent.name), hsm.effect(Graph.clear)),
+      hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("../admit")),
     ),
     hsm.state(
       "drawing",
-      hsm.entry(Graph.requestDraw),
-      hsm.exit(Graph.destroyPaint),
-      hsm.transition(hsm.on(Graph.setEvent.name), hsm.effect(Graph.rememberAndDraw)),
+      hsm.entry(Graph.notifyDrawn),
+      hsm.transition(hsm.on(Graph.setEvent.name), hsm.target("../admit")),
       hsm.transition(hsm.on(Graph.clearEvent.name), hsm.target("../empty"), hsm.effect(Graph.clear)),
     ),
   );
 
   graphs: readonly MachineGraph[] = [];
-  readonly onDraw: (graphs: readonly MachineGraph[]) => void;
-  readonly onDestroy: () => void;
-
-  constructor(hooks: { onDraw: (graphs: readonly MachineGraph[]) => void; onDestroy: () => void }) {
-    super();
-    this.onDraw = hooks.onDraw;
-    this.onDestroy = hooks.onDestroy;
-  }
 
   snapshot(): MachineGraphSnapshot {
     const statePath = this.state();
@@ -50,29 +52,24 @@ export class Graph extends hsm.Instance {
     };
   }
 
-  setGraphs(value: unknown): MachineGraphSnapshot {
-    const graphs = parseGraphs(value);
-    if (graphs === null || graphs.length === 0) {
-      this.dispatch(hsm.namedEvent(Graph.clearEvent.name));
-    } else {
-      this.dispatch(hsm.namedEvent(Graph.setEvent.name, { graphs }));
-    }
+  admit(value: unknown): MachineGraphSnapshot {
+    this.dispatch(hsm.typedEvent(Graph.setEvent, { graphs: value }));
     return this.snapshot();
+  }
+
+  static hasGraphs(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    const graphs = graphsFromEvent(event);
+    return graphs !== null && graphs.length > 0;
   }
 
   static remember(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Graph)) return;
     const graphs = graphsFromEvent(event);
-    if (graphs === null) {
+    if (graphs === null || graphs.length === 0) {
       instance.graphs = [];
       return;
     }
     instance.graphs = graphs;
-  }
-
-  static rememberAndDraw(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    Graph.remember(ctx, instance, event);
-    if (instance instanceof Graph && instance.graphs.length > 0) instance.onDraw(instance.graphs);
   }
 
   static clear(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -80,14 +77,17 @@ export class Graph extends hsm.Instance {
     instance.graphs = [];
   }
 
-  static requestDraw(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  static notifyDrawn(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Graph) || instance.graphs.length === 0) return;
-    instance.onDraw(instance.graphs);
+    hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent(Graph.drawnEvent, { graphs: instance.graphs }),
+    });
   }
 
-  static destroyPaint(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  static notifyCleared(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Graph)) return;
-    instance.onDestroy();
+    hsm.notifyOwner({ instance, event: hsm.typedEvent(Graph.clearedEvent) });
   }
 }
 

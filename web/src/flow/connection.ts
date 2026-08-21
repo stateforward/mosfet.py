@@ -46,16 +46,21 @@ export class Connection extends hsm.Instance {
     hsm.state(
       "connecting",
       hsm.transition(hsm.on(Connection.moveEvent.name), hsm.effect(Connection.move)),
-      hsm.transition(
-        hsm.on(Connection.completeEvent.name),
-        hsm.target("../idle"),
-        hsm.effect(Connection.finish),
-      ),
+      hsm.transition(hsm.on(Connection.completeEvent.name), hsm.target("../resolve")),
       hsm.transition(
         hsm.on(Connection.cancelEvent.name),
         hsm.target("../idle"),
         hsm.effect(Connection.reset),
       ),
+    ),
+    hsm.choice(
+      "resolve",
+      hsm.transition(
+        hsm.guard(Connection.isValidComplete),
+        hsm.target("idle"),
+        hsm.effect(Connection.accept),
+      ),
+      hsm.transition(hsm.target("idle"), hsm.effect(Connection.reset)),
     ),
   );
 
@@ -109,13 +114,19 @@ export class Connection extends hsm.Instance {
     instance.#emitDraft();
   }
 
-  static finish(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  static isValidComplete(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+    if (!(instance instanceof Connection) || instance.#draft === null || !hsm.isRecord(event.data)) return false;
+    const target = event.data["target"];
+    return typeof target === "string" && target !== instance.#draft.source;
+  }
+
+  static accept(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Connection) || instance.#draft === null || !hsm.isRecord(event.data)) {
       if (instance instanceof Connection) Connection.reset(_ctx, instance, event);
       return;
     }
     const target = event.data["target"];
-    if (typeof target !== "string" || target === instance.#draft.source) {
+    if (typeof target !== "string") {
       Connection.reset(_ctx, instance, event);
       return;
     }

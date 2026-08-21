@@ -55,7 +55,6 @@ export class Panner extends hsm.Instance {
       hsm.transition(hsm.on(Panner.zoomEvent.name), hsm.effect(Panner.applyZoom)),
       hsm.transition(hsm.on(Panner.fitEvent.name), hsm.effect(Panner.applyFit)),
       hsm.transition(hsm.on(Panner.viewportEvent.name), hsm.effect(Panner.applyViewport)),
-      hsm.transition(hsm.on(Panner.cursorMoveEvent.name), hsm.effect(Panner.updatePan)),
       hsm.state(
         "fixed",
         hsm.transition(
@@ -68,11 +67,13 @@ export class Panner extends hsm.Instance {
         "single",
         hsm.transition(hsm.on(Panner.panStartEvent.name), hsm.target("../pinch"), hsm.effect(Panner.startPan)),
         hsm.transition(hsm.on(Panner.panEndEvent.name), hsm.target("../fixed"), hsm.effect(Panner.endPan)),
+        hsm.transition(hsm.on(Panner.cursorMoveEvent.name), hsm.effect(Panner.dragPan)),
       ),
       hsm.state(
         "pinch",
         hsm.transition(hsm.on(Panner.panStartEvent.name), hsm.effect(Panner.startPan)),
         hsm.transition(hsm.on(Panner.panEndEvent.name), hsm.target("../ending"), hsm.effect(Panner.endPan)),
+        hsm.transition(hsm.on(Panner.cursorMoveEvent.name), hsm.effect(Panner.pinchPan)),
       ),
       hsm.choice(
         "ending",
@@ -95,10 +96,10 @@ export class Panner extends hsm.Instance {
   #dragStart: { pointerId: number; point: ViewportPoint; pan: ViewportPoint } | null = null;
   #pinchStart: { distance: number; scale: number } | null = null;
 
-  constructor(world: HTMLElement, options: { frame?: HTMLElement } = {}) {
+  constructor(args: { world: HTMLElement; frame?: HTMLElement }) {
     super();
-    this.world = world;
-    this.frame = options.frame ?? null;
+    this.world = args.world;
+    this.frame = args.frame ?? null;
   }
 
   get transform(): ViewportTransform {
@@ -113,7 +114,7 @@ export class Panner extends hsm.Instance {
     this.dispatch(hsm.typedEvent(Panner.panStartEvent, data));
   }
 
-  cursorMove(data: PanPointerData | { pan: ViewportPoint; scale?: number }): void {
+  cursorMove(data: PanPointerData): void {
     this.dispatch(hsm.typedEvent(Panner.cursorMoveEvent, data));
   }
 
@@ -156,37 +157,32 @@ export class Panner extends hsm.Instance {
     instance.#setPanning(false);
   }
 
-  static updatePan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+  static dragPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Panner)) return;
-    const record = recordOf(event.data);
-    const directPan = pointOf(record?.["pan"]);
-    if (directPan !== null) {
-      const scale = typeof record?.["scale"] === "number" ? record["scale"] : instance.scale;
-      instance.#setTransform(scale, directPan);
-      return;
-    }
     const pointer = panPointerOf(event.data);
     if (pointer === null || !instance.#pointers.has(pointer.pointerId)) return;
     instance.#pointers.set(pointer.pointerId, pointer.point);
-    if (instance.#pointers.size >= 2 && instance.#pinchStart !== null) {
-      const points = [...instance.#pointers.values()];
-      const first = points[0];
-      const second = points[1];
-      if (first !== undefined && second !== undefined) {
-        const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
-        const scale = instance.#pinchStart.scale
-          * Math.hypot(second.x - first.x, second.y - first.y)
-          / instance.#pinchStart.distance;
-        instance.#setZoom(scale, midpoint);
-      }
-      return;
-    }
-    if (instance.#dragStart?.pointerId === pointer.pointerId) {
-      instance.#setTransform(instance.scale, {
-        x: instance.#dragStart.pan.x + pointer.point.x - instance.#dragStart.point.x,
-        y: instance.#dragStart.pan.y + pointer.point.y - instance.#dragStart.point.y,
-      });
-    }
+    if (instance.#dragStart?.pointerId !== pointer.pointerId) return;
+    instance.#setTransform(instance.scale, {
+      x: instance.#dragStart.pan.x + pointer.point.x - instance.#dragStart.point.x,
+      y: instance.#dragStart.pan.y + pointer.point.y - instance.#dragStart.point.y,
+    });
+  }
+
+  static pinchPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof Panner) || instance.#pinchStart === null) return;
+    const pointer = panPointerOf(event.data);
+    if (pointer === null || !instance.#pointers.has(pointer.pointerId)) return;
+    instance.#pointers.set(pointer.pointerId, pointer.point);
+    const points = [...instance.#pointers.values()];
+    const first = points[0];
+    const second = points[1];
+    if (first === undefined || second === undefined) return;
+    const midpoint = { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+    const scale = instance.#pinchStart.scale
+      * Math.hypot(second.x - first.x, second.y - first.y)
+      / instance.#pinchStart.distance;
+    instance.#setZoom(scale, midpoint);
   }
 
   static hasTwoPointers(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): boolean {
@@ -283,7 +279,7 @@ export class Panner extends hsm.Instance {
     this.pan = { ...pan };
     this.world.style.transformOrigin = "0 0";
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.scale})`;
-    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Panner.transformEvent, this.transform) });
+    hsm.notifyOwner({ instance: this, event: hsm.typedEvent(Panner.transformEvent, this.viewport) });
   }
 
   #setPanning(panning: boolean): void {
@@ -296,7 +292,8 @@ export function startPanner(args: {
   world: HTMLElement;
   frame?: HTMLElement;
 }): Panner {
-  return hsm.start(args.ctx, new Panner(args.world, {
+  return hsm.start(args.ctx, new Panner({
+    world: args.world,
     ...(args.frame !== undefined ? { frame: args.frame } : {}),
   }), Panner.model);
 }

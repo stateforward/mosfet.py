@@ -34,5 +34,10 @@ describe("hsm.from(HTMLElement)", () => {
     assert.match(host.state(), /\/active$/);
     await hsm.stop(host);
     assert.equal(host.state(), "");
+    hsm.start(host, Host.model);
+    assert.match(host.state(), /\/idle$/);
+    host.dispatch(hsm.typedEvent(Host.pingEvent));
+    assert.match(host.state(), /\/active$/);
+    await hsm.stop(host);
   });
 });

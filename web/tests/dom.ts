@@ -101,8 +101,17 @@ class FakeElement {
   }
 
   dispatchEvent(event: FakeEvent): boolean {
-    event.target = this;
-    for (const listener of this.#listeners.get(event.type) ?? []) listener(event);
+    if (event.target === null) event.target = this;
+    let current: FakeElement | null = this;
+    while (current !== null) {
+      for (const listener of current.#listeners.get(event.type) ?? []) listener(event);
+      if (!event.bubbles) break;
+      if (current instanceof FakeShadowRoot && event.composed) {
+        current = current.host;
+        continue;
+      }
+      current = current.parentNode;
+    }
     return true;
   }
 
@@ -134,8 +143,7 @@ class FakeElement {
     const index = parent.childNodes.indexOf(this);
     if (index >= 0) parent.childNodes.splice(index, 1);
     this.parentNode = null;
-    const disconnected = (this as FakeElement & { disconnectedCallback?: () => void }).disconnectedCallback;
-    if (typeof disconnected === "function") disconnected.call(this);
+    disconnectTree(this);
   }
 
   get isConnected(): boolean {
@@ -151,12 +159,34 @@ class FakeElement {
     return null;
   }
 
-  querySelector(_selector: string): FakeElement | null {
-    return this.childNodes[0] ?? null;
+  querySelector(selector: string): FakeElement | null {
+    const match = matchSelector(this, selector);
+    if (match && this.localName !== selector && !selector.startsWith(".") && !selector.startsWith("[")) {
+      // fall through to descendants; host itself is rarely the query target
+    }
+    for (const child of this.childNodes) {
+      if (matchSelector(child, selector)) return child;
+      const nested = child.querySelector(selector);
+      if (nested !== null) return nested;
+    }
+    if (this.shadowRoot !== null) {
+      if (matchSelector(this.shadowRoot, selector)) return this.shadowRoot;
+      const nested = this.shadowRoot.querySelector(selector);
+      if (nested !== null) return nested;
+    }
+    return null;
   }
 
-  querySelectorAll(_selector: string): FakeElement[] {
-    return [...this.childNodes];
+  querySelectorAll(selector: string): FakeElement[] {
+    const found: FakeElement[] = [];
+    for (const child of this.childNodes) {
+      if (matchSelector(child, selector)) found.push(child);
+      found.push(...child.querySelectorAll(selector));
+    }
+    if (this.shadowRoot !== null) {
+      found.push(...this.shadowRoot.querySelectorAll(selector));
+    }
+    return found;
   }
 
   getBoundingClientRect(): { left: number; top: number; width: number; height: number; right: number; bottom: number } {
@@ -170,6 +200,22 @@ class FakeElement {
   get clientHeight(): number {
     return 600;
   }
+}
+
+function matchSelector(element: FakeElement, selector: string): boolean {
+  if (selector.startsWith(".")) return element.classList.contains(selector.slice(1));
+  if (selector.startsWith("[data-testid=")) {
+    const value = selector.slice("[data-testid=".length).replace(/^["']|["'\]]$]/g, "").replace(/\]$/, "").replace(/^["']|["']$/g, "");
+    return element.getAttribute("data-testid") === value;
+  }
+  return element.localName === selector;
+}
+
+function disconnectTree(element: FakeElement): void {
+  const disconnected = (element as FakeElement & { disconnectedCallback?: () => void }).disconnectedCallback;
+  if (typeof disconnected === "function") disconnected.call(element);
+  for (const child of [...element.childNodes]) disconnectTree(child);
+  if (element.shadowRoot !== null) disconnectTree(element.shadowRoot);
 }
 
 class FakeShadowRoot extends FakeElement {
@@ -315,6 +361,7 @@ class FakeKeyboardEvent extends FakeEvent {
 
 if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined" || !(globalThis as { document?: { createElement?: unknown } }).document?.createElement) {
   Object.assign(globalThis, {
+    Element: FakeElement,
     HTMLElement: FakeHTMLElement,
     document: new FakeDocument(),
     customElements: new FakeCustomElements(),

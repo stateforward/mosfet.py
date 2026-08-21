@@ -77,11 +77,15 @@ export function from<TBase extends HostConstructor>(
   return HostElement as unknown as new () => InstanceType<TBase> & Host;
 }
 
+const BIND = Symbol("hsm-bind");
+
+type BoundHost = { [BIND]?: true };
+
 /**
  * Bind library runtime onto `instance` and enter the model.
- * Idempotent while the library reports a live state path. After `stop`, call
- * `start` again to re-bind. Hosts stay started across attach/detach; children
- * parented with a context share the owner's environment.
+ * Idempotent while this module holds a bind token on the instance. After `stop`,
+ * call `start` again to re-bind. Hosts stay started across attach/detach;
+ * children parented with a context share the owner's environment.
  */
 export function start<I extends object, M>(instance: I, model: M): I & Host;
 export function start<I extends object, M>(ctx: library.Context, instance: I, model: M): I & Host;
@@ -90,8 +94,8 @@ export function start<I extends object, M>(
   instanceOrModel: I | M,
   maybeModel?: M,
 ): I & Host {
-  const instance = (maybeModel !== undefined ? instanceOrModel : ctxOrInstance) as object;
-  if (isRunning(instance)) {
+  const instance = (maybeModel !== undefined ? instanceOrModel : ctxOrInstance) as BoundHost;
+  if (instance[BIND] === true) {
     return instance as I & Host;
   }
   type LibraryStart = {
@@ -102,21 +106,14 @@ export function start<I extends object, M>(
   const started = maybeModel !== undefined
     ? libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object)
     : libraryStart(ctxOrInstance as object, instanceOrModel as object);
+  (started as BoundHost)[BIND] = true;
   return started as I & Host;
 }
 
 /** Stop the library runtime on `machine`. Further dispatch is a host-drop. */
 export async function stop(machine: object): Promise<void> {
   await library.Instance.prototype.stop.call(machine);
-}
-
-function isRunning(instance: object): boolean {
-  try {
-    const snapshot = library.Instance.prototype.takeSnapshot.call(instance);
-    return typeof snapshot.state === "string" && snapshot.state.length > 0;
-  } catch {
-    return false;
-  }
+  delete (machine as BoundHost)[BIND];
 }
 
 function isDispatchable(value: unknown): value is library.Dispatchable {

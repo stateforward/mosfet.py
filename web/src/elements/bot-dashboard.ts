@@ -976,6 +976,8 @@ export class BotDashboard extends Dashboard {
   }
 
   connectedCallback(): void {
+    const origin = this.ownerDocument?.defaultView?.location.origin;
+    this.origin = typeof origin === "string" && origin.length > 0 ? origin : "http://localhost";
     this.onSnapshot = (snapshot) => {
       this.#render(snapshot);
     };
