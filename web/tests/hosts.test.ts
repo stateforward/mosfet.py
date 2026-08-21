@@ -27,24 +27,19 @@ const fixturePath = path.join(
 
 const YIELD_MS = 0;
 
-function fittedViewport(args: {
+function viewportForFit(args: {
   bounds: { left: number; right: number; top: number; bottom: number };
   metrics: { width: number; height: number; origin: { x: number; y: number } };
-}): { scale: number; pan: { x: number; y: number } } {
-  const viewport = getViewportForBounds({
-    bounds: {
-      x: args.bounds.left + args.metrics.origin.x,
-      y: args.bounds.top + args.metrics.origin.y,
-      width: args.bounds.right - args.bounds.left,
-      height: args.bounds.bottom - args.bounds.top,
-    },
+}): { x: number; y: number; zoom: number } {
+  return getViewportForBounds({
+    bounds: args.bounds,
+    origin: args.metrics.origin,
     width: args.metrics.width,
     height: args.metrics.height,
     minZoom: MIN_ZOOM,
     maxZoom: MAX_ZOOM,
     padding: FIT_PADDING_RATIO,
   });
-  return { scale: viewport.zoom, pan: { x: viewport.x, y: viewport.y } };
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -257,7 +252,7 @@ describe("companion-style HSM controllers", () => {
     await panner.dispatch(hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: 1 } }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.zoomEvent, data: { deltaY: -100, point: { x: 30, y: 24 } } }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics } }));
-    assert.deepEqual(panner.transform, fittedViewport({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics }));
+    assert.deepEqual(panner.viewport, viewportForFit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics }));
     await hsm.stop(panner);
   });
 
@@ -354,8 +349,8 @@ describe("companion-style HSM controllers", () => {
         origin: { x: 0, y: 0 },
       },
     } }));
-    const nodeTransform = panner.transform;
-    assert.deepEqual(nodeTransform, fittedViewport({
+    const nodeTransform = panner.viewport;
+    assert.deepEqual(nodeTransform, viewportForFit({
       bounds: { left: 40, right: 136, top: 80, bottom: 176 },
       metrics: { width: 1000, height: 600, origin: { x: 0, y: 0 } },
     }));
@@ -363,7 +358,7 @@ describe("companion-style HSM controllers", () => {
     focusPath = focuser.current?.nodePath ?? "";
     assert.equal(focusKind, "node");
     assert.equal(focusPath, "/Demo/idle");
-    assert.deepEqual(panner.transform, nodeTransform);
+    assert.deepEqual(panner.viewport, nodeTransform);
     await hsm.stop(focuser);
     await hsm.stop(panner);
   });
@@ -379,11 +374,61 @@ describe("companion-style HSM controllers", () => {
     };
     await focuser.dispatch(hsm.typedEvent({ event: Focuser.focusEvent, data: { kind: "machine", machineName: "/A", bounds: { left: 0, right: 96, top: 0, bottom: 96 } } }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics } }));
-    assert.deepEqual(panner.transform, fittedViewport({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics }));
+    assert.deepEqual(panner.viewport, viewportForFit({ bounds: { left: 0, right: 96, top: 0, bottom: 96 }, metrics }));
     await focuser.dispatch(hsm.typedEvent({ event: Focuser.clearEvent }));
     await panner.dispatch(hsm.typedEvent({ event: Panner.fitEvent, data: { bounds: metrics.bounds, metrics } }));
-    assert.deepEqual(panner.transform, fittedViewport({ bounds: metrics.bounds, metrics }));
+    assert.deepEqual(panner.viewport, viewportForFit({ bounds: metrics.bounds, metrics }));
     await hsm.stop(focuser);
+    await hsm.stop(panner);
+  });
+
+  test("fitEvent inverted, zero-span, and nonzero-origin bounds share getViewportForBounds", async () => {
+    const viewportWidth = 1000;
+    const viewportHeight = 600;
+    const originX = 48;
+    const originY = -12;
+    const cases: readonly {
+      readonly bounds: { left: number; right: number; top: number; bottom: number };
+      readonly origin: { x: number; y: number };
+    }[] = [
+      { bounds: { left: 80, right: 0, top: 40, bottom: 0 }, origin: { x: 0, y: 0 } },
+      { bounds: { left: 20, right: 20, top: 10, bottom: 10 }, origin: { x: 0, y: 0 } },
+      { bounds: { left: 0, right: 80, top: 0, bottom: 40 }, origin: { x: originX, y: originY } },
+    ];
+    for (const fitCase of cases) {
+      const panner = hsm.start(new Panner(), Panner.model);
+      const metrics = {
+        width: viewportWidth,
+        height: viewportHeight,
+        bounds: { left: 0, right: viewportWidth, top: 0, bottom: viewportHeight },
+        origin: fitCase.origin,
+      };
+      await panner.dispatch(hsm.typedEvent({
+        event: Panner.fitEvent,
+        data: { bounds: fitCase.bounds, metrics },
+      }));
+      assert.deepEqual(panner.viewport, viewportForFit({ bounds: fitCase.bounds, metrics }));
+      await hsm.stop(panner);
+    }
+  });
+
+  test("fitEvent with non-finite bounds leaves the identity viewport", async () => {
+    const panner = hsm.start(new Panner(), Panner.model);
+    const identity = panner.viewport;
+    const metrics = {
+      width: 1000,
+      height: 600,
+      bounds: { left: 0, right: 1000, top: 0, bottom: 600 },
+      origin: { x: 0, y: 0 },
+    };
+    await panner.dispatch(hsm.typedEvent({
+      event: Panner.fitEvent,
+      data: {
+        bounds: { left: 0, right: 80, top: 0, bottom: 40 },
+        metrics: { ...metrics, width: Number.NaN },
+      },
+    }));
+    assert.deepEqual(panner.viewport, identity);
     await hsm.stop(panner);
   });
 

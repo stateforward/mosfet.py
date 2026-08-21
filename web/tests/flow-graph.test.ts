@@ -502,7 +502,13 @@ describe("flow-graph", () => {
     const maxZoom = 2;
     const noPadding = 0;
     const viewport = getViewportForBounds({
-      bounds,
+      bounds: {
+        left: bounds.x,
+        right: bounds.x + bounds.width,
+        top: bounds.y,
+        bottom: bounds.y + bounds.height,
+      },
+      origin: { x: 0, y: 0 },
       width: viewportWidth,
       height: viewportHeight,
       minZoom,
@@ -910,7 +916,8 @@ describe("flow-graph", () => {
     const machineName = "/A";
     const bounds = { left: originLeft, right: nodeWidth, top: originTop, bottom: nodeHeight };
     const expected = getViewportForBounds({
-      bounds: { x: originLeft, y: originTop, width: nodeWidth, height: nodeHeight },
+      bounds,
+      origin: { x: 0, y: 0 },
       width: 1000,
       height: 600,
       minZoom: MIN_ZOOM,
@@ -938,6 +945,34 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("fitBounds inverted and zero-span bounds share getViewportForBounds", async () => {
+    const viewportWidth = 1000;
+    const viewportHeight = 600;
+    const cases: readonly { left: number; right: number; top: number; bottom: number }[] = [
+      { left: 80, right: 0, top: 40, bottom: 0 },
+      { left: 20, right: 20, top: 10, bottom: 10 },
+    ];
+    for (const bounds of cases) {
+      const expected = getViewportForBounds({
+        bounds,
+        origin: { x: 0, y: 0 },
+        width: viewportWidth,
+        height: viewportHeight,
+        minZoom: MIN_ZOOM,
+        maxZoom: MAX_ZOOM,
+        padding: FIT_PADDING_RATIO,
+      });
+      const graph = document.createElement("flow-graph");
+      document.body.append(graph);
+      graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+      await waitUntil(() => graph.querySelector("flow-node") !== null);
+      graph.fitBounds(bounds);
+      await flush();
+      assert.deepEqual(graph.getViewport(), expected);
+      graph.remove();
+    }
+  });
+
   test("fitView and fitBounds during pan rebase getViewport from the live pointer", async () => {
     const originLeft = 0;
     const originTop = 0;
@@ -958,7 +993,8 @@ describe("flow-graph", () => {
     const postFitDeltaX = panClientX - midClientX;
     const postFitDeltaY = panClientY - midClientY;
     const expected = getViewportForBounds({
-      bounds: { x: originLeft, y: originTop, width: nodeWidth, height: nodeHeight },
+      bounds,
+      origin: { x: 0, y: 0 },
       width: 1000,
       height: 600,
       minZoom: MIN_ZOOM,

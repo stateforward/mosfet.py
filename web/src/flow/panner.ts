@@ -35,7 +35,6 @@ export type FitData = {
 export type ViewportData = Viewport;
 
 const MIN_PINCH_DISTANCE = 1;
-const MIN_BOUNDS_SPAN = 1;
 const ZOOM_STEP = 0.0015;
 
 export class Panner extends hsm.Instance {
@@ -242,12 +241,8 @@ export class Panner extends hsm.Instance {
 
   #fitBounds(bounds: ViewportBounds, metrics: ViewportMetrics): void {
     const viewport = getViewportForBounds({
-      bounds: {
-        x: bounds.left + metrics.origin.x,
-        y: bounds.top + metrics.origin.y,
-        width: Math.max(MIN_BOUNDS_SPAN, bounds.right - bounds.left),
-        height: Math.max(MIN_BOUNDS_SPAN, bounds.bottom - bounds.top),
-      },
+      bounds,
+      origin: metrics.origin,
       width: metrics.width,
       height: metrics.height,
       minZoom: MIN_ZOOM,

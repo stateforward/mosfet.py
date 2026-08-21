@@ -1,11 +1,13 @@
 import {
   DEFAULT_NODE_HEIGHT,
   DEFAULT_NODE_WIDTH,
+  MIN_BOUNDS_SPAN,
   type EdgeType,
   type HandlePosition,
   type Node,
   type Rect,
   type Viewport,
+  type ViewportBounds,
   type XYPosition,
 } from "./types.ts";
 
@@ -188,7 +190,7 @@ export function edgePath(
 }
 
 export function getNodesBounds(nodes: readonly Node[]): Rect {
-  if (nodes.length === 0) return { x: 0, y: 0, width: 1, height: 1 };
+  if (nodes.length === 0) return { x: 0, y: 0, width: MIN_BOUNDS_SPAN, height: MIN_BOUNDS_SPAN };
   let left = Number.POSITIVE_INFINITY;
   let top = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
@@ -204,28 +206,54 @@ export function getNodesBounds(nodes: readonly Node[]): Rect {
   return {
     x: left,
     y: top,
-    width: Math.max(1, right - left),
-    height: Math.max(1, bottom - top),
+    width: Math.max(MIN_BOUNDS_SPAN, right - left),
+    height: Math.max(MIN_BOUNDS_SPAN, bottom - top),
   };
 }
 
+/**
+ * Fit a world `bounds` rectangle into a pixel viewport.
+ *
+ * Inputs: `bounds` `{left,right,top,bottom}` in world units (finite numbers;
+ * inverted or zero span is accepted). `origin` is the world-to-viewport
+ * translation in CSS pixels. `width`/`height` are the viewport size in CSS
+ * pixels. `minZoom`/`maxZoom` are unitless zoom clamps. `padding` is a
+ * fraction of the fitted bounds, not pixels: each span is clamped to
+ * `MIN_BOUNDS_SPAN`, then multiplied by `(1 + padding)`.
+ * Outputs: `Viewport` `{x, y, zoom}`. `x`/`y` are CSS pixels placing the
+ * padded bounds in the viewport; `zoom` is unitless and clamped to
+ * `[minZoom, maxZoom]`.
+ * Ownership: pure; no retained state. The caller owns the returned object.
+ * Lifetime: the returned viewport does not alias `args`.
+ * Concurrency: runtime-safe/pure.
+ * Failure modes: non-finite inputs yield a non-finite viewport; `padding <= -1`
+ * yields a non-positive padded span and a non-finite or clamped zoom.
+ * Units: bounds and origin in world/CSS pixels; padding is a bounds ratio;
+ * zoom is unitless.
+ * Classification: runtime-safe.
+ */
 export function getViewportForBounds(args: {
-  bounds: Rect;
+  bounds: ViewportBounds;
+  origin: XYPosition;
   width: number;
   height: number;
   minZoom: number;
   maxZoom: number;
   padding: number;
 }): Viewport {
-  const paddedWidth = args.bounds.width * (1 + args.padding);
-  const paddedHeight = args.bounds.height * (1 + args.padding);
+  const spanWidth = Math.max(MIN_BOUNDS_SPAN, args.bounds.right - args.bounds.left);
+  const spanHeight = Math.max(MIN_BOUNDS_SPAN, args.bounds.bottom - args.bounds.top);
+  const x = args.bounds.left + args.origin.x;
+  const y = args.bounds.top + args.origin.y;
+  const paddedWidth = spanWidth * (1 + args.padding);
+  const paddedHeight = spanHeight * (1 + args.padding);
   const zoom = Math.min(
     args.maxZoom,
     Math.max(args.minZoom, Math.min(args.width / paddedWidth, args.height / paddedHeight)),
   );
   return {
-    x: args.width / 2 - (args.bounds.x + args.bounds.width / 2) * zoom,
-    y: args.height / 2 - (args.bounds.y + args.bounds.height / 2) * zoom,
+    x: args.width / 2 - (x + spanWidth / 2) * zoom,
+    y: args.height / 2 - (y + spanHeight / 2) * zoom,
     zoom,
   };
 }

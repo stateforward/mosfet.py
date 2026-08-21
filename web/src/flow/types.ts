@@ -5,6 +5,7 @@ export const MIN_ZOOM = 0.12;
 export const MAX_ZOOM = 2.4;
 export const ZOOM_FACTOR = 1.2;
 export const FIT_PADDING_RATIO = 0.1;
+export const MIN_BOUNDS_SPAN = 1;
 
 export type XYPosition = { readonly x: number; readonly y: number };
 
