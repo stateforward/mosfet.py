@@ -5,6 +5,9 @@ import { describe, test } from "node:test";
 import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
+import { registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
+
+registerBotOtelSource();
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
   FIT_PADDING_RATIO,
@@ -1110,5 +1113,161 @@ describe("flow-graph", () => {
     await flush();
     assert.match(graph.state(), /\/idle$/);
     graph.remove();
+  });
+
+  test("public flow CustomEvents dispatch non-cancelable with bubbles and composed", async () => {
+    const nodeWidth = 80;
+    const nodeHeight = 40;
+    const sourceNodeX = 0;
+    const targetNodeX = 200;
+    const nodeY = 0;
+    const handleSourceX = 80;
+    const handleY = 20;
+    const buttonsReleased = 0;
+
+    // flow-admit-rejected: non-finite node coordinates reject as invalid.
+    const rejectedGraph = document.createElement("flow-graph");
+    document.body.append(rejectedGraph);
+    const rejected: string[] = [];
+    rejectedGraph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail)) {
+        rejected.push(String(event.detail["reason"] ?? ""));
+        assert.equal(event.cancelable, false);
+        assert.equal(event.bubbles, true);
+        assert.equal(event.composed, true);
+      }
+    });
+    const validNode = { id: "a", position: { x: nodeY, y: nodeY }, data: { label: "A" }, width: nodeWidth, height: nodeHeight };
+    rejectedGraph.nodes = [validNode];
+    assert.equal(rejectedGraph.nodes.length, 1);
+    const invalidNode = { id: "nan", position: { x: Number.NaN, y: nodeY }, data: {} };
+    rejectedGraph.nodes = [invalidNode];
+    assert.equal(rejectedGraph.nodes.length, 1);
+    assert.deepEqual(rejected, ["invalid"]);
+
+    // flow-selection-change: box select with no hit reports an empty change set.
+    const selectGraph = document.createElement("flow-graph");
+    document.body.append(selectGraph);
+    const selected: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; nodeCount: number }> = [];
+    selectGraph.addEventListener("flow-selection-change", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail) || !Array.isArray(event.detail["nodes"])) return;
+      selected.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed, nodeCount: event.detail["nodes"].length });
+    });
+    selectGraph.nodes = [validNode];
+    const boxOrigin = { x: nodeY, y: nodeY };
+    const boxEnd = { x: nodeWidth * 2, y: nodeHeight * 2 };
+    await selectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      shiftKey: true,
+      origin: boxOrigin,
+      client: boxOrigin,
+      viewport: boxOrigin,
+      hit: { kind: "empty" },
+    }) }));
+    await selectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+      eventType: "pointermove",
+      shiftKey: true,
+      origin: boxOrigin,
+      client: boxEnd,
+      viewport: boxEnd,
+      hit: { kind: "empty" },
+    }) }));
+    await selectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      shiftKey: true,
+      buttons: buttonsReleased,
+      origin: boxOrigin,
+      client: boxEnd,
+      viewport: boxEnd,
+      hit: { kind: "empty" },
+    }) }));
+    await flush();
+    assert.ok(selected.length >= 1);
+    for (const seen of selected) {
+      assert.equal(seen.cancelable, false);
+      assert.equal(seen.bubbles, true);
+      assert.equal(seen.composed, true);
+    }
+    assert.ok(selected.some((seen) => seen.nodeCount === 1));
+
+    // flow-connect: pointer down on a source handle, up on a target handle.
+    const connectGraph = document.createElement("flow-graph");
+    document.body.append(connectGraph);
+    connectGraph.nodes = [
+      { id: "a", position: { x: sourceNodeX, y: nodeY }, data: { label: "A" }, width: nodeWidth, height: nodeHeight },
+      { id: "b", position: { x: targetNodeX, y: nodeY }, data: { label: "B" }, width: nodeWidth, height: nodeHeight },
+    ];
+    const sourceNode = connectGraph.nodes[0];
+    const targetNode = connectGraph.nodes[1];
+    assert.ok(sourceNode !== undefined && targetNode !== undefined);
+    const connected: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; pair: string }> = [];
+    connectGraph.addEventListener("flow-connect", (event: Event) => {
+      if (!(event instanceof CustomEvent) || !hsm.isRecord(event.detail)) return;
+      const sourceId = event.detail["source"];
+      const targetId = event.detail["target"];
+      if (typeof sourceId === "string" && typeof targetId === "string") {
+        connected.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed, pair: `${sourceId}->${targetId}` });
+      }
+    });
+    await connectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerDownEvent, data: pointerData({
+      eventType: "pointerdown",
+      origin: { x: handleSourceX, y: handleY },
+      client: { x: handleSourceX, y: handleY },
+      world: { x: handleSourceX, y: handleY },
+      hit: { kind: "handle", node: sourceNode, handleKind: "source", position: "right" },
+    }) }));
+    assert.match(connectGraph.state(), /\/connect$/);
+    const releaseClient = { x: targetNodeX, y: handleY };
+    await connectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: pointerData({
+      eventType: "pointermove",
+      origin: { x: handleSourceX, y: handleY },
+      client: releaseClient,
+      world: releaseClient,
+      hit: { kind: "handle", node: targetNode, handleKind: "target", position: "left" },
+    }) }));
+    await connectGraph.dispatch(hsm.typedEvent({ event: FlowGraph.pointerUpEvent, data: pointerData({
+      eventType: "pointerup",
+      buttons: buttonsReleased,
+      origin: { x: handleSourceX, y: handleY },
+      client: releaseClient,
+      world: releaseClient,
+      hit: { kind: "handle", node: targetNode, handleKind: "target", position: "left" },
+    }) }));
+    await flush();
+    assert.deepEqual(connected.map((item) => item.pair), ["a->b"]);
+    assert.ok(connected.every((item) => item.cancelable === false && item.bubbles === true && item.composed === true));
+
+    // host-drop: an admitted write on an unstarted graph classifies as unstarted.
+    const dropGraph = document.createElement("flow-graph");
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    dropGraph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed, reason: event.detail["reason"] });
+      }
+    });
+    dropGraph.nodes = [validNode];
+    await flush();
+    assert.ok(drops.length >= 1);
+    assert.ok(drops.every((drop) => drop.cancelable === false && drop.bubbles === true && drop.composed === true));
+    assert.ok(drops.some((drop) => drop.reason === "unstarted"));
+
+    // bot-otel-source: ready emits the non-cancelable public event.
+    const sourceHost = document.createElement("bot-otel-source");
+    const ready: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean }> = [];
+    sourceHost.addEventListener("bot-otel-source", (event: Event) => {
+      if (event instanceof CustomEvent) {
+        ready.push({ cancelable: event.cancelable, bubbles: event.bubbles, composed: event.composed });
+      }
+    });
+    document.body.append(sourceHost);
+    await waitUntil(() => sourceHost.snapshot().phase === "live");
+    assert.ok(ready.length >= 1);
+    assert.ok(ready.every((item) => item.cancelable === false && item.bubbles === true && item.composed === true));
+
+    rejectedGraph.remove();
+    selectGraph.remove();
+    connectGraph.remove();
+    dropGraph.remove();
+    sourceHost.remove();
   });
 });
