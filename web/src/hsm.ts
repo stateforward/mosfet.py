@@ -69,14 +69,25 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  *
  * CORE-EXC-001 exception for CORE-OBS-001 MUST OpenTelemetry Telemetry.
  * Owner: web/src/hsm.ts (bot-hsm-dashboard). Rationale: no OpenTelemetry JS
- * SDK is approved for this package; do not add one. Changed command, stream,
- * and host-drop paths emit HSM events and DOM CustomEvents with bounded names
- * (machine, event kind, stage, outcome) instead of OTEL signals.
- * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts.
+ * SDK is approved for this package; do not add one. Substitutes are bounded HSM
+ * events and DOM CustomEvents (machine, event kind, stage, outcome) on:
+ * command completed/failed/canceled; stream load.failed / stream.canceled;
+ * host-drop; coalesce timer flush via Scheduler; renderer paint / render_canceled
+ * / ErrorEvent; FlowGraph nodes/edges admit and reject; Panner transform_changed
+ * / panning_changed; Focuser focus_changed.
+ * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts,
+ * web/tests/flow-renderer.test.ts, web/tests/flow-graph.test.ts.
  * Expiration: an OpenTelemetry API or SDK dependency is user-approved for web/.
- * Removal plan: instrument host-drop, command completed/failed/canceled, and
- * stream load.failed with OTEL spans/metrics of bounded cardinality, then
- * delete this exception.
+ * Removal plan: instrument those named paths with OTEL spans/metrics of bounded
+ * cardinality, then delete this exception.
+ *
+ * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at the
+ * `as unknown as` return of `from()`. Owner: web/src/hsm.ts. Rationale: the
+ * mixin class is a custom element, not `instanceof Instance`; TypeScript has no
+ * overload-safe way to prove `HostElement` is `new () => InstanceType<TBase> &
+ * Host` after copying `Instance.prototype` descriptors. Risk tests:
+ * web/tests/from.test.ts. Expiration: the library exports a typed host mixin.
+ * Removal plan: switch `from()` to that mixin and delete the assertion.
  */
 export function from<TBase extends HostConstructor>(
   Base: TBase,
@@ -114,6 +125,16 @@ export function start<I extends object, M>(
   if (instance[BIND] === true) {
     return instance as I & Host;
   }
+  /**
+   * CORE-EXC-001 exception for TS-ANY-001 MUST NOT Use Unsafe Any at
+   * `library.start as unknown as LibraryStart`. Owner: web/src/hsm.ts.
+   * Rationale: library `start` requires a typed model instance; hosts are
+   * custom elements with copied prototypes and are not `Instance`. MixinRest
+   * does not cover this site. Risk tests: web/tests/from.test.ts.
+   * Expiration: the library accepts a host object without a model-instance
+   * generic, or exports a host mixin `start`. Removal plan: call that API
+   * and delete this assertion.
+   */
   type LibraryStart = {
     (runtime: object, defined: object): object;
     (ctx: library.Context, runtime: object, defined: object): object;
