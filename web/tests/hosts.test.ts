@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as hsm from "../src/hsm.ts";
 
-import { Dashboard, postCommandHttp, type DashboardSnapshot } from "../src/dashboard.ts";
+import { commandEventNameLegal, Dashboard, postCommandHttp, type DashboardSnapshot } from "../src/dashboard.ts";
 import { Focuser } from "../src/flow/focuser.ts";
 import { getViewportForBounds } from "../src/flow/path.ts";
 import { Panner } from "../src/flow/panner.ts";
@@ -512,20 +512,20 @@ describe("companion-style HSM controllers", () => {
     globalWithReportError.reportError = (error) => {
       reports.push(error);
     };
-    const startedHsmError = new Error("dispatch requires a started HSM");
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
     const unstarted = "unstarted";
     const host = document.createElement("div");
     try {
       assert.throws(
-        () => hsm.reportFailure({ error: startedHsmError, host }),
+        () => hsm.reportFailure({ error: startedRuntimeError, host }),
         (error: unknown) => error instanceof hsm.HostDropError && error.reason === unstarted,
       );
       assert.throws(
-        () => hsm.reportFailure({ error: startedHsmError }),
+        () => hsm.reportFailure({ error: startedRuntimeError }),
         (error: unknown) => error instanceof hsm.HostRequiredError,
       );
       assert.throws(
-        () => hsm.catchFailure()(startedHsmError),
+        () => hsm.catchFailure()(startedRuntimeError),
         (error: unknown) => error instanceof hsm.HostRequiredError,
       );
       const unexpected = new Error("unexpected HSM failure");
@@ -766,6 +766,33 @@ describe("companion-style HSM controllers", () => {
     assert.ok(names.indexOf(detach) < names.indexOf(stopped));
   });
 
+  test("overlapping dashboard stop both complete without hanging", async () => {
+    const dashboard = bootDashboard();
+    const first = dashboard.stop();
+    const second = dashboard.stop();
+    await Promise.all([first, second]);
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
+    const stopped = "stopped";
+    assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host: dashboard })?.reason, stopped);
+  });
+
+  test("command event-name charset rejects empty, whitespace, overlong, and non-letter start", async () => {
+    const maxLegal = 128;
+    const overlong = 129;
+    const letter = "a";
+    const legalMax = letter.repeat(maxLegal);
+    const tooLong = letter.repeat(overlong);
+    const leadingSpace = " phone.ring";
+    const trailingSpace = "phone.ring ";
+    const digitFirst = "1phone";
+    assert.equal(commandEventNameLegal(""), false);
+    assert.equal(commandEventNameLegal(legalMax), true);
+    assert.equal(commandEventNameLegal(tooLong), false);
+    assert.equal(commandEventNameLegal(leadingSpace), false);
+    assert.equal(commandEventNameLegal(trailingSpace), false);
+    assert.equal(commandEventNameLegal(digitFirst), false);
+  });
+
   test("empty command name fails without posting", async () => {
     const posted: string[] = [];
     const dashboard = bootDashboard({
@@ -778,6 +805,29 @@ describe("companion-style HSM controllers", () => {
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, []);
     assert.equal(dashboard.snapshot().commandResult?.detail, "event_name is required");
+    await dashboard.stop();
+  });
+
+  test("whitespace and digit-first command names fail as not allowed, not required", async () => {
+    const posted: string[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted.push(command.eventName);
+        return { result: "accepted", detail: "ok" };
+      },
+    });
+    const notAllowed = "event_name is not an allowed command";
+    await dashboard.dispatch("dashboard.command.send", { eventName: " ", dataJson: "" });
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
+    assert.deepEqual(posted, []);
+    assert.equal(dashboard.snapshot().commandResult?.detail, notAllowed);
+    await dashboard.dispatch("dashboard.command.send", { eventName: "1go", dataJson: "" });
+    await waitFor(() => dashboard.snapshot().commandResult?.detail === notAllowed && dashboard.snapshot().commandEventName === "1go");
+    assert.deepEqual(posted, []);
+    const httpEmpty = await postCommandHttp({ eventName: "", dataJson: "" });
+    const httpSpace = await postCommandHttp({ eventName: " ", dataJson: "" });
+    assert.equal(httpEmpty.detail, "event_name is required");
+    assert.equal(httpSpace.detail, notAllowed);
     await dashboard.stop();
   });
 

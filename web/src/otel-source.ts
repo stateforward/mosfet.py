@@ -33,8 +33,6 @@ export type SourceConnectData = {
   readonly source?: StreamSource;
 };
 
-const SOURCE_CONNECT_EVENT = sourceCommands["source.connect.requested"].name;
-
 export type OtelSourcePhase = "idle" | "connecting" | "live" | "error";
 
 export type OtelSourceSnapshot = {
@@ -255,7 +253,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   async #dispatchController(eventName: OtelSourceEventName, data?: unknown): Promise<OtelSourceSnapshot> {
-    const admitted = eventName === SOURCE_CONNECT_EVENT ? sourceConnectFrom(data) : data;
+    const admitted = isSourceConnectPayload(data) ? sourceConnectFrom(data) : data;
     await super.dispatch(
       admitted === undefined
         ? hsm.typedEvent({ event: sourceCommands[eventName] })
@@ -367,22 +365,31 @@ export function sourceConnectFrom(data: unknown): SourceConnectData {
   };
 }
 
-export function eventWithSourceConnect(event: hsm.Event): hsm.Event {
-  if (event.name !== SOURCE_CONNECT_EVENT) return event;
-  return { ...event, data: sourceConnectFrom(event.data) };
+/**
+ * True when unknown ingress is SourceConnect-shaped.
+ *
+ * Selects by payload (`origin` string, `urlAllowed` boolean, `url` string, or
+ * `source` stream), not `event.name`. Used so Event-path dispatch restamps
+ * `urlAllowed` from `collectorUrl` without a name allowlist.
+ */
+export function isSourceConnectPayload(data: unknown): boolean {
+  if (!hsm.isRecord(data)) return false;
+  return typeof data["origin"] === "string"
+    || typeof data["urlAllowed"] === "boolean"
+    || typeof data["url"] === "string"
+    || isOtelSource(data["source"]);
 }
 
-const DASHBOARD_SOURCE_SELECTED = "dashboard.source.selected";
-const DASHBOARD_REPLAY_LIVE = "dashboard.replay.live";
-
-export function eventWithUrlAdmission(event: hsm.Event): hsm.Event {
-  if (
-    event.name !== SOURCE_CONNECT_EVENT
-    && event.name !== DASHBOARD_SOURCE_SELECTED
-    && event.name !== DASHBOARD_REPLAY_LIVE
-  ) {
-    return event;
-  }
+/**
+ * Restamp URL-bearing Event data from `sourceConnectFrom`.
+ *
+ * Inputs: an HSM Event. Outputs: the same event, or a clone whose `data` is
+ * recomputed `SourceConnectData` when the payload is connect-shaped.
+ * Does not read `event.name`. Ownership: returns a new event object only when
+ * restamping. Classification: runtime-safe.
+ */
+export function eventWithSourceConnect(event: hsm.Event): hsm.Event {
+  if (!isSourceConnectPayload(event.data)) return event;
   return { ...event, data: sourceConnectFrom(event.data) };
 }
 

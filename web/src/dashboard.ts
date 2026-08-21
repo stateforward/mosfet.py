@@ -19,7 +19,7 @@ import {
   type OtelSource,
   type OtelStreamConnect,
 } from "./otel/source.ts";
-import { collectorUrl, eventWithUrlAdmission, sourceConnectFrom } from "./otel-source.ts";
+import { collectorUrl, eventWithSourceConnect, isSourceConnectPayload, sourceConnectFrom } from "./otel-source.ts";
 import { type ObserveSpan } from "./otel/span.ts";
 import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } from "./otel/replay.ts";
 
@@ -113,6 +113,7 @@ export type DashboardSnapshot = {
 };
 
 const COMMAND_NAME_MAX = 128;
+const COMMAND_NAME_FIRST_INDEX = 0;
 const LETTER_A = 65;
 const LETTER_Z = 90;
 const LETTER_a = 97;
@@ -124,27 +125,35 @@ const CHAR_DOT = 46;
 const CHAR_COLON = 58;
 const CHAR_SLASH = 47;
 const CHAR_DASH = 45;
+const EVENT_NAME_REQUIRED = "event_name is required";
+const EVENT_NAME_NOT_ALLOWED = "event_name is not an allowed command";
 
 /**
  * Allocation-free command event-name charset: `A-Za-z` then up to 127 of
- * `A-Za-z0-9_.:/-`. Does not trim.
+ * `A-Za-z0-9_.:/-`. Does not trim. Empty is distinct from whitespace/illegal.
  */
 export function commandEventNameLegal(name: string): boolean {
   if (name.length === 0 || name.length > COMMAND_NAME_MAX) return false;
-  const first = name.charCodeAt(0);
-  if (!isCommandNameLetter(first)) return false;
+  const first = name.charCodeAt(COMMAND_NAME_FIRST_INDEX);
+  if (!isCommandNameLetter({ code: first })) return false;
   for (let index = 1; index < name.length; index += 1) {
-    if (!isCommandNameChar(name.charCodeAt(index))) return false;
+    if (!isCommandNameChar({ code: name.charCodeAt(index) })) return false;
   }
   return true;
 }
 
-function isCommandNameLetter(code: number): boolean {
+function commandNameFailureDetail(name: string): string {
+  return name.length === 0 ? EVENT_NAME_REQUIRED : EVENT_NAME_NOT_ALLOWED;
+}
+
+function isCommandNameLetter(args: { code: number }): boolean {
+  const code = args.code;
   return (code >= LETTER_A && code <= LETTER_Z) || (code >= LETTER_a && code <= LETTER_z);
 }
 
-function isCommandNameChar(code: number): boolean {
-  if (isCommandNameLetter(code)) return true;
+function isCommandNameChar(args: { code: number }): boolean {
+  const code = args.code;
+  if (isCommandNameLetter({ code })) return true;
   if (code >= DIGIT_0 && code <= DIGIT_9) return true;
   return code === CHAR_UNDERSCORE || code === CHAR_DOT || code === CHAR_COLON || code === CHAR_SLASH || code === CHAR_DASH;
 }
@@ -217,6 +226,7 @@ function signalAborted(signal: AbortSignal | undefined): boolean {
  * Lifetime: one HTTP round-trip; the promise settling ends the call.
  * Concurrency: overlapping calls are independent fetches.
  * Failure modes:
+ * - empty `eventName` => `error` / "event_name is required"
  * - illegal `eventName` => `error` / "event_name is not an allowed command"
  * - abort observed before `fetch` is invoked => `canceled` / "command canceled"
  *   (HTTP did not commit)
@@ -237,7 +247,7 @@ export async function postCommandHttp(command: {
   signal?: AbortSignal;
 }): Promise<CommandResult> {
   if (!commandEventNameLegal(command.eventName)) {
-    return { result: "error", detail: "event_name is not an allowed command" };
+    return { result: "error", detail: commandNameFailureDetail(command.eventName) };
   }
   if (signalAborted(command.signal)) {
     return { result: "canceled", detail: "command canceled" };
@@ -511,15 +521,38 @@ function commandActorFromEvent(event: hsm.Event): Command | null {
   return event.data["command"];
 }
 
+const hostStopWaiters = new WeakMap<object, Array<() => void>>();
+const hostStopRuns = new WeakMap<object, Promise<void>>();
+
+function addHostStopWaiter(instance: object, waiter: () => void): void {
+  const waiters = hostStopWaiters.get(instance) ?? [];
+  waiters.push(waiter);
+  hostStopWaiters.set(instance, waiters);
+}
+
+function announceHostStopped(instance: hsm.Instance): void {
+  const waiters = hostStopWaiters.get(instance);
+  if (waiters === undefined) return;
+  hostStopWaiters.delete(instance);
+  for (const waiter of waiters) waiter();
+}
+
 async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
-  controllerOf(instance)?.noteHostStopping();
   const command = commandActorFromEvent(event);
-  if (command !== null) await hsm.stop(command);
-  await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
+  try {
+    if (command !== null) await hsm.stop(command);
+  } finally {
+    await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
+  }
 }
 
 function clearCommandActor(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
   controllerOf(instance)?.clearCommandActor();
+  announceHostStopped(instance);
+}
+
+function signalHostAlreadyStopped(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+  announceHostStopped(instance);
 }
 
 function replayStep(): number {
@@ -536,6 +569,7 @@ const dashboardModel = hsm.define(
     hsm.defer("dashboard.replay.play"),
     hsm.defer("dashboard.replay.enter"),
     hsm.transition(hsm.on("dashboard.host.attach"), hsm.target("../connected")),
+    hsm.transition(hsm.on("dashboard.host.detach"), hsm.effect(signalHostAlreadyStopped)),
   ),
   hsm.state(
     "connected",
@@ -628,6 +662,7 @@ const dashboardModel = hsm.define(
   hsm.state(
     "stopping",
     hsm.defer("dashboard.host.attach"),
+    hsm.defer("dashboard.host.detach"),
     hsm.defer("dashboard.source.selected"),
     hsm.defer("dashboard.command.send"),
     hsm.activity(stopCommandActor),
@@ -706,7 +741,7 @@ class Command extends hsm.Instance {
     if (!(instance instanceof Command)) return;
     const name = stringField({ event, key: "eventName" }) ?? "";
     const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
-    const detail = name.trim().length === 0 ? "event_name is required" : "event_name is not an allowed command";
+    const detail = commandNameFailureDetail(name);
     void hsm.notifyOwner({
       instance,
       event: hsm.typedEvent({
@@ -741,8 +776,7 @@ class Command extends hsm.Instance {
       });
     };
     if (!commandEventNameLegal(name)) {
-      const detail = name.length === 0 ? "event_name is required" : "event_name is not an allowed command";
-      await finish({ event: Command.failedEvent, result: { result: "error", detail } });
+      await finish({ event: Command.failedEvent, result: { result: "error", detail: commandNameFailureDetail(name) } });
       return;
     }
     const canceled: CommandResult = { result: "canceled", detail: "command canceled" };
@@ -809,9 +843,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
   origin = "";
   #commandSeq = 0;
   #command: Command | null = null;
-  #hostStopped: (() => void) | null = null;
-  #hostHasStopped = false;
-  #enteredStopping = false;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
   postCommand: CommandPost = postCommandHttp;
@@ -882,13 +913,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
    */
   clearCommandActor(): void {
     this.#command = null;
-    this.#hostHasStopped = true;
-    this.#hostStopped?.();
-    this.#hostStopped = null;
-  }
-
-  noteHostStopping(): void {
-    this.#enteredStopping = true;
   }
 
   snapshot(): DashboardSnapshot {
@@ -921,16 +945,14 @@ export class Dashboard extends hsm.from(HTMLElement) {
   override dispatch(eventOrContext: DashboardEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<DashboardSnapshot> {
     if (typeof eventOrContext !== "string") {
       return eventOrContext instanceof hsm.Context
-        ? super.dispatch(eventOrContext, eventWithUrlAdmission(data as hsm.Event))
-        : super.dispatch(eventWithUrlAdmission(eventOrContext));
+        ? super.dispatch(eventOrContext, eventWithSourceConnect(data as hsm.Event))
+        : super.dispatch(eventWithSourceConnect(eventOrContext));
     }
     return this.#dispatchController(eventOrContext, data);
   }
 
   async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    const admitted = eventName === "dashboard.source.selected" || eventName === "dashboard.replay.live"
-      ? sourceConnectFrom(data)
-      : data;
+    const admitted = isSourceConnectPayload(data) ? sourceConnectFrom(data) : data;
     await super.dispatch(
       admitted === undefined
         ? hsm.typedEvent({ event: dashboardCommands[eventName] })
@@ -943,42 +965,51 @@ export class Dashboard extends hsm.from(HTMLElement) {
   /**
    * Stop through modeled detach, then unbind.
    *
-   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command`, waits
-   * for `dashboard.host.stopped`, then module `hsm.stop(this)`. Does not write
-   * `#command` or `hsm.stop` a Command actor outside RTC.
+   * Inputs: none. Dispatches `dashboard.host.detach` with `data.command`.
+   * Topology moves connected → stopping → disconnected on
+   * `dashboard.host.stopped`. Public `stop()` waits for that modeled
+   * completion, then module `hsm.stop(this)`.
    * Outputs: host unbound. Ownership: this dashboard. Lifetime: one stop.
-   * Concurrency: runtime-safe. Overlapping stop after `dashboard.host.stopped`
-   * only unbinds. Failure modes: detach dispatch rejection unbinds then
-   * rethrows.
+   * Concurrency: overlapping `stop()` awaits the in-flight run and does not
+   * unbind while `stopCommandActor` is in flight. Detach while stopping is
+   * deferred; detach while disconnected announces the already-stopped host.
+   * Failure modes: host-drop detach is already stopped; other dispatch
+   * rejections unbind then throw an `Error`.
    * Classification: runtime-safe.
    */
   override async stop(): Promise<void> {
-    if (this.#hostHasStopped) {
-      await hsm.stop(this);
+    const inflight = hostStopRuns.get(this);
+    if (inflight !== undefined) {
+      await inflight;
       return;
     }
-    const done = new Promise<void>((resolve) => {
-      this.#hostStopped = resolve;
-    });
-    this.#enteredStopping = false;
+    const run = (async (): Promise<void> => {
+      const done = new Promise<void>((resolve, reject) => {
+        addHostStopWaiter(this, resolve);
+        void this.dispatch(hsm.typedEvent({
+          event: dashboardCommands["dashboard.host.detach"],
+          data: { command: this.#command },
+        })).then(() => undefined, (error: unknown) => {
+          const drop = hsm.hostDropFrom({ error, host: this });
+          if (drop !== null) {
+            resolve();
+            return;
+          }
+          reject(error instanceof Error ? error : new Error(String(error), { cause: error }));
+        });
+      });
+      try {
+        await done;
+      } finally {
+        await hsm.stop(this);
+      }
+    })();
+    hostStopRuns.set(this, run);
     try {
-      await this.dispatch(hsm.typedEvent({
-        event: dashboardCommands["dashboard.host.detach"],
-        data: { command: this.#command },
-      }));
-    } catch (error) {
-      this.#hostStopped = null;
-      this.#hostHasStopped = true;
-      await hsm.stop(this);
-      throw error;
+      await run;
+    } finally {
+      hostStopRuns.delete(this);
     }
-    if (!this.#enteredStopping) {
-      this.#hostStopped?.();
-      this.#hostStopped = null;
-      this.#hostHasStopped = true;
-    }
-    await done;
-    await hsm.stop(this);
   }
 
   attachCommand(): void {
@@ -993,7 +1024,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
   forwardCommand(event: hsm.Event): void {
     const command = this.#command;
     if (command === null) return;
-    const name = (stringField({ event, key: "eventName" }) ?? this.#commandEventName).trim();
+    const name = stringField({ event, key: "eventName" }) ?? this.#commandEventName;
     const payload = stringField({ event, key: "dataJson" }) ?? this.#commandDataJson;
     this.#commandEventName = name;
     this.#commandDataJson = payload;
