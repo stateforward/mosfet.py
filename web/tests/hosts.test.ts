@@ -1113,7 +1113,8 @@ describe("companion-style HSM controllers", () => {
     });
     await waitFor(() => dashboard.snapshot().phase === "error");
     assert.equal(dashboard.snapshot().phase, "error");
-    assert.equal(dashboard.snapshot().statePath.includes(viewing), false);
+    const viewingAbsent = false;
+    assert.equal(dashboard.snapshot().statePath.includes(viewing), viewingAbsent);
     assert.deepEqual(opened, []);
     assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
     await stopDashboard(dashboard);
@@ -1136,7 +1137,8 @@ describe("companion-style HSM controllers", () => {
     });
     await waitFor(() => dashboard.snapshot().phase === "error");
     assert.equal(dashboard.snapshot().phase, "error");
-    assert.equal(dashboard.snapshot().statePath.includes(viewing), false);
+    const viewingAbsent = false;
+    assert.equal(dashboard.snapshot().statePath.includes(viewing), viewingAbsent);
     assert.deepEqual(opened, []);
     assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
     await stopDashboard(dashboard);
