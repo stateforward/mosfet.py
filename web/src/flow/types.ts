@@ -206,6 +206,35 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function jsonIsCopyable(args: { value: unknown; stack: object[]; depth: number }): boolean {
+  const { value, stack, depth } = args;
+  if (value === null || typeof value !== "object") return true;
+  if (depth >= MAX_JSON_DEPTH) return false;
+  if (stack.includes(value)) return false;
+  stack.push(value);
+  const nestedDepth = depth + 1;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (!jsonIsCopyable({ value: entry, stack, depth: nestedDepth })) {
+        stack.pop();
+        return false;
+      }
+    }
+    stack.pop();
+    return true;
+  }
+  const record = value as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(record)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    if (!jsonIsCopyable({ value: entry, stack, depth: nestedDepth })) {
+      stack.pop();
+      return false;
+    }
+  }
+  stack.pop();
+  return true;
+}
+
 function copyJsonResult(args: { value: unknown; stack: object[]; depth: number }): CopyJsonResult {
   const { value, stack, depth } = args;
   if (value === null || typeof value !== "object") return { ok: true, value };
@@ -254,6 +283,21 @@ function copyJsonResult(args: { value: unknown; stack: object[]; depth: number }
 export function copyJson(value: unknown): CopyResult<unknown> {
   const initialStack: object[] = [];
   return copyJsonResult({ value, stack: initialStack, depth: initialJsonDepth });
+}
+
+/**
+ * True when `copyJson(value)` would succeed.
+ *
+ * Inputs: unknown nested objects and arrays. Outputs: `true` when the value
+ * is acyclic and nested at most `MAX_JSON_DEPTH`, including `true` for
+ * primitives and `undefined`. Ownership: `value` is not retained and no
+ * copied tree is allocated; only a visit stack is used. Lifetime: one call.
+ * Concurrency: synchronous. Failure modes: cyclic or over-deep values return
+ * `false` and do not throw. Classification: runtime-safe.
+ */
+export function jsonCopyable(value: unknown): boolean {
+  const visitStack: object[] = [];
+  return jsonIsCopyable({ value, stack: visitStack, depth: initialJsonDepth });
 }
 
 /**

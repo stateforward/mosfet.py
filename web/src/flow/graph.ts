@@ -18,6 +18,7 @@ import {
   copyNode,
   DEFAULT_NODE_HEIGHT,
   DEFAULT_NODE_WIDTH,
+  jsonCopyable,
   MAX_FLOW_EDGES,
   MAX_FLOW_NODES,
   ZOOM_FACTOR,
@@ -970,7 +971,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static nodesAdmitted(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return admitNodes(hsm.isRecord(event.data) ? event.data["nodes"] : undefined).rejected === null;
+    const nodes = hsm.isRecord(event.data) ? event.data["nodes"] : undefined;
+    if (!nodesAreAdmissible(nodes)) return false;
+    for (const node of nodes) {
+      if (!jsonCopyable(node.data)) return false;
+    }
+    return true;
   }
 
   static applyAdmittedNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -994,7 +1000,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static edgesAdmitted(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return admitEdges(hsm.isRecord(event.data) ? event.data["edges"] : undefined).rejected === null;
+    const edges = hsm.isRecord(event.data) ? event.data["edges"] : undefined;
+    if (!edgesAreAdmissible(edges)) return false;
+    for (const edge of edges) {
+      if (edge.data !== undefined && !jsonCopyable(edge.data)) return false;
+    }
+    return true;
   }
 
   static applyAdmittedEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1755,7 +1766,7 @@ function nodeHitsBox(node: Node, box: SelectionBox, viewport: Viewport): boolean
   return left < box.right && right > box.left && top < box.bottom && bottom > box.top;
 }
 
-function nodesAreAdmissible(value: unknown): boolean {
+function nodesAreAdmissible(value: unknown): value is readonly Node[] {
   if (!Array.isArray(value) || value.length > MAX_FLOW_NODES) return false;
   for (const item of value) {
     if (!isNode(item)) return false;
@@ -1763,7 +1774,7 @@ function nodesAreAdmissible(value: unknown): boolean {
   return true;
 }
 
-function edgesAreAdmissible(value: unknown): boolean {
+function edgesAreAdmissible(value: unknown): value is readonly Edge[] {
   if (!Array.isArray(value) || value.length > MAX_FLOW_EDGES) return false;
   for (const item of value) {
     if (!isEdge(item)) return false;
