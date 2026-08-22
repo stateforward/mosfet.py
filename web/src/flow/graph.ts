@@ -329,20 +329,29 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   /**
    * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. Copied with `copyNode` at write time; later
+   * Inputs: caller `value`. Copied with `snapshotNode` (`isNode` then
+   * `copyNode`, else a non-throwing shallow copy) at write time; later
    * mutation of the caller array does not change staged or admitted nodes.
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
-   * with the copy. After stop, dispatch host-drops.
+   * with the copy. After stop, dispatch host-drops and this setter does not
+   * retain `value` (the write buffer is unchanged; a later `start` from
+   * `connectedCallback` replays the last staged write, not the dropped one).
    * Outputs: getter returns copies of admitted nodes.
-   * Ownership: this host owns the copy. Lifetime: until the next nodes write
-   * or stop. Concurrency: runtime-safe. Failure modes: admit reject emits
-   * `flow-admit-rejected`; unstarted staging is not a failure.
+   * Ownership: this host owns the copy. Lifetime: until the next staged nodes
+   * write. Stopped writes do not replace the buffer. Concurrency: runtime-safe.
+   * Failure modes: admit reject emits `flow-admit-rejected`; unstarted staging
+   * is not a failure; stopped writes emit `host-drop` with reason `"stopped"`
+   * and are not retained.
    * Classification: runtime-safe.
    */
   set nodes(value: readonly Node[]) {
-    const nodes = value.map((node) => (hsm.isRecord(node.position) ? copyNode(node) : { ...node }));
+    if (hsm.hostWasStopped(this)) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
+      return;
+    }
+    const nodes = value.map(snapshotNode);
     this.#nodesWrite = nodes;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes } }));
@@ -360,14 +369,22 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_edges` is dispatched
-   * with the copy. After stop, dispatch host-drops.
+   * with the copy. After stop, dispatch host-drops and this setter does not
+   * retain `value` (the write buffer is unchanged; a later `start` from
+   * `connectedCallback` replays the last staged write, not the dropped one).
    * Outputs: getter returns copies of admitted edges.
-   * Ownership: this host owns the copy. Lifetime: until the next edges write
-   * or stop. Concurrency: runtime-safe. Failure modes: admit reject emits
-   * `flow-admit-rejected`; unstarted staging is not a failure.
+   * Ownership: this host owns the copy. Lifetime: until the next staged edges
+   * write. Stopped writes do not replace the buffer. Concurrency: runtime-safe.
+   * Failure modes: admit reject emits `flow-admit-rejected`; unstarted staging
+   * is not a failure; stopped writes emit `host-drop` with reason `"stopped"`
+   * and are not retained.
    * Classification: runtime-safe.
    */
   set edges(value: readonly Edge[]) {
+    if (hsm.hostWasStopped(this)) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
+      return;
+    }
     const edges = value.map(copyEdge);
     this.#edgesWrite = edges;
     if (!hsm.hostWasStarted(this)) return;
@@ -1361,6 +1378,11 @@ function isNode(value: unknown): value is Node {
   if (value["width"] !== undefined && !isFiniteNumber(value["width"])) return false;
   if (value["height"] !== undefined && !isFiniteNumber(value["height"])) return false;
   return true;
+}
+
+function snapshotNode(node: Node): Node {
+  const value: unknown = node;
+  return isNode(value) ? copyNode(value) : { ...node };
 }
 
 function isEdge(value: unknown): value is Edge {

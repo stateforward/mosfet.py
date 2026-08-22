@@ -135,13 +135,23 @@ export function graphsFromEvent(event: hsm.Event): MachineGraph[] | null {
 }
 
 function copyGraph(graph: MachineGraph): MachineGraph {
-  return {
-    ...graph,
-    nodes: graph.nodes.map((node) => ({ ...node })),
-    edges: graph.edges.map((edge) => ({ ...edge })),
-  };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes.map((node) => ({ ...node })) : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges.map((edge) => ({ ...edge })) : [];
+  return { ...graph, nodes, edges };
 }
 
+/**
+ * Copy `graphs` so later mutation of the caller array or graph items cannot
+ * change the returned list.
+ *
+ * Inputs: a list of machine graphs. Outputs: a new array whose items, node
+ * arrays, and edge arrays are copies. Never throws.
+ * Ownership: caller owns `graphs`; this function retains nothing. The caller
+ * owns the returned array.
+ * Purity: no I/O. Concurrency: runtime-safe.
+ * Failure modes: missing `nodes`/`edges` arrays become empty copies.
+ * Units: none. Classification: runtime-safe.
+ */
 export function copyGraphs(graphs: readonly MachineGraph[]): MachineGraph[] {
   return graphs.map(copyGraph);
 }

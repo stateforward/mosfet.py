@@ -778,7 +778,8 @@ describe("flow-graph", () => {
     const nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
     graph.nodes = nodes;
     nodes.push({ id: "b", position: { x: 1, y: 1 }, data: { label: "B" }, width: 80, height: 40 });
-    nodes.splice(0, admitted);
+    const spliceFromStart = 0;
+    nodes.splice(spliceFromStart, admitted);
     document.body.append(graph);
     await waitUntil(() => graph.nodes.length === admitted);
     assert.equal(graph.nodes.length, admitted);
@@ -796,7 +797,8 @@ describe("flow-graph", () => {
     const edges = [{ id: "a-b", source: "a", target: "b" }];
     graph.edges = edges;
     edges.push({ id: "extra", source: "a", target: "b" });
-    edges.splice(0, admitted);
+    const spliceFromStart = 0;
+    edges.splice(spliceFromStart, admitted);
     document.body.append(graph);
     await waitUntil(() => graph.edges.length === admitted);
     assert.equal(graph.edges.length, admitted);
@@ -1608,6 +1610,46 @@ describe("flow-graph", () => {
       assert.equal(drop.composed, publicEventComposed);
     }
     assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes[0]?.id === priorNodeId);
+    assert.equal(graph.nodes[0]?.id, priorNodeId);
+    const droppedWriteAbsent = false;
+    assert.equal(graph.nodes.some((node) => node.id === rejectedNodeId), droppedWriteAbsent);
+    graph.remove();
+  });
+
+  test("edges write after stop emits host-drop stopped and drops the write", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const priorEdgeId = "a-b";
+    const rejectedEdgeId = "dropped";
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: priorEdgeId, source: "a", target: "b" }];
+    await waitUntil(() => graph.edges[0]?.id === priorEdgeId);
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    await graph.stop();
+    graph.edges = [{ id: rejectedEdgeId, source: "a", target: "b" }];
+    await flush();
+    assert.equal(graph.edges[0]?.id, priorEdgeId);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+    document.body.append(graph);
+    await waitUntil(() => graph.edges[0]?.id === priorEdgeId);
+    assert.equal(graph.edges[0]?.id, priorEdgeId);
+    const droppedWriteAbsent = false;
+    assert.equal(graph.edges.some((edge) => edge.id === rejectedEdgeId), droppedWriteAbsent);
     graph.remove();
   });
 

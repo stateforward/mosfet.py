@@ -182,6 +182,65 @@ describe("bot-machine-graph flow host", () => {
     host.remove();
   });
 
+  test("mutating the caller graphs after set does not change admitted graphs", async () => {
+    const host = document.createElement("bot-machine-graph");
+    const phone = graphFor("/Phone");
+    const graphs = [phone];
+    const originalName = phone.name;
+    const originalLabel = phone.nodes[0]?.label;
+    const originalNodeCount = phone.nodes.length;
+    const admittedGraphs = 1;
+    host.graphs = graphs;
+    graphs.push(graphFor("/Other"));
+    phone.name = "/Mutated";
+    phone.nodes.push({ path: "/Phone/extra", parent: "/Phone", label: "extra" });
+    const firstNode = phone.nodes[0];
+    if (firstNode !== undefined) firstNode.label = "mutated";
+    document.body.append(host);
+    await waitUntil(() => host.getAttribute("data-node-count") === String(originalNodeCount));
+    assert.equal(host.graphs.length, admittedGraphs);
+    assert.equal(host.graphs[0]?.name, originalName);
+    assert.equal(host.graphs[0]?.nodes.length, originalNodeCount);
+    assert.equal(host.graphs[0]?.nodes[0]?.label, originalLabel);
+    assert.equal(host.getAttribute("data-node-count"), String(originalNodeCount));
+    host.remove();
+  });
+
+  test("graphs write after stop emits host-drop stopped and drops the write", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    const phone = graphFor("/Phone");
+    const other = graphFor("/Other");
+    const phoneNodeCount = phone.nodes.length;
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    host.graphs = [phone];
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    const drops: Array<{ reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    await host.stop();
+    host.graphs = [other];
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(host.graphs[0]?.name, phone.name);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    host.remove();
+    document.body.append(host);
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    assert.equal(host.graphs[0]?.name, phone.name);
+    const droppedWriteAbsent = false;
+    assert.equal(host.graphs.some((graph) => graph.name === other.name), droppedWriteAbsent);
+    host.remove();
+  });
+
   test("graphs write before append applies after nested connect without dropping fit", async () => {
     const host = document.createElement("bot-machine-graph");
     const flow = flowFrame(host);

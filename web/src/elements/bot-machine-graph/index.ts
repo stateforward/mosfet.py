@@ -149,19 +149,29 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   /**
    * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. The outer array is copied at write time. Before
-   * connect this is a write buffer replayed from `connectedCallback` after
-   * `start`; that staging is pre-start local state, not a dropped dispatch,
-   * and emits no host-drop. After start, `graphs_admit` is dispatched. After
-   * stop, dispatch host-drops. Does not call `start`.
+   * Inputs: caller `value`. Copied with `copyGraphs` at write time; later
+   * mutation of the caller array or of graph items (identity fields, `nodes`,
+   * `edges`) does not change staged or admitted graphs. Graph items are copied,
+   * not shared. Before connect this is a write buffer replayed from
+   * `connectedCallback` after `start`; that staging is pre-start local state,
+   * not a dropped dispatch, and emits no host-drop. After start, `graphs_admit`
+   * is dispatched with the copy. After stop, dispatch host-drops and this
+   * setter does not retain `value` (the write buffer is unchanged; a later
+   * `start` from `connectedCallback` replays the last staged write, not the
+   * dropped one). Does not call `start`.
    * Outputs: getter returns copies of admitted graphs.
-   * Ownership: this host owns the staged array. Lifetime: until the next
-   * graphs write or stop. Concurrency: runtime-safe.
-   * Failure modes: unstarted staging is not a failure.
+   * Ownership: this host owns the copy. Lifetime: until the next staged graphs
+   * write. Stopped writes do not replace the buffer. Concurrency: runtime-safe.
+   * Failure modes: unstarted staging is not a failure; stopped writes emit
+   * `host-drop` with reason `"stopped"` and are not retained.
    * Classification: runtime-safe.
    */
   set graphs(value: readonly MachineGraph[]) {
-    const graphs = [...value];
+    if (hsm.hostWasStopped(this)) {
+      this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: value } satisfies GraphsAdmitData }));
+      return;
+    }
+    const graphs = copyGraphs(value);
     this.#graphsWrite = graphs;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs } satisfies GraphsAdmitData }));

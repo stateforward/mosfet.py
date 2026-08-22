@@ -239,6 +239,21 @@ export function hostWasStarted(host: object): boolean {
 }
 
 /**
+ * True when this module has called `start` then `stop` on `host`, including
+ * while `stop` is in flight.
+ *
+ * Inputs: a host object. Outputs: `true` after the first `start` once `stop`
+ * has begun or finished, so later drops classify `"stopped"`. `false` if
+ * `start` has never run or the host is still bound.
+ * Ownership: does not retain `host`. Lifetime: bind tokens this module owns.
+ * Concurrency: synchronous. Failure modes: none. Classification: runtime-safe.
+ */
+export function hostWasStopped(host: object): boolean {
+  const bound = host as BoundHost;
+  return bound[WAS_STARTED] === true && (bound[BIND] !== true || bound[STOP] !== undefined);
+}
+
+/**
  * True when `value` is an HSM Event record (`name` string and `kind` number).
  *
  * Inputs: unknown ingress. Outputs: a type predicate for `Event`.
@@ -430,11 +445,6 @@ export function hostDropFrom(args: { error: unknown; host: object }): HostDropEr
   const operation = args.error.message.replace(/ requires a started HSM$/, "");
   const reason = hostWasStopped(args.host) ? "stopped" : "unstarted";
   return new HostDropError({ reason, operation, cause: args.error });
-}
-
-function hostWasStopped(host: object): boolean {
-  const bound = host as BoundHost;
-  return bound[WAS_STARTED] === true && (bound[BIND] !== true || bound[STOP] !== undefined);
 }
 
 function emitDrop(host: EventTarget | undefined, drop: HostDropError): void {
