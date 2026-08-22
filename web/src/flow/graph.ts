@@ -318,7 +318,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.#world.append(this.#edgeLayer, this.#nodeLayer);
     this.#viewport.append(this.#world, this.#selectionBox);
     this.#root.append(this.#viewport, document.createElement("slot"));
-    hsm.start(this, FlowGraph.model);
   }
 
   get nodes(): readonly Node[] {
@@ -418,6 +417,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
+    hsm.ensureStarted(this, FlowGraph.model);
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 

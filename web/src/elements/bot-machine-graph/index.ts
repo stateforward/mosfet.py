@@ -139,7 +139,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#flow.nodesDraggable = NESTED_NODES_DRAGGABLE;
     this.#flow.panOnDrag = NESTED_PAN_ON_DRAG;
     this.#root.append(this.#flow);
-    hsm.start(this, BotMachineGraph.model);
   }
 
   get graphs(): readonly MachineGraph[] {
@@ -187,6 +186,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
+    hsm.ensureStarted(this, BotMachineGraph.model);
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 

@@ -47,6 +47,20 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   throw new Error("timed out waiting for bot-machine-graph");
 }
 
+function ownedActors(host: { context(): hsm.Context }): hsm.Instance[] {
+  const instances = host.context().Value(hsm.Keys.Instances);
+  if (typeof instances !== "object" || instances === null) return [];
+  const actors: hsm.Instance[] = [];
+  for (const value of Object.values(instances as Record<string, unknown>)) {
+    if (value === host || typeof value !== "object" || value === null) continue;
+    if (typeof (value as { context?: unknown }).context !== "function") continue;
+    if (typeof (value as { state?: unknown }).state !== "function") continue;
+    if ((value as hsm.Instance).context().Value(hsm.Keys.Owner) !== host) continue;
+    actors.push(value as hsm.Instance);
+  }
+  return actors;
+}
+
 function graphFor(name: string) {
   return {
     name,
@@ -63,6 +77,11 @@ function graphFor(name: string) {
 }
 
 describe("bot-machine-graph flow host", () => {
+  test("constructor does not start the host", () => {
+    const host = document.createElement("bot-machine-graph");
+    assert.equal(host.state(), "");
+  });
+
   test("nested connect admits nodesDraggable false after the child starts", async () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
@@ -71,6 +90,22 @@ describe("bot-machine-graph flow host", () => {
     assert.match(flow.state(), /connected|pointer/);
     assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
     assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
+    host.remove();
+  });
+
+  test("Host.stop stops nested Graph actor", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    await waitUntil(() => host.state().includes("/connected"));
+    const actors = ownedActors(host);
+    const graphCount = 1;
+    assert.equal(actors.length, graphCount);
+    const graph = actors[0];
+    assert.ok(graph !== undefined);
+    assert.notEqual(graph.state(), "");
+    await host.stop();
+    assert.equal(host.state(), "");
+    assert.equal(graph.state(), "");
     host.remove();
   });
 

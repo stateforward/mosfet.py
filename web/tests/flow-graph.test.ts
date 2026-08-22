@@ -33,6 +33,20 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+function ownedActors(host: { context(): hsm.Context }): hsm.Instance[] {
+  const instances = host.context().Value(hsm.Keys.Instances);
+  if (typeof instances !== "object" || instances === null) return [];
+  const actors: hsm.Instance[] = [];
+  for (const value of Object.values(instances as Record<string, unknown>)) {
+    if (value === host || typeof value !== "object" || value === null) continue;
+    if (typeof (value as { context?: unknown }).context !== "function") continue;
+    if (typeof (value as { state?: unknown }).state !== "function") continue;
+    if ((value as hsm.Instance).context().Value(hsm.Keys.Owner) !== host) continue;
+    actors.push(value as hsm.Instance);
+  }
+  return actors;
+}
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 50; i += 1) {
     if (predicate()) return;
@@ -668,6 +682,11 @@ describe("flow-graph", () => {
     assert.equal(graph.nodes[0]?.id, "a");
     assert.deepEqual(rejected, ["invalid", "invalid"]);
     graph.remove();
+  });
+
+  test("constructor does not start the host", () => {
+    const graph = document.createElement("flow-graph");
+    assert.equal(graph.state(), "");
   });
 
   test("nodes write before connect applies after the child starts", async () => {
@@ -1494,6 +1513,24 @@ describe("flow-graph", () => {
       assert.equal(drop.composed, publicEventComposed);
     }
     assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+  });
+
+  test("Host.stop stops nested graph actors", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    const actors = ownedActors(graph);
+    const childCount = 6;
+    assert.equal(actors.length, childCount);
+    for (const actor of actors) {
+      assert.notEqual(actor.state(), "");
+    }
+    await graph.stop();
+    assert.equal(graph.state(), "");
+    for (const actor of actors) {
+      assert.equal(actor.state(), "");
+    }
     graph.remove();
   });
 
