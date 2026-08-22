@@ -69,8 +69,10 @@ export function submachineState<Name extends string, Machine extends DefinedMode
  * Host protocol after `start({ instance, model })`.
  * The host remains a custom element. It is not `instanceof Instance`.
  * `start` binds the library runtime onto `instance`.
- * `stop` unbinds the same way as module `stop`: further dispatch is a host-drop
- * with reason `"stopped"`, not `"unstarted"`.
+ * `stop` unbinds the same way as module `stop`: further dispatch and public
+ * commands (writes, fit, zoom, viewport, focus, policy) are a host-drop
+ * (`HostDropDetail`) with reason `"stopped"`, including while `stop()` is in
+ * flight, not `"unstarted"`.
  */
 export type Host = {
   dispatch(event: library.DispatchEvent): library.Completion;
@@ -267,12 +269,14 @@ export function isEvent(value: unknown): value is library.Event {
 }
 
 /**
- * Stop the library runtime on `machine`. Further dispatch is a host-drop.
+ * Stop the library runtime on `machine`. Further dispatch and public commands
+ * are a host-drop (`HostDropDetail`).
  *
  * BIND stays set until library `Instance.prototype.stop` settles so `start()`
  * no-ops for the whole RTC. Unbind in `finally` after that await (success or
  * reject). Overlapping `stop()` awaits the in-flight library stop and classifies
- * mid-stop dispatch as `"stopped"`, not `"unstarted"`.
+ * mid-stop dispatch and in-flight method commands as `"stopped"`, not
+ * `"unstarted"`.
  *
  * Owned nested machines (`context().Value(Keys.Owner) === machine`) are
  * `stop`'d before the owner. Library `Instance.stop` cancels the owner
@@ -405,12 +409,14 @@ function isStartedRuntimeRejection(error: unknown): error is Error {
 /**
  * Detail of the `host-drop` CustomEvent emitted by `reportFailure`/`catchFailure`.
  * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
- * Postcondition: the dropped write was NOT applied. `reason` is `"unstarted"`
- * or `"stopped"`: the runtime rejected `operation` because the machine had
- * not started or had already stopped, so no state was admitted and nothing is
- * in flight. Listeners only observe the drop; retrying the operation is their
- * choice, and `preventDefault()` has no effect because the event cannot be
- * canceled.
+ * Canonical source for unstarted/stopped host-drop on public writes and
+ * commands (setters, fit, zoom, viewport, focus, policy).
+ * Postcondition: the dropped operation was NOT applied. `operation` is the
+ * refused write or command. `reason` is `"unstarted"` when this module has
+ * not started `host`, or `"stopped"` after start-then-stop, including while
+ * `stop()` is in flight. No write is admitted and no command is dispatched.
+ * Listeners only observe the drop; retrying the operation is their choice,
+ * and `preventDefault()` has no effect because the event cannot be canceled.
  */
 export type HostDropDetail = {
   readonly reason: "unstarted" | "stopped";
