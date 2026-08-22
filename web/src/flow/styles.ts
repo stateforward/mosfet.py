@@ -87,6 +87,7 @@ export const edgeStyles = `
 
 export const handleStyles = `
 :host {
+  display: block;
   position: absolute;
   width: 8px;
   height: 8px;
@@ -106,6 +107,7 @@ export const handleStyles = `
 
 export const backgroundStyles = `
 :host {
+  display: block;
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -146,6 +148,7 @@ button {
 
 export const minimapStyles = `
 :host {
+  display: block;
   --flow-minimap-fill: #1d2430;
   position: absolute;
   right: 0.6rem;
