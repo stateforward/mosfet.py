@@ -194,19 +194,23 @@ export const MAX_JSON_DEPTH = 32;
 
 type CopyJsonResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
 
+const initialJsonDepth = 0;
+
 function isCopiedRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function copyJsonResult(value: unknown, stack: object[], depth: number): CopyJsonResult {
+function copyJsonResult(args: { value: unknown; stack: object[]; depth: number }): CopyJsonResult {
+  const { value, stack, depth } = args;
   if (value === null || typeof value !== "object") return { ok: true, value };
   if (depth >= MAX_JSON_DEPTH) return { ok: false };
   if (stack.includes(value)) return { ok: false };
   stack.push(value);
+  const nestedDepth = depth + 1;
   if (Array.isArray(value)) {
     const items: unknown[] = [];
     for (const entry of value) {
-      const copied = copyJsonResult(entry, stack, depth + 1);
+      const copied = copyJsonResult({ value: entry, stack, depth: nestedDepth });
       if (!copied.ok) {
         stack.pop();
         return copied;
@@ -220,7 +224,7 @@ function copyJsonResult(value: unknown, stack: object[], depth: number): CopyJso
   const copy: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(record)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
-    const copied = copyJsonResult(entry, stack, depth + 1);
+    const copied = copyJsonResult({ value: entry, stack, depth: nestedDepth });
     if (!copied.ok) {
       stack.pop();
       return copied;
@@ -241,7 +245,8 @@ function copyJsonResult(value: unknown, stack: object[], depth: number): CopyJso
  * over-deep values return `undefined` and do not throw. Classification: runtime-safe.
  */
 export function copyJson(value: unknown): unknown {
-  const copied = copyJsonResult(value, [], 0);
+  const initialStack: object[] = [];
+  const copied = copyJsonResult({ value, stack: initialStack, depth: initialJsonDepth });
   return copied.ok ? copied.value : undefined;
 }
 
@@ -253,7 +258,8 @@ export function copyNode(node: Node): Node {
       y: typeof rawPosition["y"] === "number" ? rawPosition["y"] : Number.NaN,
     }
     : { x: Number.NaN, y: Number.NaN };
-  const copied = copyJsonResult(node.data, [], 0);
+  const initialStack: object[] = [];
+  const copied = copyJsonResult({ value: node.data, stack: initialStack, depth: initialJsonDepth });
   if (!copied.ok || !isCopiedRecord(copied.value)) {
     return { ...node, position, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
   }
@@ -262,7 +268,8 @@ export function copyNode(node: Node): Node {
 
 export function copyEdge(edge: Edge): Edge {
   if (edge.data === undefined) return { ...edge };
-  const copied = copyJsonResult(edge.data, [], 0);
+  const initialStack: object[] = [];
+  const copied = copyJsonResult({ value: edge.data, stack: initialStack, depth: initialJsonDepth });
   if (!copied.ok || !isCopiedRecord(copied.value)) {
     return { ...edge, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
   }
