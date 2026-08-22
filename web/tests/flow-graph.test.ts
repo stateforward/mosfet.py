@@ -592,6 +592,64 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("poison nodes_set while panning stays in pan and keeps admitted nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.panOnDrag = true;
+    const valid = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [valid];
+    await waitUntil(() => graph.nodes.length === 1);
+    graph.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 20,
+      clientY: 20,
+      pointerId: 1,
+      bubbles: true,
+      composed: true,
+    }));
+    assert.match(graph.state(), /\/pan$/);
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.setNodesEvent,
+      data: { nodes: [{ id: "bad" }] },
+    }));
+    await flush();
+    assert.match(graph.state(), /\/pan$/);
+    assert.equal(graph.nodes.length, 1);
+    assert.equal(graph.nodes[0]?.id, "a");
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
+  test("Event-path cyclic nodes_set rejects without throw and keeps admitted nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const valid = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [valid];
+    await waitUntil(() => graph.nodes.length === 1);
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    const cyclic: Record<string, unknown> = { label: "cycle" };
+    cyclic["self"] = cyclic;
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.setNodesEvent,
+      data: { nodes: [{ id: "cycle", position: { x: 0, y: 0 }, data: cyclic }] },
+    }));
+    await flush();
+    assert.equal(graph.nodes.length, 1);
+    assert.equal(graph.nodes[0]?.id, "a");
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
   test("poison edges_set after copy success emits reject and keeps admitted edges", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);

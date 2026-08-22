@@ -229,9 +229,19 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.zoomOutEvent.name), hsm.effect(FlowGraph.applyZoomOut)),
       hsm.transition(hsm.on(FlowGraph.setViewportEvent.name), hsm.effect(FlowGraph.applySetViewport)),
       hsm.transition(hsm.on(FlowGraph.wheelEvent.name), hsm.effect(FlowGraph.applyWheel)),
-      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.applyAdmittedNodes)),
+      hsm.transition(
+        hsm.on(FlowGraph.setNodesEvent.name),
+        hsm.guard(FlowGraph.nodesAdmitted),
+        hsm.effect(FlowGraph.applyAdmittedNodes),
+      ),
+      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.rejectSetNodes)),
       hsm.transition(hsm.on(FlowGraph.rejectNodesEvent.name), hsm.effect(FlowGraph.rejectNodes)),
-      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.applyAdmittedEdges)),
+      hsm.transition(
+        hsm.on(FlowGraph.setEdgesEvent.name),
+        hsm.guard(FlowGraph.edgesAdmitted),
+        hsm.effect(FlowGraph.applyAdmittedEdges),
+      ),
+      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.rejectSetEdges)),
       hsm.transition(hsm.on(FlowGraph.rejectEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
       hsm.transition(hsm.on(FlowGraph.setPolicyEvent.name), hsm.effect(FlowGraph.applySetPolicy)),
       hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
@@ -959,18 +969,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#paint();
   }
 
+  static nodesAdmitted(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return admitNodes(hsm.isRecord(event.data) ? event.data["nodes"] : undefined).rejected === null;
+  }
+
   static applyAdmittedNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const admitted = admitNodes(hsm.isRecord(event.data) ? event.data["nodes"] : undefined);
     if (admitted.rejected !== null) {
-      void instance.dispatch(hsm.typedEvent({
-        event: FlowGraph.rejectNodesEvent,
-        data: admitted.rejected,
-      })).catch(hsm.catchFailure(instance));
-      return;
+      throw new TypeError("nodes_set entered without admitted nodes");
     }
     instance.#nodes = admitted.nodes;
     instance.#dirty();
+  }
+
+  static rejectSetNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#emitRejected(nodesRejectDetail(hsm.isRecord(event.data) ? event.data["nodes"] : undefined));
   }
 
   static rejectNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -978,18 +993,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#emitRejected(event.data);
   }
 
+  static edgesAdmitted(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return admitEdges(hsm.isRecord(event.data) ? event.data["edges"] : undefined).rejected === null;
+  }
+
   static applyAdmittedEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const admitted = admitEdges(hsm.isRecord(event.data) ? event.data["edges"] : undefined);
     if (admitted.rejected !== null) {
-      void instance.dispatch(hsm.typedEvent({
-        event: FlowGraph.rejectEdgesEvent,
-        data: admitted.rejected,
-      })).catch(hsm.catchFailure(instance));
-      return;
+      throw new TypeError("edges_set entered without admitted edges");
     }
     instance.#edges = admitted.edges;
     instance.#dirty();
+  }
+
+  static rejectSetEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#emitRejected(edgesRejectDetail(hsm.isRecord(event.data) ? event.data["edges"] : undefined));
   }
 
   static rejectEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
