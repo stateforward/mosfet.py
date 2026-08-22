@@ -96,6 +96,20 @@ function countGraphSignals(graph: Graph): { draws: string[][]; destroys: number 
   return signals;
 }
 
+function ownedActors(host: { context(): hsm.Context }): hsm.Instance[] {
+  const instances = host.context().Value(hsm.Keys.Instances);
+  if (typeof instances !== "object" || instances === null) return [];
+  const actors: hsm.Instance[] = [];
+  for (const value of Object.values(instances as Record<string, unknown>)) {
+    if (value === host || typeof value !== "object" || value === null) continue;
+    if (typeof (value as { context?: unknown }).context !== "function") continue;
+    if (typeof (value as { state?: unknown }).state !== "function") continue;
+    if ((value as hsm.Instance).context().Value(hsm.Keys.Owner) !== host) continue;
+    actors.push(value as hsm.Instance);
+  }
+  return actors;
+}
+
 function bootDashboard(options: {
   onSnapshot?: (snapshot: DashboardSnapshot) => void;
   connectStream?: Dashboard["connectStream"];
@@ -777,12 +791,24 @@ describe("companion-style HSM controllers", () => {
     await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "{}" });
     await waitFor(() => dashboard.snapshot().commandResult !== null);
     assert.deepEqual(posted, ["phone.ring"]);
+    const prior = ownedActors(dashboard);
+    const commandCount = 1;
+    assert.equal(prior.length, commandCount);
+    const stoppedCommand = prior[0];
+    assert.ok(stoppedCommand !== undefined);
+    assert.notEqual(stoppedCommand.state(), "");
     await dashboard.stop();
     assert.equal(dashboard.state(), "");
+    assert.equal(stoppedCommand.state(), "");
+    assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: stoppedCommand })?.reason, HOST_STOPPED);
     dashboard.boot();
     await dashboard.dispatch("dashboard.command.send", { eventName: "phone.hangup", dataJson: "{}" });
     await waitFor(() => posted.length === 2);
     assert.deepEqual(posted, ["phone.ring", "phone.hangup"]);
+    const next = ownedActors(dashboard);
+    assert.equal(next.length, commandCount);
+    assert.notEqual(next[0], stoppedCommand);
+    assert.notEqual(next[0]?.state(), "");
     await stopDashboard(dashboard);
   });
 

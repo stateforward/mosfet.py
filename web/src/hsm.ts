@@ -198,12 +198,33 @@ export function start<I extends object, M>(
 }
 
 /**
+ * Bind and enter `model` only when `instance` has never started.
+ *
+ * Inputs: host `instance` and its `define()` model. Outputs: the host.
+ * After `stop`, this is a no-op so later dispatches stay host-drop
+ * `"stopped"`; `boot` / `connectedCallback` call `start` to re-bind.
+ * Ownership: same bind tokens as `start`. Lifetime: one first-start.
+ * Concurrency: runtime-safe. Failure modes: none beyond `start`.
+ * Classification: initialization-only.
+ */
+export function ensureStarted<I extends object, M>(instance: I, model: M): I & Host {
+  if ((instance as BoundHost)[WAS_STARTED] === true) {
+    return instance as I & Host;
+  }
+  return start(instance, model);
+}
+
+/**
  * Stop the library runtime on `machine`. Further dispatch is a host-drop.
  *
  * BIND stays set until library `Instance.prototype.stop` settles so `start()`
  * no-ops for the whole RTC. Unbind in `finally` after that await (success or
  * reject). Overlapping `stop()` awaits the in-flight library stop and classifies
  * mid-stop dispatch as `"stopped"`, not `"unstarted"`.
+ *
+ * Owned nested machines (`context().Value(Keys.Owner) === machine`) are
+ * `stop`'d before the owner. Library `Instance.stop` cancels the owner
+ * context and does not stop `Keys.Instances` children.
  */
 export async function stop(machine: object): Promise<void> {
   const bound = machine as BoundHost;
@@ -222,11 +243,28 @@ export async function stop(machine: object): Promise<void> {
 }
 
 async function stopBound(bound: BoundHost): Promise<void> {
+  const children = ownedInstances(bound);
   try {
-    await library.Instance.prototype.stop.call(bound);
+    await Promise.all(children.map((child) => stop(child)));
   } finally {
-    delete bound[BIND];
+    try {
+      await library.Instance.prototype.stop.call(bound);
+    } finally {
+      delete bound[BIND];
+    }
   }
+}
+
+function ownedInstances(host: object): object[] {
+  if (!isDispatchable(host)) return [];
+  const instances = host.context().Value(library.Keys.Instances);
+  if (typeof instances !== "object" || instances === null) return [];
+  const children: object[] = [];
+  for (const value of Object.values(instances as Record<string, unknown>)) {
+    if (value === host || !isDispatchable(value)) continue;
+    if (value.context().Value(library.Keys.Owner) === host) children.push(value);
+  }
+  return children;
 }
 
 function isDispatchable(value: unknown): value is library.Dispatchable {

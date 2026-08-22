@@ -228,6 +228,42 @@ describe("hsm.from(HTMLElement)", () => {
     }
   });
 
+  test("Host.stop stops nested actors parented under host.context()", async () => {
+    class NestedActor extends library.Instance {
+      static readonly model = hsm.define(
+        "NestedActor",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+      );
+    }
+
+    class NestedStopHost extends hsm.from(HTMLElement) {
+      static readonly model = hsm.define(
+        "NestedStopHost",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+      );
+      child: NestedActor | null = null;
+    }
+
+    if (customElements.get("test-nested-stop-host") === undefined) {
+      customElements.define("test-nested-stop-host", NestedStopHost);
+    }
+    const host = document.createElement("test-nested-stop-host");
+    assert.ok(host instanceof NestedStopHost);
+    hsm.start(host, NestedStopHost.model);
+    host.child = hsm.start(host.context(), new NestedActor(), NestedActor.model);
+    const child = host.child;
+    assert.match(child.state(), /\/idle$/);
+    await host.stop();
+    assert.equal(host.state(), "");
+    assert.equal(child.state(), "");
+    const startedRuntimeError = new Error("dispatch requires a started HSM");
+    const stopped = "stopped";
+    assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host: child })?.reason, stopped);
+    host.remove();
+  });
+
   test("overlapping Host.stop does not classify mid-stop as unstarted", async () => {
     class OverlapStopHost extends hsm.from(HTMLElement) {
       static readonly model = hsm.define(
