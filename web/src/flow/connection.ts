@@ -144,5 +144,5 @@ export class Connection extends hsm.Instance {
 }
 
 export function startConnection(args: { ctx: hsm.Context }): Connection {
-  return hsm.start(args.ctx, new Connection(), Connection.model);
+  return hsm.start({ ctx: args.ctx, instance: new Connection(), model: Connection.model });
 }

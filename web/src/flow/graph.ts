@@ -457,7 +457,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
     if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
-    hsm.start(this, FlowGraph.model);
+    hsm.start({ instance: this, model: FlowGraph.model });
     if (this.#nodesWrite !== undefined) {
       this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: this.#nodesWrite } }));
     }

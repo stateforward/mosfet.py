@@ -295,7 +295,7 @@ export class Panner extends hsm.Instance {
 export function startPanner(args: {
   ctx: hsm.Context;
 }): Panner {
-  return hsm.start(args.ctx, new Panner(), Panner.model);
+  return hsm.start({ ctx: args.ctx, instance: new Panner(), model: Panner.model });
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {

@@ -189,7 +189,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   boot(): void {
-    hsm.start(this, OtelSource.model);
+    hsm.start({ instance: this, model: OtelSource.model });
   }
 
   /**

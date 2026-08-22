@@ -26,7 +26,7 @@ describe("hsm.from(HTMLElement)", () => {
     const host = document.createElement("test-host");
     assert.ok(host instanceof Host);
     assert.equal(host instanceof library.Instance, false);
-    hsm.start(host, Host.model);
+    hsm.start({ instance: host, model: Host.model });
     assert.equal(typeof host.dispatch, "function");
     assert.equal(typeof host.context, "function");
     assert.match(host.state(), /\/idle$/);
@@ -34,7 +34,7 @@ describe("hsm.from(HTMLElement)", () => {
     assert.match(host.state(), /\/active$/);
     await hsm.stop(host);
     assert.equal(host.state(), "");
-    hsm.start(host, Host.model);
+    hsm.start({ instance: host, model: Host.model });
     assert.match(host.state(), /\/idle$/);
     await host.dispatch(hsm.typedEvent({ event: Host.pingEvent }));
     assert.match(host.state(), /\/active$/);
@@ -146,7 +146,7 @@ describe("hsm.from(HTMLElement)", () => {
       });
     });
     document.body.append(host);
-    hsm.start(host, StopDropHost.model);
+    hsm.start({ instance: host, model: StopDropHost.model });
     await host.dispatch(hsm.typedEvent({ event: StopDropHost.pingEvent }));
     assert.match(host.state(), /\/active$/);
     await host.stop();
@@ -190,7 +190,7 @@ describe("hsm.from(HTMLElement)", () => {
       },
       (error: unknown) => error instanceof hsm.HostRequiredError,
     );
-    hsm.start(host, ClassifyHost.model);
+    hsm.start({ instance: host, model: ClassifyHost.model });
     await host.stop();
     assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
     host.remove();
@@ -218,7 +218,7 @@ describe("hsm.from(HTMLElement)", () => {
     library.Instance.prototype.stop = async function (this: object): Promise<void> {
       throw new Error(libraryStopFailed);
     };
-    hsm.start(host, RejectStopHost.model);
+    hsm.start({ instance: host, model: RejectStopHost.model });
     try {
       await assert.rejects(() => host.stop(), (error: unknown) => error instanceof Error && error.message === libraryStopFailed);
       assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
@@ -251,8 +251,8 @@ describe("hsm.from(HTMLElement)", () => {
     }
     const host = document.createElement("test-nested-stop-host");
     assert.ok(host instanceof NestedStopHost);
-    hsm.start(host, NestedStopHost.model);
-    host.child = hsm.start(host.context(), new NestedActor(), NestedActor.model);
+    hsm.start({ instance: host, model: NestedStopHost.model });
+    host.child = hsm.start({ ctx: host.context(), instance: new NestedActor(), model: NestedActor.model });
     const child = host.child;
     assert.match(child.state(), /\/idle$/);
     await host.stop();
@@ -289,12 +289,12 @@ describe("hsm.from(HTMLElement)", () => {
       await closed;
       return originalStop.call(this);
     };
-    hsm.start(host, OverlapStopHost.model);
+    hsm.start({ instance: host, model: OverlapStopHost.model });
     try {
       const first = host.stop();
       const second = host.stop();
       assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
-      hsm.start(host, OverlapStopHost.model);
+      hsm.start({ instance: host, model: OverlapStopHost.model });
       assert.equal(hsm.hostDropFrom({ error: startedRuntimeError, host })?.reason, stopped);
       gate.release();
       await Promise.all([first, second]);
@@ -321,10 +321,12 @@ describe("hsm.from(HTMLElement)", () => {
     assert.ok(host instanceof EnsureHost);
     const startedRuntimeError = new Error("dispatch requires a started HSM");
     const stopped = "stopped";
-    assert.equal(hsm.hostWasStarted(host), false);
+    const wasNotStarted = false;
+    const wasStarted = true;
+    assert.equal(hsm.hostWasStarted(host), wasNotStarted);
     hsm.ensureStarted({ instance: host, model: EnsureHost.model });
     assert.match(host.state(), /\/idle$/);
-    assert.equal(hsm.hostWasStarted(host), true);
+    assert.equal(hsm.hostWasStarted(host), wasStarted);
     await host.stop();
     assert.equal(host.state(), "");
     hsm.ensureStarted({ instance: host, model: EnsureHost.model });
@@ -356,8 +358,8 @@ describe("hsm.from(HTMLElement)", () => {
     }
     const host = document.createElement("test-nested-reject-host");
     assert.ok(host instanceof NestedRejectHost);
-    hsm.start(host, NestedRejectHost.model);
-    host.child = hsm.start(host.context(), new NestedRejectActor(), NestedRejectActor.model);
+    hsm.start({ instance: host, model: NestedRejectHost.model });
+    host.child = hsm.start({ ctx: host.context(), instance: new NestedRejectActor(), model: NestedRejectActor.model });
     const child = host.child;
     const startedRuntimeError = new Error("dispatch requires a started HSM");
     const stopped = "stopped";
@@ -379,8 +381,10 @@ describe("hsm.from(HTMLElement)", () => {
 
   test("isEvent accepts Event records and rejects other values", () => {
     const event = hsm.typedEvent({ event: { name: "ping", kind: hsm.Kinds.Event } });
-    assert.equal(hsm.isEvent(event), true);
-    assert.equal(hsm.isEvent({ name: "ping" }), false);
-    assert.equal(hsm.isEvent("ping"), false);
+    const isEventRecord = true;
+    const isNotEvent = false;
+    assert.equal(hsm.isEvent(event), isEventRecord);
+    assert.equal(hsm.isEvent({ name: "ping" }), isNotEvent);
+    assert.equal(hsm.isEvent("ping"), isNotEvent);
   });
 });

@@ -990,8 +990,8 @@ export class BotDashboard extends Dashboard {
 
   override boot(): void {
     super.boot();
-    start(this.context(), this.#source, OtelSource.model);
-    start(this.context(), this.#graph, BotMachineGraph.model);
+    start({ ctx: this.context(), instance: this.#source, model: OtelSource.model });
+    start({ ctx: this.context(), instance: this.#graph, model: BotMachineGraph.model });
   }
 
   connectedCallback(): void {

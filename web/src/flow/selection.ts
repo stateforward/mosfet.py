@@ -153,5 +153,5 @@ export class Selection extends hsm.Instance {
 }
 
 export function startSelection(args: { ctx: hsm.Context }): Selection {
-  return hsm.start(args.ctx, new Selection(), Selection.model);
+  return hsm.start({ ctx: args.ctx, instance: new Selection(), model: Selection.model });
 }

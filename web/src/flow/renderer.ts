@@ -119,5 +119,5 @@ export class Renderer extends hsm.Instance {
 export function startRenderer(args: {
   ctx: hsm.Context;
 }): Renderer {
-  return hsm.start(args.ctx, new Renderer(), Renderer.model);
+  return hsm.start({ ctx: args.ctx, instance: new Renderer(), model: Renderer.model });
 }

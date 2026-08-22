@@ -835,7 +835,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   boot(): void {
-    hsm.start(this, dashboardModel);
+    hsm.start({ instance: this, model: dashboardModel });
   }
 
   /**
@@ -962,7 +962,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
 
   attachCommand(): void {
     if (this.#command !== null) return;
-    this.#command = hsm.start(this.context(), new Command({ post: (command) => this.postCommand(command) }), Command.model);
+    this.#command = hsm.start({
+      ctx: this.context(),
+      instance: new Command({ post: (command) => this.postCommand(command) }),
+      model: Command.model,
+    });
   }
 
   hasPlayableReplay(): boolean {

@@ -192,8 +192,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   connectedCallback(): void {
-    hsm.start(this, BotMachineGraph.model);
-    hsm.start(this.context(), this.#flow, FlowGraph.model);
+    hsm.start({ instance: this, model: BotMachineGraph.model });
+    hsm.start({ ctx: this.context(), instance: this.#flow, model: FlowGraph.model });
     if (this.#graphsWrite !== undefined) {
       this.#live(hsm.typedEvent({
         event: BotMachineGraph.graphsEvent,
@@ -217,7 +217,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   static onConnected(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof BotMachineGraph)) return;
     const ctx = instance.context();
-    instance.#graph = hsm.start(ctx, new Graph(), Graph.model);
+    instance.#graph = hsm.start({ ctx, instance: new Graph(), model: Graph.model });
     instance.addEventListener("flow-node-click", instance.#onNodeClick);
     instance.addEventListener("flow-edge-click", instance.#onEdgeClick);
     instance.addEventListener("flow-viewport-change", instance.#onViewport);

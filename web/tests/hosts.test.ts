@@ -75,7 +75,7 @@ function streamView(source = streamSource(), origin = "http://localhost"): {
 }
 
 function startAdmittedGraph(): Graph {
-  return hsm.start(new Graph(), Graph.model);
+  return hsm.start({ instance: new Graph(), model: Graph.model });
 }
 
 async function admitGraphs(graph: Graph, value: unknown) {
@@ -211,7 +211,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("panner writes transform synchronously and stays off the graph model", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const graph = startAdmittedGraph();
 
     const drawing = await admitGraphs(graph, [graphFor("/Demo")]);
@@ -239,7 +239,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("graph updates repaint while the viewport is panning", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const graph = startAdmittedGraph();
     const signals = countGraphSignals(graph);
 
@@ -268,7 +268,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("normalized viewport intents update panner-owned transform", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const metrics = {
       width: 1000,
       height: 600,
@@ -288,7 +288,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("fit during pan rebases the next cursor delta from the fitted pan", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const pointerId = 1;
     const startPoint = { x: 10, y: 10 };
     const midPoint = { x: 30, y: 24 };
@@ -322,7 +322,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("viewport_set during pan rebases the next cursor delta from the set pan", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const pointerId = 1;
     const startPoint = { x: 10, y: 10 };
     const midPoint = { x: 30, y: 24 };
@@ -344,10 +344,10 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("node viewport focus uses exact bounds and stays focused across resize", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     let focusKind = "";
     let focusPath = "";
-    const focuser = hsm.start(new Focuser(), Focuser.model);
+    const focuser = hsm.start({ instance: new Focuser(), model: Focuser.model });
     const metrics = {
       width: 1000,
       height: 600,
@@ -395,8 +395,8 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("clearing focus fits the remaining graphs", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
-    const focuser = hsm.start(new Focuser(), Focuser.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
+    const focuser = hsm.start({ instance: new Focuser(), model: Focuser.model });
     const metrics = {
       width: 1000,
       height: 600,
@@ -427,7 +427,7 @@ describe("companion-style HSM controllers", () => {
       { bounds: { left: 0, right: 80, top: 0, bottom: 40 }, origin: { x: originX, y: originY } },
     ];
     for (const fitCase of cases) {
-      const panner = hsm.start(new Panner(), Panner.model);
+      const panner = hsm.start({ instance: new Panner(), model: Panner.model });
       const metrics = {
         width: viewportWidth,
         height: viewportHeight,
@@ -444,7 +444,7 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("fitEvent with non-finite bounds leaves the identity viewport", async () => {
-    const panner = hsm.start(new Panner(), Panner.model);
+    const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const identity = panner.viewport;
     const metrics = {
       width: 1000,
@@ -468,11 +468,14 @@ describe("companion-style HSM controllers", () => {
       label = "host";
     }
     class Host extends hsm.from(Base) {}
-    const host = hsm.start(new Host(), hsm.define(
-      "Host",
-      hsm.initial(hsm.target("active")),
-      hsm.state("active"),
-    ));
+    const host = hsm.start({
+      instance: new Host(),
+      model: hsm.define(
+        "Host",
+        hsm.initial(hsm.target("active")),
+        hsm.state("active"),
+      ),
+    });
     assert.equal(host.label, "host");
     assert.equal(typeof host.dispatch, "function");
     assert.match(host.state(), /\/active$/);
@@ -481,7 +484,7 @@ describe("companion-style HSM controllers", () => {
 
   test("renderer paints after mark_dirty", async () => {
     let paints = 0;
-    const renderer = hsm.start(new Renderer(), Renderer.model);
+    const renderer = hsm.start({ instance: new Renderer(), model: Renderer.model });
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.paintEvent.name) paints += 1;

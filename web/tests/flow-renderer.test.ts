@@ -20,7 +20,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 describe("Renderer dirty coalescing", () => {
   test("coalesces mark_dirty while rendering then returns to clean", async () => {
     let paints = 0;
-    const renderer = hsm.start(new Renderer(), Renderer.model);
+    const renderer = hsm.start({ instance: new Renderer(), model: Renderer.model });
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.paintEvent.name) paints += 1;
@@ -38,7 +38,7 @@ describe("Renderer dirty coalescing", () => {
   test("successful paint reaches clean without render_canceled", async () => {
     let canceled = 0;
     let paints = 0;
-    const renderer = hsm.start(new Renderer(), Renderer.model);
+    const renderer = hsm.start({ instance: new Renderer(), model: Renderer.model });
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;
@@ -55,7 +55,7 @@ describe("Renderer dirty coalescing", () => {
 
   test("paint notify failure takes rendering to failed without render_canceled", async () => {
     let canceled = 0;
-    const renderer = hsm.start(new Renderer(), Renderer.model);
+    const renderer = hsm.start({ instance: new Renderer(), model: Renderer.model });
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;
@@ -80,7 +80,7 @@ describe("Renderer dirty coalescing", () => {
       paintStarted = resolve;
     });
     const [ctx, cancel] = new hsm.Context().withCancel();
-    const renderer = hsm.start(ctx, new Renderer(), Renderer.model);
+    const renderer = hsm.start({ ctx, instance: new Renderer(), model: Renderer.model });
     const inner = renderer.dispatch.bind(renderer);
     renderer.dispatch = ((event: hsm.DispatchEvent) => {
       if (event.name === Renderer.renderCanceledEvent.name) canceled += 1;

@@ -66,7 +66,7 @@ export class Dragger extends hsm.Instance {
 }
 
 export function startDragger(args: { ctx: hsm.Context }): Dragger {
-  return hsm.start(args.ctx, new Dragger(), Dragger.model);
+  return hsm.start({ ctx: args.ctx, instance: new Dragger(), model: Dragger.model });
 }
 
 function positionOf(value: unknown): DragPosition | null {

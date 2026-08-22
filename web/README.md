@@ -74,9 +74,9 @@ the collector fans that command to `Control.Subscribe` and the bot
 ## Element machines
 
 Studio elements are autonomous custom elements that `extends hsm.from(HTMLElement)`.
-`hsm.from` copies `Instance.prototype` onto the host so `hsm.start(this, model)`
-does not require `instanceof Instance`. Start in `connectedCallback`, stop in
-`disconnectedCallback`.
+`hsm.from` copies `Instance.prototype` onto the host so
+`hsm.start({ instance: this, model })` does not require `instanceof Instance`.
+Start in `connectedCallback`, stop in `disconnectedCallback`.
 
 The graph library lives in `src/flow/` and ports React Flow's public surface as
 custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,

@@ -66,9 +66,9 @@ export function submachineState<Name extends string, Machine extends DefinedMode
 }
 
 /**
- * Host protocol after `start(this, model)`.
+ * Host protocol after `start({ instance, model })`.
  * The host remains a custom element. It is not `instanceof Instance`.
- * `start` binds the library runtime onto `this`.
+ * `start` binds the library runtime onto `instance`.
  * `stop` unbinds the same way as module `stop`: further dispatch is a host-drop
  * with reason `"stopped"`, not `"unstarted"`.
  */
@@ -97,8 +97,8 @@ type MixinRest = any[];
 type HostConstructor<T = object> = new (...args: MixinRest) => T;
 
 /**
- * Mixin: subclass stays a custom element; call `start(this, model)` from
- * `connectedCallback` or `boot` after the element exists. Do not start from
+ * Mixin: subclass stays a custom element; call `start({ instance: this, model })`
+ * from `connectedCallback` or `boot` after the element exists. Do not start from
  * the constructor after `super()`.
  *
  * CORE-EXC-001: copies `Instance.prototype` method descriptors because
@@ -161,18 +161,24 @@ type BoundHost = { [BIND]?: true; [WAS_STARTED]?: true; [STOP]?: Promise<void> }
 
 /**
  * Bind library runtime onto `instance` and enter the model.
- * Idempotent while this module holds a bind token on the instance. After `stop`,
- * call `start` again to re-bind. Hosts stay started across attach/detach;
- * children parented with a context share the owner's environment.
+ *
+ * Inputs: named `{ instance, model }` and optional `ctx` when the host is
+ * parented under `owner.context()`. Idempotent while this module holds a bind
+ * token on the instance. After `stop`, call `start` again to re-bind. Hosts
+ * stay started across attach/detach; children parented with a context share
+ * the owner's environment.
+ * Outputs: `instance` with Host methods bound.
+ * Ownership: this module owns bind tokens on `instance`.
+ * Lifetime: until `stop` unbinds. Concurrency: runtime-safe.
+ * Failure modes: library start failures propagate.
+ * Classification: initialization-only.
  */
-export function start<I extends object, M>(instance: I, model: M): I & Host;
-export function start<I extends object, M>(ctx: library.Context, instance: I, model: M): I & Host;
-export function start<I extends object, M>(
-  ctxOrInstance: library.Context | I,
-  instanceOrModel: I | M,
-  maybeModel?: M,
-): I & Host {
-  const instance = (maybeModel !== undefined ? instanceOrModel : ctxOrInstance) as BoundHost;
+export function start<I extends object, M>(args: {
+  ctx?: library.Context;
+  instance: I;
+  model: M;
+}): I & Host {
+  const instance = args.instance as BoundHost;
   if (instance[BIND] === true) {
     return instance as I & Host;
   }
@@ -191,9 +197,12 @@ export function start<I extends object, M>(
     (ctx: library.Context, runtime: object, defined: object): object;
   };
   const libraryStart = library.start as unknown as LibraryStart;
-  const started = maybeModel !== undefined
-    ? libraryStart(ctxOrInstance as library.Context, instanceOrModel as object, maybeModel as object)
-    : libraryStart(ctxOrInstance as object, instanceOrModel as object);
+  const runtime = args.instance as object;
+  const defined = args.model as object;
+  const ctx = args.ctx;
+  const started = ctx !== undefined
+    ? libraryStart(ctx, runtime, defined)
+    : libraryStart(runtime, defined);
   (started as BoundHost)[BIND] = true;
   (started as BoundHost)[WAS_STARTED] = true;
   return started as I & Host;
@@ -213,7 +222,7 @@ export function ensureStarted<I extends object, M>(args: { instance: I; model: M
   if ((args.instance as BoundHost)[WAS_STARTED] === true) {
     return args.instance as I & Host;
   }
-  return start(args.instance, args.model);
+  return start({ instance: args.instance, model: args.model });
 }
 
 /**
@@ -253,7 +262,7 @@ export function isEvent(value: unknown): value is library.Event {
  * Owned nested machines (`context().Value(Keys.Owner) === machine`) are
  * `stop`'d before the owner. Library `Instance.stop` cancels the owner
  * context and does not stop `Keys.Instances` children. Nested custom-element
- * hosts started with `start(owner.context(), host, model)` are in that set.
+ * hosts started with `start({ ctx: owner.context(), instance: host, model })` are in that set.
  *
  * If a nested owned `stop` rejects, that rejection propagates. Sibling stops
  * already started keep running (`Promise.all` does not cancel them). The owner

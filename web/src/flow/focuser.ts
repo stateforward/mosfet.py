@@ -90,7 +90,7 @@ export class Focuser extends hsm.Instance {
 export function startFocuser(args: {
   ctx: hsm.Context;
 }): Focuser {
-  return hsm.start(args.ctx, new Focuser(), Focuser.model);
+  return hsm.start({ ctx: args.ctx, instance: new Focuser(), model: Focuser.model });
 }
 
 function focusTargetOf(value: unknown): FocusTarget | null {
