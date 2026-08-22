@@ -1301,6 +1301,61 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
+  test("event-path payload-less replay live is not restamped by name", async () => {
+    let connects = 0;
+    const firstConnect = 1;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(dashboard.snapshot().phase, "live");
+    assert.equal(connects, firstConnect);
+    await dashboard.dispatch("dashboard.replay.enter");
+    await dashboard.dispatch(hsm.typedEvent({
+      event: { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
+    }));
+    assert.equal(dashboard.snapshot().phase, "error");
+    assert.match(dashboard.snapshot().errorMessage ?? "", /no otel stream selected/);
+    assert.equal(connects, firstConnect);
+    await stopDashboard(dashboard);
+  });
+
+  test("event-path replay live uses producer-stamped connect data", async () => {
+    let connects = 0;
+    const urls: string[] = [];
+    const firstConnect = 1;
+    const secondConnect = 2;
+    const dashboard = bootDashboard({
+      connectStream: (url) => {
+        connects += 1;
+        urls.push(url);
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(dashboard.snapshot().phase, "live");
+    assert.equal(connects, firstConnect);
+    await dashboard.dispatch("dashboard.replay.enter");
+    const owned = dashboard.ownedSourceConnect();
+    await dashboard.dispatch(hsm.typedEvent({
+      event: { name: "dashboard.replay.live", kind: hsm.Kinds.Event },
+      data: owned,
+    }));
+    const after = dashboard.snapshot();
+    assert.equal(after.phase, "live");
+    const replayInactive = false;
+    assert.equal(after.replay.active, replayInactive);
+    assert.match(after.statePath, /\/viewing$/);
+    await waitFor(() => connects === secondConnect);
+    const collectorPath = "/v1/traces/stream";
+    const secondUrlIndex = 1;
+    assert.equal(urls[secondUrlIndex], collectorPath);
+    await stopDashboard(dashboard);
+  });
+
   test("replay live with source and no origin does not fill instance origin", async () => {
     let connects = 0;
     const firstConnect = 1;

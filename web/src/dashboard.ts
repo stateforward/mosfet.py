@@ -940,8 +940,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Admit Event-path and controller payloads. Connect-shaped data (`origin`
    * string, `urlAllowed` boolean, or `source`) is restamped through
    * `sourceConnectFrom` so choice guards read `urlAllowed` and never construct
-   * URL objects. A payload-less `dashboard.replay.live` is stamped from this
-   * dashboard's owned `#source` and `origin`, not from `snapshot()`.
+   * URL objects. Payload-less Event-path live is not restamped by `event.name`;
+   * producers stamp typed connect data, or callers use the controller overload
+   * `dispatch("dashboard.replay.live")`, which stamps from this dashboard's
+   * owned `#source` and `origin`, not from `snapshot()`.
    */
   override dispatch(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot>;
   override dispatch(event: hsm.Event): hsm.Completion;
@@ -982,12 +984,21 @@ export class Dashboard extends hsm.from(HTMLElement) {
     return data;
   }
 
+  /**
+   * Admit Event-path payloads. Connect-shaped data (`origin` string,
+   * `urlAllowed` boolean, or `source`) is restamped through
+   * `sourceConnectFrom`. Payload-less Event-path live is not restamped by
+   * `event.name`; producers stamp typed connect data, or callers use the
+   * controller overload.
+   *
+   * Inputs: an HSM Event. Outputs: the same event, or a clone whose `data` is
+   * recomputed `SourceConnectData` when the payload is connect-shaped.
+   * Does not read `event.name`. Ownership: returns a new event object only
+   * when restamping. Classification: runtime-safe.
+   */
   #admitEvent(event: hsm.Event): hsm.Event {
     if (isConnectIngress(event.data)) {
       return { ...event, data: sourceConnectFrom(event.data) };
-    }
-    if (event.data === undefined && event.name === dashboardCommands["dashboard.replay.live"].name) {
-      return { ...event, data: this.ownedSourceConnect() };
     }
     return eventWithSourceConnect(event);
   }
