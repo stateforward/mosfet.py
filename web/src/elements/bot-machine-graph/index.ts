@@ -155,10 +155,11 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
    * not shared. Before connect this is a write buffer replayed from
    * `connectedCallback` after `start`; that staging is pre-start local state,
    * not a dropped dispatch, and emits no host-drop. After start, `graphs_admit`
-   * is dispatched with the copy. After stop, dispatch host-drops and this
-   * setter does not retain `value` (the write buffer is unchanged; a later
-   * `start` from `connectedCallback` replays the last staged write, not the
-   * dropped one). Does not call `start`.
+   * is dispatched with the copy. After stop, including while `stop()` is in
+   * flight, this setter emits `host-drop` with reason `"stopped"` and does not
+   * dispatch or retain `value` (the write buffer is unchanged; a later `start`
+   * from `connectedCallback` replays the last staged write, not the dropped
+   * one). Does not call `start`.
    * Outputs: getter returns copies of admitted graphs.
    * Ownership: this host owns the copy. Lifetime: until the next staged graphs
    * write. Stopped writes do not replace the buffer. Concurrency: runtime-safe.
@@ -168,7 +169,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
    */
   set graphs(value: readonly MachineGraph[]) {
     if (hsm.hostWasStopped(this)) {
-      this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: value } satisfies GraphsAdmitData }));
+      this.#dropStopped({ operation: BotMachineGraph.graphsEvent.name });
       return;
     }
     const graphs = copyGraphs(value);
@@ -236,6 +237,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   #live(event: hsm.DispatchEvent): void {
     void this.dispatch(event).catch(hsm.catchFailure(this));
+  }
+
+  #dropStopped(args: { operation: string }): void {
+    hsm.catchFailure(this)(new hsm.HostDropError({ reason: "stopped", operation: args.operation }));
   }
 
   static onConnected(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {

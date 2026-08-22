@@ -335,7 +335,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
-   * with the copy. After stop, dispatch host-drops and this setter does not
+   * with the copy. After stop, including while `stop()` is in flight, this
+   * setter emits `host-drop` with reason `"stopped"` and does not dispatch or
    * retain `value` (the write buffer is unchanged; a later `start` from
    * `connectedCallback` replays the last staged write, not the dropped one).
    * Outputs: getter returns copies of admitted nodes.
@@ -348,7 +349,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    */
   set nodes(value: readonly Node[]) {
     if (hsm.hostWasStopped(this)) {
-      this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
+      this.#dropStopped({ operation: FlowGraph.setNodesEvent.name });
       return;
     }
     const nodes = value.map(snapshotNode);
@@ -369,7 +370,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_edges` is dispatched
-   * with the copy. After stop, dispatch host-drops and this setter does not
+   * with the copy. After stop, including while `stop()` is in flight, this
+   * setter emits `host-drop` with reason `"stopped"` and does not dispatch or
    * retain `value` (the write buffer is unchanged; a later `start` from
    * `connectedCallback` replays the last staged write, not the dropped one).
    * Outputs: getter returns copies of admitted edges.
@@ -382,7 +384,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    */
   set edges(value: readonly Edge[]) {
     if (hsm.hostWasStopped(this)) {
-      this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
+      this.#dropStopped({ operation: FlowGraph.setEdgesEvent.name });
       return;
     }
     const edges = value.map(copyEdge);
@@ -399,9 +401,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Store `nodesDraggable` on this host. Before start this is pre-start local
    * state, not a dropped dispatch: pointer guards read the field, and no
    * `policy_set` event is sent. After start, `policy_set` is dispatched.
-   * After stop, dispatch host-drops. Does not call `start`.
+   * After stop, including while `stop()` is in flight, this setter emits
+   * `host-drop` with reason `"stopped"` and does not retain `value`. Does not
+   * call `start`.
    */
   set nodesDraggable(value: boolean) {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.setPolicyEvent.name });
+      return;
+    }
     this.#nodesDraggable = value;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
@@ -415,9 +423,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Store `panOnDrag` on this host. Before start this is pre-start local
    * state, not a dropped dispatch: pointer guards read the field, and no
    * `policy_set` event is sent. After start, `policy_set` is dispatched.
-   * After stop, dispatch host-drops. Does not call `start`.
+   * After stop, including while `stop()` is in flight, this setter emits
+   * `host-drop` with reason `"stopped"` and does not retain `value`. Does not
+   * call `start`.
    */
   set panOnDrag(value: boolean) {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.setPolicyEvent.name });
+      return;
+    }
     this.#panOnDrag = value;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
@@ -561,6 +575,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   #live(event: hsm.DispatchEvent): void {
     void this.dispatch(event).catch(hsm.catchFailure(this));
+  }
+
+  #dropStopped(args: { operation: string }): void {
+    hsm.catchFailure(this)(new hsm.HostDropError({ reason: "stopped", operation: args.operation }));
   }
 
   #send(args: { machine: hsm.Instance | null; event: hsm.DispatchEvent }): void {

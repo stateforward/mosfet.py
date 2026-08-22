@@ -241,6 +241,47 @@ describe("bot-machine-graph flow host", () => {
     host.remove();
   });
 
+  test("graphs write during in-flight stop emits host-drop stopped and drops the write", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    const phone = graphFor("/Phone");
+    const other = graphFor("/Other");
+    const phoneNodeCount = phone.nodes.length;
+    const originalOtherName = other.name;
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    host.graphs = [phone];
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    const drops: Array<{ reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    const stopping = host.stop();
+    host.graphs = [other];
+    other.name = "/Mutated";
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(host.graphs[0]?.name, phone.name);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    await stopping;
+    assert.equal(host.graphs[0]?.name, phone.name);
+    const droppedWriteAbsent = false;
+    assert.equal(host.graphs.some((graph) => graph.name === originalOtherName), droppedWriteAbsent);
+    assert.equal(host.graphs.some((graph) => graph.name === other.name), droppedWriteAbsent);
+    host.remove();
+    document.body.append(host);
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    assert.equal(host.graphs[0]?.name, phone.name);
+    assert.equal(host.graphs.some((graph) => graph.name === originalOtherName), droppedWriteAbsent);
+    host.remove();
+  });
+
   test("graphs write before append applies after nested connect without dropping fit", async () => {
     const host = document.createElement("bot-machine-graph");
     const flow = flowFrame(host);

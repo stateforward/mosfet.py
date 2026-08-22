@@ -1653,6 +1653,110 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("nodes write during in-flight stop emits host-drop stopped and drops the write", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const priorNodeId = "a";
+    const rejectedNodeId = "dropped";
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    const position = { x: 1, y: 1 };
+    graph.nodes = [{ id: priorNodeId, position: { x: 0, y: 0 }, data: {} }];
+    await waitUntil(() => graph.nodes[0]?.id === priorNodeId);
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    const stopping = graph.stop();
+    graph.nodes = [{ id: rejectedNodeId, position, data: { label: "dropped" } }];
+    position.x = 999;
+    await flush();
+    assert.equal(graph.nodes[0]?.id, priorNodeId);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    await stopping;
+    assert.equal(graph.nodes[0]?.id, priorNodeId);
+    const droppedWriteAbsent = false;
+    assert.equal(graph.nodes.some((node) => node.id === rejectedNodeId), droppedWriteAbsent);
+    graph.remove();
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes[0]?.id === priorNodeId);
+    assert.equal(graph.nodes[0]?.id, priorNodeId);
+    assert.equal(graph.nodes.some((node) => node.id === rejectedNodeId), droppedWriteAbsent);
+    graph.remove();
+  });
+
+  test("edges write during in-flight stop emits host-drop stopped and drops the write", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const priorEdgeId = "a-b";
+    const rejectedEdgeId = "dropped";
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: priorEdgeId, source: "a", target: "b" }];
+    await waitUntil(() => graph.edges[0]?.id === priorEdgeId);
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    const stopping = graph.stop();
+    graph.edges = [{ id: rejectedEdgeId, source: "a", target: "b" }];
+    await flush();
+    assert.equal(graph.edges[0]?.id, priorEdgeId);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    await stopping;
+    assert.equal(graph.edges[0]?.id, priorEdgeId);
+    const droppedWriteAbsent = false;
+    assert.equal(graph.edges.some((edge) => edge.id === rejectedEdgeId), droppedWriteAbsent);
+    graph.remove();
+    document.body.append(graph);
+    await waitUntil(() => graph.edges[0]?.id === priorEdgeId);
+    assert.equal(graph.edges[0]?.id, priorEdgeId);
+    assert.equal(graph.edges.some((edge) => edge.id === rejectedEdgeId), droppedWriteAbsent);
+    graph.remove();
+  });
+
+  test("nodesDraggable and panOnDrag writes after stop emit host-drop stopped and drop the write", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const policyOn = true;
+    const policyOff = false;
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    graph.nodesDraggable = policyOn;
+    graph.panOnDrag = policyOn;
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    await graph.stop();
+    graph.nodesDraggable = policyOff;
+    graph.panOnDrag = policyOff;
+    await flush();
+    assert.equal(graph.nodesDraggable, policyOn);
+    assert.equal(graph.panOnDrag, policyOn);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    assert.equal(graph.nodesDraggable, policyOn);
+    assert.equal(graph.panOnDrag, policyOn);
+    graph.remove();
+  });
+
   test("Host.stop stops nested graph actors", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
