@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 
 import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
+import { FlowNode } from "../src/flow/node.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
@@ -1754,6 +1755,53 @@ describe("flow-graph", () => {
     await waitUntil(() => /\/connected\//.test(graph.state()));
     assert.equal(graph.nodesDraggable, policyOn);
     assert.equal(graph.panOnDrag, policyOn);
+    graph.remove();
+  });
+
+  test("repairing nested fields after an invalid nodes write does not admit the write", async () => {
+    const graph = document.createElement("flow-graph");
+    const repairedId = "repaired";
+    const nanWidthId = "nan-width";
+    const noNodes = 0;
+    const position = { x: Number.NaN, y: 0 };
+    const data = { label: "bad" };
+    graph.nodes = [{ id: repairedId, position, data }];
+    position.x = 0;
+    data.label = "mutated";
+    document.body.append(graph);
+    await flush();
+    assert.equal(graph.nodes.length, noNodes);
+    assert.equal(graph.nodes.some((node) => node.id === repairedId), false);
+    graph.remove();
+    const nanWidthPosition = { x: 4, y: 5 };
+    const nanWidthData = { label: "nan-width" };
+    const again = document.createElement("flow-graph");
+    again.nodes = [{ id: nanWidthId, position: nanWidthPosition, data: nanWidthData, width: Number.NaN }];
+    nanWidthPosition.x = 999;
+    nanWidthData.label = "mutated-width";
+    document.body.append(again);
+    await flush();
+    assert.equal(again.nodes.length, noNodes);
+    assert.equal(again.nodes.some((node) => node.id === nanWidthId), false);
+    again.remove();
+  });
+
+  test("flow-node paint does not alias graph node nested fields", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originX = 0;
+    const mutatedX = 999;
+    const originalLabel = "A";
+    graph.nodes = [{ id: "a", position: { x: originX, y: 0 }, data: { label: originalLabel }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const element = graph.querySelector("flow-node");
+    assert.ok(element instanceof FlowNode);
+    const painted = element.node as { position: { x: number }; data: { label?: unknown } } | null;
+    assert.ok(painted !== null);
+    painted.position.x = mutatedX;
+    painted.data.label = "mutated";
+    assert.equal(graph.nodes[0]?.position.x, originX);
+    assert.equal(graph.nodes[0]?.data["label"], originalLabel);
     graph.remove();
   });
 

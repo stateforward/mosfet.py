@@ -1,7 +1,7 @@
 import * as hsm from "../hsm.ts";
 
 import { edgePath } from "./path.ts";
-import type { Edge, Node } from "./types.ts";
+import { copyEdge, type Edge, type Node } from "./types.ts";
 
 const ELEMENT_NAME = "flow-edge";
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -31,7 +31,7 @@ export class FlowEdge extends HTMLElement {
   }
 
   set edge(value: Edge | null) {
-    this.#edge = value;
+    this.#edge = value === null ? null : copyEdge(value);
   }
 
   connectedCallback(): void {

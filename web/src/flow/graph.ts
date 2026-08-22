@@ -329,9 +329,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   /**
    * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. Copied with `snapshotNode` (`isNode` then
-   * `copyNode`, else a non-throwing shallow copy) at write time; later
-   * mutation of the caller array does not change staged or admitted nodes.
+   * Inputs: caller `value`. Copied with `snapshotNode` (`copyNode` of owned
+   * nested `position`/`data`) at write time; later mutation of the caller
+   * array or nested fields does not change staged or admitted nodes.
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
@@ -1299,7 +1299,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         this.#nodeLayer.append(element);
         this.#nodeElements.set(node.id, element);
       }
-      element.node = { ...node, selected: this.#selectedNodeIds.has(node.id) };
+      element.node = copyNode({ ...node, selected: this.#selectedNodeIds.has(node.id) });
     }
     for (const [id, element] of this.#nodeElements) {
       if (seenNodes.has(id)) continue;
@@ -1319,7 +1319,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       element.mount(this.#edgeLayer);
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
-      element.edge = { ...edge, selected: this.#selectedEdgeIds.has(edge.id) };
+      element.edge = copyEdge({ ...edge, selected: this.#selectedEdgeIds.has(edge.id) });
       if (source !== undefined && target !== undefined) element.paint(source, target);
     }
     for (const [id, element] of this.#edgeElements) {
@@ -1467,8 +1467,16 @@ function isNode(value: unknown): value is Node {
 }
 
 function snapshotNode(node: Node): Node {
-  const value: unknown = node;
-  return isNode(value) ? copyNode(value) : { ...node };
+  const rawPosition: unknown = node.position;
+  const rawData: unknown = node.data;
+  const position = hsm.isRecord(rawPosition)
+    ? {
+      x: typeof rawPosition["x"] === "number" ? rawPosition["x"] : Number.NaN,
+      y: typeof rawPosition["y"] === "number" ? rawPosition["y"] : Number.NaN,
+    }
+    : { x: Number.NaN, y: Number.NaN };
+  const data = hsm.isRecord(rawData) ? rawData : {};
+  return copyNode({ ...node, position, data });
 }
 
 function isEdge(value: unknown): value is Edge {

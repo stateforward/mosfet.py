@@ -1,6 +1,6 @@
 import { applyStyles } from "../elements/styles.ts";
 
-import { DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node } from "./types.ts";
+import { copyNode, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node } from "./types.ts";
 import { nodeStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node";
@@ -32,7 +32,7 @@ export class FlowNode extends HTMLElement {
   }
 
   set node(value: Node | null) {
-    this.#node = value;
+    this.#node = value === null ? null : copyNode(value);
     this.#sync();
   }
 
