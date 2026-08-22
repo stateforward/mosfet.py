@@ -520,23 +520,13 @@ type HostDetachData = {
   readonly command: Command | null;
 };
 
-function commandActorFromEvent(event: hsm.Event): Command | null {
-  if (!hsm.isRecord(event.data) || !(event.data["command"] instanceof Command)) return null;
-  return event.data["command"];
-}
-
 function isHostDetachData(value: unknown): value is HostDetachData {
   if (!hsm.isRecord(value)) return false;
   return value["command"] === null || value["command"] instanceof Command;
 }
 
-async function stopCommandOnSessionEnd(ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
-  if (!(instance instanceof Dashboard)) return;
-  await instance.stopCommandWhenSessionEnds(ctx);
-}
-
 async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
-  const command = isHostDetachData(event.data) ? event.data.command : commandActorFromEvent(event);
+  const command = isHostDetachData(event.data) ? event.data.command : null;
   try {
     if (command !== null) await hsm.stop(command);
   } catch (error) {
@@ -577,7 +567,7 @@ const dashboardModel = hsm.define(
       "session",
       hsm.initial(hsm.target("idle")),
       hsm.entry(attachCommand),
-      hsm.activity(stopCommandOnSessionEnd),
+      hsm.exit(clearCommandActor),
       hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
       hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(forwardCommand)),
       hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
@@ -885,7 +875,8 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Outputs: none directly. Topology moves `connected` to `stopping`, then
    * `disconnected` on `dashboard.host.stopped`. The host stays bound.
    * Ownership: this dashboard owns the dispatch; the stamped Command actor is
-   * stopped by the stopping activity and nulled by `clearCommandActor`.
+   * stopped by the stopping activity. Session exit and `host.stopped` null
+   * `#command`.
    * Lifetime: one detach request; stopping lasts until `dashboard.host.stopped`.
    * Concurrency: runtime-safe. Detach while stopping is deferred. Detach while
    * disconnected is ignored. Public `stop()` is mixin Host.stop, not detach.
@@ -903,12 +894,12 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Null the Command actor after host stop.
+   * Null the Command actor after session exit or `dashboard.host.stopped`.
    *
-   * Inputs: none. Invoked from the `dashboard.host.stopped` effect.
-   * Outputs: `#command` is `null`. Ownership: declaring Dashboard class only.
-   * Lifetime: until the next `session` entry attaches a new Command actor.
-   * Concurrency: runtime-safe; called once on the stopped transition.
+   * Inputs: none. Invoked from session exit and the `dashboard.host.stopped`
+   * effect. Outputs: `#command` is `null`. Ownership: declaring Dashboard
+   * class only. Lifetime: until the next `session` entry attaches a new
+   * Command actor. Concurrency: runtime-safe.
    * Failure modes: none. Units: none.
    * Classification: runtime-safe.
    */
@@ -966,50 +957,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
     );
     this.#emit();
     return this.snapshot();
-  }
-
-  /**
-   * Unbind like mixin Host.stop.
-   *
-   * Inputs: none. Awaits module `hsm.stop(this)`, which keeps BIND until
-   * library RTC settles and unbinds in `finally`. Command teardown is the
-   * session activity `stopCommandOnSessionEnd` (and `stopCommandActor` on
-   * detach). Outputs: host unbound. Overlapping `stop()` joins the in-flight
-   * run. Failure modes: library stop rejection still unbinds BIND, then
-   * throws. Classification: runtime-safe.
-   */
-  override async stop(): Promise<void> {
-    await hsm.stop(this);
-  }
-
-  /**
-   * Stop the Command actor when the session activity context is canceled.
-   *
-   * Inputs: the session activity `ctx`. Captures `#command` at activity start
-   * and awaits `hsm.stop` in `finally` after `ctx` `done`. Outputs: none.
-   * Ownership: declaring Dashboard class only. Lifetime: session entry until
-   * session exit or library stop. Failure modes: Command stop rejection is
-   * classified by `catchFailure(this)`. Classification: runtime-safe.
-   */
-  async stopCommandWhenSessionEnds(ctx: hsm.Context): Promise<void> {
-    const command = this.#command;
-    try {
-      await new Promise<void>((resolve) => {
-        const onDone = (): void => {
-          ctx.removeEventListener("done", onDone);
-          resolve();
-        };
-        ctx.addEventListener("done", onDone);
-        if (ctx.done) onDone();
-      });
-    } finally {
-      if (command === null) return;
-      try {
-        await hsm.stop(command);
-      } catch (error) {
-        hsm.catchFailure(this)(error);
-      }
-    }
   }
 
   attachCommand(): void {

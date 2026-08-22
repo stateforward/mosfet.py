@@ -766,6 +766,26 @@ describe("companion-style HSM controllers", () => {
     assert.equal(dashboard.state(), "");
   });
 
+  test("dashboard stop then boot attaches a new Command", async () => {
+    const posted: string[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted.push(command.eventName);
+        return { result: "accepted", detail: "ok" };
+      },
+    });
+    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "{}" });
+    await waitFor(() => dashboard.snapshot().commandResult !== null);
+    assert.deepEqual(posted, ["phone.ring"]);
+    await dashboard.stop();
+    assert.equal(dashboard.state(), "");
+    dashboard.boot();
+    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.hangup", dataJson: "{}" });
+    await waitFor(() => posted.length === 2);
+    assert.deepEqual(posted, ["phone.ring", "phone.hangup"]);
+    await stopDashboard(dashboard);
+  });
+
   test("overlapping dashboard stop both complete without hanging", async () => {
     const dashboard = bootDashboard();
     const first = dashboard.stop();
@@ -776,12 +796,21 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("requestDetach stops command then stays bound", async () => {
-    const dashboard = bootDashboard();
+    const posted: string[] = [];
+    const dashboard = bootDashboard({
+      postCommand: async (command) => {
+        posted.push(command.eventName);
+        return { result: "accepted", detail: "ok" };
+      },
+    });
     dashboard.requestDetach();
     await waitFor(() => dashboard.state().endsWith("/disconnected"));
     assert.notEqual(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
     dashboard.requestAttach();
     await waitFor(() => dashboard.state().includes("/session"));
+    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "{}" });
+    await waitFor(() => posted.length === 1);
+    assert.deepEqual(posted, ["phone.ring"]);
     await stopDashboard(dashboard);
   });
 
