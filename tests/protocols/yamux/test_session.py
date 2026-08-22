@@ -4,6 +4,7 @@ import inspect
 import types
 
 import hsm
+import bot
 
 from bot.protocols.yamux.events import (
     CloseStreamEvent,
@@ -92,7 +93,7 @@ def test_yamux_session_model_tracks_protocol_states_without_stream_events() -> N
 def test_yamux_session_take_snapshot_extends_canonical_hsm_snapshot() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, payload=b"rpc", flags=Flag.SYN))
 
         snapshot = hsm.take_snapshot(None, session)
@@ -108,7 +109,7 @@ def test_yamux_session_take_snapshot_extends_canonical_hsm_snapshot() -> None:
 def test_yamux_session_outbound_frame_stream_wakes_waiting_reader() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         pending_frame = asyncio.create_task(read_outbound(session))
         await asyncio.sleep(0)
@@ -125,8 +126,8 @@ def test_yamux_session_allocates_role_specific_stream_ids_and_opens_with_syn() -
     async def run() -> None:
         client = Session(role="client")
         server = Session(role="server")
-        _ = await hsm.started(None, client, client.model)
-        _ = await hsm.started(None, server, server.model)
+        _ = await bot.started(None, client, client.model)
+        _ = await bot.started(None, server, server.model)
 
         await client.dispatch(client.context(), OpenStreamEvent.with_data(OpenStreamData()))
         await server.dispatch(server.context(), OpenStreamEvent.with_data(OpenStreamData()))
@@ -142,12 +143,10 @@ def test_yamux_session_allocates_role_specific_stream_ids_and_opens_with_syn() -
 def test_yamux_session_allows_data_before_ack_and_counts_only_data_bytes() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
-        await session.dispatch(
-            session.context(), SendDataEvent.with_data(SendData(stream_id=1, payload=b"hello"))
-        )
+        await session.dispatch(session.context(), SendDataEvent.with_data(SendData(stream_id=1, payload=b"hello")))
 
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
         assert await read_outbound(session) == FrameData.data(stream_id=1, payload=b"hello")
@@ -165,7 +164,7 @@ def test_yamux_session_allows_data_before_ack_and_counts_only_data_bytes() -> No
 def test_yamux_session_accepts_data_ack_for_locally_opened_stream() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
 
@@ -189,7 +188,7 @@ def test_yamux_session_accepts_data_ack_for_locally_opened_stream() -> None:
 def test_yamux_session_accepts_remote_syn_and_exposes_python_stream_reader() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, payload=b"rpc", flags=Flag.SYN))
 
@@ -206,7 +205,7 @@ def test_yamux_session_accepts_remote_syn_and_exposes_python_stream_reader() -> 
 def test_yamux_session_sends_window_update_when_application_reads_stream_bytes() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, payload=b"window", flags=Flag.SYN))
         assert await read_outbound(session) == FrameData.window_update(stream_id=2, delta=0, flags=Flag.ACK)
 
@@ -229,7 +228,7 @@ def test_yamux_session_sends_window_update_when_application_reads_stream_bytes()
 def test_yamux_session_rejects_bad_remote_stream_parity() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.receive_frame(session.context(), FrameData.data(stream_id=3, flags=Flag.SYN))
 
@@ -246,7 +245,7 @@ def test_yamux_session_rejects_bad_remote_stream_parity() -> None:
 def test_yamux_session_rejects_bad_remote_ack_flag() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, flags=Flag.SYN | Flag.ACK))
 
@@ -263,7 +262,7 @@ def test_yamux_session_rejects_bad_remote_ack_flag() -> None:
 def test_yamux_session_protocol_error_clears_outstanding_ping() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=77)))
         assert await read_outbound(session) == FrameData.ping(opaque=77)
@@ -283,7 +282,7 @@ def test_yamux_session_protocol_error_clears_outstanding_ping() -> None:
 def test_yamux_session_fin_half_close_and_rst_runtime() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
         await session.receive_frame(session.context(), FrameData.window_update(stream_id=1, delta=0, flags=Flag.ACK))
@@ -305,7 +304,7 @@ def test_yamux_session_fin_half_close_and_rst_runtime() -> None:
 def test_yamux_session_accepts_ack_after_local_fin_before_ack() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
 
@@ -331,7 +330,7 @@ def test_yamux_session_accepts_ack_after_local_fin_before_ack() -> None:
 def test_yamux_session_accepts_data_ack_after_remote_fin_before_ack() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
 
@@ -353,7 +352,7 @@ def test_yamux_session_accepts_data_ack_after_remote_fin_before_ack() -> None:
 def test_yamux_session_accepts_ack_after_stream_closed_before_ack() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
 
@@ -380,7 +379,7 @@ def test_yamux_session_accepts_ack_after_stream_closed_before_ack() -> None:
 def test_yamux_session_rejects_duplicate_window_fin_without_runtime_error() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.receive_frame(session.context(), FrameData.window_update(stream_id=2, delta=0, flags=Flag.SYN))
         assert await read_outbound(session) == FrameData.window_update(stream_id=2, delta=0, flags=Flag.ACK)
@@ -400,7 +399,7 @@ def test_yamux_session_rejects_duplicate_window_fin_without_runtime_error() -> N
 def test_yamux_session_rejects_send_when_flow_control_is_exhausted() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
 
@@ -425,7 +424,14 @@ def test_yamux_session_admission_guards_use_session_ledger_not_stream_private_fi
     import bot.protocols.yamux.session as session_mod
 
     tree = ast.parse(inspect.getsource(session_mod))
-    stream_private_attrs = {"_state", "_send_window", "_receive_window", "_awaiting_ack", "_sent_bytes", "_received_bytes"}
+    stream_private_attrs = {
+        "_state",
+        "_send_window",
+        "_receive_window",
+        "_awaiting_ack",
+        "_sent_bytes",
+        "_received_bytes",
+    }
     stream_mutations = {
         "send",
         "receive",
@@ -491,7 +497,9 @@ def test_yamux_session_admission_guards_use_session_ledger_not_stream_private_fi
     _Visitor().visit(tree)
     assert peek_sites == [], f"Session peeks Stream private fields: {peek_sites}"
     assert bare_mutations == [], f"Stream mutations outside _drive_stream_*: {bare_mutations}"
-    assert any(isinstance(node, ast.FunctionDef) and node.name.startswith("_drive_stream_") for node in tree.body) or any(
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name.startswith("_drive_stream_") for node in tree.body
+    ) or any(
         isinstance(node, ast.ClassDef)
         and any(isinstance(item, ast.FunctionDef) and item.name.startswith("_drive_stream_") for item in node.body)
         for node in tree.body
@@ -499,7 +507,7 @@ def test_yamux_session_admission_guards_use_session_ledger_not_stream_private_fi
 
     async def run() -> int:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         _ = await read_outbound(session)
         await session.dispatch(
@@ -516,7 +524,7 @@ def test_yamux_session_admission_guards_use_session_ledger_not_stream_private_fi
 def test_yamux_session_rejects_inbound_data_when_receive_window_is_exhausted() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, flags=Flag.SYN))
         assert await read_outbound(session) == FrameData.window_update(stream_id=2, delta=0, flags=Flag.ACK)
 
@@ -536,7 +544,7 @@ def test_yamux_session_rejects_inbound_data_when_receive_window_is_exhausted() -
 def test_yamux_session_rejects_oversized_syn_data_before_opening_remote_stream() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.receive_frame(
             session.context(),
@@ -553,7 +561,7 @@ def test_yamux_session_rejects_oversized_syn_data_before_opening_remote_stream()
 def test_yamux_session_rejects_stale_terminal_data_and_window_updates() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
         await session.receive_frame(session.context(), FrameData.window_update(stream_id=1, delta=0, flags=Flag.ACK))
@@ -579,7 +587,7 @@ def test_yamux_session_rejects_stale_terminal_data_and_window_updates() -> None:
 def test_yamux_session_duplicate_syn_is_protocol_error() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.receive_frame(session.context(), FrameData.data(stream_id=2, flags=Flag.SYN))
         assert await read_outbound(session) == FrameData.window_update(stream_id=2, delta=0, flags=Flag.ACK)
 
@@ -598,7 +606,7 @@ def test_yamux_session_duplicate_syn_is_protocol_error() -> None:
 def test_yamux_session_ping_echo_ack_correlation_and_timeout() -> None:
     async def run() -> None:
         session = Session(role="client", ping_timeout=datetime.timedelta(milliseconds=5))
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=42)))
         assert await read_outbound(session) == FrameData.ping(opaque=42)
@@ -621,7 +629,7 @@ def test_yamux_session_ping_echo_ack_correlation_and_timeout() -> None:
 def test_yamux_session_ping_timeout_clears_outstanding_ping() -> None:
     async def run() -> None:
         session = Session(role="client", ping_timeout=datetime.timedelta(milliseconds=5))
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=42)))
         assert await read_outbound(session) == FrameData.ping(opaque=42)
@@ -638,7 +646,7 @@ def test_yamux_session_ping_timeout_clears_outstanding_ping() -> None:
 def test_yamux_session_can_open_stream_while_waiting_for_ping_ack() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=42)))
         assert await read_outbound(session) == FrameData.ping(opaque=42)
@@ -655,7 +663,7 @@ def test_yamux_session_can_open_stream_while_waiting_for_ping_ack() -> None:
 def test_yamux_session_goaway_stops_new_streams_and_allows_active_stream_drain() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=42)))
         assert await read_outbound(session) == FrameData.ping(opaque=42)
@@ -667,7 +675,7 @@ def test_yamux_session_goaway_stops_new_streams_and_allows_active_stream_drain()
         assert await read_outbound(session) == FrameData.go_away(code=GoAwayCode.NORMAL)
 
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
         await session.receive_frame(session.context(), FrameData.window_update(stream_id=1, delta=0, flags=Flag.ACK))
@@ -697,7 +705,7 @@ def test_yamux_session_goaway_stops_new_streams_and_allows_active_stream_drain()
 def test_yamux_session_received_goaway_routes_through_disconnect_choice() -> None:
     async def run() -> None:
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
 
         await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=43)))
         assert await read_outbound(session) == FrameData.ping(opaque=43)
@@ -708,7 +716,7 @@ def test_yamux_session_received_goaway_routes_through_disconnect_choice() -> Non
         assert session.take_snapshot().outstanding_ping is None
 
         session = Session(role="client")
-        _ = await hsm.started(None, session, session.model)
+        _ = await bot.started(None, session, session.model)
         await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
         assert await read_outbound(session) == FrameData.window_update(stream_id=1, delta=0, flags=Flag.SYN)
         await session.receive_frame(session.context(), FrameData.window_update(stream_id=1, delta=0, flags=Flag.ACK))

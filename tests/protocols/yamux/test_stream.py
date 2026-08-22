@@ -3,6 +3,7 @@ import dataclasses
 import inspect
 
 import hsm
+import bot
 import pytest
 
 from bot.protocols.yamux.frame import INITIAL_STREAM_WINDOW
@@ -55,7 +56,7 @@ def test_yamux_stream_model_does_not_rely_on_observer_effects_for_internal_trans
 def test_yamux_stream_take_snapshot_extends_canonical_hsm_snapshot() -> None:
     async def run() -> None:
         stream = Stream(stream_id=2, locally_initiated=False)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         snapshot = hsm.take_snapshot(None, stream)
 
@@ -69,7 +70,7 @@ def test_yamux_stream_take_snapshot_extends_canonical_hsm_snapshot() -> None:
 def test_yamux_stream_reads_received_bytes_with_asyncio_stream_api() -> None:
     async def run() -> None:
         stream = Stream(stream_id=2, locally_initiated=False)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         assert stream.take_snapshot().lifecycle is StreamState.OPEN
         stream.receive(b"hello\n")
@@ -91,7 +92,7 @@ def test_yamux_stream_reports_application_read_window_consumption() -> None:
             locally_initiated=False,
             on_window_consumed=lambda stream_id, count: consumed.append((stream_id, count)),
         )
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         stream.receive(b"abcdef")
         assert await stream.read(2) == b"ab"
@@ -105,7 +106,7 @@ def test_yamux_stream_reports_application_read_window_consumption() -> None:
 def test_yamux_stream_lifecycle_and_flow_control_runtime() -> None:
     async def run() -> None:
         stream = Stream(stream_id=1, locally_initiated=True)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         assert stream.take_snapshot().lifecycle is StreamState.LOCAL_OPENING
         assert stream.take_snapshot().awaiting_ack
@@ -136,7 +137,7 @@ def test_yamux_stream_lifecycle_and_flow_control_runtime() -> None:
 def test_yamux_stream_accepts_ack_after_local_fin_before_ack() -> None:
     async def run() -> None:
         stream = Stream(stream_id=1, locally_initiated=True)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         stream.send(b"done", end_stream=True)
         assert stream.take_snapshot().lifecycle is StreamState.LOCAL_CLOSED
@@ -150,7 +151,7 @@ def test_yamux_stream_accepts_ack_after_local_fin_before_ack() -> None:
             stream.acknowledge()
 
         stream = Stream(stream_id=3, locally_initiated=True)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
         stream.send(b"done", end_stream=True)
         stream.remote_fin()
         assert stream.take_snapshot().lifecycle is StreamState.CLOSED
@@ -167,7 +168,7 @@ def test_yamux_stream_accepts_ack_after_local_fin_before_ack() -> None:
 def test_yamux_stream_reset_is_terminal() -> None:
     async def run() -> None:
         stream = Stream(stream_id=2, locally_initiated=False)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         stream.reset()
 
@@ -183,7 +184,7 @@ def test_yamux_stream_reset_is_terminal() -> None:
 def test_yamux_stream_rejects_invalid_operations_through_hsm_transitions() -> None:
     async def run() -> None:
         stream = Stream(stream_id=2, locally_initiated=False)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
 
         with pytest.raises(RuntimeError, match="not awaiting acknowledgement"):
             stream.acknowledge()
@@ -205,13 +206,13 @@ def test_yamux_stream_rejects_invalid_operations_through_hsm_transitions() -> No
             stream.local_fin()
 
         stream = Stream(stream_id=4, locally_initiated=False)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
         stream.remote_fin()
         with pytest.raises(RuntimeError, match="remote writes"):
             stream.remote_fin()
 
         stream = Stream(stream_id=1, locally_initiated=True)
-        _ = await hsm.started(None, stream, stream.model)
+        _ = await bot.started(None, stream, stream.model)
         stream.acknowledge()
         with pytest.raises(RuntimeError, match="not awaiting acknowledgement"):
             stream.acknowledge()

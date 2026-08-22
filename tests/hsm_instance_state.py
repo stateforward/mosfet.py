@@ -7,6 +7,7 @@ import uuid
 import weakref
 
 import hsm
+import bot
 
 from bot import abilities
 from bot import behavior
@@ -46,7 +47,7 @@ def _record_ability_terminal_mirror_event(
 
 
 class _AbilityTerminalMirror(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "AbilityTerminalMirror",
         hsm.initial(hsm.target("/AbilityTerminalMirror/recording")),
         hsm.state(
@@ -125,7 +126,7 @@ async def await_result(awaitable: collections.abc.Awaitable[TResult]) -> TResult
 async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     context = hsm.Context() if ctx is None else ctx
     owner = _AbilityTerminalMirror(ability)
-    _ = await hsm.started(context, owner, typing.cast(hsm.Model, owner.model))
+    _ = await bot.started(context, owner, typing.cast(hsm.Model, owner.model))
     operation_id = uuid.uuid4().hex
     attached = owner.result_for(operation_id)
     _ = await ability.attach(

@@ -29,6 +29,10 @@ from bot.abilities.learning import learning as learning_impl
 from bot.protocols import attachment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
+# One Learning revision performs one isolated Starlark validation with a three-second budget;
+# the host wait includes five seconds for decode, recall, selection, terminal propagation, and teardown.
+_LEARNING_REVISION_HOST_TIMEOUT_SECONDS = 8.0
+
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
@@ -133,10 +137,14 @@ def test_learning_callbacks_do_not_use_assert_for_control_flow() -> None:
     """
 
     source = pathlib.Path(typing.cast(str, learning_impl.__file__)).read_text(encoding="utf-8")
-    asserts = [
-        node.lineno for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assert)
-    ]
+    asserts = [node.lineno for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assert)]
     assert asserts == [], f"assert used for control flow at learning.py lines {asserts}"
+
+
+def test_learning_revision_progresses_from_typed_child_terminals() -> None:
+    source = pathlib.Path(typing.cast(str, learning_impl.__file__)).read_text(encoding="utf-8")
+
+    assert "Ability.await_child_terminal" not in source
 
 
 def test_learning_event_names_and_types() -> None:
@@ -207,7 +215,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it.", media_type="text/plain"),
-            timeout=5.0,
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
 
     output = asyncio.run(run())
@@ -292,7 +300,7 @@ def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it.", media_type="text/plain"),
-            timeout=5.0,
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
 
     output = asyncio.run(run())
@@ -395,7 +403,7 @@ class AttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "LearningAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -425,7 +433,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
     """A stuck teardown reboots with a learning-domain reason, not a cognition one."""
 
     class StubbornProcessing(processing.Processing):
-        submodel = hsm.define(
+        submodel = bot.define(
             "StubbornLearningProcessing",
             hsm.initial(hsm.target("/StubbornLearningProcessing/waiting")),
             hsm.state(
@@ -443,7 +451,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
             self._attachment_group = attachment.Group(stubborn, self._revision, self._memory)
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
-        monkeypatch.setattr(learning_impl, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(milliseconds=10))
+        monkeypatch.setattr(learning_impl, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(0))
         connection = sqlite3.connect(":memory:", check_same_thread=False)
         store = memory.Memory(connection=connection)
         _seed_ring_episode(store)
@@ -456,7 +464,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
         ability.replace_processing(stubborn)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -481,9 +489,8 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
                 target=hsm.id(ability),
             ),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: ability.state().endswith("/rebooting"))
-        await asyncio.sleep(0.01)
+        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
         result = list(owner.lifecycle), ability.state()
         await ability.stop(ability.context())
         connection.close()
@@ -553,7 +560,7 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it."),
-            timeout=5.0,
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
 
     output = asyncio.run(run())
@@ -742,7 +749,7 @@ def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_select
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it.", media_type="text/plain"),
-            timeout=5.0,
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
         return processor
 

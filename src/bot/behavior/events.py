@@ -10,7 +10,7 @@ from __future__ import annotations
 import typing
 
 import hsm
-from bot import event_schema
+from bot import event
 import pydantic
 
 CREATE_EVENT_NAME = "bot.behavior.create"
@@ -140,17 +140,17 @@ Data: typing.TypeAlias = typing.Annotated[
 
 CreateEvent = hsm.Event[CreateData](
     name=CREATE_EVENT_NAME,
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=CreateData,
 )
 ChangeEvent = hsm.Event[ChangeData](
     name=CHANGE_EVENT_NAME,
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=ChangeData,
 )
 BreakEvent = hsm.Event[BreakData](
     name=BREAK_EVENT_NAME,
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=BreakData,
 )
 

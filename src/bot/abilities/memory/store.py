@@ -18,6 +18,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 import pydantic
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Dialect
@@ -52,10 +53,7 @@ class Statement(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "sql": (
-                        f"SELECT content FROM {MEMORY_TABLE} WHERE query_tags = ? "
-                        "ORDER BY created_at"
-                    ),
+                    "sql": (f"SELECT content FROM {MEMORY_TABLE} WHERE query_tags = ? ORDER BY created_at"),
                     "parameters": ["cognitive_episode"],
                 },
             ],
@@ -324,14 +322,12 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.memory.store.input",
-    schema=InputData,
-
+        name="bot.ability.memory.store.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.memory.store.output",
-    schema=OutputData,
-
+        name="bot.ability.memory.store.output",
+        schema=OutputData,
     )
 
     _engine: Engine
@@ -423,7 +419,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "MemoryStore",
         hsm.initial(hsm.target("/MemoryStore/idle")),
         hsm.state(

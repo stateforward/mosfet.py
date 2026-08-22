@@ -1,4 +1,4 @@
-"""Bot-owned conversation contribution → cognition → Speaking product path."""
+"""Bot-owned conversation contribution → cognition body-path tests."""
 
 from __future__ import annotations
 
@@ -25,6 +25,10 @@ from bot.device import Device
 from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.test_bot import CapturingCognition, as_cognition
 
+MessageContent: typing.TypeAlias = (
+    str | int | float | bool | None | list["MessageContent"] | dict[str, "MessageContent"]
+)
+
 
 class RecordingEncoder(encoding.Encoder[bytes, bytes]):
     def __init__(self, audio: bytes = b"\x11\x22") -> None:
@@ -49,24 +53,25 @@ class IdentityTextDecoder(decoding.Decoder[typing.Any, str]):
         raise AssertionError(f"unexpected stimulus {input!r}")
 
 
-class SpeakFromContributionProcessor(processing.Processor):
-    """Select speaking.input using contribution text product from conversation terminal stimulus."""
+class ContributionProcessor(processing.Processor):
+    """Inspect conversation products without selecting a body output port."""
 
     inputs: list[processing.InputData]
-    require_conversation_actor: bool
+    require_communication_actor: bool
 
-    def __init__(self, *, require_conversation_actor: bool = True) -> None:
+    def __init__(self, *, require_communication_actor: bool = True) -> None:
         self.inputs = []
-        self.require_conversation_actor = require_conversation_actor
+        self.require_communication_actor = require_communication_actor
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
         self.inputs.append(input)
         names = {event.name for event in input.schemas}
-        assert "bot.ability.speaking.input" in names
-        assert "speaking" in input.actors
-        if self.require_conversation_actor:
-            assert any(isinstance(actor, conversation.Conversation) for actor in input.actors.values())
+        assert "bot.ability.speaking.input" not in names
+        assert "speaking" not in input.actors
+        assert "conversation" not in input.actors
+        if self.require_communication_actor:
+            assert isinstance(input.actors.get("communication"), communication.Communication)
         stimulus = input.input
         assert isinstance(stimulus, hsm.Event)
         assert stimulus.name == conversation.OutputEvent.name
@@ -75,21 +80,14 @@ class SpeakFromContributionProcessor(processing.Processor):
         inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
         assert isinstance(inbound.content, str) and inbound.content
         assert inbound.content_type.lower().startswith("text/")
-        return (
-            processing.SelectedEvent(
-                event="bot.ability.speaking.input",
-                data={"text": f"Heard: {inbound.content}"},
-                target="speaking",
-                reason="reply to conversation contribution",
-            ),
-        )
+        return ()
 
 
 def _history_message(
-    content: object,
+    content: MessageContent | bytes,
     *,
-    source_ids: frozenset[object] = frozenset({"caller"}),
-    target_ids: frozenset[object] = frozenset({"bot"}),
+    source_ids: conversation.IdentitySet = frozenset({"caller"}),
+    target_ids: conversation.IdentitySet = frozenset({"bot"}),
     content_type: str = "text/plain",
     direction: typing.Literal["inbound", "outbound"] = "inbound",
 ) -> conversation.Messages:
@@ -98,7 +96,7 @@ def _history_message(
             conversation.Message(
                 sequence=0,
                 direction=direction,
-                source_ids=source_ids if direction == "inbound" else frozenset(),
+                source_ids=source_ids if direction == "inbound" else conversation.IdentitySet(),
                 target_ids=target_ids if direction == "inbound" else source_ids,
                 content=None if isinstance(content, bytes) else content,
                 content_type=content_type,
@@ -139,11 +137,18 @@ def _text_conversation() -> conversation.Conversation:
 
 def _text_communication(
     conversation_ability: conversation.Conversation | None = None,
-) -> tuple[communication.Communication, conversation.Conversation]:
+    speaking_ability: speaking.Speaking | None = None,
+) -> tuple[communication.Communication, conversation.Conversation, speaking.Speaking]:
     conversation_ability = conversation_ability if conversation_ability is not None else _text_conversation()
+    speaking_ability = (
+        speaking_ability
+        if speaking_ability is not None
+        else speaking.Speaking(encoder=RecordingEncoder(), conversation=conversation_ability)
+    )
     return (
-        communication.Communication(active_conversation=conversation_ability),
+        communication.Communication(active_conversation=conversation_ability, speaking=speaking_ability),
         conversation_ability,
+        speaking_ability,
     )
 
 
@@ -160,14 +165,14 @@ def test_conversation_input_uses_identity_sets_and_content() -> None:
     assert message.content_type == "text/plain"
 
 
-def test_bot_conversation_contribution_selects_speaking() -> None:
-    """Message → Conversation contribution → Bot cognition (Speaking in actors) → Speaking."""
+def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking() -> None:
+    """Message → Conversation contribution → Bot cognition, without a direct Speaking affordance."""
 
     async def run() -> tuple[list[bytes], list[processing.InputData], conversation.Messages | None]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        communication_ability, conversation_ability = _text_communication()
-        processor = SpeakFromContributionProcessor()
+        communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
+        processor = ContributionProcessor()
 
         class Probe(Bot):
             def __init__(self) -> None:
@@ -182,6 +187,7 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
         environment = Environment()
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
+        await _wait_until(lambda: (communication_ability.state() or "").endswith("/behavior/active"))
         await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
 
         operation_id = uuid.uuid4().hex
@@ -193,10 +199,10 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
         )
         _ = await hsm.dispatch(
             environment,
-            conversation_ability,
-            conversation_ability.input_event.with_data_and_id(message, operation_id),
+            communication_ability,
+            communication.InputEvent.with_data_and_id(message, operation_id),
         )
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
+        await _wait_until(lambda: len(processor.inputs) == 1, timeout=10.0)
         await _wait_until(
             lambda: (probe.state() or "").endswith("/unfocused") or (probe.state() or "").endswith("/focused")
         )
@@ -207,8 +213,10 @@ def test_bot_conversation_contribution_selects_speaking() -> None:
         return encoder.calls, processor.inputs, response
 
     calls, inputs, response = asyncio.run(run())
-    assert calls == [b"Heard: hello from the room"]
+    assert calls == []
     assert len(inputs) == 1
+    assert "bot.ability.speaking.input" not in {event.name for event in inputs[0].schemas}
+    assert "speaking" not in inputs[0].actors
     assert response is not None
     inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
     assert inbound.content == "hello from the room"
@@ -235,7 +243,13 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
         await probe.attach(environment)
         await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
 
-        encoded = _history_message(None, source_ids=frozenset({"bot"}), target_ids=frozenset({"caller"}), content_type="audio/raw", direction="outbound")
+        encoded = _history_message(
+            None,
+            source_ids=frozenset({"bot"}),
+            target_ids=frozenset({"caller"}),
+            content_type="audio/raw",
+            direction="outbound",
+        )
         # Address this Bot by id (dispatch_to / envelope target) — still fail closed on payload shape.
         terminal = dataclasses.replace(
             conversation.OutputEvent.with_data(encoded),
@@ -320,13 +334,13 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
 
 
 def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
-    """Contribution handoff addressed to this Bot by id enters body cognition (no source-id walk)."""
+    """Contribution handoff addressed to this Bot by id enters cognition (no source-id walk)."""
 
-    async def run() -> list[bytes]:
+    async def run() -> tuple[list[processing.InputData], list[bytes]]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
         # Address-only path: no acquired Conversation actor required on the body.
-        processor = SpeakFromContributionProcessor(require_conversation_actor=False)
+        processor = ContributionProcessor(require_communication_actor=False)
 
         class Probe(Bot):
             def __init__(self) -> None:
@@ -350,20 +364,23 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
             id=uuid.uuid4().hex,
         )
         _ = await hsm.dispatch_to(environment, handoff, hsm.id(probe))
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
-        return encoder.calls
+        await _wait_until(lambda: len(processor.inputs) == 1, timeout=10.0)
+        return processor.inputs, encoder.calls
 
-    assert asyncio.run(run()) == [b"Heard: addressed by id"]
+    inputs, calls = asyncio.run(run())
+    assert len(inputs) == 1
+    assert calls == []
+    assert "speaking" not in inputs[0].actors
 
 
 def test_bot_product_path_does_not_use_host_turn() -> None:
-    """Bot body bridge is the product path: one cognition entry without host_turn."""
+    """Bot body bridge is the product path: one cognition entry without host_turn or direct Speaking selection."""
 
     async def run() -> int:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        communication_ability, conversation_ability = _text_communication()
-        processor = SpeakFromContributionProcessor()
+        communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
+        processor = ContributionProcessor()
 
         class Probe(Bot):
             def __init__(self) -> None:
@@ -392,7 +409,7 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
                 uuid.uuid4().hex,
             ),
         )
-        await _wait_until(lambda: bool(encoder.calls), timeout=10.0)
+        await _wait_until(lambda: len(processor.inputs) == 1, timeout=10.0)
         return len(processor.inputs)
 
     assert asyncio.run(run()) == 1
@@ -404,7 +421,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
     async def run() -> list[str]:
         encoder = RecordingEncoder()
         speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
-        communication_ability, conversation_ability = _text_communication()
+        communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
         # Gate first process until second message is queued.
         first_started = asyncio.Event()
         release_first = asyncio.Event()
@@ -427,14 +444,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 assert isinstance(response, conversation.Messages)
                 inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
                 assert isinstance(inbound.content, str) and inbound.content
-                return (
-                    processing.SelectedEvent(
-                        event="bot.ability.speaking.input",
-                        data={"text": inbound.content},
-                        target="speaking",
-                        reason="deferred turn proof",
-                    ),
-                )
+                return ()
 
         processor = GatedSpeakProcessor()
 
@@ -489,11 +499,20 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
         # Second contribution should reach Bot while still processing first → defer.
         await _wait_until(lambda: len(processor.inputs) >= 1)
         release_first.set()
-        await _wait_until(lambda: len(encoder.calls) >= 2, timeout=10.0)
+        await _wait_until(lambda: len(processor.inputs) >= 2, timeout=10.0)
         await _wait_until(
             lambda: (probe.state() or "").endswith("/unfocused") or (probe.state() or "").endswith("/focused")
         )
-        return [call.decode() for call in encoder.calls]
+        texts: list[str] = []
+        for call in processor.inputs:
+            stimulus = call.input
+            assert isinstance(stimulus, hsm.Event)
+            response = stimulus.data
+            assert isinstance(response, conversation.Messages)
+            inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
+            assert isinstance(inbound.content, str)
+            texts.append(inbound.content)
+        return texts
 
     texts = asyncio.run(run())
     assert texts == ["first", "second"]
@@ -503,11 +522,11 @@ def test_listening_speech_reaches_cognition_without_conversation_dispatch() -> N
     """Listening keeps its cognition.InputEvent/SpeechEvent contract through the Bot body."""
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData], str, str, str]:
-        communication_ability, conversation_ability = _text_communication()
+        communication_ability, conversation_ability, speaking_ability = _text_communication()
         processor = CountingProcessor()
         cognitive = CapturingCognition(processor)
         listening_ability = listening.Listening(
-            voice_detector=_VoiceThenSilence(),
+            voice_activity_classifier=_VoiceThenSilence(),
             speech_decoder=None,
         )
 
@@ -517,6 +536,7 @@ def test_listening_speech_reaches_cognition_without_conversation_dispatch() -> N
                     devices={"phone": Device()},
                     cognition=cognitive,
                     input=(listening_ability,),
+                    output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
                 )
 
@@ -562,12 +582,12 @@ def test_listening_stt_product_reaches_cognition_without_conversation_dispatch()
     """The former STT bridge also remains inside Cognition when Communication holds Conversation."""
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData], list[bytes], str, str, str]:
-        communication_ability, conversation_ability = _text_communication()
+        communication_ability, conversation_ability, speaking_ability = _text_communication()
         processor = CountingProcessor()
         cognitive = CapturingCognition(processor)
         speech_decoder = _RecordingSpeechDecoder()
         listening_ability = listening.Listening(
-            voice_detector=_VoiceThenSilence(),
+            voice_activity_classifier=_VoiceThenSilence(),
             speech_decoder=speech_decoder,
         )
 
@@ -577,6 +597,7 @@ def test_listening_stt_product_reaches_cognition_without_conversation_dispatch()
                     devices={"phone": Device()},
                     cognition=cognitive,
                     input=(listening_ability,),
+                    output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
                 )
 
@@ -638,7 +659,7 @@ class _RecordingSpeechDecoder(speech.SpeechDecoder):
         return b"decoded:" + input
 
 
-class _VoiceThenSilence(hearing_voice.detection.VoiceDetector):
+class _VoiceThenSilence(hearing_voice.detection.VoiceActivityClassifier):
     def __init__(self) -> None:
         self.calls = 0
 

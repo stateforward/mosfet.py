@@ -1,15 +1,18 @@
 """Utilities for typed HSM event payload contracts."""
 
 import base64
+import binascii
 import collections.abc
 import dataclasses
 import enum
+import itertools
+import math
 import re
 import typing
-import xml.etree.ElementTree as ElementTree
 
 import hsm
 import pydantic
+import pydantic_core
 
 # Marks an event as offerable to a model as a tool. Derived from ``hsm.EventKind``, so
 # ``hsm.kind.Is(EventKind, hsm.EventKind)`` still holds and HSM treats it as any other event.
@@ -102,361 +105,238 @@ def validate_event_schema_data(schema: object | None, data: object) -> object:
     return _event_schema_adapter(schema).validate_python(data)
 
 
-def project_json_value(value: object) -> object:
-    """Project a value into a JSON-compatible tree for Starlark / selection envelopes.
+_OMIT: typing.Final = object()
+_MAX_EVENT_JSON_DEPTH = 64
+_MAX_EVENT_JSON_NODES = 20_000
+_MAX_EVENT_JSON_ITEMS = 10_000
+_MAX_EVENT_JSON_SCALAR_BYTES = 4_194_304
+_MAX_EVENT_JSON_ENCODED_BYTES = 4_194_304
+_MAX_JSON_SCHEMA_DEPTH = 64
+_MAX_JSON_SCHEMA_PATTERN_CHARS = 256
+_MAX_JSON_SCHEMA_PATTERN_INPUT_CHARS = 4_096
+_MAX_JSON_SCHEMA_PATTERN_QUANTIFIERS = 16
+_MAX_JSON_SCHEMA_BOUNDED_REPEAT = 4_096
 
-    Contract (agnostic for every event payload):
 
-    - ``bytes`` / ``bytearray`` become **URL-safe base64 ASCII text** — the same wire form
-      pydantic uses for ``ser_json_bytes="base64"`` (``-``/``_``, not ``+``/``/``).
-    - Never ``str(bytes)`` (``"b'\\x00…'"``), which cannot rehydrate.
-    - Pydantic models use ``model_dump(mode="json")`` so their own byte fields match.
-    - Typed rehydration is the receiving event schema's job (``bytes_from_base64`` /
-      ``val_json_bytes`` / model validators), not this projector.
+@dataclasses.dataclass(slots=True)
+class _EventJsonBudget:
+    nodes: int = 0
+    items: int = 0
+    scalar_bytes: int = 0
+
+    def consume_node(self) -> None:
+        self.nodes += 1
+        if self.nodes > _MAX_EVENT_JSON_NODES:
+            raise ValueError(f"event JSON value exceeds maximum nodes of {_MAX_EVENT_JSON_NODES}")
+
+    def consume_items(self, count: int) -> None:
+        if count > _MAX_EVENT_JSON_ITEMS - self.items:
+            raise ValueError(f"event JSON value exceeds maximum items of {_MAX_EVENT_JSON_ITEMS}")
+        self.items += count
+
+    def consume_scalar(self, value: str | bytes | bytearray | memoryview) -> None:
+        size = len(value.encode("utf-8")) if isinstance(value, str) else len(value)
+        if size > _MAX_EVENT_JSON_SCALAR_BYTES - self.scalar_bytes:
+            raise ValueError(f"event JSON value exceeds maximum scalar bytes of {_MAX_EVENT_JSON_SCALAR_BYTES}")
+        self.scalar_bytes += size
+
+
+def event_json_value(value: object) -> object:
+    """Return a bounded canonical JSON-compatible event/Data tree without raw media.
+
+    Raises ``TypeError`` for unsupported mapping keys or a raw-media root, and ``ValueError``
+    when the input is cyclic, too deep, too wide, or exceeds scalar or encoded byte budgets.
     """
 
-    if isinstance(value, pydantic.BaseModel):
-        return value.model_dump(mode="json")
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return project_json_value(dataclasses.asdict(value))
-    if isinstance(value, collections.abc.Mapping):
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): project_json_value(item) for key, item in mapping.items()}
-    if isinstance(value, tuple | list):
-        sequence = typing.cast(collections.abc.Sequence[object], value)
-        return [project_json_value(item) for item in sequence]
-    if isinstance(value, memoryview):
-        return base64.urlsafe_b64encode(value.tobytes()).decode("ascii")
-    if isinstance(value, (bytes, bytearray)):
-        return base64.urlsafe_b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    return str(value)
+    budget = _EventJsonBudget()
+    projected = _event_json_value(value, depth=0, active=set(), budget=budget)
+    if projected is _OMIT:
+        raise TypeError("raw media must be excluded from an event/Data field before serialization")
+    encoded_size = len(pydantic_core.to_json(projected))
+    if encoded_size > _MAX_EVENT_JSON_ENCODED_BYTES:
+        raise ValueError(f"event JSON value exceeds maximum encoded bytes of {_MAX_EVENT_JSON_ENCODED_BYTES}")
+    return projected
 
 
-def model_facing_json_value(value: object) -> object:
-    """Project a value for a model prompt, with raw media replaced by a descriptor.
-
-    ``project_json_value`` is the *wire* projection: it keeps media as base64 so a peer can
-    rehydrate it. A model cannot rehydrate anything. Handing it base64 spends the context window
-    on a waveform it can only describe back ("your audio appears to be garbled"), so this
-    projection is the one every model-facing surface uses instead.
-
-    Contract:
-
-    - ``bytes`` / ``bytearray`` / ``memoryview`` become ``{"media": "bytes", "bytes": <length>}``.
-      The descriptor is non-reversible on purpose; it says how much media there was, never what
-      it contained.
-    - Everything the model can actually reason about survives: sibling scalars such as
-      ``content_type``, ``sample_rate_hz``, ``channels``, and voice spans are ordinary fields and
-      stay, so "1.2s of undecoded audio/pcm" is still legible without the samples.
-    - Pydantic models are dumped in ``python`` mode and re-projected here, so nested media is
-      described rather than base64-encoded by the model's own ``ser_json_bytes`` config.
-    """
-
-    if isinstance(value, bytes | bytearray):
-        return {"media": "bytes", "bytes": len(value)}
-    if isinstance(value, memoryview):
-        return {"media": "bytes", "bytes": value.nbytes}
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    if isinstance(value, enum.Enum):
-        return model_facing_json_value(value.value)
-    if isinstance(value, hsm.Event):
-        event = typing.cast(hsm.Event[object], value)
-        return {
-            "name": event.name,
-            "data": model_facing_json_value(event.data),
-            "kind": model_facing_json_value(event.kind),
-            "id": event.id or "",
-            "source": event.source or "",
-            "target": event.target or "",
-            "metadata": model_facing_json_value(dict(event.metadata)) if event.metadata else {},
-        }
-    if isinstance(value, pydantic.BaseModel):
-        return model_facing_json_value(value.model_dump(mode="python"))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return model_facing_json_value(dataclasses.asdict(value))
-    if isinstance(value, collections.abc.Mapping):
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): model_facing_json_value(item) for key, item in mapping.items()}
-    if isinstance(value, collections.abc.Set):
-        members = typing.cast(collections.abc.Set[object], value)
-        # Sets have no inherent order; sort the projected members so one stimulus always
-        # renders one prompt.
-        return sorted((model_facing_json_value(item) for item in members), key=repr)
-    if isinstance(value, collections.abc.Sequence):
-        sequence = typing.cast(collections.abc.Sequence[object], value)
-        return [model_facing_json_value(item) for item in sequence]
-    return str(value)
-
-
-# Source-tree layer packages. These name where a domain *lives*, never the domain itself, so a
-# tag derived from a payload type's module skips them (``bot.abilities.listening…`` is the
-# ``listening`` domain, not the ``abilities`` one). Kept here rather than as a per-payload tag
-# table: nothing registers a name, the module path already carries it.
-_LAYER_PACKAGES: typing.Final = frozenset({"abilities", "devices", "providers"})
-_MEDIA_DESCRIPTOR_PREFIX: typing.Final = "bytes:"
-_TAG_NAMESPACE_PREFIX: typing.Final = "urn:stateforward.bot:"
-# Envelope attributes live under their own prefix so they can never collide with a payload field.
-_STIMULUS_PREFIX: typing.Final = "stimulus"
-
-
-def _snake_case(name: str) -> str:
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-
-
-def _payload_tag(payload_type: type) -> str:
-    """Derive one XML tag from a payload type: ``<domain>:<local>``.
-
-    Nothing is registered — both halves come from what the type already carries:
-
-    - **domain** is the first module segment after the ``bot`` root and any layer package, so
-      ``bot.environment.events`` → ``environment`` and ``bot.abilities.listening.interpretation``
-      → ``listening``.
-    - **local** is the class name minus its ``Data`` suffix, snake-cased, minus a leading
-      repetition of the domain (``PhoneSoundData`` in ``bot.devices.phone`` → ``sound``).
-
-    The result matches the owning event name where one exists (``SoundData`` → ``environment:sound``
-    for ``environment.sound``) without reading the event: ancestry levels and contained payloads
-    have no event of their own, so the type is the only source that works everywhere.
-    """
-
-    segments = [segment for segment in (getattr(payload_type, "__module__", "") or "").split(".") if segment]
-    if segments and segments[0] == "bot":
-        segments = segments[1:]
-        while segments and segments[0] in _LAYER_PACKAGES:
-            segments = segments[1:]
-    else:
-        # Not a domain payload at all (``bytes``, ``str``, a test-local model): there is no domain
-        # to qualify it with, so the local name stands alone rather than inventing one.
-        segments = []
-    domain = segments[0] if segments else ""
-    local = _snake_case(payload_type.__name__.removesuffix("Data") or payload_type.__name__)
-    if domain and local.startswith(f"{domain}_"):
-        local = local.removeprefix(f"{domain}_")
-    return f"{domain}:{local}" if domain else local
-
-
-def _payload_ancestry(payload_type: type[pydantic.BaseModel]) -> tuple[type[pydantic.BaseModel], ...]:
-    """Model levels of ``payload_type``, most general first (``BaseModel`` itself excluded)."""
-
-    return tuple(
-        level
-        for level in reversed(payload_type.__mro__)
-        if issubclass(level, pydantic.BaseModel) and level is not pydantic.BaseModel
-    )
-
-
-def _set_event_attributes(element: ElementTree.Element, event: object) -> None:
-    """Stamp modeled event identity on the payload element, never on telemetry metadata."""
-
-    if getattr(type(event), "__model_facing_event_data__", False):
-        event_name = getattr(event, "event", None)
-        if isinstance(event_name, str) and event_name:
-            element.set(f"{_STIMULUS_PREFIX}:event", event_name)
-        for attribute in ("id", "source", "target"):
-            carried = getattr(event, attribute, None)
-            if carried:
-                element.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
-        return
-    if isinstance(event, hsm.Event):
-        element.set(f"{_STIMULUS_PREFIX}:event", event.name)
-        for attribute, carried in (("id", event.id), ("source", event.source), ("target", event.target)):
-            if carried:
-                element.set(f"{_STIMULUS_PREFIX}:{attribute}", carried)
-
-
-def _model_element(
-    model: pydantic.BaseModel,
+def _event_json_value(
+    value: object,
     *,
-    child: ElementTree.Element | None = None,
-    envelope: object | None = None,
-) -> ElementTree.Element:
-    """Render one payload, with causal parents outside and the concrete product inside.
-
-    Each inheritance level carries only the fields it declares. A field named ``parent`` is a
-    typed causal ``StimulusData`` wrapper: its payload is rendered outside this model and its
-    event identity is stamped on that parent's own element. This differs from ordinary contained
-    payload fields, which remain nested under their field name.
-    """
-
-    if getattr(type(model), "__model_facing_event_data__", False):
-        payload = getattr(model, "data", None)
-        if isinstance(payload, pydantic.BaseModel):
-            return _model_element(payload, child=child, envelope=model)
-        root = ElementTree.Element(_payload_tag(type(payload)))
-        if payload is not None:
-            _fill_field(root, "content", payload)
-        if child is not None:
-            root.append(child)
-        _set_event_attributes(root, model)
-        return root
-
-    fields = type(model).model_fields
-    excluded_fields = frozenset(
-        name
-        for level in _payload_ancestry(type(model))
-        for name in getattr(level, "__model_facing_excluded_fields__", frozenset())
-    )
-    parent: object | None = None
-    root: ElementTree.Element | None = None
-    current: ElementTree.Element | None = None
-    rendered: set[str] = set()
-    for level in _payload_ancestry(type(model)):
-        element = ElementTree.Element(_payload_tag(level))
-        if current is None:
-            root = element
-        else:
-            current.append(element)
-        current = element
-        declared = getattr(level, "__annotations__", {})
-        for name in fields:
-            if name in rendered or name not in declared or name in excluded_fields:
-                continue
-            rendered.add(name)
-            value = getattr(model, name, None)
-            if name == "parent" and (
-                value is None
-                or (
-                    isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_event_data__", False)
-                )
-            ):
-                parent = value
-                continue
-            _fill_field(element, name, value)
-    if root is None:
-        root = ElementTree.Element(_payload_tag(type(model)))
-    if envelope is not None:
-        _set_event_attributes(root, envelope)
-    if child is not None and current is not None:
-        current.append(child)
-    if parent is not None:
-        if isinstance(parent, pydantic.BaseModel) and getattr(type(parent), "__model_facing_event_data__", False):
-            parent_payload = getattr(parent, "data", None)
-            if isinstance(parent_payload, pydantic.BaseModel):
-                return _model_element(parent_payload, child=root, envelope=parent)
-            parent_root = ElementTree.Element(_payload_tag(type(parent_payload)))
-            if parent_payload is not None:
-                _fill_field(parent_root, "content", parent_payload)
-            parent_root.append(root)
-            _set_event_attributes(parent_root, parent)
-            return parent_root
-        raise TypeError("causal parent must be a typed StimulusData payload")
-    return root
-
-
-def _fill_field(element: ElementTree.Element, name: str, value: object) -> None:
-    """Place one field on ``element``: scalars as attributes, structure as child elements."""
-
-    if value is None:
-        return
-    if isinstance(value, bytes | bytearray):
-        # Media descriptor, never the media: how much there was, never what it contained.
-        element.set(name, f"{_MEDIA_DESCRIPTOR_PREFIX}{len(value)}")
-        return
-    if isinstance(value, memoryview):
-        element.set(name, f"{_MEDIA_DESCRIPTOR_PREFIX}{value.nbytes}")
-        return
-    if isinstance(value, enum.Enum):
-        member: object = value.value
-        _fill_field(element, name, member)
-        return
-    if isinstance(value, bool):
-        element.set(name, "true" if value else "false")
-        return
-    if isinstance(value, str | int | float):
-        element.set(name, str(value))
-        return
+    depth: int,
+    active: set[int],
+    budget: _EventJsonBudget,
+) -> object:
+    if depth > _MAX_EVENT_JSON_DEPTH:
+        raise ValueError(f"event JSON value exceeds maximum depth of {_MAX_EVENT_JSON_DEPTH}")
+    budget.consume_node()
     if isinstance(value, hsm.Event):
-        child = ElementTree.SubElement(element, name)
-        payload = value.data
-        if isinstance(payload, pydantic.BaseModel):
-            child.append(_model_element(payload, envelope=value))
-        else:
-            if payload is not None:
-                _fill_field(child, "content", payload)
-            _set_event_attributes(child, value)
-        return
+        value_id = _enter_json_value(value, active)
+        event = value
+        try:
+            budget.consume_items(7)
+            data = _event_json_value(event.data, depth=depth + 1, active=active, budget=budget)
+            if data is _OMIT:
+                raise TypeError("raw media cannot be the root payload of a serialized event")
+            return {
+                "name": _event_json_value(event.name, depth=depth + 1, active=active, budget=budget),
+                "data": data,
+                "kind": _event_json_value(event.kind, depth=depth + 1, active=active, budget=budget),
+                "id": _event_json_value(event.id or "", depth=depth + 1, active=active, budget=budget),
+                "source": _event_json_value(event.source or "", depth=depth + 1, active=active, budget=budget),
+                "target": _event_json_value(event.target or "", depth=depth + 1, active=active, budget=budget),
+                "metadata": (
+                    _event_json_value(event.metadata, depth=depth + 1, active=active, budget=budget)
+                    if event.metadata
+                    else {}
+                ),
+            }
+        finally:
+            active.remove(value_id)
     if isinstance(value, pydantic.BaseModel):
-        child = ElementTree.SubElement(element, name)
-        child.append(_model_element(value))
-        return
+        value_id = _enter_json_value(value, active)
+        try:
+            if isinstance(value, pydantic.RootModel):
+                return _event_json_value(value.root, depth=depth + 1, active=active, budget=budget)
+            model_type = type(value)
+            field_names = tuple(name for name, field in model_type.model_fields.items() if field.exclude is not True)
+            computed_names = tuple(model_type.model_computed_fields)
+            extra = value.model_extra or {}
+            count = len(field_names) + len(extra) + len(computed_names)
+            entries = itertools.chain(
+                ((name, getattr(value, name)) for name in field_names),
+                extra.items(),
+                ((name, getattr(value, name)) for name in computed_names),
+            )
+            return _project_json_mapping_items(
+                entries,
+                count=count,
+                depth=depth,
+                active=active,
+                budget=budget,
+            )
+        finally:
+            active.remove(value_id)
+    if isinstance(value, enum.Enum):
+        return _event_json_value(
+            typing.cast(object, value.value),
+            depth=depth + 1,
+            active=active,
+            budget=budget,
+        )
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        _fill_field(element, name, dataclasses.asdict(value))
-        return
+        value_id = _enter_json_value(value, active)
+        try:
+            data_fields = dataclasses.fields(value)
+            return _project_json_mapping_items(
+                ((field.name, getattr(value, field.name)) for field in data_fields),
+                count=len(data_fields),
+                depth=depth,
+                active=active,
+                budget=budget,
+            )
+        finally:
+            active.remove(value_id)
     if isinstance(value, collections.abc.Mapping):
-        child = ElementTree.SubElement(element, name)
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        for key, item in mapping.items():
-            _fill_field(child, str(key), item)
-        return
-    if isinstance(value, collections.abc.Set | collections.abc.Sequence):
-        items = tuple(typing.cast(collections.abc.Collection[object], value))
-        child = ElementTree.SubElement(element, name)
-        child.set("count", str(len(items)))
-        for item in items:
-            if isinstance(item, pydantic.BaseModel):
-                child.append(_model_element(item))
-            elif isinstance(item, str):
-                ElementTree.SubElement(child, "item").text = item
-        # Numeric members (voice embeddings, raw sample runs) stay a count for the same reason
-        # media does: a model reasons about how many there were, never about the values.
-        return
-    element.set(name, str(value))
+        value_id = _enter_json_value(typing.cast(object, value), active)
+        try:
+            mapping = typing.cast(collections.abc.Mapping[object, object], value)
+            return _project_json_mapping_items(
+                mapping.items(),
+                count=len(mapping),
+                depth=depth,
+                active=active,
+                budget=budget,
+            )
+        finally:
+            active.remove(value_id)
+    if isinstance(value, tuple | list):
+        value_id = _enter_json_value(typing.cast(object, value), active)
+        try:
+            sequence = typing.cast(collections.abc.Sequence[object], value)
+            budget.consume_items(len(sequence))
+            return [
+                projected
+                for item in sequence
+                if (projected := _event_json_value(item, depth=depth + 1, active=active, budget=budget)) is not _OMIT
+            ]
+        finally:
+            active.remove(value_id)
+    if isinstance(value, collections.abc.Set):
+        value_id = _enter_json_value(value, active)
+        try:
+            members = value
+            budget.consume_items(len(members))
+            return sorted(
+                (
+                    projected
+                    for item in members
+                    if (projected := _event_json_value(item, depth=depth + 1, active=active, budget=budget))
+                    is not _OMIT
+                ),
+                key=repr,
+            )
+        finally:
+            active.remove(value_id)
+    if isinstance(value, bytes | bytearray | memoryview):
+        budget.consume_scalar(value)
+        return _OMIT
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("event JSON numbers must be finite")
+    if isinstance(value, str | int | float | bool) or value is None:
+        if isinstance(value, str):
+            budget.consume_scalar(value)
+        else:
+            budget.consume_scalar(pydantic_core.to_json(value))
+        return value
+    value_id = _enter_json_value(value, active)
+    try:
+        try:
+            scalar = typing.cast(object, pydantic_core.to_jsonable_python(value))
+        except (TypeError, ValueError, pydantic_core.PydanticSerializationError):
+            scalar = str(value)
+        except RecursionError as error:
+            raise ValueError("event JSON value contains a cycle") from error
+        if scalar is value:
+            scalar = str(value)
+        return _event_json_value(scalar, depth=depth + 1, active=active, budget=budget)
+    finally:
+        active.remove(value_id)
 
 
-def model_facing_xml(value: object) -> str:
-    """Project a stimulus as one XML element, with raw media replaced by a descriptor.
+def _project_json_mapping_items(
+    items: collections.abc.Iterable[tuple[object, object]],
+    *,
+    count: int,
+    depth: int,
+    active: set[int],
+    budget: _EventJsonBudget,
+) -> dict[str, object]:
+    budget.consume_items(count)
+    projected_mapping: dict[str, object] = {}
+    for key, item in items:
+        if not isinstance(key, str):
+            raise TypeError("event JSON mapping keys must be strings")
+        budget.consume_scalar(key)
+        projected_item = _event_json_value(item, depth=depth + 1, active=active, budget=budget)
+        if projected_item is not _OMIT:
+            projected_mapping[key] = projected_item
+    return projected_mapping
 
-    This is the model-facing sibling of ``model_facing_json_value`` and carries the same absolute
-    guarantee: ``bytes`` never reach a prompt in any encoding. Where the JSON projection writes
-    ``{"media": "bytes", "bytes": 115200}``, this writes ``content="bytes:115200"`` — equally
-    non-reversible, and equally legible as "there was 115200 bytes of it".
 
-    The stimulus *is* the root element — there is no envelope around it. A payload renders as its
-    inheritance chain (see ``_model_element``), so the root is the most general model level and the
-    concrete type nests inside it; a payload with no model of its own (raw media, plain text) is
-    tagged by its type.
-
-    An ``hsm.Event`` stimulus carries its envelope as ``stimulus:``-prefixed attributes on that same
-    root: ``event`` plus whichever of ``id`` / ``source`` / ``target`` it was stamped with. The
-    prefix is what keeps the envelope from colliding with a payload field that happens to be called
-    ``source`` or ``id``. ``metadata`` is telemetry propagation and never domain content, so it is
-    not projected.
-
-    Escaping is ``ElementTree``'s, so transcripts, caller IDs, and any other remote- or
-    model-authored text cannot close an element or inject markup.
-    """
-
-    event: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
-    payload: object = event.data if event is not None else value
-    if isinstance(payload, pydantic.BaseModel):
-        root = _model_element(payload, envelope=event)
-    else:
-        root = ElementTree.Element(_payload_tag(type(payload)))
-        if isinstance(payload, str):
-            root.text = payload
-        elif payload is not None:
-            _fill_field(root, "content", payload)
-        if event is not None:
-            _set_event_attributes(root, event)
-    # Every prefix a tag or attribute used is declared on the root, so the result is
-    # namespace-well-formed XML rather than names that merely contain a colon. The URI is derived
-    # from the prefix; nothing registers one.
-    prefixes = {element.tag.split(":", 1)[0] for element in root.iter() if ":" in element.tag}
-    prefixes.update(name.split(":", 1)[0] for element in root.iter() for name in element.keys() if ":" in name)
-    for prefix in sorted(prefixes):
-        root.set(f"xmlns:{prefix}", f"{_TAG_NAMESPACE_PREFIX}{prefix}")
-    ElementTree.indent(root, space="  ")
-    return ElementTree.tostring(root, encoding="unicode")
+def _enter_json_value(value: object, active: set[int]) -> int:
+    value_id = id(value)
+    if value_id in active:
+        raise ValueError("event JSON value contains a cycle")
+    active.add(value_id)
+    return value_id
 
 
 def bytes_from_base64(value: object) -> bytes:
     """Rehydrate media from a JSON hop: ``bytes`` as-is, or base64 text only.
 
-    Uses **URL-safe** decoding so values match pydantic ``ser_json_bytes="base64"``
-    (``-``/``_``). Python's urlsafe decoder also accepts the standard ``+``/``/`` alphabet.
+    Uses strict **URL-safe** decoding so values match pydantic ``ser_json_bytes="base64"``
+    (``-``/``_``), while rejecting the standard ``+``/``/`` alphabet, misplaced padding,
+    whitespace, and impossible lengths. Padding is optional, as allowed by the JSON wire
+    contract, but when present it must be canonical.
     """
 
     if isinstance(value, (bytes, bytearray)):
@@ -465,34 +345,49 @@ def bytes_from_base64(value: object) -> bytes:
         return value.tobytes()
     if not isinstance(value, str):
         raise ValueError(f"audio content must be bytes or base64 text, got {type(value).__name__}")
-    text = value.strip()
+    text = value
     if not text:
         return b""
-    pad = (-len(text)) % 4
-    if pad:
-        text = text + ("=" * pad)
+    if re.fullmatch(r"[A-Za-z0-9_-]*={0,2}", text) is None:
+        raise ValueError("audio content must be bytes or base64 text")
+    padding = len(text) - len(text.rstrip("="))
+    encoded = text[:-padding] if padding else text
+    remainder = len(encoded) % 4
+    if remainder == 1:
+        raise ValueError("audio content must be bytes or base64 text")
+    expected_padding = (-len(encoded)) % 4
+    if padding and (len(text) % 4 != 0 or padding != expected_padding):
+        raise ValueError("audio content must be bytes or base64 text")
+    normalized = encoded + ("=" * expected_padding)
     try:
-        return base64.urlsafe_b64decode(text)
-    except Exception as error:
+        return base64.b64decode(normalized, altchars=b"-_", validate=True)
+    except binascii.Error as error:
         raise ValueError("audio content must be bytes or base64 text") from error
 
 
 def validate_supported_json_schema(schema: JsonSchema, *, path: str = "$") -> None:
     """Reject schemas whose keywords cannot be enforced by the local matcher."""
 
+    _validate_local_ref_graph(schema)
+    _validate_supported_json_schema(schema, path=path, depth=0)
+
+
+def _validate_supported_json_schema(schema: JsonSchema, *, path: str, depth: int) -> None:
+    if depth > _MAX_JSON_SCHEMA_DEPTH:
+        raise ValueError(f"JSON schema exceeds maximum depth of {_MAX_JSON_SCHEMA_DEPTH} at {path}")
     for keyword, value in schema.items():
         if keyword not in _SUPPORTED_JSON_SCHEMA_KEYWORDS:
             raise ValueError(f"unsupported JSON schema keyword {keyword!r} at {path}")
-        _validate_json_schema_keyword(keyword, value, path=path)
+        _validate_json_schema_keyword(keyword, value, path=path, depth=depth)
 
 
 def matches_json_schema(data: object, schema: collections.abc.Mapping[str, object]) -> bool:
-    """Return whether data matches the supported stateforward.bot JSON schema subset."""
+    """Return whether data matches the supported, bounded JSON schema subset.
 
-    try:
-        validate_supported_json_schema(dict(schema))
-    except ValueError:
-        return False
+    Raises ``ValueError`` when the schema is malformed, cyclic, or uses an unsafe pattern.
+    """
+
+    validate_supported_json_schema(dict(schema))
     return _matches_json_schema(data, schema, root=schema)
 
 
@@ -502,7 +397,7 @@ def _event_schema_adapter(schema: object) -> pydantic.TypeAdapter[object]:
     return pydantic.TypeAdapter(schema)
 
 
-def _validate_json_schema_keyword(keyword: str, value: object, *, path: str) -> None:
+def _validate_json_schema_keyword(keyword: str, value: object, *, path: str, depth: int) -> None:
     if keyword == "type":
         _validate_json_schema_type(value, path=path)
         return
@@ -525,18 +420,23 @@ def _validate_json_schema_keyword(keyword: str, value: object, *, path: str) -> 
                 raise ValueError(f"JSON schema $defs names at {path} must be strings")
             if not isinstance(definition_schema, dict):
                 raise ValueError(f"JSON schema $defs {definition_name!r} at {path} must be an object")
-            validate_supported_json_schema(
+            _validate_supported_json_schema(
                 typing.cast(JsonSchema, definition_schema),
                 path=f"{path}.$defs.{definition_name}",
+                depth=depth + 1,
             )
         return
     if keyword in {"anyOf", "oneOf", "allOf"}:
-        _validate_schema_options(value, keyword=keyword, path=path)
+        _validate_schema_options(value, keyword=keyword, path=path, depth=depth)
         return
     if keyword == "not":
         if not isinstance(value, dict):
             raise ValueError(f"JSON schema not at {path} must be an object")
-        validate_supported_json_schema(typing.cast(JsonSchema, value), path=f"{path}.not")
+        _validate_supported_json_schema(
+            typing.cast(JsonSchema, value),
+            path=f"{path}.not",
+            depth=depth + 1,
+        )
         return
     if keyword == "properties":
         if not isinstance(value, dict):
@@ -547,9 +447,10 @@ def _validate_json_schema_keyword(keyword: str, value: object, *, path: str) -> 
                 raise ValueError(f"JSON schema property names at {path} must be strings")
             if not isinstance(property_schema, dict):
                 raise ValueError(f"JSON schema property {property_name!r} at {path} must be an object")
-            validate_supported_json_schema(
+            _validate_supported_json_schema(
                 typing.cast(JsonSchema, property_schema),
                 path=f"{path}.properties.{property_name}",
+                depth=depth + 1,
             )
         return
     if keyword == "required":
@@ -561,13 +462,21 @@ def _validate_json_schema_keyword(keyword: str, value: object, *, path: str) -> 
         if isinstance(value, bool):
             return
         if isinstance(value, dict):
-            validate_supported_json_schema(typing.cast(JsonSchema, value), path=f"{path}.additionalProperties")
+            _validate_supported_json_schema(
+                typing.cast(JsonSchema, value),
+                path=f"{path}.additionalProperties",
+                depth=depth + 1,
+            )
             return
         raise ValueError(f"JSON schema additionalProperties at {path} must be a boolean or object")
     if keyword == "items":
         if not isinstance(value, dict):
             raise ValueError(f"JSON schema items at {path} must be an object")
-        validate_supported_json_schema(typing.cast(JsonSchema, value), path=f"{path}.items")
+        _validate_supported_json_schema(
+            typing.cast(JsonSchema, value),
+            path=f"{path}.items",
+            depth=depth + 1,
+        )
         return
     if keyword == "enum":
         if not isinstance(value, list):
@@ -609,8 +518,70 @@ def _validate_string_schema_keyword(keyword: str, value: object, *, path: str) -
             _ = re.compile(value)
         except re.error as error:
             raise ValueError(f"JSON schema pattern at {path} is invalid: {error}") from error
+        _validate_safe_json_schema_pattern(value, path=path)
         return
     _validate_non_negative_integer(value, keyword=keyword, path=path)
+
+
+def _validate_safe_json_schema_pattern(pattern: str, *, path: str) -> None:
+    """Accept a bounded, linear-shape subset of Python regular expressions."""
+
+    if len(pattern) > _MAX_JSON_SCHEMA_PATTERN_CHARS:
+        raise ValueError(f"unsafe JSON schema pattern at {path}: maximum length is {_MAX_JSON_SCHEMA_PATTERN_CHARS}")
+    quantifiers = 0
+    variable_quantifiers: list[str] = []
+    unbounded_quantifiers = 0
+    in_character_class = False
+    index = 0
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "\\":
+            index += 1
+            if index >= len(pattern):
+                break
+            if pattern[index].isdigit() or pattern[index] == "g":
+                raise ValueError(f"unsafe JSON schema pattern at {path}: backreferences are unsupported")
+        elif character == "[":
+            in_character_class = True
+        elif character == "]" and in_character_class:
+            in_character_class = False
+        elif not in_character_class and character in "()|":
+            raise ValueError(f"unsafe JSON schema pattern at {path}: grouping and alternation are unsupported")
+        elif not in_character_class and character in "*+?":
+            quantifiers += 1
+            variable_quantifiers.append(character)
+            if character in "*+":
+                unbounded_quantifiers += 1
+        elif not in_character_class and character == "{":
+            end = pattern.find("}", index + 1)
+            if end != -1:
+                bounds = pattern[index + 1 : end]
+                lower_text, separator, upper_text = bounds.partition(",")
+                if lower_text.isdigit() and (not separator or not upper_text or upper_text.isdigit()):
+                    quantifiers += 1
+                    lower = int(lower_text)
+                    if separator and not upper_text:
+                        variable_quantifiers.append("open repeat")
+                        unbounded_quantifiers += 1
+                    else:
+                        upper = int(upper_text) if separator else lower
+                        if upper != lower:
+                            variable_quantifiers.append("bounded repeat")
+                        if upper > _MAX_JSON_SCHEMA_BOUNDED_REPEAT:
+                            raise ValueError(
+                                f"unsafe JSON schema pattern at {path}: bounded repeat exceeds "
+                                f"{_MAX_JSON_SCHEMA_BOUNDED_REPEAT}"
+                            )
+                    index = end
+        index += 1
+    if quantifiers > _MAX_JSON_SCHEMA_PATTERN_QUANTIFIERS:
+        raise ValueError(
+            f"unsafe JSON schema pattern at {path}: maximum quantifiers is {_MAX_JSON_SCHEMA_PATTERN_QUANTIFIERS}"
+        )
+    if unbounded_quantifiers > 1:
+        raise ValueError(f"unsafe JSON schema pattern at {path}: multiple unbounded quantifiers are unsupported")
+    if len(variable_quantifiers) > 2 or (len(variable_quantifiers) == 2 and variable_quantifiers[0] != "?"):
+        raise ValueError(f"unsafe JSON schema pattern at {path}: ambiguous variable quantifiers are unsupported")
 
 
 def _validate_number_schema_keyword(keyword: str, value: object, *, path: str) -> None:
@@ -628,13 +599,61 @@ def _validate_non_negative_integer(value: object, *, keyword: str, path: str) ->
         raise ValueError(f"JSON schema {keyword} at {path} must be a non-negative integer")
 
 
-def _validate_schema_options(value: object, *, keyword: str, path: str) -> None:
+def _validate_schema_options(value: object, *, keyword: str, path: str, depth: int) -> None:
     if not isinstance(value, list) or not value:
         raise ValueError(f"JSON schema {keyword} at {path} must be a non-empty list")
     for index, option in enumerate(typing.cast(list[object], value)):
         if not isinstance(option, dict):
             raise ValueError(f"JSON schema {keyword} option at {path}[{index}] must be an object")
-        validate_supported_json_schema(typing.cast(JsonSchema, option), path=f"{path}.{keyword}[{index}]")
+        _validate_supported_json_schema(
+            typing.cast(JsonSchema, option),
+            path=f"{path}.{keyword}[{index}]",
+            depth=depth + 1,
+        )
+
+
+def _validate_local_ref_graph(root: collections.abc.Mapping[str, object]) -> None:
+    """Reject cyclic local references and cyclic in-memory schema containers."""
+
+    active_nodes: set[int] = set()
+    validated_references: set[str] = set()
+
+    def walk(value: object, resolving: frozenset[str], depth: int) -> None:
+        if depth > _MAX_JSON_SCHEMA_DEPTH:
+            raise ValueError(f"JSON schema exceeds maximum depth of {_MAX_JSON_SCHEMA_DEPTH}")
+        if isinstance(value, collections.abc.Mapping):
+            node_id = id(value)
+            if node_id in active_nodes:
+                raise ValueError("JSON schema contains a cycle")
+            active_nodes.add(node_id)
+            try:
+                mapping = typing.cast(collections.abc.Mapping[object, object], value)
+                reference = mapping.get("$ref")
+                if isinstance(reference, str) and reference.startswith("#/"):
+                    resolved = _resolve_local_ref(root, reference)
+                    if reference in resolving or (resolved is not None and id(resolved) in active_nodes):
+                        raise ValueError(f"JSON schema $ref cycle involving {reference!r}")
+                    if resolved is not None and reference not in validated_references:
+                        walk(resolved, resolving | {reference}, depth + 1)
+                        validated_references.add(reference)
+                for key, child in mapping.items():
+                    if key != "$ref":
+                        walk(child, resolving, depth + 1)
+            finally:
+                active_nodes.remove(node_id)
+            return
+        if isinstance(value, list | tuple):
+            node_id = id(value)
+            if node_id in active_nodes:
+                raise ValueError("JSON schema contains a cycle")
+            active_nodes.add(node_id)
+            try:
+                for child in typing.cast(collections.abc.Sequence[object], value):
+                    walk(child, resolving, depth + 1)
+            finally:
+                active_nodes.remove(node_id)
+
+    walk(root, frozenset(), 0)
 
 
 def _matches_json_schema(
@@ -837,8 +856,11 @@ def _matches_string_schema(data: str, schema: collections.abc.Mapping[str, objec
     if isinstance(max_length, int) and len(data) > max_length:
         return False
     pattern = schema.get("pattern")
-    if isinstance(pattern, str) and re.search(pattern, data) is None:
-        return False
+    if isinstance(pattern, str):
+        if len(data) > _MAX_JSON_SCHEMA_PATTERN_INPUT_CHARS:
+            return False
+        if re.search(pattern, data) is None:
+            return False
     return True
 
 
@@ -998,9 +1020,7 @@ __all__ = [
     "event_schema_json_schema",
     "json_schema_is_embeddable",
     "matches_json_schema",
-    "model_facing_json_value",
-    "model_facing_xml",
-    "project_json_value",
+    "event_json_value",
     "validate_event_data",
     "validate_event_schema_data",
     "validate_supported_json_schema",

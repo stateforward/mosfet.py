@@ -6,6 +6,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
@@ -97,19 +98,17 @@ class SoundClassification(classifying.Classifying[SoundData, OutputData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = SoundData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[SoundData]] = hsm.Event[SoundData](
-    name="bot.ability.hearing.sound.classification.input",
-    schema=SoundData,
-
+        name="bot.ability.hearing.sound.classification.input",
+        schema=SoundData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.hearing.sound.classification.output",
-    schema=OutputData,
-
+        name="bot.ability.hearing.sound.classification.output",
+        schema=OutputData,
     )
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _SoundClassificationApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _SoundClassificationApplyFailedEvent
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "SoundClassification",
         hsm.initial(hsm.target("/SoundClassification/idle")),
         hsm.state(

@@ -9,6 +9,7 @@ import typing
 import weakref
 
 import hsm
+import bot
 import pydantic
 from livekit import rtc
 
@@ -567,7 +568,7 @@ class RoomAudioTrackPath(hsm.Instance):
             return
         _ = hsm.dispatch(ctx, instance, _RoomAudioRemoteAudioEndedEvent)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "RoomAudioTrackPath",
         hsm.initial(hsm.target("/RoomAudioTrackPath/disconnected")),
         hsm.state(

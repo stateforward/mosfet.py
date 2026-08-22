@@ -1,8 +1,8 @@
 """Bot behavior primitives for stateforward.bot.
 
-A behavior is a Starlark-backed executable program under cognition. Automatic and
-learned programs share this inventory — they are both behaviors, not separate
-domains. Fast intuition / Autonomy can invoke ACTIVE behaviors before deliberation.
+An executable behavior is an HSM program under cognition. Trusted seeded programs may
+be native Python HSMs; learned programs remain Starlark source in the behavior inventory.
+Autonomy runs both through the same candidate lifecycle before deliberation.
 
 Inventory events (first-class package exports):
 
@@ -38,6 +38,7 @@ if typing.TYPE_CHECKING:
     from .compiler import build
     from .diagnostic import Checked, Diagnostic, Level, Report, Stage
     from .instance import Instance, check, start
+    from .seed import Seed
     from .schema import JsonSchema
     from .source import (
         Source,
@@ -70,6 +71,8 @@ _LAZY = {
     "compiler": ".compiler",
     "diagnostic": ".diagnostic",
     "instance": ".instance",
+    "Seed": ".seed",
+    "seed": ".seed",
     "runtime": ".runtime",
     "schema": ".schema",
     "storage": ".storage",
@@ -89,6 +92,7 @@ __all__ = [
     "Data",
     "Event",
     "Instance",
+    "Seed",
     "Behavior",
     "Source",
     "EventContract",
@@ -114,6 +118,7 @@ __all__ = [
     "diagnostic",
     "events",
     "instance",
+    "seed",
     "runtime",
     "schema",
     "storage",
@@ -137,6 +142,7 @@ def __getattr__(name: str) -> object:
         "schema",
         "source",
         "events",
+        "seed",
     }:
         value: object = module
     else:

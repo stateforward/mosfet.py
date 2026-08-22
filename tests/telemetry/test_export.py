@@ -30,6 +30,10 @@ def _reset_telemetry(
     bot.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
     # Silence set-once warnings; emission uses the module-retained provider.
     def _noop_set_logger_provider(_provider: object) -> None:
         return None
@@ -164,3 +168,4 @@ def test_export_rejects_hardlinked_leaf(tmp_path: pathlib.Path) -> None:
     _force_flush()
     assert outside.read_text(encoding="utf-8") == "sentinel-hardlink\n"
     assert "must-not-follow-hardlink" not in outside.read_text(encoding="utf-8")
+

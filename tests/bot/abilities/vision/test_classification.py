@@ -12,11 +12,13 @@ import pytest
 from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
 from tests.type_helpers import model_view, object_dict
 
+
 class FixedVisualClassifier(vision.VisualClassifier):
     @override
     async def classify(self, input: vision.InputData) -> vision.OutputData:
         del input
         return vision.OutputData(kind="image", confidence=0.87)
+
 
 class RecordingVisualClassification(vision.VisualClassification):
     outputs: list[vision.OutputData]
@@ -39,18 +41,22 @@ class RecordingVisualClassification(vision.VisualClassification):
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
+
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
     for _ in range(100):
         if condition():
             return
         await asyncio.sleep(0)
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
 
+
 async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     await start_abilities_for_test(hsm.Context() if ctx is None else ctx, ability)
+
 
 def test_visual_classification_input_separates_text_and_image_payloads() -> None:
     text_input = vision.InputData(kind="text", content="read this")
@@ -70,6 +76,7 @@ def test_visual_classification_input_separates_text_and_image_payloads() -> None
     with pytest.raises(ValueError):
         _ = vision.InputData(kind="image", content="not image")
 
+
 def test_visual_classification_output_records_kind_and_confidence() -> None:
     classification = vision.OutputData(kind="image", confidence=0.87)
 
@@ -78,6 +85,7 @@ def test_visual_classification_output_records_kind_and_confidence() -> None:
 
     with pytest.raises(ValueError):
         _ = vision.OutputData(kind="text", confidence=1.1)
+
 
 def test_visual_classification_uses_injected_classifier() -> None:
     async def run() -> list[vision.OutputData]:
@@ -94,6 +102,7 @@ def test_visual_classification_uses_injected_classifier() -> None:
 
     assert outputs == [vision.OutputData(kind="image", confidence=0.87)]
 
+
 def test_visual_classification_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(vision.VisualClassification.input_event.schema)
     output_schema = object_dict(vision.VisualClassification.output_event.schema)
@@ -103,6 +112,7 @@ def test_visual_classification_events_use_concrete_pydantic_schemas() -> None:
 
     assert vision.VisualClassification.output_event.name == "bot.ability.vision.classification.output"
     assert output_schema == vision.OutputData.model_json_schema()
+
 
 def test_visual_classification_model_tracks_classification_lifecycle() -> None:
     model = model_view(require_model(vision.VisualClassification.model))
@@ -123,6 +133,7 @@ def test_visual_classification_model_tracks_classification_lifecycle() -> None:
         "bot.ability.vision.classification.apply.failed"
         in model.transition_map["/VisualClassificationLifecycle/attached/behavior/Classifying"]
     )
+
 
 def test_visual_classification_is_concrete_ability() -> None:
     ability = vision.VisualClassification(classifier=FixedVisualClassifier())

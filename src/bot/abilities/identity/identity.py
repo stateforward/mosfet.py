@@ -27,9 +27,10 @@ import typing
 import uuid
 
 import hsm
+import bot
 import pydantic
 
-from bot import event_schema
+from bot import event
 from bot.abilities import cognition
 from bot.environment import SoundData, SoundEvent
 from bot.telemetry import observer
@@ -78,7 +79,7 @@ class AdoptData(pydantic.BaseModel):
 
 AdoptEvent = hsm.Event[AdoptData](
     name="bot.ability.identity.adopt",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=AdoptData,
 )
 
@@ -410,7 +411,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
             return
         _dispatch_terminal_failure(ctx, instance, event, failure.message)
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Identity",
         hsm.initial(hsm.target("/Identity/recalling")),
         hsm.state(

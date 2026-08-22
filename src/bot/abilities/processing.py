@@ -19,23 +19,26 @@ import asyncio
 import collections.abc
 import dataclasses
 import enum
+import json
 import re
 import typing
 import uuid
 
 import bot
+from bot import lifecycle
 import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
-from bot.event_schema import (
+from bot.event import (
     EventKind,
     embeddable_json_schema,
+    event_json_value,
     event_json_schema,
     event_schema_json_schema,
-    model_facing_xml,
     validate_event_data,
 )
+from .cognition.event import model_facing_xml
 from bot.telemetry import observer
 
 # Processing inputs offer live HSM events (not a parallel offer DTO).
@@ -47,6 +50,100 @@ class DispatchTrust(enum.StrEnum):
 
     MODEL = "model"
     TRUSTED_BEHAVIOR = "trusted_behavior"
+
+
+_MAX_REJECTION_MESSAGE_LENGTH: typing.Final[int] = 2_048
+_MAX_VALIDATION_ERRORS: typing.Final[int] = 8
+_MAX_DIAGNOSTIC_FRAGMENT_LENGTH: typing.Final[int] = 256
+_MAX_MODEL_PROMPT_BYTES: typing.Final[int] = 262_144
+_MAX_MODEL_PROMPT_SCALAR_CHARACTERS: typing.Final[int] = 65_536
+_URL_PATTERN = re.compile(r'(?i)(?:\b(?:https?|ftp|mailto):|(?<!\w)www\.)[^\s<>"\']+')
+_INPUT_VALUE_PATTERN = re.compile(r"(?i)\binput_value\s*=\s*.*?(?=,\s*input_type\s*=|$)")
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(?:password|passwd|secret|token|api[_ -]?key|authorization|cookie|credential|private[_ -]?key)\b"
+    + r"\s*[:=]\s*[\"']?[^,\s\"']+"
+)
+_SENSITIVE_FIELD_PATTERN = re.compile(
+    r"(?i)(?:password|passwd|secret|token|api[_ -]?key|authorization|cookie|credential|private[_ -]?key)"
+)
+
+
+def _safe_diagnostic_text(value: object, *, max_length: int) -> str:
+    """Normalize untrusted diagnostic text without carrying payload values or URLs."""
+
+    text = " ".join(str(value).split())
+    text = _INPUT_VALUE_PATTERN.sub("[redacted]", text)
+    text = _SENSITIVE_ASSIGNMENT_PATTERN.sub("[redacted]", text)
+    text = _URL_PATTERN.sub("[redacted-url]", text)
+    text = text.replace("input_value", "[redacted]")
+    if len(text) > max_length:
+        return f"{text[: max_length - 1]}…"
+    return text
+
+
+def _validation_details(error: pydantic.ValidationError) -> tuple[str, ...]:
+    details: list[str] = []
+    error_items = error.errors()
+    for item in error_items[:_MAX_VALIDATION_ERRORS]:
+        location = item.get("loc", ())
+        if isinstance(location, (str, bytes)):
+            location_parts = (location,)
+        else:
+            location_parts = typing.cast(collections.abc.Iterable[object], location)
+        path = ".".join(_safe_diagnostic_text(part, max_length=64) for part in location_parts) or "<root>"
+        error_type = _safe_diagnostic_text(item.get("type", "validation_error"), max_length=64)
+        if _SENSITIVE_FIELD_PATTERN.search(path):
+            message = "[redacted validation message]"
+        else:
+            message = _safe_diagnostic_text(
+                item.get("msg", "validation error"),
+                max_length=_MAX_DIAGNOSTIC_FRAGMENT_LENGTH,
+            )
+        details.append(f"{path}: {error_type}: {message}")
+    if len(error_items) > _MAX_VALIDATION_ERRORS:
+        details.append("[additional validation errors omitted]")
+    return tuple(details)
+
+
+class SelectionRejectionError(RuntimeError):
+    """A model-selected event was rejected before delivery to its recipient.
+
+    The complete message is intended for model repair feedback. ``normalized`` deliberately
+    excludes dynamic validation details such as Pydantic's ``input_value`` so consecutive
+    equivalent rejections can be compared without losing the original diagnostic text.
+    """
+
+    normalized: str
+
+    def __init__(self, message: str, *, normalized: str | None = None) -> None:
+        safe_message = _safe_diagnostic_text(message, max_length=_MAX_REJECTION_MESSAGE_LENGTH)
+        super().__init__(safe_message)
+        self.normalized = _safe_diagnostic_text(
+            safe_message if normalized is None else normalized,
+            max_length=_MAX_REJECTION_MESSAGE_LENGTH,
+        )
+
+    @classmethod
+    def from_validation(
+        cls,
+        *,
+        event_name: str,
+        prefix: str,
+        error: Exception,
+    ) -> "SelectionRejectionError":
+        if isinstance(error, pydantic.ValidationError):
+            details = _validation_details(error)
+            diagnostic = "; ".join(details) or "<root>: validation_error: validation error"
+            normalized_details = tuple(detail.replace(": ", ":", 2) for detail in details)
+            normalized_diagnostic = "|".join((event_name, *normalized_details))
+        else:
+            diagnostic = (
+                f"{type(error).__name__}: {_safe_diagnostic_text(error, max_length=_MAX_DIAGNOSTIC_FRAGMENT_LENGTH)}"
+            )
+            normalized_diagnostic = f"{event_name}|{diagnostic}"
+        message = f"{prefix}: {_safe_diagnostic_text(diagnostic, max_length=_MAX_REJECTION_MESSAGE_LENGTH)}"
+        normalized = f"{prefix}: {normalized_diagnostic}"
+        return cls(message, normalized=normalized)
 
 
 # Single model-facing tool: multi-select is an events array, not N parallel tools.
@@ -713,10 +810,10 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
         _ = instance
 
     operation = Operation()
-    await hsm.started(
+    await bot.started(
         owner.context(),
         operation,
-        hsm.define(
+        bot.define(
             "ProcessingOperation",
             hsm.initial(hsm.target("active")),
             hsm.state(
@@ -780,7 +877,7 @@ def finish_operation(ctx: hsm.Context, owner: hsm.Instance, operation_id: str) -
     if not isinstance(instances, collections.abc.MutableMapping):
         return
     operation = instances.pop(_operation_key(owner, operation_id), None)
-    if isinstance(operation, Operation):
+    if isinstance(operation, Operation) and lifecycle.is_started(operation):
         _ = hsm.dispatch(
             ctx,
             operation,
@@ -972,7 +1069,7 @@ class InputData(pydantic.BaseModel):
                 "Processing input: stimulus payload plus HSM event schemas available for selection. "
                 "Processor output is always an array of selected events."
             ),
-            "examples": [{"input": "incoming speech", "schemas": ["bot.ability.speaking.input"]}],
+            "examples": [{"input": "incoming speech", "schemas": ["bot.ability.cognition.ignore"]}],
         },
     )
 
@@ -1030,19 +1127,26 @@ class InputData(pydantic.BaseModel):
         ),
     )
 
+    @pydantic.field_serializer("input", when_used="json")
+    def _serialize_input(self, value: object) -> object:
+        """Serialize the stimulus through the canonical event/Data JSON projection."""
+
+        return event_json_value(value)
+
     def model_facing_payload(self) -> str:
         """Project this turn exactly as a model may see it: the stimulus, as one XML element.
 
-        The stimulus is the root element — nothing wraps it. Its envelope (event name, and the
+        The terminal stimulus is the root element — nothing wraps it. Typed causal parents are
+        retained in runtime and canonical event data but omitted from this prompt projection. Its
+        envelope (event name, and the
         ``id`` / ``source`` / ``target`` it was stamped with) rides on that same root under the
         ``stimulus:`` prefix.
 
-        This is the single model-facing projection of a processing input. Every processor that
-        renders a prompt goes through it, so "the model never receives raw media" is one
-        guarantee here rather than a promise repeated in each provider: the stimulus is projected
-        with ``event_schema.model_facing_xml``, which replaces bytes with a size descriptor and
-        escapes every value it renders. Instructions are system policy for the provider, not part
-        of this content.
+        This is an explicit presentation projection for processors that render a prompt. The
+        canonical Pydantic serialization of this model remains ``model_dump``; this helper is
+        intentionally separate from that contract. The cognition renderer uses the shared
+        canonical event/Data tree and escapes every value it renders. Instructions are system
+        policy for the provider, not part of this content.
 
         ``schemas`` are deliberately absent. The offered events of a turn reach the model through
         the provider's own tool API — ``dispatch_tool`` projects exactly these schemas as the
@@ -1051,12 +1155,20 @@ class InputData(pydantic.BaseModel):
         what this content is for; the tool menu is what the tool channel is for.
         """
 
-        return model_facing_xml(self.input)
-
-    @pydantic.model_serializer(mode="wrap")
-    def _serialize_model(self, serializer: typing.Callable[[typing.Any], str]) -> str:
-        del serializer
-        return self.model_facing_payload()
+        rendered = model_facing_xml(self.input)
+        instructions = self.instructions or ""
+        if len(instructions) > _MAX_MODEL_PROMPT_SCALAR_CHARACTERS:
+            raise ValueError("prompt projection scalar length budget exceeded")
+        tool = json.dumps(
+            dispatch_tool(self.schemas),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        encoded_bytes = sum(len(part.encode("utf-8")) for part in (instructions, rendered, tool))
+        if encoded_bytes > _MAX_MODEL_PROMPT_BYTES:
+            raise ValueError("prompt projection cumulative encoded byte budget exceeded")
+        return rendered
 
 
 class CompletionData(pydantic.BaseModel):
@@ -1250,7 +1362,11 @@ def enabled_call_events(instance: hsm.Instance) -> tuple[Event[typing.Any], ...]
     return tuple(offered)
 
 
-def _declared_call_event_names(instance: hsm.Instance) -> set[str]:
+def _declared_call_event_names(
+    instance: hsm.Instance,
+    *,
+    dispatch_trust: DispatchTrust = DispatchTrust.MODEL,
+) -> set[str]:
     """Call events declared by the instance's model (explicit transitions).
 
     Delivery validation reads the model, not a point-in-time transition snapshot: the
@@ -1262,7 +1378,7 @@ def _declared_call_event_names(instance: hsm.Instance) -> set[str]:
     return {
         name
         for name, event in _instance_event_map(instance).items()
-        if isinstance(event, hsm.Event) and event.kind == EventKind
+        if isinstance(event, hsm.Event) and _is_dispatchable_event(event, dispatch_trust=dispatch_trust)
     }
 
 
@@ -1288,21 +1404,39 @@ def _reject_untrusted_provenance(value: object, *, trust: DispatchTrust) -> None
     fields = _producer_stamped_fields(value)
     if fields:
         names = ", ".join(sorted(fields))
-        raise RuntimeError(f"Processing model selection includes producer-stamped fields: {names}.")
+        raise SelectionRejectionError(f"Processing model selection includes producer-stamped fields: {names}.")
 
 
-def _resolve_target(input: InputData, selection: SelectedEvent) -> hsm.Instance:
+def _is_dispatchable_event(event: Event[typing.Any], *, dispatch_trust: DispatchTrust) -> bool:
+    return event.kind == EventKind or (dispatch_trust is DispatchTrust.TRUSTED_BEHAVIOR and event.kind == hsm.EventKind)
+
+
+def _resolve_target(
+    input: InputData,
+    selection: SelectedEvent,
+    *,
+    dispatch_trust: DispatchTrust,
+) -> hsm.Instance:
     if selection.target is not None:
         instance = input.actors.get(selection.target)
-        if instance is None or selection.event not in _declared_call_event_names(instance):
-            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
+        if instance is None or selection.event not in _declared_call_event_names(
+            instance,
+            dispatch_trust=dispatch_trust,
+        ):
+            raise SelectionRejectionError(_unavailable_message(event=selection.event, target=selection.target))
         return instance
     matches = [
-        name for name, instance in input.actors.items() if selection.event in _declared_call_event_names(instance)
+        name
+        for name, instance in input.actors.items()
+        if selection.event
+        in _declared_call_event_names(
+            instance,
+            dispatch_trust=dispatch_trust,
+        )
     ]
     if len(matches) == 1:
         return input.actors[matches[0]]
-    raise RuntimeError(_unavailable_message(event=selection.event))
+    raise SelectionRejectionError(_unavailable_message(event=selection.event))
 
 
 async def dispatch_selected_events(
@@ -1324,13 +1458,18 @@ async def dispatch_selected_events(
     if input.actor_events:
         selections = fill_unique_selection_targets(selections, input.actor_events)
     by_name = {event.name: event for event in input.schemas}
+    if dispatch_trust is DispatchTrust.TRUSTED_BEHAVIOR:
+        for instance in input.actors.values():
+            for event in _instance_event_map(instance).values():
+                if _is_dispatchable_event(event, dispatch_trust=dispatch_trust):
+                    by_name.setdefault(event.name, event)
     event_metadata = dict(metadata or {})
     prepared: list[tuple[hsm.Instance, hsm.Event[typing.Any]]] = []
 
     for selection in selections:
         offered = by_name.get(selection.event)
         if offered is None:
-            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
+            raise SelectionRejectionError(_unavailable_message(event=selection.event, target=selection.target))
         # Domain validate never sees model-facing patches; strip using this input's patch type.
         domain_data, _meta = unpatch_event_data(selection.data, patch=input.patch)
         if domain_data is None:
@@ -1339,10 +1478,8 @@ async def dispatch_selected_events(
             # Already typed event data (or a selection that carried a model instance).
             raw = domain_data
         elif isinstance(domain_data, collections.abc.Mapping):
-            # JSON / Starlark hop: project any leftover bytes to base64 before schema rehydrate.
-            from bot.event_schema import project_json_value
-
-            raw = project_json_value(dict(typing.cast(collections.abc.Mapping[str, object], domain_data)))
+            # JSON / Starlark hops carry the canonical JSON-compatible event/Data tree.
+            raw = event_json_value(dict(typing.cast(collections.abc.Mapping[str, object], domain_data)))
         else:
             # Live deliberative frames (processing.InputData) and other non-mapping payloads.
             raw = domain_data
@@ -1350,23 +1487,27 @@ async def dispatch_selected_events(
         try:
             offered_validated = validate_event_data(offered, raw)
         except Exception as error:
-            raise RuntimeError(
-                f"Processing selected invalid event data for event: {selection.event}: {error}"
+            raise SelectionRejectionError.from_validation(
+                event_name=selection.event,
+                prefix=f"Processing selected invalid event data for event: {selection.event}",
+                error=error,
             ) from error
         _reject_untrusted_provenance(
             raw if offered_validated is None else offered_validated,
             trust=dispatch_trust,
         )
 
-        target = _resolve_target(input, selection)
+        target = _resolve_target(input, selection, dispatch_trust=dispatch_trust)
         declared = _instance_event_map(target).get(selection.event)
-        if declared is None or declared.kind != EventKind:
-            raise RuntimeError(_unavailable_message(event=selection.event, target=selection.target))
+        if declared is None or not _is_dispatchable_event(declared, dispatch_trust=dispatch_trust):
+            raise SelectionRejectionError(_unavailable_message(event=selection.event, target=selection.target))
         try:
             validated = validate_event_data(declared, raw)
         except Exception as error:
-            raise RuntimeError(
-                f"Processing selected invalid event data for event: {selection.event}: {error}"
+            raise SelectionRejectionError.from_validation(
+                event_name=selection.event,
+                prefix=f"Processing selected invalid event data for event: {selection.event}",
+                error=error,
             ) from error
         _reject_untrusted_provenance(raw if validated is None else validated, trust=dispatch_trust)
         dispatch_event = declared if validated is None else declared.with_data(validated)
@@ -1383,13 +1524,22 @@ async def dispatch_selected_events(
             )
         )
 
-    async def dispatch(target: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
-        await target.dispatch(ctx, event)
+    async def dispatch_target(target: hsm.Instance, events: list[hsm.Event[typing.Any]]) -> None:
+        for event in events:
+            await target.dispatch(ctx, event)
+
+    by_target: dict[int, tuple[hsm.Instance, list[hsm.Event[typing.Any]]]] = {}
+    for target, event in prepared:
+        target_group = by_target.get(id(target))
+        if target_group is None:
+            target_group = (target, list[hsm.Event[typing.Any]]())
+            by_target[id(target)] = target_group
+        target_group[1].append(event)
 
     try:
         async with asyncio.TaskGroup() as tasks:
-            for target, event in prepared:
-                _ = tasks.create_task(dispatch(target, event))
+            for target, events in by_target.values():
+                _ = tasks.create_task(dispatch_target(target, events))
     except ExceptionGroup as errors:
         first = errors.exceptions[0]
         if isinstance(first, Exception):
@@ -1544,6 +1694,7 @@ class Processing(ability.Ability[InputData, CompletionData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
         finish_operation(ctx, instance, event.id)
@@ -1557,6 +1708,7 @@ class Processing(ability.Ability[InputData, CompletionData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
         finish_operation(ctx, instance, event.id)
@@ -1639,22 +1791,24 @@ class Processing(ability.Ability[InputData, CompletionData]):
                 output = OutputData(events=coerced)
             applied = _AppliedEventData(input=input, output=output)
         except Exception as error:
-            _ = hsm.dispatch(
+            _ = instance.dispatch(
                 ctx,
-                instance,
                 dataclasses.replace(
                     _FailedEvent.with_data(FailureData(message=str(error), input=input)),
                     id=event.id or None,
+                    source=event.source,
+                    target=event.target,
                     metadata=dict(event.metadata),
                 ),
             )
             return
-        _ = hsm.dispatch(
+        _ = instance.dispatch(
             ctx,
-            instance,
             dataclasses.replace(
                 _AppliedEvent.with_data(applied),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
@@ -1681,27 +1835,29 @@ class Processing(ability.Ability[InputData, CompletionData]):
                     metadata=dict(event.metadata),
                 )
         except Exception as error:
-            _ = hsm.dispatch(
+            _ = instance.dispatch(
                 ctx,
-                instance,
                 dataclasses.replace(
                     _FailedEvent.with_data(FailureData(message=str(error), input=data.input)),
                     id=event.id or None,
+                    source=event.source,
+                    target=event.target,
                     metadata=dict(event.metadata),
                 ),
             )
             return
-        _ = hsm.dispatch(
+        _ = instance.dispatch(
             ctx,
-            instance,
             dataclasses.replace(
                 _DispatchedEvent.with_data(data),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Processing",
         hsm.initial(hsm.target("/Processing/idle")),
         hsm.state(
@@ -1811,6 +1967,7 @@ __all__ = [
     "Processor",
     "Processing",
     "Result",
+    "SelectionRejectionError",
     "SchemaPatch",
     "SelectedEvent",
     "active_operation",

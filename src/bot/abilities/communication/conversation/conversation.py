@@ -19,15 +19,17 @@ from . import turn_detector
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import typing as typ
 import uuid
 
 import hsm
+import bot
 import pydantic
 from pydantic.config import JsonDict, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 
-from bot import event_schema
+from bot import event
 from bot import events
 from bot.abilities import cognition
 from bot.abilities.listening import interpretation
@@ -37,16 +39,16 @@ from bot.telemetry import span
 
 Stage: typ.TypeAlias = typ.Literal["memory", "turn_detector", "voice_routing"]
 Content: typ.TypeAlias = object
-MessageContent = typ.TypeAliasType(
-    "MessageContent",
-    "str | int | float | bool | None | list[MessageContent] | dict[str, MessageContent]",
-)
+type MessageContent = str | int | float | bool | None | list[MessageContent] | dict[str, MessageContent]
 IdentitySet: typ.TypeAlias = value.IdentitySet
 IdentityValue: typ.TypeAlias = value.IdentityValue
 TrackRef: typ.TypeAlias = str
 TurnDetectorFactory: typ.TypeAlias = typ.Callable[[str, TrackRef], turn_detector.TurnDetector]
 
 _TURN_TIMEOUT_SECONDS = 5.0
+# Recall, detector ready, detector turn, and remember are sequential inner stages.
+# The contribution waiter must outlive one inner stage so a typed stage failure can settle.
+_CONTRIBUTION_TIMEOUT_STAGES = 4
 
 
 def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detector.TurnDetector:
@@ -157,7 +159,7 @@ class TurnData(pydantic.BaseModel):
         content_type = data.get("content_type")
         content = data.get("content")
         if isinstance(content_type, str) and content_type.lower().startswith("audio/"):
-            data["content"] = event_schema.bytes_from_base64(content)
+            data["content"] = event.bytes_from_base64(content)
         return data
 
     @pydantic.field_validator("source_ids", "target_ids", mode="before")
@@ -217,8 +219,12 @@ class MessageProvenance(pydantic.BaseModel):
     id: str | None = pydantic.Field(default=None, description="Correlation id of the committing event.")
     source: str | None = pydantic.Field(default=None, description="HSM source identity of the committing event.")
     target: str | None = pydantic.Field(default=None, description="HSM target identity of the committing event.")
-    session_ref: str | None = pydantic.Field(default=None, min_length=1, description="Conversation relationship reference, when known.")
-    turn_ref: str | None = pydantic.Field(default=None, min_length=1, description="Turn detector reference, when known.")
+    session_ref: str | None = pydantic.Field(
+        default=None, min_length=1, description="Conversation relationship reference, when known."
+    )
+    turn_ref: str | None = pydantic.Field(
+        default=None, min_length=1, description="Turn detector reference, when known."
+    )
 
 
 class Message(pydantic.BaseModel):
@@ -248,7 +254,9 @@ class Message(pydantic.BaseModel):
     )
 
     sequence: int = pydantic.Field(ge=0, description="Zero-based position in committed conversation history.")
-    direction: typ.Literal["inbound", "outbound"] = pydantic.Field(description="Whether the message came from a participant or the bot.")
+    direction: typ.Literal["inbound", "outbound"] = pydantic.Field(
+        description="Whether the message came from a participant or the bot."
+    )
     source_ids: IdentitySet = pydantic.Field(description="Opaque source identities associated with the message.")
     target_ids: IdentitySet = pydantic.Field(description="Opaque target identities associated with the message.")
     content: MessageContent = pydantic.Field(
@@ -271,6 +279,7 @@ class Message(pydantic.BaseModel):
         if contains_media(raw_value):
             raise ValueError("message content cannot contain raw media")
         return raw_value
+
     content_type: str = pydantic.Field(min_length=1, description="Media type of the model-safe message content.")
     provenance: MessageProvenance = pydantic.Field(description="Typed event provenance for this committed message.")
 
@@ -460,7 +469,7 @@ def participated_turn_from_messages(
 
 InputEvent = hsm.Event[TurnData](
     name="bot.ability.conversation.input",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=TurnData,
 )
 
@@ -825,7 +834,6 @@ def _content_for_detector(
 async def _run_memory_operation(
     ctx: hsm.Context,
     *,
-    owner: ability.Ability[typ.Any, typ.Any],
     memory: ability.Ability[typ.Any, typ.Any],
     operation_id: str,
     operation: typ.Literal["recall", "remember"],
@@ -835,26 +843,19 @@ async def _run_memory_operation(
 ) -> memory_ability.OutputData:
     request_id = f"{operation_id}:memory:{operation}"
     try:
-        terminal = await asyncio.wait_for(
-            ability.Ability.await_child_terminal(
-                ctx,
-                owner=owner,
-                child=memory,
-                operation_id=request_id,
-                input=memory_input,
-                metadata=metadata,
+        terminal = await ability.run_terminal_operation(
+            ctx,
+            child=memory,
+            request=dataclasses.replace(
+                memory.input_event.with_data_and_id(memory_input, request_id),
+                metadata=dict(metadata),
             ),
-            timeout=timeout,
+            terminals=(memory.output_event, memory.failed_event),
+            timeout=datetime.timedelta(seconds=timeout),
         )
-    except asyncio.TimeoutError as error:
+    except TimeoutError as error:
         raise RuntimeError(f"Conversation memory {operation} timed out.") from error
 
-    if terminal.id != request_id or terminal.source != hsm.id(memory):
-        raise RuntimeError(
-            "Conversation memory returned an unrelated terminal: "
-            f"id={terminal.id!r} source={terminal.source!r} "
-            f"expected_id={request_id!r} expected_source={hsm.id(memory)!r}"
-        )
     if isinstance(terminal.data, ability.FailureData):
         raise RuntimeError(terminal.data.message)
     if not isinstance(terminal.data, memory_ability.OutputData):
@@ -879,10 +880,13 @@ def _terminal_output(
     instance: "Conversation",
     event: hsm.Event[typ.Any],
     output: Messages,
+    *,
+    reply_target: str | None,
 ) -> None:
     history_event = dataclasses.replace(
         _with_operation(instance.output_event.with_data(output), event),
         source=hsm.id(instance),
+        target=reply_target,
     )
     latest_inbound = next((item for item in reversed(output.messages) if item.direction == "inbound"), None)
     text_product = (
@@ -899,6 +903,7 @@ def _terminal_output(
                 event,
             ),
             source=hsm.id(instance),
+            target=reply_target,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
         return
@@ -910,10 +915,13 @@ def _terminal_failure(
     instance: "Conversation",
     event: hsm.Event[typ.Any],
     failure: FailureData,
+    *,
+    reply_target: str | None,
 ) -> None:
     terminal = dataclasses.replace(
         _with_operation(instance.failed_event.with_data(failure), event),
         source=hsm.id(instance),
+        target=reply_target,
     )
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -935,7 +943,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
     snapshot_request_event: typ.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
     snapshot_output_event: typ.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
     _composite_attachment_lifecycle: typ.ClassVar[bool] = False
-    submodel: typ.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typ.ClassVar[hsm.Model | None] = bot.define(
         "Conversation",
         hsm.initial(hsm.target("/Conversation/inactive")),
         hsm.state("inactive"),
@@ -1237,9 +1245,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     "target": event_target,
                 }
             )
-            committed = message.model_copy(
-                update={"sequence": len(instance._history), "provenance": provenance}
-            )
+            committed = message.model_copy(update={"sequence": len(instance._history), "provenance": provenance})
             instance._history.append(committed)
         output = Messages(parent=instance._history_parent, messages=tuple(instance._history))
         terminal = dataclasses.replace(
@@ -1388,7 +1394,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
             if instance._memory is not None:
                 memory_output = await _run_memory_operation(
                     ctx,
-                    owner=instance,
                     memory=instance._memory,
                     operation_id=operation_id,
                     operation="recall",
@@ -1418,62 +1423,38 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     provisional_detector_keys.add(detector_key)
                     # This child must outlive this activity; the parent Conversation
                     # context is its lifetime, never the activity context ``ctx``.
-                    await hsm.started(instance.context(), detector, detector.owned_model)
-                    # The detector is owned by Conversation's context.  It is
-                    # intentionally not attached back to Conversation: an
-                    # Ability already has one owner, and this child is
-                    # coordinated through owner-local terminal waiters (reply
-                    # weakref on the detector, Future on Conversation).
+                    await bot.started(instance.context(), detector, detector.owned_model)
+                    # The detector is owned by Conversation's context and is
+                    # coordinated through one-shot directed operations.
                     ready_operation_id = f"{operation_id}:ready:{participant.track_ref}"
-                    # Owner-local waiter on Conversation; detector only holds a reply weakref.
-                    ready_waiter = ability.Ability.prepare_child_terminal_wait(instance, detector, ready_operation_id)
-                    readiness_error: BaseException | None = None
-                    ready: hsm.Event[typ.Any] | None = None
                     try:
-                        try:
-                            await hsm.dispatch(
-                                ctx,
-                                detector,
-                                dataclasses.replace(
-                                    turn_detector.TurnDetectorReadyRequestEvent.with_data(
-                                        turn_detector.TurnDetectorReadyRequestData(
-                                            participant_ref=participant.track_ref,
-                                            conversation_ref=relationship_ref,
-                                        )
+                        ready = await ability.run_terminal_operation(
+                            ctx,
+                            child=detector,
+                            request=dataclasses.replace(
+                                turn_detector.TurnDetectorReadyRequestEvent.with_data_and_id(
+                                    turn_detector.TurnDetectorReadyRequestData(
+                                        participant_ref=participant.track_ref,
+                                        conversation_ref=relationship_ref,
                                     ),
-                                    id=ready_operation_id,
-                                    source=hsm.id(instance),
-                                    target=hsm.id(detector),
-                                    metadata=dict(event.metadata),
+                                    ready_operation_id,
                                 ),
-                            )
-                            ready = await asyncio.wait_for(ready_waiter, timeout=_TURN_TIMEOUT_SECONDS)
-                            if (
-                                ready.name != turn_detector.TurnDetectorReadyEvent.name
-                                or not isinstance(ready.data, turn_detector.TurnDetectorReadyData)
-                                or ready.id != ready_operation_id
-                                or ready.source != hsm.id(detector)
-                                or ready.data.participant_ref != participant.track_ref
-                                or ready.data.conversation_ref != relationship_ref
-                            ):
-                                raise RuntimeError("Turn detector did not produce a correlated readiness terminal.")
-                        except asyncio.TimeoutError as error:
-                            readiness_error = RuntimeError(
-                                f"Turn detector readiness timed out after {_TURN_TIMEOUT_SECONDS:g} seconds."
-                            )
-                            readiness_error.__cause__ = error
-                        except BaseException as error:
-                            readiness_error = error
-                    finally:
-                        try:
-                            ability.Ability.clear_child_terminal_wait(instance, detector, ready_operation_id)
-                        except BaseException as error:
-                            if readiness_error is None:
-                                readiness_error = error
-                            else:
-                                readiness_error.add_note(f"Failed to clear readiness waiter: {error!r}")
-                    if readiness_error is not None:
-                        raise readiness_error
+                                metadata=dict(event.metadata),
+                            ),
+                            terminals=(turn_detector.TurnDetectorReadyEvent, detector.failed_event),
+                            timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
+                        )
+                    except TimeoutError as error:
+                        raise RuntimeError(
+                            f"Turn detector readiness timed out after {_TURN_TIMEOUT_SECONDS:g} seconds."
+                        ) from error
+                    if (
+                        ready.name != turn_detector.TurnDetectorReadyEvent.name
+                        or not isinstance(ready.data, turn_detector.TurnDetectorReadyData)
+                        or ready.data.participant_ref != participant.track_ref
+                        or ready.data.conversation_ref != relationship_ref
+                    ):
+                        raise RuntimeError("Turn detector did not produce a correlated readiness terminal.")
                     instance._detectors[detector_key] = detector
                     participant.detector = detector
                 else:
@@ -1514,39 +1495,37 @@ class Conversation(ability.Ability[TurnData, Messages]):
                 ):
                     # One start/end exchange with one detector. A trace that stops here says the
                     # product reached the detector and no turn ever came back.
-                    waiter = ability.Ability.prepare_child_terminal_wait(instance, detector, operation_id)
+                    child_operation_id = turn_ref
                     try:
                         await hsm.dispatch(
                             ctx,
                             detector,
                             dataclasses.replace(
                                 turn_detector.TurnStartEvent.with_data(start),
-                                id=operation_id,
+                                id=child_operation_id,
                                 source=hsm.id(instance),
                                 target=hsm.id(detector),
                                 metadata=dict(event.metadata),
                             ),
                         )
-                        await hsm.dispatch(
+                        terminal = await ability.run_terminal_operation(
                             ctx,
-                            detector,
-                            dataclasses.replace(
-                                turn_detector.TurnEndEvent.with_data(
+                            child=detector,
+                            request=dataclasses.replace(
+                                turn_detector.TurnEndEvent.with_data_and_id(
                                     turn_detector.TurnEndData(
                                         conversation_ref=relationship_ref,
                                         turn_ref=turn_ref,
                                         source_participant_ref=source_id,
-                                    )
+                                    ),
+                                    child_operation_id,
                                 ),
-                                id=operation_id,
-                                source=hsm.id(instance),
-                                target=hsm.id(detector),
                                 metadata=dict(event.metadata),
                             ),
+                            terminals=(detector.output_event, detector.failed_event),
+                            timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
                         )
-                        terminal = await asyncio.wait_for(waiter, timeout=_TURN_TIMEOUT_SECONDS)
-                    except asyncio.TimeoutError as error:
-                        ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
+                    except TimeoutError as error:
                         provenance = provenance.model_copy(
                             update={
                                 "detector_ids": provenance.detector_ids - frozenset({participant.track_ref}),
@@ -1556,16 +1535,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                         raise RuntimeError(
                             f"Turn detector turn timed out after {_TURN_TIMEOUT_SECONDS:g} seconds."
                         ) from error
-                    finally:
-                        ability.Ability.clear_child_terminal_wait(instance, detector, operation_id)
-                    correlated_envelope = terminal.id == operation_id and terminal.source == hsm.id(detector)
-                    if not correlated_envelope:
-                        raise RuntimeError(
-                            "Turn detector returned an unrelated terminal: "
-                            f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
-                            f"expected_id={operation_id!r} expected_source={hsm.id(detector)!r} "
-                            f"data={terminal.data!r}"
-                        )
                     if terminal.name == detector.failed_event.name and isinstance(
                         terminal.data, turn_detector.FailedEventData
                     ):
@@ -1603,7 +1572,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     memory_scope = "short_term"
                 _ = await _run_memory_operation(
                     ctx,
-                    owner=instance,
                     memory=instance._memory,
                     operation_id=operation_id,
                     operation="remember",
@@ -1856,6 +1824,9 @@ class Conversation(ability.Ability[TurnData, Messages]):
             instance,
             event,
             Messages(parent=parent, messages=tuple(instance._history), memories=data.memories),
+            reply_target=(
+                parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None
+            ),
         )
 
     @staticmethod
@@ -1874,7 +1845,16 @@ class Conversation(ability.Ability[TurnData, Messages]):
             relationship.participants[:] = [
                 participant for participant in relationship.participants if participant.detector is not None
             ]
-        _terminal_failure(ctx, instance, event, failure.failure)
+        parent = failure.input_parent
+        _terminal_failure(
+            ctx,
+            instance,
+            event,
+            failure.failure,
+            reply_target=(
+                parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None
+            ),
+        )
 
     @staticmethod
     def _snapshot(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
@@ -1899,7 +1879,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             _TurnOperationCompletedEvent,
             _TurnFailedEvent,
         )
-        return hsm.define(
+        return bot.define(
             root_name,
             hsm.initial(hsm.target(f"{root}/inactive")),
             hsm.transition(
@@ -2012,22 +1992,13 @@ async def append_conversation_message(
 
     context = conversation.context() if ctx is None else ctx
     operation_id = uuid.uuid4().hex
-    waiter: asyncio.Future[hsm.Event[typ.Any]] = asyncio.get_running_loop().create_future()
-    conversation.register_terminal_waiter(operation_id, waiter)
-    try:
-        await hsm.dispatch(
-            context,
-            conversation,
-            dataclasses.replace(
-                AppendEvent.with_data(AppendData(message=message)),
-                id=operation_id,
-                source="",
-                target=hsm.id(conversation),
-            ),
-        )
-        terminal = await asyncio.wait_for(waiter, timeout=_TURN_TIMEOUT_SECONDS)
-    finally:
-        conversation.clear_terminal_waiter(operation_id)
+    terminal = await ability.run_terminal_operation(
+        context,
+        child=conversation,
+        request=AppendEvent.with_data_and_id(AppendData(message=message), operation_id),
+        terminals=(conversation.output_event, conversation.failed_event),
+        timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
+    )
     if not isinstance(terminal.data, Messages):
         raise RuntimeError("Conversation outbound append produced no history output.")
     return terminal.data
@@ -2043,12 +2014,15 @@ async def contribute_conversation_input(
 
     context = conversation.context() if ctx is None else ctx
     operation_id = uuid.uuid4().hex
-    result: asyncio.Future[hsm.Event[typ.Any]] = asyncio.get_running_loop().create_future()
-    conversation.register_terminal_waiter(operation_id, result)
     try:
-        await hsm.dispatch(context, conversation, conversation.input_event.with_data_and_id(input_data, operation_id))
-        terminal = await asyncio.wait_for(result, timeout=5.0)
-    except asyncio.CancelledError:
+        terminal = await ability.run_terminal_operation(
+            context,
+            child=conversation,
+            request=conversation.input_event.with_data_and_id(input_data, operation_id),
+            terminals=(conversation.output_event, cognition.InputEvent, conversation.failed_event),
+            timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS * _CONTRIBUTION_TIMEOUT_STAGES),
+        )
+    except asyncio.CancelledError as cancelled:
         cancellation = dataclasses.replace(
             _InputCancelledEvent.with_data(_InputCancelledData(operation_id=operation_id)),
             id=operation_id,
@@ -2057,11 +2031,10 @@ async def contribute_conversation_input(
         )
         try:
             await asyncio.shield(hsm.dispatch(context, conversation, cancellation))
-        except BaseException:
-            pass
+        except Exception as error:
+            span.record_current_failure("input_cancel_dispatch_failed")
+            raise cancelled from error
         raise
-    finally:
-        conversation.clear_terminal_waiter(operation_id)
     if terminal.name == conversation.failed_event.name:
         raise RuntimeError(f"Conversation failed during input contribution: {terminal.data!r}")
     return participated_turn_from_messages(input_data, _messages_from_contribution_terminal(terminal))

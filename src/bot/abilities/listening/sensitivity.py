@@ -31,6 +31,7 @@ import datetime
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.environment import SoundData, SoundEvent
@@ -80,6 +81,23 @@ class OutputData(pydantic.BaseModel):
     )
 
 
+class ScoreData(pydantic.BaseModel):
+    """Private listening request preserving the environment sound that must be scored."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    stimulus: events.StimulusData[SoundData] = pydantic.Field(
+        description=(
+            "Exact environment sound request being scored, including the acoustic source needed "
+            "to compare an arrival with the currently producing mouth."
+        )
+    )
+
+
+ScoreEvent = hsm.Event[ScoreData](
+    name="bot.ability.listening.sensitivity.score",
+    schema=ScoreData,
+)
 OutputEvent = hsm.Event[OutputData](
     name="bot.ability.listening.sensitivity.output",
     schema=OutputData,
@@ -110,7 +128,7 @@ def _producing_mouth(instance: "Sensitivity") -> str | None:
 
 def _has_sound(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
-    return isinstance(event.data, SoundData)
+    return isinstance(event.data, SoundData | ScoreData)
 
 
 def _has_efference_copy(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> bool:
@@ -130,6 +148,19 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[SoundData]] = SoundEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
+
+    @staticmethod
+    def _sound(event: hsm.Event[typing.Any]) -> SoundData:
+        data = event.data
+        if isinstance(data, ScoreData):
+            return data.stimulus.data
+        assert isinstance(data, SoundData)
+        return data
+
+    @staticmethod
+    def _acoustic_source(event: hsm.Event[typing.Any]) -> str | None:
+        data = event.data
+        return data.stimulus.source if isinstance(data, ScoreData) else event.source
 
     @staticmethod
     def _remember_command(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> None:
@@ -164,13 +195,35 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         event: hsm.Event[typing.Any],
         product: OutputData,
     ) -> None:
-        if isinstance(event.data, SoundData) and product.parent is None:
-            product = product.model_copy(update={"parent": events.StimulusData.from_event(event)})
+        data = event.data
+        if product.parent is None:
+            if isinstance(data, ScoreData):
+                product = product.model_copy(update={"parent": data.stimulus})
+            elif isinstance(data, SoundData):
+                product = product.model_copy(update={"parent": events.StimulusData.from_event(event)})
+        # Return-to-source routing applies to a directed-operation request: ScoreEvent (ScoreData)
+        # is the typed PRIVATE DIRECTED interface, dispatched as a terminal operation targeted at
+        # this machine by an external operation actor. When such a request was targeted here
+        # (event.target == hsm.id(instance)) and its source is a real external caller (non-empty and
+        # not this machine), the terminal returns to that source. The ambient transducer stimulus
+        # (SoundData/input_event) never matches: its source is the transducer — a device id string,
+        # not a directed caller — so it stays owner-fallback and the terminal is delivered to the
+        # attached owner object by _forward_terminal_event. Selection is purely by typed event and
+        # the stamped envelope; there is no lookup into any address map or instance graph.
+        target = (
+            event.source
+            if isinstance(data, ScoreData)
+            and event.target == hsm.id(instance)
+            and event.source
+            and event.source != hsm.id(instance)
+            else None
+        )
         terminal = dataclasses.replace(
             instance.output_event.with_data(product),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=target,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
@@ -185,8 +238,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         suppressing own audio outright.
         """
 
-        sound = event.data
-        assert isinstance(sound, SoundData)
+        sound = Sensitivity._sound(event)
         Sensitivity._emit(ctx, instance, event, OutputData(sound=sound, perceived_level_db=sound.received_level_db))
 
     @staticmethod
@@ -226,9 +278,8 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         information, which is the entire reason this is bounded in time rather than by identity.
         """
 
-        sound = event.data
-        assert isinstance(sound, SoundData)
-        if event.source != _producing_mouth(instance):
+        sound = Sensitivity._sound(event)
+        if Sensitivity._acoustic_source(event) != _producing_mouth(instance):
             Sensitivity._score_unproduced(ctx, instance, event)
             return
         observed = _path_gain_db(sound)
@@ -242,7 +293,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
             perceived = abs(observed - learned)
         Sensitivity._emit(ctx, instance, event, OutputData(sound=sound, perceived_level_db=perceived))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Sensitivity",
         hsm.attribute(_PLAYOUT_SECONDS_ATTRIBUTE),
         hsm.attribute(_PRODUCING_MOUTH_ATTRIBUTE),
@@ -251,7 +302,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         hsm.state(
             "quiet",
             hsm.transition(
-                hsm.on(input_event),
+                hsm.on(input_event, ScoreEvent),
                 hsm.guard(_has_sound),
                 hsm.effect(_score_unproduced),
             ),
@@ -265,7 +316,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
         hsm.state(
             "producing",
             hsm.transition(
-                hsm.on(input_event),
+                hsm.on(input_event, ScoreEvent),
                 hsm.guard(_has_sound),
                 hsm.effect(_score_against_prediction),
             ),

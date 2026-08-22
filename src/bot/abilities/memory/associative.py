@@ -6,16 +6,21 @@ from .. import decoding
 from .. import encoding
 from .. import processing
 
+import asyncio
 import dataclasses
+import datetime
 import typing
+import uuid
 
 import hsm
+import bot
 
 from bot.protocols import attachment
 import pydantic
 
 from bot.telemetry import observer
 
+_STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _AssociativeMemoryChildrenAttachedEvent = hsm.Event[object](
     name="bot.ability.memory.associative.children.attached",
     kind=hsm.CompletionEventKind,
@@ -381,6 +386,8 @@ def _associative_memory_event_with_context(
     return dataclasses.replace(
         event,
         id=source.id or None,
+        source=source.source,
+        target=source.target,
         metadata=dict(source.metadata),
     )
 
@@ -407,6 +414,11 @@ def _dispatch_associative_memory_output(
         id=event.id or None,
         metadata=_public_associative_memory_metadata(dict(event.metadata)),
         source=hsm.id(instance),
+        target=(
+            event.source
+            if event.target == hsm.id(instance) and event.source and event.source != hsm.id(instance)
+            else None
+        ),
     )
     _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
@@ -423,6 +435,11 @@ def _dispatch_associative_memory_failure(
         id=event.id or None,
         metadata=_public_associative_memory_metadata(dict(event.metadata)),
         source=hsm.id(instance),
+        target=(
+            event.source
+            if event.target == hsm.id(instance) and event.source and event.source != hsm.id(instance)
+            else None
+        ),
     )
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -494,6 +511,11 @@ def _dispatch_invalid_associative_memory_output_failure(
         id=event.id or None,
         metadata=_public_associative_memory_metadata(dict(event.metadata)),
         source=hsm.id(instance),
+        target=(
+            event.source
+            if event.target == hsm.id(instance) and event.source and event.source != hsm.id(instance)
+            else None
+        ),
     )
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -566,42 +588,70 @@ async def _run_associative_memory_processor(
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
+            _associative_memory_event_with_context(
                 _AssociativeMemoryApplyFailedEvent.with_data(
                     ability.FailureData(message="AssociativeMemory refused processing without operation id.")
                 ),
-                id=event.id or "",
-                metadata=public_metadata,
+                event,
             ),
         )
         return
     child = instance.processor
-    terminal = await ability.Ability.await_child_terminal(
-        ctx,
-        owner=instance,
-        child=child,
-        operation_id=operation_id,
-        input=processing.InputData(
-            input=AssociationData(
-                sources=decoded.sources,
-                context=decoded.input.context,
-                context_ref=decoded.input.context_ref,
-                subject_ref=decoded.input.subject_ref,
-                store_ref=decoded.input.store_ref,
-                graph_ref=decoded.input.graph_ref,
-            )
+    child_operation_id = f"{operation_id}:processing:{uuid.uuid4().hex}"
+    child_request = dataclasses.replace(
+        child.input_event.with_data_and_id(
+            processing.InputData(
+                input=AssociationData(
+                    sources=decoded.sources,
+                    context=decoded.input.context,
+                    context_ref=decoded.input.context_ref,
+                    subject_ref=decoded.input.subject_ref,
+                    store_ref=decoded.input.store_ref,
+                    graph_ref=decoded.input.graph_ref,
+                )
+            ),
+            child_operation_id,
         ),
         metadata=public_metadata,
     )
+    try:
+        terminal = await ability.run_terminal_operation(
+            instance.context(),
+            child=child,
+            request=child_request,
+            terminals=(child.output_event, child.failed_event),
+            timeout=_STAGE_OPERATION_TIMEOUT,
+        )
+    except asyncio.CancelledError:
+        cancel_token = uuid.uuid4().hex
+        await asyncio.shield(
+            hsm.dispatch(
+                instance.context(),
+                child,
+                dataclasses.replace(
+                    processing.CancelEvent.with_data(
+                        processing.CancelData(
+                            operation_id=child_operation_id,
+                            token=cancel_token,
+                            parent_operation_id=operation_id,
+                        )
+                    ),
+                    id=child_operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(child),
+                    metadata=public_metadata,
+                ),
+            )
+        )
+        raise
     if terminal.name == child.failed_event.name:
         message = getattr(terminal.data, "message", "AssociativeMemory processor failed.")
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
+            _associative_memory_event_with_context(
                 _AssociativeMemoryApplyFailedEvent.with_data(ability.FailureData(message=str(message))),
-                id=operation_id,
-                metadata=public_metadata,
+                event,
             ),
         )
         return
@@ -610,14 +660,13 @@ async def _run_associative_memory_processor(
         _ = hsm.dispatch(
             ctx,
             instance,
-            dataclasses.replace(
+            _associative_memory_event_with_context(
                 _AssociativeMemoryApplyFailedEvent.with_data(
                     ability.FailureData(
                         message="AssociativeMemory processor produced output that does not match its output schema."
                     )
                 ),
-                id=operation_id,
-                metadata=public_metadata,
+                event,
             ),
         )
         return
@@ -629,10 +678,9 @@ async def _run_associative_memory_processor(
     _ = hsm.dispatch(
         ctx,
         instance,
-        dataclasses.replace(
+        _associative_memory_event_with_context(
             _AssociativeMemoryProcessingCompletedEvent.with_data(data),
-            id=operation_id,
-            metadata=public_metadata,
+            event,
         ),
     )
 
@@ -679,14 +727,12 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.memory.associative.input",
-    schema=InputData,
-
+        name="bot.ability.memory.associative.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.memory.associative.output",
-    schema=OutputData,
-
+        name="bot.ability.memory.associative.output",
+        schema=OutputData,
     )
 
     @staticmethod
@@ -741,7 +787,7 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _AssociativeMemoryApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _AssociativeMemoryApplyFailedEvent
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "AssociativeMemory",
         hsm.initial(hsm.target("initializing")),
         hsm.state(

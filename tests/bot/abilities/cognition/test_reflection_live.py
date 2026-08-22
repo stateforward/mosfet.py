@@ -401,7 +401,7 @@ def _live_behavior_answers_phone_call(
         autonomy = cognition.Autonomy(memory=store)
         shared = shared_hsm_context(environment)
         await start_abilities_for_test(shared, autonomy)
-        _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        _ = await bot.started(shared, phone, typing.cast(hsm.Model, phone.model))
 
         firmware = phone_firmware(phone)
         assert firmware is not None
@@ -460,9 +460,10 @@ def _live_behavior_answers_phone_call(
     assert selections is not None and selections, f"behavior/autonomy produced no selections: {output!r}"
     answer_selections = [item for item in selections if item.event == "phone.answer_call"]
     assert answer_selections, f"expected phone.answer_call selection, got {selections!r}"
-    assert answer_selections[0].data is not None
-    assert answer_selections[0].data.get("call_id") == "livekit:caller", (
-        f"behavior must use the ringing call_id from event['id'], got {answer_selections[0].data!r}"
+    answer_data = answer_selections[0].data
+    assert isinstance(answer_data, dict)
+    assert answer_data.get("call_id") == "livekit:caller", (
+        f"behavior must use the ringing call_id from event['id'], got {answer_data!r}"
     )
     assert phone_device.ServiceAnswerRequestedEvent.name in published, (
         f"phone never requested answer; published={published!r} state={phone_state!r}"
@@ -561,7 +562,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         shared = shared_hsm_context(environment)
         phone = phone_device.Phone()
         await start_abilities_for_test(shared, ability)
-        _ = await hsm.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        _ = await bot.started(shared, phone, typing.cast(hsm.Model, phone.model))
         await wait_idle(ability, timeout=30.0)
         await wait_idle(reflection, timeout=30.0)
 

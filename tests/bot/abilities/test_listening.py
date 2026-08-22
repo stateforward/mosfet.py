@@ -1,3 +1,4 @@
+from bot import StimulusData
 from bot import abilities
 from bot.abilities import cognition
 from bot.abilities import listening
@@ -9,12 +10,15 @@ from bot.protocols import attachment
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import io
+import pathlib
 import typing
 import wave
 from typing import override
 
 import hsm
+import bot
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
@@ -35,6 +39,51 @@ def sound(audio: bytes, *, received_level_db: float | None = None) -> SoundData:
         channels=1,
         received_level_db=received_level_db,
     )
+
+
+def _score_request(sound: SoundData, operation_id: str) -> hsm.Event[typing.Any]:
+    """The typed PRIVATE DIRECTED interface: a ScoreEvent carried as a terminal operation.
+
+    Mirrors the listening pipeline (listening.py _run_sensitivity): the environment sound is
+    wrapped in a ScoreData stimulus and dispatched as a directed request targeted at the stage.
+    """
+
+    stimulus = StimulusData.from_event(dataclasses.replace(SoundEvent.with_data(sound), source="mouth"))
+    return listening.sensitivity.ScoreEvent.with_data_and_id(
+        listening.sensitivity.ScoreData(stimulus=stimulus),
+        operation_id,
+    )
+
+
+def test_sensitivity_directed_operations_keep_unique_child_envelopes() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], hsm.Event[typing.Any], str]:
+        stage = listening.sensitivity.Sensitivity()
+        await start_ability_tree(None, stage)
+        first, second = await asyncio.gather(
+            abilities.run_terminal_operation(
+                stage.context(),
+                child=stage,
+                request=_score_request(sound(b"first"), "sensitivity:first"),
+                terminals=(stage.output_event, stage.failed_event),
+                timeout=datetime.timedelta.max,
+            ),
+            abilities.run_terminal_operation(
+                stage.context(),
+                child=stage,
+                request=_score_request(sound(b"second"), "sensitivity:second"),
+                terminals=(stage.output_event, stage.failed_event),
+                timeout=datetime.timedelta.max,
+            ),
+        )
+        return first, second, hsm.id(stage)
+
+    first, second, stage_id = asyncio.run(run())
+
+    assert (first.id, second.id) == ("sensitivity:first", "sensitivity:second")
+    assert first.source == second.source == stage_id
+    assert first.target and second.target and first.target != second.target
+    assert isinstance(first.data, listening.sensitivity.OutputData)
+    assert isinstance(second.data, listening.sensitivity.OutputData)
 
 
 def wav_sound(
@@ -61,7 +110,7 @@ def wav_sound(
     )
 
 
-class FixedVoiceDetector(voice.detection.VoiceDetector):
+class FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     output: voice.detection.ApplyData
 
     def __init__(self, output: voice.detection.ApplyData) -> None:
@@ -73,7 +122,7 @@ class FixedVoiceDetector(voice.detection.VoiceDetector):
         return self.output
 
 
-class SequenceVoiceDetector(voice.detection.VoiceDetector):
+class SequenceVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     """Returns apply results in order, then repeats the last result."""
 
     outputs: list[voice.detection.ApplyData]
@@ -81,7 +130,7 @@ class SequenceVoiceDetector(voice.detection.VoiceDetector):
 
     def __init__(self, *outputs: voice.detection.ApplyData) -> None:
         if not outputs:
-            raise ValueError("SequenceVoiceDetector requires at least one ApplyData.")
+            raise ValueError("SequenceVoiceActivityClassifier requires at least one ApplyData.")
         self.outputs = list(outputs)
         self.index = 0
 
@@ -95,14 +144,14 @@ class SequenceVoiceDetector(voice.detection.VoiceDetector):
         return self.outputs[-1]
 
 
-class FailingVoiceDetector(voice.detection.VoiceDetector):
+class FailingVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     @override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
-        raise RuntimeError("voice detector offline")
+        raise RuntimeError("voice activity classifier offline")
 
 
-class HangingVoiceDetector(voice.detection.VoiceDetector):
+class HangingVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     cancelled: bool
     entered: asyncio.Event
 
@@ -213,7 +262,7 @@ class RecordingListening(listening.Listening):
     def __init__(
         self,
         *,
-        voice_detector: voice.detection.VoiceDetector,
+        voice_activity_classifier: voice.detection.VoiceActivityClassifier,
         sound_classifier: sound_hearing.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
@@ -226,7 +275,7 @@ class RecordingListening(listening.Listening):
     ) -> None:
         thresholds = {} if product_threshold_db is None else {"product_threshold_db": product_threshold_db}
         super().__init__(
-            voice_detector=voice_detector,
+            voice_activity_classifier=voice_activity_classifier,
             sound_classifier=sound_classifier,
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
@@ -252,7 +301,7 @@ class ListeningAttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "ListeningAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -309,13 +358,13 @@ def _listening(
     else:
         speech_decoder = decoder
     # Voice path uses Start then End (silence) so HearingSpeech can close the utterance.
-    voice_detector: voice.detection.VoiceDetector
+    voice_activity_classifier: voice.detection.VoiceActivityClassifier
     if is_voice:
-        voice_detector = SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY)
+        voice_activity_classifier = SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY)
     else:
-        voice_detector = FixedVoiceDetector(_SILENCE_APPLY)
+        voice_activity_classifier = FixedVoiceActivityClassifier(_SILENCE_APPLY)
     listening_ability = RecordingListening(
-        voice_detector=voice_detector,
+        voice_activity_classifier=voice_activity_classifier,
         sound_classifier=sound_classifier,
         speech_decoder=speech_decoder,
         voice_diarizer=diarizer,
@@ -418,7 +467,7 @@ def test_listening_pairs_diarized_segments_with_voice_embeddings_in_order() -> N
             voice.identification.VoiceEmbedding(embedding=(0.3, 0.4), model="fixture"),
         )
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_diarizer=diarizer,
             voice_classifier=identifier,
         )
@@ -452,7 +501,9 @@ def test_listening_pairs_diarized_segments_with_voice_embeddings_in_order() -> N
         (1.25, 2.5),
     ]
     assert all(observation.source_ids for observation in ordered_observations)
-    assert len({next(iter(observation.source_ids)) for observation in ordered_observations}) == len(ordered_observations)
+    assert len({next(iter(observation.source_ids)) for observation in ordered_observations}) == len(
+        ordered_observations
+    )
     assert [next(iter(observation.source_ids)) for observation in ordered_observations] == [
         (0.1, 0.2),
         (0.3, 0.4),
@@ -465,7 +516,7 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
             voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture", confidence=0.95),
         )
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
         )
         await start_ability_tree(None, listening_ability)
@@ -502,12 +553,14 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
     pcm_silence = b"\x00\x00" * 240
     sample_rate_hz = 16_000
 
-    async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData], list[listening.FailedEventData]]:
+    async def run() -> tuple[
+        list[cognition.InputData], list[voice.identification.InputData], list[listening.FailedEventData]
+    ]:
         identifier = FixedVoiceClassifier(
             voice.identification.VoiceEmbedding(embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94),
         )
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
             speech_decoder=None,
         )
@@ -550,11 +603,9 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
 
 def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_product() -> None:
     async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
-        identifier = FixedVoiceClassifier(
-            voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture")
-        )
+        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"))
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
         )
         await start_ability_tree(None, listening_ability)
@@ -577,7 +628,7 @@ def test_listening_direct_identification_uses_open_utterance_level_after_quiet_v
     async def run() -> list[cognition.InputData]:
         identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2)))
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
         )
         await start_ability_tree(None, listening_ability)
@@ -602,7 +653,7 @@ def test_listening_reports_typed_failure_for_invalid_direct_identification_pcm()
     ]:
         identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1,)))
         listening_ability = RecordingListening(
-            voice_detector=SequenceVoiceDetector(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
         )
         await start_ability_tree(None, listening_ability)
@@ -629,7 +680,7 @@ def test_listening_reports_typed_failure_for_invalid_direct_identification_pcm()
 def test_listening_rejects_voice_classifier_with_speech_decoder() -> None:
     with pytest.raises(ValueError, match="voice_classifier cannot be combined with speech_decoder"):
         _ = listening.Listening(
-            voice_detector=FixedVoiceDetector(_VOICE_APPLY),
+            voice_activity_classifier=FixedVoiceActivityClassifier(_VOICE_APPLY),
             speech_decoder=RecordingSpeechDecoder(),
             voice_classifier=FixedVoiceClassifier(
                 voice.identification.VoiceEmbedding(embedding=(0.1, 0.2)),
@@ -659,9 +710,11 @@ def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_f
 
         monkeypatch.setattr(attachment.Group, "__init__", record_group)
         monkeypatch.setattr(attachment.Group, "attach", hold_attach)
-        minimum = listening.Listening(voice_detector=FixedVoiceDetector(voice.detection.ApplyData(segments=())))
+        minimum = listening.Listening(
+            voice_activity_classifier=FixedVoiceActivityClassifier(voice.detection.ApplyData(segments=()))
+        )
         maximum = listening.Listening(
-            voice_detector=FixedVoiceDetector(
+            voice_activity_classifier=FixedVoiceActivityClassifier(
                 voice.detection.ApplyData(
                     segments=(
                         voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.9),
@@ -673,13 +726,13 @@ def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_f
             speech_decoder=RecordingSpeechDecoder(),
         )
         owner = hsm.Instance()
-        owner_model = hsm.define(
+        owner_model = bot.define(
             "ListeningAttachmentOwner",
             hsm.initial(hsm.target("ready")),
             hsm.state("ready"),
         )
         ctx = hsm.Context()
-        _ = await hsm.started(ctx, owner, owner_model)
+        _ = await bot.started(ctx, owner, owner_model)
         await minimum.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -738,9 +791,9 @@ def test_listening_reports_aggregate_attachment_failure_and_accepts_retry(
         ctx = hsm.Context()
         owner = ListeningAttachmentOwner()
         listening_ability = listening.Listening(
-            voice_detector=FixedVoiceDetector(voice.detection.ApplyData(segments=()))
+            voice_activity_classifier=FixedVoiceActivityClassifier(voice.detection.ApplyData(segments=()))
         )
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await listening_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -816,9 +869,9 @@ def test_listening_detaches_each_group_once_through_group_and_can_reattach(
         ctx = hsm.Context()
         owner = ListeningAttachmentOwner()
         listening_ability = listening.Listening(
-            voice_detector=FixedVoiceDetector(voice.detection.ApplyData(segments=()))
+            voice_activity_classifier=FixedVoiceActivityClassifier(voice.detection.ApplyData(segments=()))
         )
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await listening_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -940,7 +993,8 @@ def test_interpretation_model_tracks_detection_diarization_and_decoding_lifecycl
     assert model.qualified_name == "/InterpretationLifecycle"
     assert "/InterpretationLifecycle/attached/behavior/initializing" in model.members
     assert "/InterpretationLifecycle/attached/behavior/Idle" in model.members
-    # Busy serial pipeline is one composite (shared defer + stage-failure).
+    # Working owns the common sensitivity-output deferral. HearingSpeech has the only
+    # leaf-specific input transition while the utterance is open.
     assert working in model.members
     assert f"{working}/HandingOff" in model.members
     assert f"{working}/DetectingVoice" in model.members
@@ -967,6 +1021,21 @@ def test_interpretation_model_tracks_detection_diarization_and_decoding_lifecycl
     assert "bot.ability.listening.sensitivity.output" in model.transition_map[f"{working}/HearingSpeech"]
     assert "bot.ability.listening.voice_diarization.completed" in model.transition_map[f"{working}/DiarizingVoice"]
     assert "bot.ability.listening.speech_decoding.completed" in model.transition_map[f"{working}/DecodingSpeech"]
+    deferred_map = typing.cast(
+        collections.abc.Mapping[str, collections.abc.Mapping[str, str]],
+        typing.cast(object, getattr(model, "deferred_map")),
+    )
+    assert deferred_map[working]["bot.ability.listening.sensitivity.output"] == working
+    for state in (
+        "DetectingVoice",
+        "FeedingSpeech",
+        "ClassifyingSound",
+        "DiarizingVoice",
+        "IdentifyingVoiceDirect",
+        "IdentifyingVoice",
+        "DecodingSpeech",
+    ):
+        assert deferred_map[f"{working}/{state}"]["bot.ability.listening.sensitivity.output"] == working
 
 
 def test_listening_skips_cognition_input_when_no_voice() -> None:
@@ -1019,7 +1088,7 @@ def test_listening_skips_cognition_input_when_sound_classifier_finds_no_labels_w
         await start_ability_tree(None, listening)
 
         _ = await listening.apply(sound(b"ambient"))
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: bool(classifier.calls))
 
         return listening.handoffs, classifier.calls, listening.state()
 
@@ -1221,14 +1290,14 @@ def test_the_product_threshold_is_the_one_place_a_level_becomes_a_yes_or_a_no() 
 def test_a_negative_product_threshold_is_refused() -> None:
     try:
         _ = listening.Listening(
-            voice_detector=FixedVoiceDetector(
+            voice_activity_classifier=FixedVoiceActivityClassifier(
                 voice.detection.ApplyData(
                     segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0),)
                 )
             )
         )
         _ = listening.Listening(
-            voice_detector=FixedVoiceDetector(
+            voice_activity_classifier=FixedVoiceActivityClassifier(
                 voice.detection.ApplyData(
                     segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0),)
                 )
@@ -1430,19 +1499,85 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
     assert decoder_calls == [b"voicesilence"]
 
 
+@pytest.mark.live
+def test_listening_decodes_real_wav_with_real_mlx_providers() -> None:
+    """Exercise Listening through real MLX VAD and speech decoding providers."""
+    mlx_audio = pytest.importorskip("bot.providers.mlx_audio")
+
+    async def run() -> cognition.InputData:
+        speech_wav_path = (
+            pathlib.Path(__file__).resolve().parents[3] / "src/providers/mlx_audio/tests/assets/speech.wav"
+        )
+        speech_wav = speech_wav_path.read_bytes()
+        with wave.open(io.BytesIO(speech_wav), "rb") as speech_file:
+            sample_rate_hz = speech_file.getframerate()
+            channels = speech_file.getnchannels()
+            assert speech_file.getsampwidth() == 2
+
+        silence_buffer = io.BytesIO()
+        with wave.open(silence_buffer, "wb") as silence_file:
+            silence_file.setnchannels(channels)
+            silence_file.setsampwidth(2)
+            silence_file.setframerate(sample_rate_hz)
+            silence_file.writeframes(b"\x00\x00" * (sample_rate_hz // 2 * channels))
+
+        voice_activity_classifier = mlx_audio.VoiceActivityClassifier(
+            sample_rate_hz=sample_rate_hz,
+            channels=channels,
+        )
+        speech_decoder = mlx_audio.SpeechDecoder()
+        listening_ability = listening.Listening(
+            voice_activity_classifier=voice_activity_classifier,
+            speech_decoder=speech_decoder,
+        )
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, listening_ability)
+
+        await listening_ability.apply(
+            SoundData(
+                audio=speech_wav,
+                media_type="audio/wav",
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                kind="test.speech",
+            ),
+            ctx=ctx,
+        )
+        return await dispatch_ability_for_test(
+            listening_ability,
+            ctx,
+            SoundData(
+                audio=silence_buffer.getvalue(),
+                media_type="audio/wav",
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                kind="test.silence",
+            ),
+            timeout=120.0,
+        )
+
+    handoff = asyncio.run(run())
+    stimulus = _stimulus(handoff)
+    assert stimulus.name == listening.SpeechEvent.name
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content_type == "text/plain"
+    assert isinstance(stimulus.data.content, str)
+    assert stimulus.data.content.strip()
+
+
 def test_listening_detach_releases_owned_subabilities_while_detecting_voice() -> None:
     async def run() -> tuple[bool, str]:
         ctx = hsm.Context()
-        detector = HangingVoiceDetector()
+        voice_activity_classifier = HangingVoiceActivityClassifier()
         listening_ability = RecordingListening(
-            voice_detector=detector,
+            voice_activity_classifier=voice_activity_classifier,
             speech_decoder=RecordingSpeechDecoder(),
         )
         await start_ability_tree(ctx, listening_ability)
         _ = await listening_ability.apply(sound(b"voice"), ctx=ctx)
-        # Waited on through the detector rather than through a state name: the ear hands the sound
+        # Waited on through the classifier rather than through a state name: the ear hands the sound
         # on and goes straight back to listening, so it is never the thing sitting in detection.
-        await wait_until(lambda: detector.entered.is_set())
+        await wait_until(lambda: voice_activity_classifier.entered.is_set())
         assert listening_ability.state() == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
 
         owner = ability_terminal_owner(listening_ability)
@@ -1452,10 +1587,10 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
             attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
         )
         await wait_until(lambda: listening_ability.state().endswith("/detached"))
-        await wait_until(lambda: detector.cancelled)
+        await wait_until(lambda: voice_activity_classifier.cancelled)
         state = listening_ability.state()
         await listening_ability.stop(ctx)
-        return detector.cancelled, state
+        return voice_activity_classifier.cancelled, state
 
     cancelled, state = asyncio.run(run())
 
@@ -1466,12 +1601,12 @@ def test_listening_detach_releases_owned_subabilities_while_detecting_voice() ->
 def test_listening_dispatches_failure_when_detection_fails() -> None:
     async def run() -> tuple[list[listening.FailedEventData], list[cognition.InputData], str]:
         listening_ability = RecordingListening(
-            voice_detector=FailingVoiceDetector(),
+            voice_activity_classifier=FailingVoiceActivityClassifier(),
             speech_decoder=RecordingSpeechDecoder(),
         )
         await start_ability_tree(None, listening_ability)
 
-        with pytest.raises(RuntimeError, match="voice detector offline"):
+        with pytest.raises(RuntimeError, match="voice activity classifier offline"):
             _ = await dispatch_ability_for_test(listening_ability, hsm.Context(), sound(b"voice"))
         await wait_until(lambda: bool(listening_ability.failures))
 
@@ -1480,7 +1615,7 @@ def test_listening_dispatches_failure_when_detection_fails() -> None:
     failures, handoffs, active_state = asyncio.run(run())
 
     assert failures == [
-        listening.FailedEventData(stage="voice_detection", message="voice detector offline"),
+        listening.FailedEventData(stage="voice_detection", message="voice activity classifier offline"),
     ]
     assert handoffs == []
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
@@ -1494,88 +1629,48 @@ def test_listening_failure_payload_reuses_ability_failure_message_shape() -> Non
 
     assert failure == listening.FailedEventData(stage="speech_decoding", message="decoder timed out")
 
-def test_interpretation_wav_helpers_detect_containers() -> None:
-    from bot.abilities.listening import interpretation as interpretation_module
-    from bot.environment import SoundData
-    import io
-    import wave
 
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(16000)
-        handle.writeframes(b"\x00\x10" * 100)
-    wav = buf.getvalue()
-    assert interpretation_module._is_wav_container_bytes(wav)
-    assert interpretation_module._is_wav_sound(SoundData(audio=wav, media_type="audio/wav", sample_rate_hz=16000, channels=1))
-    assert not interpretation_module._is_wav_container_bytes(b"\x00\x01" * 50)
-    assert not interpretation_module._is_wav_sound(
-        SoundData(audio=b"\x00\x01" * 50, media_type="audio/pcm", sample_rate_hz=16000, channels=1)
-    )
-
-
-def test_interpretation_vad_receives_original_wav_not_decoded_pcm() -> None:
-    """Regression: 16 kHz Person WAV must not be rewrapped as 48 kHz PCM for Silero."""
-
-    import asyncio
-    import io
-    import wave
+def test_interpretation_routes_child_output_and_preserves_wav_for_vad() -> None:
+    """A public Interpretation run preserves WAV ingress while consuming typed child output."""
 
     from bot.abilities.hearing import voice
     from bot.abilities.listening import interpretation as interpretation_module
     from bot.abilities.listening import sensitivity
-    from bot.environment import SoundData
 
-    def make_wav(sample_rate_hz: int = 16000, frames: int = 1600) -> bytes:
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as handle:
-            handle.setnchannels(1)
-            handle.setsampwidth(2)
-            handle.setframerate(sample_rate_hz)
-            handle.writeframes(bytes((0, 64)) * frames)
-        return buf.getvalue()
+    class RecordingVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
+        inputs: list[bytes]
 
-    class SpyDetector(voice.detection.VoiceDetector):
         def __init__(self) -> None:
-            self.inputs: list[bytes] = []
+            self.inputs = []
 
-        async def classify(self, input: bytes) -> voice.detection.ApplyData:  # type: ignore[override]
+        @override
+        async def classify(self, input: bytes) -> voice.detection.ApplyData:
             self.inputs.append(input)
             return voice.detection.ApplyData(
                 segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1),)
             )
 
-    async def run() -> bytes:
-        spy = SpyDetector()
-        instance = interpretation_module.Interpretation(voice_detector=spy)
-        instance._active_operation_id = "op-1"
-        wav = make_wav()
-        sensed = sensitivity.OutputData(
-            sound=SoundData(audio=wav, media_type="audio/wav", sample_rate_hz=16000, channels=1),
-            perceived_level_db=60.0,
-        )
+    async def run() -> tuple[bytes, cognition.InputData, bytes, bytes]:
+        classifier = RecordingVoiceActivityClassifier()
+        instance = interpretation_module.Interpretation(voice_activity_classifier=classifier)
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, instance)
 
-        class Event:
-            data = sensed
-            id = "op-1"
-            metadata = {}
-            source = None
+        pcm = bytes((0, 64)) * 1600
+        wav = wav_sound(pcm, sample_rate_hz=16_000)
+        sensed = sensitivity.OutputData(sound=wav, perceived_level_db=60.0)
+        handoff = await dispatch_ability_for_test(instance, ctx, sensed)
 
-        # Route child apply straight to spy.classify
-        async def fake_await(ctx, owner_instance, event, *, child, child_input, stage):
-            del ctx, owner_instance, event, child, stage
-            return await spy.classify(child_input)
+        assert len(classifier.inputs) == 1
+        return classifier.inputs[0], handoff, pcm, wav.audio
 
-        original = interpretation_module.Interpretation._await_child_output
-        interpretation_module.Interpretation._await_child_output = staticmethod(fake_await)
-        try:
-            await interpretation_module.Interpretation._run_voice_detection(None, instance, Event())  # type: ignore[arg-type]
-        finally:
-            interpretation_module.Interpretation._await_child_output = original  # type: ignore[method-assign]
-        assert len(spy.inputs) == 1
-        return spy.inputs[0]
+    vad_input, handoff, pcm, wav_audio = asyncio.run(run())
 
-    got = asyncio.run(run())
-    assert got.startswith(b"RIFF") and got[8:12] == b"WAVE"
-    assert got == make_wav()
+    assert vad_input == wav_audio
+    assert vad_input.startswith(b"RIFF")
+    assert vad_input[8:12] == b"WAVE"
+    stimulus = _stimulus(handoff)
+    assert stimulus.name == listening.SpeechEvent.name
+    assert isinstance(stimulus.data, listening.SpeechData)
+    assert stimulus.data.content == pcm
+    assert stimulus.data.media_type == "audio/pcm"

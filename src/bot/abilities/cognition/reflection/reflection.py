@@ -26,6 +26,7 @@ from ... import memory
 
 import dataclasses
 import datetime
+import collections.abc
 import typing
 import uuid
 
@@ -79,6 +80,12 @@ INSTRUCTIONS = SELECT_INSTRUCTIONS
 _SELECT_ID_SUFFIX = ":reflection:select"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
+
+
+def _one_shot_timeout() -> datetime.timedelta:
+    return (
+        _CHILD_OPERATION_TIMEOUT if _CHILD_OPERATION_TIMEOUT > datetime.timedelta(0) else datetime.timedelta(seconds=30)
+    )
 
 
 class InputData(pydantic.BaseModel):
@@ -233,6 +240,11 @@ _StageFailedEvent = hsm.Event[_StageFailedData](
     kind=hsm.ErrorEventKind,
     schema=_StageFailedData,
 )
+_SelectHopTimedOutEvent = hsm.Event[object](
+    name="bot.ability.reflection.select.hop.timed_out",
+    kind=hsm.ErrorEventKind,
+    schema=object,
+)
 
 
 def behavior_events() -> tuple[processing.Event[typing.Any], ...]:
@@ -277,7 +289,12 @@ def _coerce_output_data(value: object) -> types.OutputData:
 def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any]:
     """Build a behavior inventory HSM event from one select-step selection."""
 
-    raw = dict(item.data or {})
+    if item.data is None:
+        raw: dict[str, object] = {}
+    elif isinstance(item.data, collections.abc.Mapping):
+        raw = dict(item.data)
+    else:
+        raise TypeError(f"Reflection inventory selection data must be a mapping, got {type(item.data).__name__}.")
     if item.event == CreateEvent.name:
         return event_for_data(CreateData.model_validate(raw))
     if item.event == ChangeEvent.name:
@@ -469,15 +486,21 @@ class Reflection(processing.Processing):
     @staticmethod
     def _cancel_select_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         request_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
+        processing.finish_operation(ctx, instance, request_id)
         processing.dispatch_child_cancel(
             ctx,
             instance,
             instance._select_processing,
             event,
             request_id=request_id,
-            parent_operation_id=event.id or request_id,
+            parent_operation_id=processing.active_operation_id(instance) or event.id or request_id,
             token=uuid.uuid4().hex,
         )
+
+    @staticmethod
+    def _is_select_hop_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return event.source == hsm.id(instance) and event.target == hsm.id(instance)
 
     @staticmethod
     def _cancel_revision_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
@@ -501,6 +524,8 @@ class Reflection(processing.Processing):
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
         del ctx, instance, event
+        if _CHILD_OPERATION_TIMEOUT <= datetime.timedelta(0):
+            return datetime.timedelta(milliseconds=1)
         return _CHILD_OPERATION_TIMEOUT
 
     @staticmethod
@@ -618,9 +643,7 @@ class Reflection(processing.Processing):
         processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
 
     @staticmethod
-    def _request_detach_rollback_reboot(
-        ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]
-    ) -> None:
+    def _request_detach_rollback_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         processing.request_reboot(ctx, instance, event, reason="cognition_detach_rollback_failed")
 
     @staticmethod
@@ -717,14 +740,51 @@ class Reflection(processing.Processing):
             schemas=behavior_events(),
             actors={},
         )
+        hop_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
         input_event = dataclasses.replace(
             instance._select_processing.input_event.with_data_and_id(
                 select_input,
-                Reflection._child_id(instance, _SELECT_ID_SUFFIX),
+                hop_id,
             ),
             metadata=dict(event.metadata),
         )
-        await hsm.dispatch(ctx, instance._select_processing, input_event)
+        if processing.active_operation(instance, hop_id) is None:
+            _ = await processing.start_operation(instance, hop_id)
+        try:
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=instance._select_processing,
+                request=input_event,
+                terminals=(
+                    instance._select_processing.output_event,
+                    instance._select_processing.failed_event,
+                ),
+                timeout=_one_shot_timeout(),
+                on_terminal=lambda _terminal: processing.finish_operation(ctx, instance, hop_id),
+            )
+        except TimeoutError:
+            processing.finish_operation(ctx, instance, hop_id)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _SelectHopTimedOutEvent.with_data_and_id(None, hop_id),
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
+            return
+        processing.finish_operation(ctx, instance, hop_id)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                terminal,
+                source=hsm.id(instance._select_processing),
+                target=hsm.id(instance),
+            ),
+        )
 
     @staticmethod
     def _matches_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -763,13 +823,12 @@ class Reflection(processing.Processing):
     @staticmethod
     def _matches_revision_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        child = instance._revision
         data = event.data
         if not isinstance(data, revision.OutputData):
             return False
         return processing.matches_child_terminal(
             instance,
-            child,
+            instance._revision,
             event,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
@@ -779,13 +838,12 @@ class Reflection(processing.Processing):
     @staticmethod
     def _matches_revision_failure(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        child = instance._revision
         data = event.data
         if not isinstance(data, revision.FailureData):
             return False
         return processing.matches_child_terminal(
             instance,
-            child,
+            instance._revision,
             event,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
@@ -796,10 +854,6 @@ class Reflection(processing.Processing):
     def _apply_revision(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, revision.OutputData)
-        turn = InputData(
-            cognition_input=data.input.cognition_input,
-            cognition_output=data.input.cognition_output,
-        )
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -808,7 +862,10 @@ class Reflection(processing.Processing):
                 event,
                 _AppliedEvent,
                 _AppliedEventData(
-                    turn=turn,
+                    turn=InputData(
+                        cognition_input=data.input.cognition_input,
+                        cognition_output=data.input.cognition_output,
+                    ),
                     behavior=data.applied,
                     operation_id=data.input.parent_operation_id,
                     generation=data.input.parent_generation,
@@ -964,7 +1021,7 @@ class Reflection(processing.Processing):
             ctx,
             instance._revision,
             dataclasses.replace(
-                instance._revision.input_event.with_data(
+                instance._revision.input_event.with_data_and_id(
                     revision.InputData(
                         cognition_input=selected.turn.cognition_input,
                         cognition_output=selected.turn.cognition_output,
@@ -972,9 +1029,9 @@ class Reflection(processing.Processing):
                         intent=intent,
                         parent_operation_id=selected.operation_id,
                         parent_generation=selected.generation,
-                    )
+                    ),
+                    selected.operation_id,
                 ),
-                id=selected.operation_id,
                 source=hsm.id(instance),
                 target=hsm.id(instance._revision),
                 metadata=dict(event.metadata),
@@ -1076,7 +1133,7 @@ class Reflection(processing.Processing):
             output=None,
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Reflection",
         hsm.initial(hsm.target("/Reflection/initializing")),
         hsm.state(
@@ -1175,7 +1232,8 @@ class Reflection(processing.Processing):
                 hsm.target("/Reflection/idle"),
             ),
             hsm.transition(
-                hsm.after(_child_timeout_delay),
+                hsm.on(_SelectHopTimedOutEvent),
+                hsm.guard(_is_select_hop_timeout),
                 hsm.effect(_cancel_select_timeout),
                 hsm.target("/Reflection/timing_out"),
             ),

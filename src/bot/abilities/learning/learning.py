@@ -35,7 +35,8 @@ import typing
 import uuid
 
 import hsm
-from bot import event_schema
+import bot
+from bot import event
 import pydantic
 from sqlalchemy import select
 
@@ -97,6 +98,12 @@ _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 
 
+def _one_shot_timeout() -> datetime.timedelta:
+    return (
+        _CHILD_OPERATION_TIMEOUT if _CHILD_OPERATION_TIMEOUT > datetime.timedelta(0) else datetime.timedelta(seconds=30)
+    )
+
+
 class InputData(pydantic.BaseModel):
     """External material to learn from (decoded before behavior generation).
 
@@ -133,11 +140,11 @@ class InputData(pydantic.BaseModel):
     )
 
 
-# Model-callable so cognition can select learning from a live turn, the same way Speaking is
-# selected. Programmatic callers still dispatch this event directly.
+# Model-callable so cognition can select learning from a live turn. Programmatic callers still
+# dispatch this event directly.
 InputEvent = hsm.Event[InputData](
     name="bot.ability.learning.input",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=InputData,
 )
 
@@ -224,7 +231,7 @@ class RuntimeInputData(pydantic.BaseModel):
         default=None,
         min_length=1,
         description="Optional expected selection event the lesson implies (from memory when known).",
-        examples=["bot.focus_device", "bot.ability.speaking.input"],
+        examples=["bot.focus_device", "bot.behavior.answer_greeting.output"],
     )
     expected_target: str | None = pydantic.Field(
         default=None,
@@ -326,7 +333,7 @@ class GenerateData(pydantic.BaseModel):
                         # expected_data is omitted on purpose where the expected selection speaks:
                         # a worked utterance here is authored straight into a standing behavior and
                         # said aloud on every later match. The words come from the lesson and memory.
-                        "expected_event": "bot.ability.speaking.input",
+                        "expected_event": "bot.behavior.answer_greeting.output",
                     },
                 }
             ],
@@ -373,7 +380,7 @@ class GenerateData(pydantic.BaseModel):
 
 GenerateEvent = hsm.Event[GenerateData](
     name=_GENERATE_EVENT_NAME,
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=GenerateData,
 )
 
@@ -464,6 +471,11 @@ _StageFailedEvent = hsm.Event[_StageFailedData](
     name="bot.ability.learning.stage.failed",
     kind=hsm.ErrorEventKind,
     schema=_StageFailedData,
+)
+_SelectHopTimedOutEvent = hsm.Event[object](
+    name="bot.ability.learning.select.hop.timed_out",
+    kind=hsm.ErrorEventKind,
+    schema=object,
 )
 
 
@@ -863,6 +875,8 @@ class Learning(ability.Ability[InputData, OutputData]):
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
         del ctx, instance, event
+        if _CHILD_OPERATION_TIMEOUT <= datetime.timedelta(0):
+            return datetime.timedelta(milliseconds=1)
         return _CHILD_OPERATION_TIMEOUT
 
     @staticmethod
@@ -980,16 +994,51 @@ class Learning(ability.Ability[InputData, OutputData]):
             schemas=(GenerateEvent,),
             actors={},
         )
+        hop_id = Learning._child_id(instance, _SELECT_ID_SUFFIX)
         input_event = dataclasses.replace(
             instance._select_processing.input_event.with_data_and_id(
                 select_input,
-                Learning._child_id(instance, _SELECT_ID_SUFFIX),
+                hop_id,
             ),
             metadata=dict(event.metadata),
-            source=hsm.id(instance),
-            target=hsm.id(instance._select_processing),
         )
-        await hsm.dispatch(ctx, instance._select_processing, input_event)
+        if processing.active_operation(instance, hop_id) is None:
+            _ = await processing.start_operation(instance, hop_id)
+        try:
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=instance._select_processing,
+                request=input_event,
+                terminals=(
+                    instance._select_processing.output_event,
+                    instance._select_processing.failed_event,
+                ),
+                timeout=_one_shot_timeout(),
+                on_terminal=lambda _terminal: processing.finish_operation(ctx, instance, hop_id),
+            )
+        except TimeoutError:
+            processing.finish_operation(ctx, instance, hop_id)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _SelectHopTimedOutEvent.with_data_and_id(None, hop_id),
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
+            return
+        processing.finish_operation(ctx, instance, hop_id)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                terminal,
+                source=hsm.id(instance._select_processing),
+                target=hsm.id(instance),
+            ),
+        )
 
     @staticmethod
     def _matches_select_output(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> bool:
@@ -1134,22 +1183,21 @@ class Learning(ability.Ability[InputData, OutputData]):
             instance._revision,
             dataclasses.replace(
                 instance._revision.input_event.with_data_and_id(revision_input, selected.operation_id),
-                metadata=dict(event.metadata),
                 source=hsm.id(instance),
                 target=hsm.id(instance._revision),
+                metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _matches_revision_output(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        child = instance._revision
         data = event.data
         if not isinstance(data, revision.OutputData):
             return False
         return processing.matches_child_terminal(
             instance,
-            child,
+            instance._revision,
             event,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
@@ -1159,13 +1207,12 @@ class Learning(ability.Ability[InputData, OutputData]):
     @staticmethod
     def _matches_revision_failure(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        child = instance._revision
         data = event.data
         if not isinstance(data, revision.FailureData):
             return False
         return processing.matches_child_terminal(
             instance,
-            child,
+            instance._revision,
             event,
             request_id=data.input.parent_operation_id,
             operation_id=data.input.parent_operation_id,
@@ -1176,7 +1223,6 @@ class Learning(ability.Ability[InputData, OutputData]):
     def _complete_revision(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         if not isinstance(data, revision.OutputData):
-            # Unreachable: paired with hsm.guard(_matches_revision_output), which narrows this payload.
             return
         runtime_input = _runtime_input_from_revision_stimulus(data.input.cognition_input)
         if runtime_input is None:
@@ -1221,7 +1267,6 @@ class Learning(ability.Ability[InputData, OutputData]):
     def _fail_revision(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         if not isinstance(data, revision.FailureData):
-            # Unreachable: paired with hsm.guard(_matches_revision_failure), which narrows this payload.
             return
         processing.dispatch_terminal_failure(
             ctx,
@@ -1237,9 +1282,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         processing.request_reboot(ctx, instance, event, reason="learning_child_teardown_failed")
 
     @staticmethod
-    def _request_detach_rollback_reboot(
-        ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]
-    ) -> None:
+    def _request_detach_rollback_reboot(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
         processing.request_reboot(ctx, instance, event, reason="learning_detach_rollback_failed")
 
     @staticmethod
@@ -1276,16 +1319,23 @@ class Learning(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _cancel_select_timeout(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
+        hop_id = Learning._child_id(instance, _SELECT_ID_SUFFIX)
+        processing.finish_operation(ctx, instance, hop_id)
         operation_id = processing.active_operation_id(instance) or event.id or uuid.uuid4().hex
         processing.dispatch_child_cancel(
             ctx,
             instance,
             instance._select_processing,
             event,
-            request_id=Learning._child_id(instance, _SELECT_ID_SUFFIX),
+            request_id=hop_id,
             parent_operation_id=operation_id,
             token=uuid.uuid4().hex,
         )
+
+    @staticmethod
+    def _is_select_hop_timeout(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return event.source == hsm.id(instance) and event.target == hsm.id(instance)
 
     @staticmethod
     def _cancel_revision_timeout(ctx: hsm.Context, instance: "Learning", event: hsm.Event[typing.Any]) -> None:
@@ -1365,7 +1415,7 @@ class Learning(ability.Ability[InputData, OutputData]):
             failure=ability.FailureData(message="Learning child cancellation timed out."),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Learning",
         hsm.initial(hsm.target("/Learning/initializing")),
         hsm.state(
@@ -1453,7 +1503,8 @@ class Learning(ability.Ability[InputData, OutputData]):
                 hsm.target("/Learning/idle"),
             ),
             hsm.transition(
-                hsm.after(_child_timeout_delay),
+                hsm.on(_SelectHopTimedOutEvent),
+                hsm.guard(_is_select_hop_timeout),
                 hsm.effect(_cancel_select_timeout),
                 hsm.target("/Learning/timing_out"),
             ),

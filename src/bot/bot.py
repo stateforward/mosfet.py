@@ -7,12 +7,13 @@ import collections.abc
 import dataclasses
 import datetime
 import typing
+import uuid
 import weakref
 
 import hsm
+import bot
 import pydantic
 
-import bot
 from bot import abilities
 from bot import lifecycle
 from bot.protocols import attachment
@@ -20,6 +21,7 @@ from . import events
 
 from bot.device import Device
 from bot import telemetry
+from bot.telemetry import control
 from bot.telemetry import observer
 from bot.telemetry import span
 from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
@@ -61,73 +63,6 @@ def _is_not_started_error(error: BaseException) -> bool:
     return False
 
 
-class _BotLifecycleTerminalData(pydantic.BaseModel):
-    """Immutable typed terminal for one lifecycle run, correlated by request id."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
-
-    request_id: str = pydantic.Field(min_length=1)
-    kind: typing.Literal["attach", "detach"]
-
-
-_BotLifecycleCompletedEvent = hsm.Event[_BotLifecycleTerminalData](
-    name="bot.lifecycle.completed",
-    kind=hsm.CompletionEventKind,
-    schema=_BotLifecycleTerminalData,
-)
-_BotLifecycleFailedEvent = hsm.Event[_BotLifecycleTerminalData](
-    name="bot.lifecycle.failed",
-    kind=hsm.ErrorEventKind,
-    schema=_BotLifecycleTerminalData,
-)
-
-
-class _BotLifecycleReply(hsm.Instance):
-    """One-shot reply inbox that hands the attachment group terminal to the owning activity."""
-
-
-def _lifecycle_reply_model(request_id: str, terminal: asyncio.Future[hsm.Event[typing.Any]]) -> hsm.Model:
-    def correlated(
-        ctx: hsm.Context,
-        instance: _BotLifecycleReply,
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx, instance
-        return event.id == request_id and isinstance(
-            event.data,
-            (attachment.AttachCompleteData, attachment.DetachedData, attachment.FailedData),
-        )
-
-    def complete(
-        ctx: hsm.Context,
-        instance: _BotLifecycleReply,
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        del ctx, instance
-        if not terminal.done():
-            terminal.set_result(event)
-
-    return hsm.define(
-        "BotLifecycleReply",
-        hsm.initial(hsm.target("waiting")),
-        hsm.state(
-            "waiting",
-            hsm.transition(
-                hsm.on(
-                    attachment.AttachCompleteEvent,
-                    attachment.AttachFailedEvent,
-                    attachment.DetachedEvent,
-                    attachment.DetachFailedEvent,
-                ),
-                hsm.guard(correlated),
-                hsm.effect(complete),
-                hsm.target("/BotLifecycleReply/done"),
-            ),
-        ),
-        hsm.final("done"),
-    )
-
-
 class _BotCleanupData(pydantic.BaseModel):
     """Private exact terminal for one lifecycle cleanup activity."""
 
@@ -142,6 +77,70 @@ _BotCleanupDoneEvent = hsm.Event[_BotCleanupData](
     kind=hsm.CompletionEventKind,
     schema=_BotCleanupData,
 )
+
+
+class _BotAttachmentOperation(hsm.Instance):
+    """One-shot graph-visible correlation boundary for a Bot attachment request."""
+
+    _owner: hsm.Instance
+    _request_id: str
+
+    def __init__(self, owner: hsm.Instance, request_id: str) -> None:
+        super().__init__()
+        self._owner = owner
+        self._request_id = request_id
+
+    @staticmethod
+    def _matches(
+        ctx: hsm.Context,
+        instance: "_BotAttachmentOperation",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        return (
+            event.id == instance._request_id
+            and event.target == hsm.id(instance)
+            and isinstance(data, (attachment.AttachCompleteData, attachment.DetachedData, attachment.FailedData))
+            and data.actor is instance._owner
+        )
+
+    @staticmethod
+    def _forward(
+        ctx: hsm.Context,
+        instance: "_BotAttachmentOperation",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        _ = hsm.dispatch(
+            ctx,
+            instance._owner,
+            dataclasses.replace(
+                event,
+                source=instance._request_id,
+                target=hsm.id(instance._owner),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    model: typing.ClassVar[hsm.Model] = bot.define(
+        "BotAttachmentOperation",
+        hsm.initial(hsm.target("waiting")),
+        hsm.state(
+            "waiting",
+            hsm.transition(
+                hsm.on(
+                    attachment.AttachCompleteEvent,
+                    attachment.AttachFailedEvent,
+                    attachment.DetachedEvent,
+                    attachment.DetachFailedEvent,
+                ),
+                hsm.guard(_matches),
+                hsm.effect(_forward),
+                hsm.target("/BotAttachmentOperation/done"),
+            ),
+        ),
+        hsm.final("done"),
+    )
 
 
 class _BotProcessingOperationData(pydantic.BaseModel):
@@ -248,7 +247,7 @@ class _BotProcessingOperation(hsm.Instance):
                 ),
             )
 
-        return hsm.define(
+        return bot.define(
             "BotProcessingTimer",
             hsm.initial(hsm.target("waiting")),
             hsm.state(
@@ -274,7 +273,7 @@ class _BotProcessingOperation(hsm.Instance):
         event_template: hsm.Event[_BotProcessingOperationData],
     ) -> "_BotProcessingOperation":
         try:
-            return await hsm.started(
+            return await bot.started(
                 _private_scope(ctx),
                 operation,
                 cls._model(
@@ -361,22 +360,27 @@ class Bot(hsm.Instance, abc.ABC):
         # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
         # Unconditional: the already-running branch above swallows its error, and join is idempotent.
         environment.join(self, placement=placement)
+        control.listen(environment)
         await self.dispatch(environment, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
     def _model_for_instance(self) -> hsm.Model:
+        """Return the topology model for this runtime bot instance."""
+
         return self.model
 
-    def _model_for_device(self, device: Device) -> hsm.Model:
-        model = device.model
-        if model is None:
-            raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
-        return model
+    def _model_for_device(self, device: Device) -> hsm.Model | None:
+        """Return the published model for one configured device."""
+
+        return device.model
 
     async def detach(self, environment: Environment) -> typing.Self:
         require_environment_scope(environment, self, participant="Bot")
         try:
-            await self.dispatch(environment, events.DeactivateEvent.with_data(events.DeactivateEventData()))
+            await self.dispatch(
+                environment,
+                events.DeactivateEvent.with_data_and_id(events.DeactivateEventData(), uuid.uuid4().hex),
+            )
         except Exception as error:
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
             if not _is_not_started_error(error):
@@ -386,6 +390,7 @@ class Bot(hsm.Instance, abc.ABC):
         # detaching and keeps presence. Pairs with the join in attach; no test can observe the
         # removal (a stopped or inactive bot ignores broadcasts either way), so this is ownership
         # completeness and map hygiene. Do not delete it as untested.
+        control.unlisten(environment)
         environment.leave(self)
         return self
 
@@ -408,6 +413,12 @@ class Bot(hsm.Instance, abc.ABC):
         return tuple(lifecycle)
 
     @staticmethod
+    def _cognition_abilities(instance: "Bot") -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
+        """Return only the bot abilities cognition is allowed to inventory."""
+
+        return (*instance._innate_ability_instances, *instance._acquired_abilities)
+
+    @staticmethod
     def _lifecycle_attachment_members(instance: "Bot") -> tuple[hsm.Instance, ...]:
         members: list[hsm.Instance] = []
         seen: set[int] = set()
@@ -419,62 +430,71 @@ class Bot(hsm.Instance, abc.ABC):
         return tuple(members)
 
     @staticmethod
-    async def _request_attachment_terminal(
+    async def _request_attachment(
         ctx: hsm.Context,
         instance: "Bot",
         event: hsm.Event,
         *,
         kind: typing.Literal["attach", "detach"],
     ) -> None:
-        """Run one attachment group operation and emit the bot-private lifecycle terminal.
+        """Address one correlated attachment request whose typed terminal returns to Bot."""
 
-        The group replies to a one-shot inbox addressed through ``reply_to``; the activity
-        alone emits the terminal, so a canceled run can never deliver a stale completion.
-        """
-
-        terminal: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
-        reply = _BotLifecycleReply()
-        try:
-            _ = await hsm.started(_private_scope(ctx), reply, _lifecycle_reply_model(event.id, terminal))
-            request: hsm.Event[typing.Any]
-            if kind == "attach":
-                request = attachment.AttachEvent.with_data(attachment.AttachData(actor=instance, reply_to=reply))
-            else:
-                request = attachment.DetachEvent.with_data(attachment.DetachData(actor=instance, reply_to=reply))
-            request = dataclasses.replace(
-                request,
-                id=event.id,
-                source=hsm.id(instance),
-                target=hsm.id(instance._attachments),
-                metadata=dict(event.metadata),
-            )
-            if kind == "attach":
-                await instance._attachments.attach(ctx, typing.cast(hsm.Event[attachment.AttachData], request))
-            else:
-                await instance._attachments.detach(ctx, typing.cast(hsm.Event[attachment.DetachData], request))
-            outcome = await terminal
-        finally:
-            await hsm.stop(reply, hsm.Context())
-        outcome_data = _BotLifecycleTerminalData(request_id=event.id, kind=kind)
-        if isinstance(outcome.data, (attachment.AttachCompleteData, attachment.DetachedData)):
-            terminal_event = _BotLifecycleCompletedEvent.with_data(outcome_data)
-        else:
-            terminal_event = _BotLifecycleFailedEvent.with_data(outcome_data)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                terminal_event,
-                id=outcome_data.request_id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
+        lifetime = instance.context()
+        operation = await bot.started(
+            _private_scope(ctx),
+            _BotAttachmentOperation(instance, event.id),
+            _BotAttachmentOperation.model,
+            hsm.Config(id=event.id),
         )
+        request: hsm.Event[typing.Any]
+        if kind == "attach":
+            request = attachment.AttachEvent.with_data(attachment.AttachData(actor=instance, reply_to=operation))
+        else:
+            request = attachment.DetachEvent.with_data(attachment.DetachData(actor=instance, reply_to=operation))
+        request = dataclasses.replace(
+            request,
+            id=event.id,
+            source=hsm.id(instance),
+            target=hsm.id(instance._attachments),
+            metadata=dict(event.metadata),
+        )
+        try:
+            try:
+                if kind == "attach":
+                    await instance._attachments.attach(ctx, typing.cast(hsm.Event[attachment.AttachData], request))
+                else:
+                    await instance._attachments.detach(ctx, typing.cast(hsm.Event[attachment.DetachData], request))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                failed = attachment.FailedData(
+                    actor=instance,
+                    kind=attachment.FailureKind.DISPATCH,
+                    message=f"Bot lifecycle {kind} dispatch failed: {error}",
+                )
+                failed_event = (
+                    attachment.AttachFailedEvent.with_data(failed)
+                    if kind == "attach"
+                    else attachment.DetachFailedEvent.with_data(failed)
+                )
+                _ = hsm.dispatch(
+                    lifetime,
+                    instance,
+                    dataclasses.replace(
+                        failed_event,
+                        id=event.id,
+                        source=event.id,
+                        target=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+            await asyncio.wrap_future(ctx.done())
+        finally:
+            await hsm.stop(operation, hsm.Context())
 
     @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        await Bot._request_attachment_terminal(ctx, instance, event, kind="detach")
+        await Bot._request_attachment(ctx, instance, event, kind="detach")
 
     @staticmethod
     async def _deactivation_cleanup(
@@ -784,40 +804,19 @@ class Bot(hsm.Instance, abc.ABC):
 
     @staticmethod
     def _dispatch_actors(instance: "Bot") -> dict[str, hsm.Instance]:
-        """Map cognition-visible actors: devices, abilities, and nested ability actors.
+        """Map cognition-visible devices, innate abilities, and acquired abilities.
 
-        Abilities that expose ``nested_actors()`` (e.g. Communication → conversation) are
-        flattened so tools resolve ``conversation.input`` without dual-acquiring Conversation.
+        Body input/output ports and ability-owned child machines are composition wiring and
+        never enter this cognition inventory.
         """
 
         actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
         for ability in (
-            *instance._input,
-            *instance._output,
             *instance._innate_ability_instances,
             *instance._acquired_abilities,
         ):
             key = Bot._ability_actor_key(ability, actors)
             actors[key] = ability
-            nested_method = getattr(ability, "nested_actors", None)
-            if not callable(nested_method):
-                continue
-            nested_map = nested_method()
-            if not isinstance(nested_map, collections.abc.Mapping):
-                continue
-            typed_nested = typing.cast(collections.abc.Mapping[object, object], nested_map)
-            for nested_key, nested_actor in typed_nested.items():
-                if not isinstance(nested_key, str) or not nested_key:
-                    continue
-                if not isinstance(nested_actor, hsm.Instance):
-                    continue
-                resolved = nested_key
-                if resolved in actors:
-                    suffix = 2
-                    while f"{resolved}_{suffix}" in actors:
-                        suffix += 1
-                    resolved = f"{resolved}_{suffix}"
-                actors[resolved] = nested_actor
         return actors
 
     @staticmethod
@@ -845,10 +844,10 @@ class Bot(hsm.Instance, abc.ABC):
             focus_candidates = Bot._processing_device_references(instance, stimulus, event.source)
             instance._processing_focus_candidates = focus_candidates
             active.set_attribute("bot.device.focus_candidate.count", len(focus_candidates))
-            active.set_attribute("bot.ability.count", len(Bot._lifecycle_abilities(instance)))
+            active.set_attribute("bot.ability.count", len(Bot._cognition_abilities(instance)))
             cognition_input = cognition.InputData(
                 stimulus=stimulus,
-                abilities=Bot._lifecycle_abilities(instance),
+                abilities=Bot._cognition_abilities(instance),
                 actors=Bot._dispatch_actors(instance),
                 focus=instance._focused_device if instance._focused_device in instance._devices else None,
                 focus_candidates=focus_candidates,
@@ -859,17 +858,7 @@ class Bot(hsm.Instance, abc.ABC):
         request_id = event.id
         assert request_id
         _ = await processing.start_operation(instance, request_id)
-        timer = _BotProcessingOperation()
-        _ = await _BotProcessingOperation.started(
-            ctx,
-            timer,
-            owner=instance,
-            request_id=request_id,
-            delay=instance._processing_timeout,
-            event_template=_BotProcessingTimedOutEvent,
-        )
-        cancel_id = _bot_cancel_operation_id(request_id, hsm.id(timer), instance)
-        _ = await processing.start_operation(instance, cancel_id)
+        timer: _BotProcessingOperation | None = None
         try:
             with span.operation(
                 "bot.body.cognition_dispatch",
@@ -887,9 +876,23 @@ class Bot(hsm.Instance, abc.ABC):
                     )
                 )
                 _ = hsm.dispatch(ctx, instance._cognition, input_event)
-            await asyncio.wrap_future(ctx.Done())
+            if not ctx.is_done():
+                timer = _BotProcessingOperation()
+                _ = await _BotProcessingOperation.started(
+                    ctx,
+                    timer,
+                    owner=instance,
+                    request_id=request_id,
+                    delay=instance._processing_timeout,
+                    event_template=_BotProcessingTimedOutEvent,
+                )
+                cancel_id = _bot_cancel_operation_id(request_id, hsm.id(timer), instance)
+                _ = await processing.start_operation(instance, cancel_id)
+            if not ctx.is_done():
+                await asyncio.wrap_future(ctx.Done())
         finally:
-            await hsm.stop(timer, hsm.Context())
+            if timer is not None:
+                await hsm.stop(timer, hsm.Context())
             # Drop only the turn id if still live. Cancel-token ops are owned by the cancel path
             # (_retire_bot_turn on success, cancel confirmation/timeout, or deactivation cleanup).
             if processing.active_operation(instance, request_id) is not None:
@@ -1101,7 +1104,7 @@ class Bot(hsm.Instance, abc.ABC):
         try:
             group_scope = _private_scope(lifetime)
             try:
-                _ = await hsm.started(group_scope, instance._attachments, instance._attachments.model)
+                _ = await bot.started(group_scope, instance._attachments, instance._attachments.model)
             except Exception as error:
                 if not _is_already_running_error(error):
                     raise
@@ -1111,6 +1114,8 @@ class Bot(hsm.Instance, abc.ABC):
             for device in instance._devices.values():
                 require_environment_scope(environment, device, participant="Device")
                 model = instance._model_for_device(device)
+                if model is None:
+                    raise RuntimeError(f"{type(device).__name__} has no lifecycle model.")
                 try:
                     _ = await bot.started(
                         environment,
@@ -1128,7 +1133,7 @@ class Bot(hsm.Instance, abc.ABC):
                 if model is None:
                     raise RuntimeError(f"{type(ability).__name__} has no lifecycle model.")
                 try:
-                    _ = await hsm.started(ability_scope, ability, model)
+                    _ = await bot.started(ability_scope, ability, model)
                 except Exception as error:
                     # Idempotent when already running under private scope; raise when the
                     # ability is already running under the environment instance map (would receive
@@ -1138,37 +1143,77 @@ class Bot(hsm.Instance, abc.ABC):
                     )
                     if not _is_already_running_error(error) or shares_environment_instances:
                         raise
-            await Bot._request_attachment_terminal(ctx, instance, event, kind="attach")
+            await Bot._request_attachment(ctx, instance, event, kind="attach")
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Public notification for observers; the private terminal drives topology.
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()),
-                    id=event.id,
-                    source=hsm.id(instance),
-                    target=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
+            failure = attachment.FailedData(
+                actor=instance,
+                kind=attachment.FailureKind.INITIALIZATION,
+                message="Bot activation preparation failed.",
             )
-            failure = _BotLifecycleTerminalData(request_id=event.id, kind="attach")
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _BotLifecycleFailedEvent.with_data(failure),
-                    id=failure.request_id,
-                    source=hsm.id(instance),
+                    attachment.AttachFailedEvent.with_data(failure),
+                    id=event.id,
+                    source=event.id,
                     target=hsm.id(instance),
                     metadata=dict(event.metadata),
                 ),
             )
 
     @staticmethod
-    def _matches_lifecycle_terminal(
+    def _dispatch_activating_done(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        """Publish the public activation terminal after private attachment completion."""
+
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                events.ActivatingDoneEvent.with_data(events.ActivatingDoneEventData()),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _dispatch_activating_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        """Publish the public activation failure after the private failure terminal."""
+
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _dispatch_deactivating_done(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        """Publish the public deactivation terminal after private cleanup completion."""
+
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                events.DeactivatingDoneEvent.with_data(events.DeactivatingDoneEventData()),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _matches_attachment_terminal(
         ctx: hsm.Context,
         instance: "Bot",
         event: hsm.Event[typing.Any],
@@ -1177,21 +1222,26 @@ class Bot(hsm.Instance, abc.ABC):
     ) -> bool:
         del ctx
         data = event.data
+        expected = (
+            (attachment.AttachCompleteData, attachment.FailedData)
+            if kind == "attach"
+            else (attachment.DetachedData, attachment.FailedData)
+        )
         return (
-            isinstance(data, _BotLifecycleTerminalData)
-            and data.kind == kind
-            and event.id == data.request_id
-            and event.source == hsm.id(instance)
+            isinstance(data, expected)
+            and data.actor is instance
+            and bool(event.id)
+            and event.source == event.id
             and event.target == hsm.id(instance)
         )
 
     @staticmethod
     def _matches_attach_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        return Bot._matches_lifecycle_terminal(ctx, instance, event, kind="attach")
+        return Bot._matches_attachment_terminal(ctx, instance, event, kind="attach")
 
     @staticmethod
     def _matches_detach_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        return Bot._matches_lifecycle_terminal(ctx, instance, event, kind="detach")
+        return Bot._matches_attachment_terminal(ctx, instance, event, kind="detach")
 
     @staticmethod
     def _matches_cleanup_done(
@@ -1307,7 +1357,7 @@ class Bot(hsm.Instance, abc.ABC):
         del ctx, event
         instance._device_source_refs = {}
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "Bot",
         hsm.attribute(_OWNED_DEVICES_ATTRIBUTE),
         hsm.initial(hsm.target("inactive")),
@@ -1333,13 +1383,15 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.target("../activation_cleanup"),
             ),
             hsm.transition(
-                hsm.on(_BotLifecycleCompletedEvent),
+                hsm.on(attachment.AttachCompleteEvent),
                 hsm.guard(_matches_attach_terminal),
+                hsm.effect(_dispatch_activating_done),
                 hsm.target("../active"),
             ),
             hsm.transition(
-                hsm.on(_BotLifecycleFailedEvent),
+                hsm.on(attachment.AttachFailedEvent),
                 hsm.guard(_matches_attach_terminal),
+                hsm.effect(_dispatch_activating_failed),
                 hsm.target("../activation_cleanup"),
             ),
         ),
@@ -1372,7 +1424,7 @@ class Bot(hsm.Instance, abc.ABC):
                 hsm.target("../reboot_deactivating"),
             ),
             hsm.transition(
-                hsm.on(_BotLifecycleCompletedEvent, _BotLifecycleFailedEvent),
+                hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
                 hsm.guard(_matches_detach_terminal),
                 hsm.target("../deactivation_cleanup"),
             ),
@@ -1393,6 +1445,7 @@ class Bot(hsm.Instance, abc.ABC):
             hsm.transition(
                 hsm.on(_BotCleanupDoneEvent),
                 hsm.guard(_matches_deactivation_cleanup_done),
+                hsm.effect(_dispatch_deactivating_done),
                 hsm.target("../inactive"),
             ),
             hsm.transition(
@@ -1404,12 +1457,12 @@ class Bot(hsm.Instance, abc.ABC):
             "reboot_deactivating",
             hsm.activity(_deactivate_activity),
             hsm.transition(
-                hsm.on(_BotLifecycleCompletedEvent),
+                hsm.on(attachment.DetachedEvent),
                 hsm.guard(_matches_detach_terminal),
                 hsm.target("../reboot_cleanup_preserve"),
             ),
             hsm.transition(
-                hsm.on(_BotLifecycleFailedEvent),
+                hsm.on(attachment.DetachFailedEvent),
                 hsm.guard(_matches_detach_terminal),
                 hsm.target("../reboot_cleanup_reset"),
             ),

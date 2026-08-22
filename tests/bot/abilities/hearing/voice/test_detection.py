@@ -4,6 +4,7 @@ from bot.abilities.hearing import voice
 
 import asyncio
 import collections.abc
+import datetime
 import typing
 from typing import override
 
@@ -17,24 +18,22 @@ _VOICE_DETECTION_MODEL = "/VoiceDetectionLifecycle/attached/behavior"
 _RECORDING_VOICE_DETECTION_MODEL = "/RecordingVoiceDetectionLifecycle/attached/behavior"
 
 
-class FixedVoiceDetector(voice.detection.VoiceDetector):
+class FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     @override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
         return voice.detection.ApplyData(
-            segments=(
-                voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),
-            )
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),)
         )
 
 
-class NoVoiceDetector(voice.detection.VoiceDetector):
+class NoVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     @override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
         return voice.detection.ApplyData(segments=())
 
 
-class SlowVoiceDetector(voice.detection.VoiceDetector):
+class SlowVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     release: asyncio.Event
 
     def __init__(self, release: asyncio.Event) -> None:
@@ -45,13 +44,11 @@ class SlowVoiceDetector(voice.detection.VoiceDetector):
         del input
         _ = await self.release.wait()
         return voice.detection.ApplyData(
-            segments=(
-                voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),
-            )
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),)
         )
 
 
-class RecordingDelayedVoiceDetector(voice.detection.VoiceDetector):
+class RecordingDelayedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     calls: list[bytes]
     release_first: asyncio.Event
 
@@ -77,21 +74,21 @@ class RecordingDelayedVoiceDetector(voice.detection.VoiceDetector):
         )
 
 
-class WrongVoiceDetector(voice.detection.VoiceDetector):
+class WrongVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     @override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
         return invalid_value(voice.detection.ApplyData, "not voice detection apply data")
 
 
-class FailingVoiceDetector(voice.detection.VoiceDetector):
+class FailingVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     @override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
         del input
         raise RuntimeError("provider unavailable")
 
 
-class VoiceThenInvalidOutputDetector(voice.detection.VoiceDetector):
+class VoiceThenInvalidOutputClassifier(voice.detection.VoiceActivityClassifier):
     call_count: int
 
     def __init__(self) -> None:
@@ -103,14 +100,12 @@ class VoiceThenInvalidOutputDetector(voice.detection.VoiceDetector):
         self.call_count += 1
         if self.call_count == 1:
             return voice.detection.ApplyData(
-                segments=(
-                    voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),
-                )
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),)
             )
         return invalid_value(voice.detection.ApplyData, "not voice detection apply data")
 
 
-class VoiceThenFailingDetector(voice.detection.VoiceDetector):
+class VoiceThenFailingClassifier(voice.detection.VoiceActivityClassifier):
     call_count: int
 
     def __init__(self) -> None:
@@ -122,9 +117,7 @@ class VoiceThenFailingDetector(voice.detection.VoiceDetector):
         self.call_count += 1
         if self.call_count == 1:
             return voice.detection.ApplyData(
-                segments=(
-                    voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),
-                )
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.87),)
             )
         raise RuntimeError("provider unavailable")
 
@@ -136,7 +129,7 @@ class RecordingVoiceDetection(voice.detection.VoiceDetection):
     # Terminal recorder may mirror Start into ``outputs``; keep a list for that seam.
     outputs: list[object]
 
-    def __init__(self, *, classifier: voice.detection.VoiceDetector) -> None:
+    def __init__(self, *, classifier: voice.detection.VoiceActivityClassifier) -> None:
         super().__init__(classifier=classifier)
         self.starts = []
         self.ends = []
@@ -201,6 +194,27 @@ def test_voice_detection_apply_data_records_segments() -> None:
     assert detection.segments[0].confidence == 0.87
 
 
+def test_voice_detection_directed_operation_replies_only_to_its_one_shot_actor() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        detection = voice.detection.VoiceDetection(classifier=FixedVoiceActivityClassifier())
+        await start_ability_tree(None, detection)
+        terminal = await abilities.run_terminal_operation(
+            detection.context(),
+            child=detection,
+            request=detection.input_event.with_data_and_id(b"audio", "voice-detection:directed"),
+            terminals=(detection.output_event, detection.failed_event),
+            timeout=datetime.timedelta.max,
+        )
+        return terminal, hsm.id(detection)
+
+    terminal, detection_id = asyncio.run(run())
+
+    assert terminal.id == "voice-detection:directed"
+    assert terminal.source == detection_id
+    assert terminal.target and terminal.target != detection_id
+    assert isinstance(terminal.data, voice.detection.ApplyData)
+
+
 def test_voice_detection_segment_rejects_invalid_span() -> None:
     with pytest.raises(ValueError):
         _ = voice.detection.VoiceDetectionSegment(start_seconds=1.0, end_seconds=0.5)
@@ -217,7 +231,7 @@ def test_voice_detection_segment_rejects_invalid_confidence() -> None:
 
 def test_voice_detection_emits_start_on_voice() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[voice.detection.EndData]]:
-        ability = RecordingVoiceDetection(classifier=FixedVoiceDetector())
+        ability = RecordingVoiceDetection(classifier=FixedVoiceActivityClassifier())
         await start_ability_tree(None, ability)
 
         _ = await ability.apply(b"audio")
@@ -271,7 +285,7 @@ def test_voice_detection_model_tracks_detection_lifecycle() -> None:
 
 def test_voice_detection_silence_emits_no_boundary_while_idle() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[voice.detection.EndData]]:
-        ability = RecordingVoiceDetection(classifier=NoVoiceDetector())
+        ability = RecordingVoiceDetection(classifier=NoVoiceActivityClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"silence"))
@@ -287,18 +301,17 @@ def test_voice_detection_silence_emits_no_boundary_while_idle() -> None:
 
 def test_voice_detection_emits_start_then_end_across_clips() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[voice.detection.EndData]]:
-        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceDetector([], asyncio.Event()))
-        # Use detectors that alternate via input identity
-        class VoiceThenSilence(voice.detection.VoiceDetector):
+        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceActivityClassifier([], asyncio.Event()))
+
+        # Use classifiers that alternate via input identity
+        class VoiceThenSilence(voice.detection.VoiceActivityClassifier):
             @override
             async def classify(self, input: bytes) -> voice.detection.ApplyData:
                 if input == b"silence":
                     return voice.detection.ApplyData(segments=())
                 return voice.detection.ApplyData(
                     segments=(
-                        voice.detection.VoiceDetectionSegment(
-                            start_seconds=0.1, end_seconds=0.9, confidence=0.8
-                        ),
+                        voice.detection.VoiceDetectionSegment(start_seconds=0.1, end_seconds=0.9, confidence=0.8),
                     )
                 )
 
@@ -319,7 +332,7 @@ def test_voice_detection_emits_start_then_end_across_clips() -> None:
 
 def test_voice_detection_does_not_reemit_start_while_voice_continues() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[voice.detection.EndData]]:
-        ability = RecordingVoiceDetection(classifier=FixedVoiceDetector())
+        ability = RecordingVoiceDetection(classifier=FixedVoiceActivityClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"a"))
@@ -337,7 +350,7 @@ def test_voice_detection_does_not_reemit_start_while_voice_continues() -> None:
 def test_voice_detection_public_start_event_does_not_complete_in_flight_detection() -> None:
     async def run() -> None:
         release = asyncio.Event()
-        ability = RecordingVoiceDetection(classifier=SlowVoiceDetector(release))
+        ability = RecordingVoiceDetection(classifier=SlowVoiceActivityClassifier(release))
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"audio"))
@@ -352,8 +365,7 @@ def test_voice_detection_public_start_event_does_not_complete_in_flight_detectio
 
         release.set()
         await wait_until(
-            lambda: ability.starts[-1:]
-            == [voice.detection.StartData(start_seconds=0.0, confidence=0.87)]
+            lambda: ability.starts[-1:] == [voice.detection.StartData(start_seconds=0.0, confidence=0.87)]
             or len(ability.starts) >= 2
         )
 
@@ -367,7 +379,7 @@ def test_voice_detection_defers_repeated_input_while_detecting() -> None:
     async def run() -> tuple[list[bytes], list[voice.detection.StartData], str]:
         release_first = asyncio.Event()
         calls: list[bytes] = []
-        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceDetector(calls, release_first))
+        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceActivityClassifier(calls, release_first))
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"first"))
@@ -394,7 +406,7 @@ def test_voice_detection_rejects_input_event_with_wrong_payload_type() -> None:
     async def run() -> tuple[list[bytes], str]:
         release_first = asyncio.Event()
         calls: list[bytes] = []
-        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceDetector(calls, release_first))
+        ability = RecordingVoiceDetection(classifier=RecordingDelayedVoiceActivityClassifier(calls, release_first))
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(
@@ -412,7 +424,7 @@ def test_voice_detection_rejects_input_event_with_wrong_payload_type() -> None:
 
 def test_voice_detection_routes_wrong_output_type_to_failure() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[abilities.FailureData]]:
-        ability = RecordingVoiceDetection(classifier=WrongVoiceDetector())
+        ability = RecordingVoiceDetection(classifier=WrongVoiceActivityClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"audio"))
@@ -431,9 +443,9 @@ def test_voice_detection_routes_wrong_output_type_to_failure() -> None:
     assert "apply schema" in failures[0].message
 
 
-def test_voice_detection_routes_detector_exception_to_failure() -> None:
+def test_voice_detection_routes_classifier_exception_to_failure() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[abilities.FailureData]]:
-        ability = RecordingVoiceDetection(classifier=FailingVoiceDetector())
+        ability = RecordingVoiceDetection(classifier=FailingVoiceActivityClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"audio"))
@@ -454,7 +466,7 @@ def test_voice_detection_routes_detector_exception_to_failure() -> None:
 
 def test_voice_detection_preserves_present_state_after_wrong_output_type() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[abilities.FailureData]]:
-        ability = RecordingVoiceDetection(classifier=VoiceThenInvalidOutputDetector())
+        ability = RecordingVoiceDetection(classifier=VoiceThenInvalidOutputClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"voice"))
@@ -472,9 +484,9 @@ def test_voice_detection_preserves_present_state_after_wrong_output_type() -> No
     assert "apply schema" in failures[0].message
 
 
-def test_voice_detection_preserves_present_state_after_detector_exception() -> None:
+def test_voice_detection_preserves_present_state_after_classifier_exception() -> None:
     async def run() -> tuple[str, list[voice.detection.StartData], list[abilities.FailureData]]:
-        ability = RecordingVoiceDetection(classifier=VoiceThenFailingDetector())
+        ability = RecordingVoiceDetection(classifier=VoiceThenFailingClassifier())
         await start_ability_tree(None, ability)
 
         await hsm.dispatch(None, ability, ability.input_event.with_data(b"voice"))
@@ -493,10 +505,10 @@ def test_voice_detection_preserves_present_state_after_detector_exception() -> N
 
 
 def test_voice_detection_is_concrete_ability() -> None:
-    ability = voice.detection.VoiceDetection(classifier=FixedVoiceDetector())
+    ability = voice.detection.VoiceDetection(classifier=FixedVoiceActivityClassifier())
 
     assert isinstance(ability, abilities.Ability)
-    assert issubclass(voice.detection.VoiceDetector, abilities.Classifier)
+    assert issubclass(voice.detection.VoiceActivityClassifier, abilities.Classifier)
     assert voice.detection.VoiceDetection.output_data_type is voice.detection.ApplyData
     assert voice.detection.VoiceDetection.output_event is voice.detection.OutputEvent
     assert voice.detection.VoiceDetection.start_event is voice.detection.StartEvent

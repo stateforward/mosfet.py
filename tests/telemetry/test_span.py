@@ -6,6 +6,7 @@ import json
 import pathlib
 import queue as queue_module
 import threading
+import typing
 
 import bot.telemetry
 import hsm
@@ -30,6 +31,12 @@ def _spans() -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def _attributes(record: dict[str, object]) -> dict[str, object]:
+    attributes = record["attributes"]
+    assert isinstance(attributes, dict)
+    return typing.cast(dict[str, object], attributes)
+
+
 @pytest.fixture(autouse=True)
 def _reset_telemetry(
     tmp_path: pathlib.Path,
@@ -40,6 +47,9 @@ def _reset_telemetry(
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
     monkeypatch.delenv("BOT_OTEL_SPAN_FILE", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
 
     # Silence set-once warnings; emission uses the module-retained providers.
     def _noop_set_logger_provider(_provider: object) -> None:
@@ -397,8 +407,8 @@ def test_operation_keeps_a_recorded_failure_on_clean_exit() -> None:
 
     record = _spans()[0]
     assert record["status"] == "ERROR"
-    assert record["attributes"]["bot.outcome"] == "failed"
-    assert record["attributes"]["bot.failure.kind"] == "decode_failed"
+    assert _attributes(record)["bot.outcome"] == "failed"
+    assert _attributes(record)["bot.failure.kind"] == "decode_failed"
 
 
 def test_record_current_failure_marks_the_enclosing_operation() -> None:
@@ -412,8 +422,8 @@ def test_record_current_failure_marks_the_enclosing_operation() -> None:
         span.record_current_failure("SpeechDecodeFailed")
 
     record = _spans()[0]
-    assert record["attributes"]["bot.outcome"] == "failed"
-    assert record["attributes"]["bot.failure.kind"] == "speech_decode_failed"
+    assert _attributes(record)["bot.outcome"] == "failed"
+    assert _attributes(record)["bot.failure.kind"] == "speech_decode_failed"
 
 
 def test_operation_still_closes_ok_without_a_recorded_failure() -> None:
@@ -426,7 +436,7 @@ def test_operation_still_closes_ok_without_a_recorded_failure() -> None:
     ):
         pass
 
-    assert _spans()[0]["attributes"]["bot.outcome"] == "ok"
+    assert _attributes(_spans()[0])["bot.outcome"] == "ok"
 
 
 def test_unstamped_event_stays_in_the_ambient_trace() -> None:
@@ -469,5 +479,5 @@ def test_operation_records_cancellation_as_its_own_outcome() -> None:
             raise asyncio.CancelledError
 
     record = _spans()[0]
-    assert record["attributes"]["bot.outcome"] == "failed"
-    assert record["attributes"]["bot.failure.kind"] == "cancelled"
+    assert _attributes(record)["bot.outcome"] == "failed"
+    assert _attributes(record)["bot.failure.kind"] == "cancelled"

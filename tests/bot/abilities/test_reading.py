@@ -11,6 +11,7 @@ import datetime
 import typing
 
 import hsm
+import bot
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
@@ -159,7 +160,7 @@ class AttachmentOwner(hsm.Instance):
         }:
             instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "ReadingAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -289,7 +290,7 @@ def test_reading_waits_for_aggregate_attachment_completion(monkeypatch: pytest.M
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -342,7 +343,7 @@ def test_reading_reports_correlated_failure_when_attachment_group_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         started = hsm.started
 
         async def fail_group_start[T: hsm.Instance](
@@ -382,7 +383,7 @@ def test_reading_reports_correlated_attach_failure_when_reply_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         started = hsm.started
 
         async def fail_reply_start[T: hsm.Instance](
@@ -422,7 +423,7 @@ def test_reading_reports_correlated_detach_failure_when_reply_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -479,7 +480,7 @@ def test_reading_rejects_replayed_group_terminal_when_operation_id_is_reused(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=owner), "reused-id"),
@@ -557,7 +558,7 @@ def test_reading_rolls_back_owner_after_aggregate_attachment_failure(monkeypatch
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -640,6 +641,34 @@ def test_reading_apply_runs_text_route_to_encoded_output() -> None:
     assert classification_calls == [vision.classification.InputData(kind="text", content="hello")]
     assert text_calls == ["hello"]
     assert encoder_calls == [reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)]
+
+
+def test_reading_directed_operation_preserves_requester_across_nested_children() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        reading_ability = stub_reading(
+            visual_classifier=StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99)),
+            text_decoder=StubTextDecoder(),
+            output_encoder=StubOutputEncoder(),
+        )
+        await start_ability_tree(None, reading_ability)
+        terminal = await abilities.run_terminal_operation(
+            reading_ability.context(),
+            child=reading_ability,
+            request=reading_ability.input_event.with_data_and_id(
+                reading.InputData(kind="text", content="hello"),
+                "reading:directed",
+            ),
+            terminals=(reading_ability.output_event, reading_ability.failed_event),
+            timeout=datetime.timedelta.max,
+        )
+        return terminal, hsm.id(reading_ability)
+
+    terminal, reading_id = asyncio.run(run())
+
+    assert terminal.id == "reading:directed"
+    assert terminal.source == reading_id
+    assert terminal.target and terminal.target != reading_id
+    assert terminal.data == reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)
 
 
 def test_reading_ignores_stale_terminal_event_for_previous_apply_operation() -> None:
@@ -756,7 +785,7 @@ def test_reading_detach_timeout_reports_failure_and_preserves_owner_for_retry(
             image_decoder=StubImageDecoder(),
             output_encoder=StubOutputEncoder(),
         )
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -803,7 +832,7 @@ def test_reading_can_reattach_after_successful_group_detach() -> None:
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(

@@ -496,7 +496,7 @@ class CognitionRecorder(abilities.Ability[cognition_input.InputData, object]):
         if isinstance(data, cognition_input.InputData):
             instance.turns.append(data)
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "CognitionRecorder",
         hsm.initial(hsm.target("/CognitionRecorder/idle")),
         hsm.state("idle", hsm.transition(hsm.on(input_event), hsm.effect(_record))),

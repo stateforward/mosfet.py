@@ -5,27 +5,31 @@ elevate playout as ``environment.sound``. An optional ``Speaker`` may still be
 injected for mouth identity / later mouth wiring; playout does not require it.
 On playout entry, Speaking delivers a motor-command copy (efference) directly to
 registered Listening peers — not via body fan-out or environment broadcast.
-Conversation is separate and may invoke Speaking later; cognition can select
-``speaking.input`` directly as an output ability.
+Conversation is separate and may invoke Speaking later; cognition does not select
+``speaking.input`` directly. A behavior/topology route owns that dispatch.
 """
 
 from __future__ import annotations
 
 from .. import ability
 from .. import encoding
+from .. import processing
 
 import datetime
 import collections.abc
 import dataclasses
 import typing
+import uuid
 
 import hsm
-from bot import event_schema
+import bot
 import pydantic
 
 from bot import lifecycle
+from bot import telemetry
 from bot.protocols import attachment
 from bot.telemetry import observer
+from bot.telemetry import span
 
 if typing.TYPE_CHECKING:
     from bot.devices.audio.speaker import Speaker
@@ -33,6 +37,7 @@ if typing.TYPE_CHECKING:
 _DEFAULT_SAMPLE_RATE_HZ = 24_000
 _DEFAULT_CHANNELS = 1
 _RECORDING_TIMEOUT = datetime.timedelta(seconds=5)
+_ENCODING_TIMEOUT = datetime.timedelta(seconds=5)
 ConversationTarget: typing.TypeAlias = ability.Ability[typing.Any, typing.Any]
 
 _LINEAR_PCM_BYTES_PER_SAMPLE = 2
@@ -169,10 +174,10 @@ _ConversationRecordedEvent = hsm.Event[OutputData](
     schema=OutputData,
 )
 
-# Selectable by Processing / cognition: mark the ability's one front door offerable.
+# Speaking is reached through behavior/topology wiring, not as a direct cognition tool.
 InputEvent = hsm.Event[InputData](
     name="bot.ability.speaking.input",
-    kind=event_schema.EventKind,
+    kind=hsm.EventKind,
     schema=InputData,
 )
 
@@ -338,7 +343,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
     Constructor-inject a TTS ``encoder``, optional ``speaker`` (mouth identity / future mouth
     wiring), and optional ``listening`` peer(s) for the motor-command copy on playout entry.
     Playout broadcasts ``environment.sound`` from this ability; efference is delivered only to
-    registered Listening targets. Cognition selects ``bot.ability.speaking.input``.
+    registered Listening targets. Cognition does not select ``bot.ability.speaking.input`` directly;
+    a behavior/topology route must dispatch it.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -424,7 +430,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             model = type(speaker).model
             if model is None:
                 raise RuntimeError(f"{type(speaker).__name__} has no lifecycle model.")
-            _ = await hsm.started(self.context(), speaker, model)
+            _ = await bot.started(self.context(), speaker, model)
             self._speaker_started = True
         return instance
 
@@ -452,8 +458,19 @@ class Speaking(ability.Ability[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source,
         )
-        _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+        with span.operation(
+            "bot.speaking.terminal",
+            scope="bot.abilities.speaking",
+            component="speaking",
+            stage="terminal",
+            context=telemetry.event_context(event),
+        ):
+            if event.source and event.source != hsm.id(instance):
+                _ = hsm.dispatch_to(instance.context(), terminal, event.source)
+            else:
+                _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     @staticmethod
     async def _record_output(
@@ -464,45 +481,30 @@ class Speaking(ability.Ability[InputData, OutputData]):
         data = event.data
         assert isinstance(data, OutputData)
         try:
-            from ..communication.conversation import conversation as conversation_module
+            from ..communication import conversation
 
             for target in instance._conversation_targets:
                 operation_id = f"{event.id or hsm.id(instance)}:conversation:{hsm.id(target)}"
-                waiter = ability.Ability.prepare_child_terminal_wait(instance, target, operation_id)
-                try:
-                    message = conversation_module.Message(
-                        sequence=0,
-                        direction="outbound",
-                        source_ids=frozenset(),
-                        target_ids=frozenset(),
-                        content=data.text,
-                        content_type="text/plain",
-                        provenance=conversation_module.MessageProvenance(event=conversation_module.AppendEvent.name),
-                    )
-                    await hsm.dispatch(
-                        ctx,
-                        target,
-                        dataclasses.replace(
-                            conversation_module.AppendEvent.with_data(
-                                conversation_module.AppendData(message=message)
-                            ),
-                            id=operation_id,
-                            source=hsm.id(instance),
-                            target=hsm.id(target),
-                            metadata=dict(event.metadata),
-                        ),
-                    )
-                    terminal = await waiter
-                    if (
-                        terminal.name != conversation_module.OutputEvent.name
-                        or terminal.id != operation_id
-                        or terminal.source != hsm.id(target)
-                        or terminal.target != hsm.id(instance)
-                        or not isinstance(terminal.data, conversation_module.Messages)
-                    ):
-                        raise RuntimeError("Conversation outbound append returned an unrelated terminal.")
-                finally:
-                    ability.Ability.clear_child_terminal_wait(instance, target, operation_id)
+                message = conversation.Message(
+                    sequence=0,
+                    direction="outbound",
+                    source_ids=frozenset(),
+                    target_ids=frozenset(),
+                    content=data.text,
+                    content_type="text/plain",
+                    provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
+                )
+                await hsm.dispatch(
+                    ctx,
+                    target,
+                    dataclasses.replace(
+                        conversation.AppendEvent.with_data(conversation.AppendData(message=message)),
+                        id=operation_id,
+                        source=hsm.id(instance),
+                        target=hsm.id(target),
+                        metadata=dict(event.metadata),
+                    ),
+                )
         except Exception as error:
             Speaking._dispatch_speak_failure(ctx, instance, event, error)
             return
@@ -512,6 +514,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             dataclasses.replace(
                 _ConversationRecordedEvent.with_data(data),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
@@ -524,14 +528,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
         return _RECORDING_TIMEOUT
 
     @staticmethod
-    def _dispatch_recording_timeout(
-        ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]
-    ) -> None:
+    def _dispatch_recording_timeout(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         failure = ability.FailureData(message="Conversation history recording timed out.")
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=event.id or None,
             source=hsm.id(instance),
+            target=event.source,
             metadata=dict(event.metadata),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
@@ -540,13 +543,27 @@ class Speaking(ability.Ability[InputData, OutputData]):
     def _dispatch_failure(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
+        if processing.active_operation(instance, event.id) is not None:
+            processing.finish_operation(ctx, instance, event.id)
         terminal = dataclasses.replace(
             instance.failed_event.with_data(data),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source,
         )
-        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        with span.operation(
+            "bot.speaking.terminal",
+            scope="bot.abilities.speaking",
+            component="speaking",
+            stage="terminal",
+            context=telemetry.event_context(event),
+        ) as active:
+            span.record_failure(active, "speaking_failed")
+            if event.source and event.source != hsm.id(instance):
+                _ = hsm.dispatch_to(instance.context(), terminal, event.source)
+            else:
+                _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _dispatch_speak_failure(
@@ -561,6 +578,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             dataclasses.replace(
                 _SpeakFailedEvent.with_data(ability.FailureData(message=str(error))),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
@@ -571,6 +590,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
         data = event.data
         assert isinstance(data, InputData)
+        operation_id = event.id or uuid.uuid4().hex
+        _ = await processing.start_operation(instance, operation_id)
         try:
             text = data.text.strip()
             if not text:
@@ -593,10 +614,60 @@ class Speaking(ability.Ability[InputData, OutputData]):
             instance,
             dataclasses.replace(
                 _SpeechEncodedEvent.with_data(encoded),
-                id=event.id or None,
+                id=operation_id,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
+
+    @staticmethod
+    def _has_current_encoding(
+        ctx: hsm.Context,
+        instance: "Speaking",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return isinstance(event.data, _EncodedData) and processing.active_operation(instance, event.id) is not None
+
+    @staticmethod
+    def _finish_encoding(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        processing.finish_operation(ctx, instance, event.id)
+
+    @staticmethod
+    def _encoding_timeout_delay(
+        ctx: hsm.Context,
+        instance: "Speaking",
+        event: hsm.Event[typing.Any],
+    ) -> datetime.timedelta:
+        del ctx, instance, event
+        return _ENCODING_TIMEOUT
+
+    @staticmethod
+    def _dispatch_encoding_timeout(
+        ctx: hsm.Context,
+        instance: "Speaking",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del event
+        operation_id = processing.active_operation_id(instance)
+        if operation_id is None:
+            return
+        processing.finish_operation(ctx, instance, operation_id)
+        failure = ability.FailureData(message="Speech encoding timed out.")
+        with span.operation(
+            "bot.speaking.terminal",
+            scope="bot.abilities.speaking",
+            component="speaking",
+            stage="terminal",
+        ) as active:
+            span.record_failure(active, "encoding_timeout")
+            terminal = dataclasses.replace(
+                instance.failed_event.with_data_and_id(failure, operation_id),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            )
+            _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _issue_efference_copy(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -688,11 +759,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
             dataclasses.replace(
                 _SpeakCompletedEvent.with_data(product),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Speaking",
         hsm.initial(hsm.target("idle")),
         hsm.state(
@@ -713,13 +786,19 @@ class Speaking(ability.Ability[InputData, OutputData]):
             hsm.activity(_run_encoding_activity),
             hsm.transition(
                 hsm.on(_SpeechEncodedEvent),
-                hsm.guard(_has_encoded_speech),
+                hsm.guard(_has_current_encoding),
+                hsm.effect(_finish_encoding),
                 hsm.target("../playing"),
             ),
             hsm.transition(
                 hsm.on(_SpeakFailedEvent),
                 hsm.guard(_has_speak_failure),
                 hsm.effect(_dispatch_failure),
+                hsm.target("../idle"),
+            ),
+            hsm.transition(
+                hsm.after(_encoding_timeout_delay),
+                hsm.effect(_dispatch_encoding_timeout),
                 hsm.target("../idle"),
             ),
         ),

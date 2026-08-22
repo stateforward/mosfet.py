@@ -7,6 +7,7 @@ from bot.environment import SoundData, SoundEvent
 
 import asyncio
 import dataclasses
+import datetime
 import typing
 
 import hsm
@@ -17,6 +18,32 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_n
 
 def test_reasoning_never_uses_metadata_for_coordination() -> None:
     assert_metadata_is_not_coordination(reasoning_module)
+
+
+def test_reasoning_returns_directed_terminal_to_one_shot_operation() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        child = cognition.Reasoning(processor=EmptyProcessor())
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, child)
+        operation_id = "reasoning-terminal-operation"
+        request = reasoning_input(
+            SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")),
+            operation_id=operation_id,
+        )
+        return await ability.run_terminal_operation(
+            ctx,
+            child=child,
+            request=child.input_event.with_data_and_id(request, operation_id),
+            terminals=(child.output_event, child.failed_event),
+            timeout=datetime.timedelta(seconds=1),
+        )
+
+    terminal = asyncio.run(run())
+
+    assert terminal.name == cognition.reasoning.OutputEvent.name
+    assert terminal.id == "reasoning-terminal-operation"
+    assert terminal.source
+    assert terminal.target
 
 
 class EmptyProcessor(processing.Processor):

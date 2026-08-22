@@ -40,3 +40,10 @@ global API slot.
 **User-approved:** `opentelemetry-sdk>=1.42.1` plus a matching
 `opentelemetry-api>=1.42.1` floor (approved together with the sdk addition in
 `pyproject.toml`).
+
+## Dependency floor: OTLP gRPC span exporter
+
+**User-approved:** `opentelemetry-exporter-otlp-proto-grpc>=1.42.1,<2.0.0`
+(same 1.42 floor as api/sdk). Transitive `grpcio` is the Control subscribe
+transport. Dashboard live ingest is OTLP gRPC on `:4317`; JSONL file export
+remains the local recording artifact.

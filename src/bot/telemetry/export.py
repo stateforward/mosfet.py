@@ -1,4 +1,4 @@
-"""Local JSONL OpenTelemetry exporters (log records and spans) for development."""
+"""Local JSONL OpenTelemetry exporters for development recording."""
 
 from __future__ import annotations
 
@@ -81,10 +81,7 @@ def _relative_parts(path: pathlib.Path) -> tuple[str, ...]:
     try:
         relative = candidate.relative_to(cwd)
     except ValueError as error:
-        message = (
-            "export path must resolve under the process working directory "
-            + f"({cwd}); got {candidate}"
-        )
+        message = "export path must resolve under the process working directory " + f"({cwd}); got {candidate}"
         raise ValueError(message) from error
     parts = relative.parts
     if not parts or parts[-1] in {"", ".", ".."} or any(part == ".." for part in parts):
@@ -299,3 +296,4 @@ class JsonlFileSpanExporter(SpanExporter):
 
 
 __all__ = ["JsonlFileLogRecordExporter", "JsonlFileSpanExporter"]
+

@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
   "opentelemetry-api>=1.42.1,<2.0.0",
   "opentelemetry-sdk>=1.42.1,<2.0.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.42.1,<2.0.0",
   "pydantic>=2.10.0,<3.0.0",
   "stateforward-hsm>=1.3.2,<1.4",
   "starlark-go>=1.0.1,<2.0.0",
@@ -35,6 +36,7 @@ members = ["src/providers/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "examples/listen_speak_bot/src"]
 markers = [
   "live: hits real external providers (requires API keys; skipped by default in CI without keys)",
 ]
@@ -52,7 +54,7 @@ include = [
   "src/bot",
   "tests",
 ]
-extraPaths = ["src", "."]
+extraPaths = ["src", ".", "examples/listen_speak_bot/src"]
 pythonVersion = "3.13"
 reportImportCycles = false
 # Single underscore is private/protected to the declaring class/module. Outside access is an error

@@ -6,6 +6,7 @@ import types
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.protocols.yamux.events import (
@@ -312,9 +313,7 @@ def _data_frame_is_ack_only_for_admission(admission: _StreamAdmission, data: Rec
     )
 
 
-def _window_frame_is_ack_only_for_admission(
-    admission: _StreamAdmission, data: ReceiveWindowUpdateFrameData
-) -> bool:
+def _window_frame_is_ack_only_for_admission(admission: _StreamAdmission, data: ReceiveWindowUpdateFrameData) -> bool:
     flags = _flags(data.flags)
     return (
         admission.awaiting_ack
@@ -387,11 +386,7 @@ def _can_send_data(ctx: hsm.Context, instance: "Session", event: hsm.Event[typin
     if data is None:
         return False
     admission = _session_admission(instance, data.stream_id)
-    return (
-        admission is not None
-        and _admission_is_writable(admission)
-        and len(data.payload) <= admission.send_window
-    )
+    return admission is not None and _admission_is_writable(admission) and len(data.payload) <= admission.send_window
 
 
 def _send_data_unknown_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -415,11 +410,7 @@ def _send_data_exhausts_window(ctx: hsm.Context, instance: "Session", event: hsm
     if data is None:
         return False
     admission = _session_admission(instance, data.stream_id)
-    return (
-        admission is not None
-        and _admission_is_writable(admission)
-        and len(data.payload) > admission.send_window
-    )
+    return admission is not None and _admission_is_writable(admission) and len(data.payload) > admission.send_window
 
 
 def _can_close_stream(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -822,9 +813,7 @@ class Session(hsm.Instance):
         initial_send_window: int = INITIAL_STREAM_WINDOW,
         initial_receive_window: int | None = None,
     ) -> Stream:
-        receive_window = (
-            self._initial_stream_window if initial_receive_window is None else initial_receive_window
-        )
+        receive_window = self._initial_stream_window if initial_receive_window is None else initial_receive_window
         stream = Stream(
             stream_id=stream_id,
             initial_send_window=initial_send_window,
@@ -924,7 +913,7 @@ class Session(hsm.Instance):
         del ctx
         startup = typing.cast(
             collections.abc.Coroutine[typing.Any, typing.Any, Stream],
-            hsm.started(self.context(), stream, stream.model),
+            bot.started(self.context(), stream, stream.model),
         )
         task = asyncio.Task(startup, loop=asyncio.get_running_loop(), eager_start=True)
         if not task.done():
@@ -1222,7 +1211,7 @@ class Session(hsm.Instance):
     def _active_streams_exist(self) -> bool:
         return any(not _admission_is_terminal(admission) for admission in self._stream_admission.values())
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "Session",
         hsm.initial(hsm.target("/Session/connected/open")),
         hsm.state(

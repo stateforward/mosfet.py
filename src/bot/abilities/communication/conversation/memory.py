@@ -262,8 +262,7 @@ def relationship_context_ref(
             allow_empty=field_name == "target_ids",
         )
         return frozenset(
-            identity if isinstance(identity, str) else value.normalize_embedding(identity)
-            for identity in normalized
+            identity if isinstance(identity, str) else value.normalize_embedding(identity) for identity in normalized
         )
 
     groups = value.identity_groups(
@@ -294,8 +293,7 @@ def conversation_memory_insert_input(
     clause = insert(table).values(
         memory_id=memory_id or uuid.uuid4().hex,
         scope=normalized_scope,
-        context_ref=context_ref
-        or relationship_context_ref(source_ids=item.source_ids, target_ids=item.target_ids),
+        context_ref=context_ref or relationship_context_ref(source_ids=item.source_ids, target_ids=item.target_ids),
         subject_ref=None,
         kind="conversation",
         sensitivity="standard",

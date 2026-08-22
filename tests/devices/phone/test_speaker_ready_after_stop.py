@@ -6,6 +6,7 @@ import asyncio
 import typing
 
 import hsm
+import bot
 
 from bot.devices import audio
 from bot.devices.phone import phone as phone_device
@@ -46,7 +47,7 @@ def test_receiver_requires_attach_and_started_speaker() -> None:
         unattached = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         observation.target = target
         attached_unstarted = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        _ = await hsm.started(environment, speaker, typing.cast(hsm.Model, audio.Speaker.model))
+        _ = await bot.started(environment, speaker, typing.cast(hsm.Model, audio.Speaker.model))
         ready = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
         await hsm.stop(speaker)
         after_stop = PhoneFirmware._matches_current_service_audio(environment, firmware, event)

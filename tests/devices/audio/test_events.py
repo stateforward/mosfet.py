@@ -2,6 +2,7 @@ from bot.devices import audio
 
 from tests.type_helpers import object_dict
 
+
 def test_audio_events_use_pydantic_schemas() -> None:
     input_schema = object_dict(audio.InputEvent.schema)
     output_schema = object_dict(audio.OutputEvent.schema)
@@ -13,9 +14,14 @@ def test_audio_events_use_pydantic_schemas() -> None:
     assert output_schema == audio.AudioOutputData.model_json_schema()
     assert output_schema["required"] == ["audio"]
 
+
 def test_audio_event_data_describes_generic_sound_chunks() -> None:
-    input_data = audio.AudioInputData(audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1)
-    output_data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+    input_data = audio.AudioInputData(
+        audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1
+    )
+    output_data = audio.AudioOutputData(
+        audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2
+    )
 
     assert input_data.audio == b"captured-audio"
     assert input_data.media_type == "audio/opus"
@@ -25,6 +31,7 @@ def test_audio_event_data_describes_generic_sound_chunks() -> None:
     assert output_data.media_type == "audio/pcm"
     assert output_data.sample_rate_hz == 44_100
     assert output_data.channels == 2
+
 
 def test_audio_event_data_rejects_empty_audio() -> None:
     try:

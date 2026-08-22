@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import collections.abc
+import dataclasses
+import datetime
 import typing
 
 import hsm
+import bot
 import pytest
 from bot import lifecycle
 from bot.abilities import processing
@@ -53,12 +56,26 @@ class FailingEncoder(encoding.Encoder[bytes, bytes]):
         raise RuntimeError("tts failed")
 
 
+class NeverReturningEncoder(encoding.Encoder[bytes, bytes]):
+    def __init__(self) -> None:
+        self.cancelled = asyncio.Event()
+
+    @typing.override
+    async def encode(self, input: bytes) -> bytes:
+        del input
+        try:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        finally:
+            self.cancelled.set()
+
+
 async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 2.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         if condition():
             return
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
     raise AssertionError("condition not met")
 
 
@@ -86,10 +103,7 @@ def test_speaking_records_one_trusted_outbound_message() -> None:
     histories, speaker_id, conversation_id = asyncio.run(run())
 
     assert histories
-    assert all(
-        len(history.messages) == 1 and history.messages[0].direction == "outbound"
-        for history in histories
-    )
+    assert all(len(history.messages) == 1 and history.messages[0].direction == "outbound" for history in histories)
     provenance_ids = {history.messages[0].provenance.id for history in histories}
     assert len(provenance_ids) == 1
     message = histories[0].messages[0]
@@ -100,9 +114,9 @@ def test_speaking_records_one_trusted_outbound_message() -> None:
     assert message.provenance.target == conversation_id
 
 
-def test_speaking_input_is_call_event_for_cognition_selection() -> None:
+def test_speaking_input_is_not_a_cognition_call_event() -> None:
     assert speaking.InputEvent.name == "bot.ability.speaking.input"
-    assert speaking.InputEvent.kind == processing.EventKind
+    assert speaking.InputEvent.kind == hsm.EventKind
 
 
 def _examples_in(schema: object, path: str = "") -> list[str]:
@@ -151,7 +165,7 @@ class SoundListener(hsm.Instance):
         if isinstance(data, SoundData):
             instance._sounds.append(data)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "SoundListener",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -174,7 +188,7 @@ def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
         listener = SoundListener(sounds)
 
         await start_ability_tree(environment, speaking_ability)
-        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
         outputs: list[speaking.OutputData] = []
@@ -237,20 +251,82 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
     assert "tts failed" in message
 
 
-def test_speaking_is_cognition_callable_output_ability() -> None:
-    """Speaking is a CallEvent ability suitable for bot.output / cognition tool selection.
+def test_speaking_returns_correlated_terminal_directly_to_request_source() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        environment = Environment()
+        terminals: list[hsm.Event[typing.Any]] = []
 
-    Actor-map assembly is bot-private; public contract is event kind + wiring (see e2e test).
-    """
+        class Requester(hsm.Instance):
+            @staticmethod
+            def record(ctx: hsm.Context, instance: "Requester", event: hsm.Event[typing.Any]) -> None:
+                del ctx, instance
+                terminals.append(event)
+
+            model = bot.define(
+                "SpeakingRequester",
+                hsm.initial(hsm.target("/SpeakingRequester/waiting")),
+                hsm.state(
+                    "waiting",
+                    hsm.transition(hsm.on(speaking.OutputEvent), hsm.effect(record)),
+                ),
+            )
+
+        requester = Requester()
+        speaker = speaking.Speaking(encoder=RecordingEncoder())
+        _ = await bot.started(environment, requester, requester.model)
+        await start_ability_tree(environment, speaker)
+
+        await hsm.dispatch(
+            environment,
+            speaker,
+            dataclasses.replace(
+                speaking.InputEvent.with_data_and_id(speaking.InputData(text="Hello."), "speak-1"),
+                source=hsm.id(requester),
+                target=hsm.id(speaker),
+            ),
+        )
+        await _wait_until(lambda: bool(terminals))
+        return terminals
+
+    terminals = asyncio.run(run())
+    assert len(terminals) == 1
+    assert terminals[0].id == "speak-1"
+
+
+def test_speaking_encoding_timeout_cancels_non_returning_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[str, bool]:
+        from bot.abilities.speaking import speaking as speaking_source
+
+        monkeypatch.setattr(speaking_source, "_ENCODING_TIMEOUT", datetime.timedelta(milliseconds=10))
+        encoder = NeverReturningEncoder()
+        speaker = speaking.Speaking(encoder=encoder)
+        environment = Environment()
+        await start_ability_tree(environment, speaker)
+        await hsm.dispatch(
+            environment,
+            speaker,
+            speaking.InputEvent.with_data_and_id(speaking.InputData(text="Never returns."), "timeout-1"),
+        )
+        await _wait_until(lambda: (speaker.state() or "").endswith("/idle"))
+        await encoder.cancelled.wait()
+        return speaker.state() or "", encoder.cancelled.is_set()
+
+    state, cancelled = asyncio.run(run())
+    assert state.endswith("/idle")
+    assert cancelled
+
+
+def test_speaking_is_not_cognition_callable() -> None:
+    """Speaking is an effector reached through behavior/topology wiring."""
 
     speaking_ability = speaking.Speaking(encoder=RecordingEncoder())
-    assert speaking.InputEvent.kind == processing.EventKind
+    assert speaking.InputEvent.kind == hsm.EventKind
     assert speaking_ability.input_event is speaking.InputEvent
-    assert speaking_ability.input_event.kind == processing.EventKind
+    assert speaking_ability.input_event.kind == hsm.EventKind
 
 
-def test_cognition_to_speaking_output_end_to_end() -> None:
-    """Bot input event → cognition/intuition → select speaking.input → encoder runs."""
+def test_cognition_does_not_directly_select_speaking_output() -> None:
+    """Body output wiring is absent from cognition's actor/tool inventory."""
 
     import bot
     from bot.bot import Bot
@@ -269,16 +345,9 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
         async def process(self, input: processing.InputData) -> processing.Events:
             self.inputs.append(input)
             names = {event.name for event in input.schemas}
-            assert "bot.ability.speaking.input" in names
-            assert "speaking" in input.actors
-            return (
-                processing.SelectedEvent(
-                    event="bot.ability.speaking.input",
-                    data={"text": "hi from cognition"},
-                    target="speaking",
-                    reason="test speak selection",
-                ),
-            )
+            assert "bot.ability.speaking.input" not in names
+            assert "speaking" not in input.actors
+            return ()
 
     async def run() -> tuple[list[bytes], list[processing.InputData]]:
         encoder = RecordingEncoder(audio=b"\x11\x22")
@@ -303,13 +372,13 @@ def test_cognition_to_speaking_output_end_to_end() -> None:
             environment,
             bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=0)),
         )
-        await _wait_until(lambda: bool(encoder.calls))
         return encoder.calls, processor.inputs
 
     calls, inputs = asyncio.run(run())
-    assert calls == [b"hi from cognition"]
+    assert calls == []
     assert len(inputs) == 1
-    assert "bot.ability.speaking.input" in {event.name for event in inputs[0].schemas}
+    assert "bot.ability.speaking.input" not in {event.name for event in inputs[0].schemas}
+    assert "speaking" not in inputs[0].actors
 
 
 class ListeningPeer(hsm.Instance):
@@ -329,7 +398,7 @@ class ListeningPeer(hsm.Instance):
         if isinstance(event.data, EfferenceData):
             instance._seen.append("efference")
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "ListeningPeer",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(EfferenceEvent), hsm.effect(_record))),
@@ -349,7 +418,7 @@ class OrderingSoundListener(hsm.Instance):
         if isinstance(event.data, SoundData):
             instance._seen.append("sound")
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "OrderingSoundListener",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -359,7 +428,7 @@ class OrderingSoundListener(hsm.Instance):
 class AbilityOwner(hsm.Instance):
     """Attachment owner so Speaking can leave detached lifecycle and run behavior."""
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "AbilityOwner",
         hsm.initial(hsm.target("owning")),
         hsm.state("owning"),
@@ -383,8 +452,8 @@ async def _speak_with_listening_peer(
 
     peer = ListeningPeer(order)
     owner = AbilityOwner()
-    _ = await hsm.started(environment, peer, peer.model)
-    _ = await hsm.started(environment, owner, owner.model)
+    _ = await bot.started(environment, peer, peer.model)
+    _ = await bot.started(environment, owner, owner.model)
     speaking_ability = speaking.Speaking(
         encoder=RecordingEncoder(audio=audio_bytes),
         speaker=mouth,
@@ -393,12 +462,12 @@ async def _speak_with_listening_peer(
         channels=1,
         media_type=media_type,
     )
-    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    _ = await bot.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     listener = OrderingSoundListener(order)
-    _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+    _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
     environment.join(listener)
 
-    _ = await hsm.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
+    _ = await bot.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
     # Attach is ability lifecycle only; the motor-command copy goes to ``listening=peer``, not owner.
     _ = await speaking_ability.attach(
         environment,
@@ -418,7 +487,6 @@ async def _speak_with_listening_peer(
             environment, speaking.InputEvent.with_data(speaking.InputData(text="Hello there."))
         )
         await _wait_until(lambda: "sound" in order)
-        await asyncio.sleep(0.02)
     finally:
         peer.dispatch = original  # type: ignore[method-assign]
     return order, copies
@@ -476,9 +544,8 @@ def test_the_efference_event_is_never_offerable_to_a_model() -> None:
 
     assert EfferenceEvent.kind != processing.EventKind
     assert EfferenceEvent.name == "bot.ability.speaking.efference"
-    # Contrast: the ability's one front door is offerable, which is what makes the difference
-    # between them a decision rather than an oversight.
-    assert speaking.InputEvent.kind == processing.EventKind
+    # Speaking is also an internal effector boundary; behaviors/topology own the route.
+    assert speaking.InputEvent.kind == hsm.EventKind
 
 
 def test_speaking_powers_an_unstarted_mouth_it_was_given() -> None:
@@ -497,7 +564,7 @@ def test_speaking_powers_an_unstarted_mouth_it_was_given() -> None:
         listener = SoundListener(sounds)
 
         await start_ability_tree(environment, speaking_ability)
-        _ = await hsm.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
         _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
@@ -536,7 +603,7 @@ def test_speaking_never_stops_a_mouth_it_did_not_start() -> None:
         environment = Environment()
 
         # Started by someone else before the ability ever runs: shared, not owned.
-        _ = await hsm.started(environment, speaker, require_model(speaker.model))
+        _ = await bot.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
 
         await speaking_ability.stop(environment)
@@ -556,7 +623,7 @@ def test_speaking_playout_does_not_attach_optional_speaker() -> None:
         speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
         environment = Environment()
-        _ = await hsm.started(environment, speaker, require_model(speaker.model))
+        _ = await bot.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
 
         for _ in range(3):

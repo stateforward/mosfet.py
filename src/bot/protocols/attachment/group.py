@@ -9,6 +9,7 @@ import typing
 import weakref
 
 import hsm
+import bot
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
@@ -99,6 +100,8 @@ _MemberDetachFailedEvent = hsm.Event[_MemberDetachFailedData](
     kind=hsm.ErrorEventKind,
     schema=_MemberDetachFailedData,
 )
+
+
 def _operation(event: hsm.Event[typing.Any]) -> _OperationData:
     data = event.data
     if isinstance(
@@ -276,7 +279,7 @@ class _Reply(hsm.Instance):
                     hsm.target("/AttachmentGroupReply/done"),
                 )
             )
-        return hsm.define(
+        return bot.define(
             "AttachmentGroupReply",
             hsm.initial(hsm.target("waiting")),
             hsm.state("waiting", *waiting),
@@ -299,7 +302,7 @@ class _Reply(hsm.Instance):
             values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
         )
         try:
-            return await hsm.started(
+            return await bot.started(
                 reply_ctx,
                 reply,
                 cls._define_model(operation, index, metadata, with_timeout=with_timeout),
@@ -805,9 +808,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             ctx,
             operation.reply_to,
             dataclasses.replace(
-                events.AttachCompleteEvent.with_data(
-                    events.AttachCompleteData(actor=operation.actor, created=True)
-                ),
+                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=operation.actor, created=True)),
                 id=operation.request_id,
                 source=hsm.id(instance),
                 target=hsm.id(operation.reply_to),
@@ -880,7 +881,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             ),
         )
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "AttachmentGroup",
         hsm.initial(hsm.target("detached")),
         hsm.state(
@@ -1052,7 +1053,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     continue
                 assert model is not None
                 try:
-                    _ = await hsm.started(ctx, member, model)
+                    _ = await bot.started(ctx, member, model)
                 except Exception as error:
                     reply_to = data.actor if data.reply_to is None else data.reply_to
                     await hsm.dispatch(

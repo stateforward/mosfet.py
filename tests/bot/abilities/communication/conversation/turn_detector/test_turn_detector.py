@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from bot import abilities
 from bot.abilities.communication.conversation import turn_detector
 
 import asyncio
 import collections.abc
+import datetime
 import uuid
 
 import hsm
@@ -66,31 +68,25 @@ def test_turn_detector_owns_typed_turn_lifecycle_and_exports_no_perception_pipel
     assert "OutputData" not in turn_detector.__all__
 
 
-def test_turn_detector_accepts_typed_ready_request_without_target_gate() -> None:
+def test_turn_detector_returns_ready_to_the_terminal_operation() -> None:
     async def run() -> hsm.Event[object]:
-        ability = RecordingTurnDetector(participant_ref="bot-a", conversation_ref="conversation")
+        detector = RecordingTurnDetector(participant_ref="bot-a", conversation_ref="conversation")
         context = hsm.Context()
-        await start_ability_tree(context, ability)
+        await start_ability_tree(context, detector)
         operation_id = uuid.uuid4().hex
-        waiter: asyncio.Future[hsm.Event[object]] = asyncio.get_running_loop().create_future()
-        ability.register_terminal_waiter(operation_id, waiter)
-        try:
-            request = turn_detector.TurnDetectorReadyRequestEvent.with_data_and_id(
+        return await abilities.run_terminal_operation(
+            context,
+            child=detector,
+            request=turn_detector.TurnDetectorReadyRequestEvent.with_data_and_id(
                 turn_detector.TurnDetectorReadyRequestData(
                     participant_ref="bot-a",
                     conversation_ref="conversation",
                 ),
                 operation_id,
-            )
-            assert not request.target
-            await hsm.dispatch(
-                context,
-                ability,
-                request,
-            )
-            return await asyncio.wait_for(waiter, timeout=1.0)
-        finally:
-            ability.clear_terminal_waiter(operation_id)
+            ),
+            terminals=(turn_detector.TurnDetectorReadyEvent, detector.failed_event),
+            timeout=datetime.timedelta(seconds=1),
+        )
 
     terminal = asyncio.run(run())
     assert terminal.name == turn_detector.TurnDetectorReadyEvent.name

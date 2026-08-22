@@ -43,8 +43,7 @@ def normalize_identity(value: object, *, field_name: str = "identity") -> Identi
     components: list[object] = list(value)
     if len(components) > MAX_EMBEDDING_DIMENSION:
         raise ValueError(
-            f"{field_name} embedding dimension {len(components)} exceeds the maximum "
-            f"of {MAX_EMBEDDING_DIMENSION}."
+            f"{field_name} embedding dimension {len(components)} exceeds the maximum of {MAX_EMBEDDING_DIMENSION}."
         )
     for component in components:
         if isinstance(component, bool) or not isinstance(component, (int, float)):
@@ -129,9 +128,7 @@ def match_vector(
             )
         except ValueError:
             continue
-        score = math.fsum(
-            left * right for left, right in zip(normalized_vector, normalized_candidate, strict=True)
-        )
+        score = math.fsum(left * right for left, right in zip(normalized_vector, normalized_candidate, strict=True))
         scored.append((score, index))
     if not scored:
         return None

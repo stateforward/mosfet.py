@@ -27,6 +27,10 @@ def _reset_telemetry(
     bot.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
     def _noop_set_logger_provider(_provider: object) -> None:
         return None
 

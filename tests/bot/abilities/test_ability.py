@@ -1,10 +1,11 @@
-from bot import abilities
+from bot import abilities, environment
 from bot.abilities.language import text
 
 import asyncio
 import ast
 import collections.abc
 import dataclasses
+import datetime
 import importlib.util
 import pathlib
 import typing
@@ -96,7 +97,7 @@ def _record_ability_terminal_owner_event(
 
 
 class AbilityTerminalOwner(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "AbilityTerminalOwner",
         hsm.initial(hsm.target("/AbilityTerminalOwner/recording")),
         hsm.state(
@@ -110,14 +111,17 @@ class AbilityTerminalOwner(hsm.Instance):
     outputs: list[object]
     failures: list[object]
     lifecycle: list[hsm.Event[typing.Any]]
+    events: list[hsm.Event[typing.Any]]
 
     def __init__(self) -> None:
         super().__init__()
         self.outputs = []
         self.failures = []
         self.lifecycle = []
+        self.events = []
 
     def record(self, event: hsm.Event[typing.Any]) -> None:
+        self.events.append(event)
         if event.name.endswith(".output"):
             self.outputs.append(event.data)
         if event.name.endswith(".failed"):
@@ -129,6 +133,76 @@ class AbilityTerminalOwner(hsm.Instance):
             attachment.DetachFailedEvent.name,
         }:
             self.lifecycle.append(event)
+
+
+class TerminalOperationInputData(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(frozen=True)
+
+    value: str
+
+
+class TerminalOperationOutputData(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(frozen=True)
+
+    value: str
+
+
+TerminalOperationInputEvent = hsm.Event[TerminalOperationInputData](
+    name="test.ability.terminal.operation.input",
+    schema=TerminalOperationInputData,
+)
+TerminalOperationOutputEvent = hsm.Event[TerminalOperationOutputData](
+    name="test.ability.terminal.operation.output",
+    schema=TerminalOperationOutputData,
+)
+TerminalOperationFailedEvent = hsm.Event[abilities.FailureData](
+    name="test.ability.terminal.operation.failed",
+    schema=abilities.FailureData,
+)
+
+
+class TerminalOperationAbility(abilities.Ability[TerminalOperationInputData, TerminalOperationOutputData]):
+    input_event = TerminalOperationInputEvent
+    output_event = TerminalOperationOutputEvent
+    failed_event = TerminalOperationFailedEvent
+    requests: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests = []
+
+    @staticmethod
+    def record_request(
+        ctx: hsm.Context,
+        instance: "TerminalOperationAbility",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance.requests.append(event)
+
+    async def emit_terminal(
+        self,
+        ctx: hsm.Context,
+        terminal: hsm.Event[typing.Any],
+    ) -> None:
+        wrapper = (
+            ability_module.TerminalErrorEvent
+            if terminal.name == self.failed_event.name
+            else ability_module.TerminalOutputEvent
+        )
+        await hsm.dispatch(ctx, self, wrapper.with_data(terminal))
+
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+        "TerminalOperationAbility",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(
+                hsm.on(TerminalOperationInputEvent),
+                hsm.effect(record_request),
+            ),
+        ),
+    )
 
 
 class CompositeAbility(abilities.Ability[object, object]):
@@ -205,7 +279,7 @@ class CompositeAbility(abilities.Ability[object, object]):
         self.hold_terminal = False
         await super().dispatch(ctx, self.held_terminals[-1])
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "CompositeAbility",
         hsm.initial(hsm.target("initializing")),
         hsm.state(
@@ -278,12 +352,52 @@ def require_model(model: hsm.Model | None) -> hsm.Model:
     return model
 
 
+async def start_terminal_operation_ability(
+    ctx: hsm.Context,
+) -> tuple[TerminalOperationAbility, AbilityTerminalOwner]:
+    owner = AbilityTerminalOwner()
+    child = TerminalOperationAbility()
+    _ = await bot.started(ctx, owner, require_model(owner.model))
+    _ = await child.attach(
+        ctx,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+    )
+    return child, owner
+
+
+def terminal_operation_request(operation_id: str, value: str) -> hsm.Event[TerminalOperationInputData]:
+    return TerminalOperationInputEvent.with_data_and_id(
+        TerminalOperationInputData(value=value),
+        operation_id,
+    )
+
+
+def terminal_operation_output(
+    child: TerminalOperationAbility,
+    request: hsm.Event[typing.Any],
+    value: str,
+    *,
+    operation_id: str | None = None,
+    source: str | None = None,
+    target: str | None = None,
+) -> hsm.Event[TerminalOperationOutputData]:
+    return dataclasses.replace(
+        TerminalOperationOutputEvent.with_data(
+            TerminalOperationOutputData(value=value),
+        ),
+        id=request.id if operation_id is None else operation_id,
+        source=hsm.id(child) if source is None else source,
+        target=request.source if target is None else target,
+        metadata=dict(request.metadata),
+    )
+
+
 async def start_recorded_generation(
     generation: RecordingTextGeneration,
 ) -> tuple[hsm.Context, AbilityTerminalOwner]:
     ctx = hsm.Context()
     owner = AbilityTerminalOwner()
-    _ = await hsm.started(ctx, owner, require_model(owner.model))
+    _ = await bot.started(ctx, owner, require_model(owner.model))
     _ = await generation.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -329,6 +443,360 @@ def test_ability() -> None:
     assert "output" not in object_dict(output_schema.get("properties", {}))
 
 
+def test_terminal_waiter_registry_api_is_removed() -> None:
+    legacy = {
+        "_terminal_waiters",
+        "_child_terminal_waiters",
+        "_terminal_reply_owners",
+        "register_terminal_waiter",
+        "clear_terminal_waiter",
+        "prepare_child_terminal_wait",
+        "clear_child_terminal_wait",
+        "await_child_terminal",
+    }
+
+    assert legacy.isdisjoint(vars(abilities.Ability))
+    assert "weakref" not in pathlib.Path(ability_module.__file__).read_text()
+    assert abilities.run_terminal_operation is ability_module.run_terminal_operation
+
+
+def test_terminal_operation_rejects_invalid_configuration() -> None:
+    async def run(
+        *,
+        request: hsm.Event[typing.Any],
+        terminals: tuple[hsm.Event[typing.Any], ...],
+        timeout: datetime.timedelta,
+    ) -> None:
+        await ability_module.run_terminal_operation(
+            hsm.Context(),
+            child=TerminalOperationAbility(),
+            request=request,
+            terminals=terminals,
+            timeout=timeout,
+        )
+
+    with pytest.raises(ValueError, match="request.id"):
+        asyncio.run(
+            run(
+                request=TerminalOperationInputEvent.with_data(TerminalOperationInputData(value="input")),
+                terminals=(TerminalOperationOutputEvent,),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+    with pytest.raises(ValueError, match="at least one terminal"):
+        asyncio.run(
+            run(
+                request=terminal_operation_request("empty-terminals", "input"),
+                terminals=(),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+    with pytest.raises(ValueError, match="cannot be negative"):
+        asyncio.run(
+            run(
+                request=terminal_operation_request("negative-timeout", "input"),
+                terminals=(TerminalOperationOutputEvent,),
+                timeout=datetime.timedelta(microseconds=-1),
+            )
+        )
+    with pytest.raises(RuntimeError, match="must be started"):
+        asyncio.run(
+            run(
+                request=terminal_operation_request("unstarted", "input"),
+                terminals=(TerminalOperationOutputEvent,),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+
+
+def test_terminal_operations_isolate_concurrent_results() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], hsm.Event[typing.Any]]:
+        ctx = environment.Environment()
+        child, _owner = await start_terminal_operation_ability(ctx)
+        first = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("first", "one"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        second = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("second", "two"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while len(child.requests) != 2:
+            await asyncio.sleep(0)
+        requests = {event.id: event for event in child.requests}
+        await child.emit_terminal(ctx, terminal_operation_output(child, requests["second"], "TWO"))
+        await child.emit_terminal(ctx, terminal_operation_output(child, requests["first"], "ONE"))
+        return await first, await second
+
+    first, second = asyncio.run(run())
+
+    assert first.data == TerminalOperationOutputData(value="ONE")
+    assert second.data == TerminalOperationOutputData(value="TWO")
+
+
+def test_terminal_operation_rejects_wrong_envelopes_and_duplicate() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ctx = environment.Environment()
+        instances = typing.cast(
+            collections.abc.Mapping[str, hsm.Instance],
+            ctx.value(hsm.Keys.Instances),
+        )
+        child, _owner = await start_terminal_operation_ability(ctx)
+        task = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("correlated", "input"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while not child.requests:
+            await asyncio.sleep(0)
+        request = child.requests[-1]
+        operation = instances[request.source]
+        wrong = (
+            terminal_operation_output(child, request, "wrong-id", operation_id="other"),
+            terminal_operation_output(child, request, "wrong-source", source="other"),
+            terminal_operation_output(child, request, "wrong-target", target="other"),
+        )
+        for terminal in wrong:
+            await hsm.dispatch(ctx, operation, terminal)
+            assert not task.done()
+        accepted = terminal_operation_output(child, request, "accepted")
+        await hsm.dispatch(ctx, operation, accepted)
+        result = await task
+        with pytest.raises(RuntimeError, match="started HSM"):
+            await hsm.dispatch(ctx, operation, dataclasses.replace(accepted))
+        return result
+
+    result = asyncio.run(run())
+
+    assert result.data == TerminalOperationOutputData(value="accepted")
+
+
+def test_terminal_operation_rejects_stale_terminal_from_prior_operation() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ctx = environment.Environment()
+        instances = typing.cast(
+            collections.abc.Mapping[str, hsm.Instance],
+            ctx.value(hsm.Keys.Instances),
+        )
+        child, _owner = await start_terminal_operation_ability(ctx)
+
+        first = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("old", "old"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while len(child.requests) != 1:
+            await asyncio.sleep(0)
+        old_request = child.requests[-1]
+        await child.emit_terminal(ctx, terminal_operation_output(child, old_request, "old"))
+        _ = await first
+
+        second = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("new", "new"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while len(child.requests) != 2:
+            await asyncio.sleep(0)
+        new_request = child.requests[-1]
+        operation = instances[new_request.source]
+        await hsm.dispatch(
+            ctx,
+            operation,
+            terminal_operation_output(
+                child,
+                new_request,
+                "stale",
+                operation_id=old_request.id,
+            ),
+        )
+        assert not second.done()
+        await child.emit_terminal(ctx, terminal_operation_output(child, new_request, "new"))
+        return await second
+
+    result = asyncio.run(run())
+
+    assert result.data == TerminalOperationOutputData(value="new")
+
+
+def test_terminal_operation_models_timeout() -> None:
+    async def run() -> None:
+        ctx = environment.Environment()
+        child, _owner = await start_terminal_operation_ability(ctx)
+        await ability_module.run_terminal_operation(
+            ctx,
+            child=child,
+            request=terminal_operation_request("timeout", "input"),
+            terminals=(child.output_event, child.failed_event),
+            timeout=datetime.timedelta(0),
+        )
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        asyncio.run(run())
+
+
+def test_terminal_operation_cancellation_stops_actor_and_late_terminal_isolated() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ctx = environment.Environment()
+        instances = typing.cast(
+            collections.abc.Mapping[str, hsm.Instance],
+            ctx.value(hsm.Keys.Instances),
+        )
+        child, _owner = await start_terminal_operation_ability(ctx)
+        canceled = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("canceled", "input"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while len(child.requests) != 1:
+            await asyncio.sleep(0)
+        canceled_request = child.requests[-1]
+        canceled_actor = instances[canceled_request.source]
+        _ = canceled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await canceled
+        assert not bot.lifecycle.is_started(canceled_actor)
+
+        active = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("active", "input"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while len(child.requests) != 2:
+            await asyncio.sleep(0)
+        active_request = child.requests[-1]
+        active_actor = instances[active_request.source]
+        await hsm.dispatch(
+            ctx,
+            active_actor,
+            terminal_operation_output(
+                child,
+                active_request,
+                "late",
+                operation_id=canceled_request.id,
+            ),
+        )
+        assert not active.done()
+        await child.emit_terminal(ctx, terminal_operation_output(child, active_request, "active"))
+        return await active
+
+    result = asyncio.run(run())
+
+    assert result.data == TerminalOperationOutputData(value="active")
+
+
+def test_terminal_operation_returns_correlated_typed_failure() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ctx = environment.Environment()
+        child, _owner = await start_terminal_operation_ability(ctx)
+        task = asyncio.create_task(
+            ability_module.run_terminal_operation(
+                ctx,
+                child=child,
+                request=terminal_operation_request("failed", "input"),
+                terminals=(child.output_event, child.failed_event),
+                timeout=datetime.timedelta(seconds=1),
+            )
+        )
+        while not child.requests:
+            await asyncio.sleep(0)
+        request = child.requests[-1]
+        await child.emit_terminal(
+            ctx,
+            dataclasses.replace(
+                child.failed_event.with_data(abilities.FailureData(message="failed")),
+                id=request.id,
+                source=hsm.id(child),
+                target=request.source,
+            ),
+        )
+        return await task
+
+    result = asyncio.run(run())
+
+    assert result.name == TerminalOperationFailedEvent.name
+    assert result.data == abilities.FailureData(message="failed")
+
+
+def test_targeted_terminal_is_delivered_once_without_owner_fallback() -> None:
+    """Ability terminal emission: a set target is delivered once and never also to the owner."""
+
+    async def run() -> tuple[AbilityTerminalOwner, AbilityTerminalOwner, TerminalOperationAbility]:
+        ctx = environment.Environment()
+        child, owner = await start_terminal_operation_ability(ctx)
+        recipient = AbilityTerminalOwner()
+        _ = await bot.started(ctx, recipient, require_model(recipient.model))
+        terminal = dataclasses.replace(
+            child.output_event.with_data(TerminalOperationOutputData(value="targeted")),
+            id="targeted",
+            source="spoofed",
+            target=hsm.id(recipient),
+        )
+        await child.emit_terminal(ctx, terminal)
+        return recipient, owner, child
+
+    recipient, owner, child = asyncio.run(run())
+
+    routed = [event for event in recipient.events if event.name == TerminalOperationOutputEvent.name]
+    assert len(routed) == 1
+    assert routed[0].source == hsm.id(child)
+    assert routed[0].target == hsm.id(recipient)
+    assert owner.outputs == []
+
+
+def test_targetless_terminal_falls_back_to_attachment_owner_once() -> None:
+    """Ability terminal emission: an absent or empty target is delivered once to the owner."""
+
+    async def run() -> tuple[AbilityTerminalOwner, TerminalOperationAbility]:
+        ctx = environment.Environment()
+        child, owner = await start_terminal_operation_ability(ctx)
+        terminal = dataclasses.replace(
+            child.output_event.with_data(TerminalOperationOutputData(value="ambient")),
+            id="ambient",
+            source="spoofed",
+            target=None,
+        )
+        await child.emit_terminal(ctx, terminal)
+        return owner, child
+
+    owner, child = asyncio.run(run())
+
+    routed = [event for event in owner.events if event.name == TerminalOperationOutputEvent.name]
+    assert len(routed) == 1
+    assert routed[0].source == hsm.id(child)
+    assert routed[0].target == hsm.id(owner)
+
+
 def test_ability_operation_model_helper_is_removed_from_ability_sources() -> None:
     ability_sources = pathlib.Path("src/bot/abilities").rglob("*.py")
 
@@ -356,7 +824,7 @@ def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
         child = abilities.Ability[object, object]()
         owner = AbilityTerminalOwner()
 
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         _ = await child.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -391,7 +859,7 @@ def test_composite_ability_waits_for_submodel_readiness_before_reporting_attache
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
 
         _ = await composite.attach(
@@ -421,7 +889,7 @@ def test_composite_ability_rejects_uncorrelated_private_terminal() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         _ = await composite.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -440,7 +908,7 @@ def test_composite_ability_rejects_substituted_reply_identity() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
         _ = await composite.attach(ctx, attachment.AttachEvent.with_data(request))
         composite.hold_terminal = True
@@ -468,7 +936,7 @@ def test_composite_ability_initialization_failure_releases_owner_for_retry() -> 
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
 
         _ = await composite.attach(
@@ -505,7 +973,7 @@ def test_composite_ability_waits_for_private_detach_terminal() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
         attach_request = attachment.AttachData(actor=owner)
         detach_request = attachment.DetachData(actor=owner)
         _ = await composite.attach(
@@ -553,9 +1021,9 @@ def test_ability_reports_correlated_attachment_success_and_conflict() -> None:
         child = abilities.Ability[object, object]()
         owner = AbilityTerminalOwner()
         other_owner = AbilityTerminalOwner()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
-        _ = await hsm.started(ctx, other_owner, require_model(other_owner.model))
-        _ = await hsm.started(ctx, child, require_model(child.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, other_owner, require_model(other_owner.model))
+        _ = await bot.started(ctx, child, require_model(child.model))
 
         await child.dispatch(
             ctx,
@@ -609,7 +1077,7 @@ def test_ability_attach_does_not_poll_active_state(monkeypatch: pytest.MonkeyPat
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
-        _ = await hsm.started(ctx, owner, require_model(owner.model))
+        _ = await bot.started(ctx, owner, require_model(owner.model))
 
         _ = await generation.attach(
             ctx,
@@ -841,12 +1309,10 @@ def test_ability_detach_when_stopped_emits_detach_failed() -> None:
         await hsm.stop(generation)
         failures: list[hsm.Event[typing.Any]] = []
 
-        def record_failure(
-            _ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event[typing.Any]
-        ) -> None:
+        def record_failure(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
             failures.append(event)
 
-        reply_model = hsm.define(
+        reply_model = bot.define(
             "DetachReply",
             hsm.initial(hsm.target("s")),
             hsm.state(
@@ -855,7 +1321,7 @@ def test_ability_detach_when_stopped_emits_detach_failed() -> None:
             ),
         )
         reply = hsm.Instance()
-        await hsm.started(ctx, reply, reply_model)
+        await bot.started(ctx, reply, reply_model)
         await generation.detach(
             ctx,
             attachment.DetachEvent.with_data(attachment.DetachData(actor=owner, reply_to=reply)),

@@ -9,6 +9,7 @@ import collections.abc
 import typing
 
 import hsm
+import bot
 
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
@@ -187,7 +188,7 @@ def _record_memory_fixture_terminal_mirror_event(
 
 
 class MemoryFixtureAbilityTerminalMirror(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "MemoryFixtureAbilityTerminalMirror",
         hsm.initial(hsm.target("/MemoryFixtureAbilityTerminalMirror/recording")),
         hsm.state(
@@ -237,7 +238,7 @@ async def start_ability_tree(*abilities: abilities.Ability[typing.Any, typing.An
     for ability in abilities:
         owner = MemoryFixtureAbilityTerminalMirror(ability)
         assert owner.model is not None
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         _ = await ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections.abc
 import concurrent.futures
+import importlib
 import pathlib
 import threading
 
@@ -9,8 +10,11 @@ import bot.telemetry
 import pytest
 from opentelemetry import _logs
 
-from bot.telemetry.configure import is_enabled, log_file, logger_provider
+from bot.telemetry import span
+from bot.telemetry.configure import is_enabled, log_file, logger_provider, span_file, tracer_provider
 from bot.telemetry.generator import record_generator_request
+
+_CONFIGURE_MOD = importlib.import_module("bot.telemetry.configure")
 
 
 def _force_flush() -> None:
@@ -28,6 +32,10 @@ def _reset_telemetry(
     bot.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+
     # Silence set-once warnings; emission uses the module-retained provider.
     def _noop_set_logger_provider(_provider: object) -> None:
         return None
@@ -182,3 +190,97 @@ def test_record_opt_out_after_configure(monkeypatch: pytest.MonkeyPatch) -> None
     _force_flush()
     assert is_enabled() is False
     assert not log_path.exists()
+
+
+class _FakeOtlpExporter:
+    endpoint: str | None
+
+    def __init__(self, endpoint: str | None = None, **_kwargs: object) -> None:
+        self.endpoint = endpoint
+
+    def export(self, spans: object) -> object:
+        del spans
+        return None
+
+    def shutdown(self) -> None:
+        return None
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        del timeout_millis
+        return True
+
+
+def _capture_otlp_endpoints(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    seen: list[str | None] = []
+
+    class _Recording(_FakeOtlpExporter):
+        def __init__(self, endpoint: str | None = None, **kwargs: object) -> None:
+            seen.append(endpoint)
+            super().__init__(endpoint, **kwargs)
+
+    monkeypatch.setattr(_CONFIGURE_MOD, "OTLPSpanExporter", _Recording)
+    return seen
+
+
+def test_configure_without_otlp_endpoint_is_jsonl_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_otlp_endpoints(monkeypatch)
+    assert bot.telemetry.configure() is True
+    assert seen == []
+    provider = tracer_provider()
+    assert provider is not None
+    assert provider.resource.attributes.get("bot.otel.otlp_export") is None
+    assert span_file() is not None
+
+
+def test_configure_otlp_traces_endpoint_installs_second_processor(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_otlp_endpoints(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4317")
+    assert bot.telemetry.configure() is True
+    assert seen == ["http://127.0.0.1:4317"]
+    provider = tracer_provider()
+    assert provider is not None
+    assert provider.resource.attributes.get("bot.otel.otlp_export") == "true"
+    assert span_file() is not None
+
+
+def test_configure_otlp_base_endpoint_does_not_append_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_otlp_endpoints(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    assert bot.telemetry.configure() is True
+    assert seen == ["http://127.0.0.1:4317"]
+
+
+def test_configure_otlp_base_endpoint_strips_legacy_http_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_otlp_endpoints(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317/v1/traces")
+    assert bot.telemetry.configure() is True
+    assert seen == ["http://127.0.0.1:4317"]
+
+
+def test_configure_bot_otlp_endpoint_wins_and_strips_legacy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_otlp_endpoints(monkeypatch)
+    monkeypatch.setenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9999/v1/traces")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    assert bot.telemetry.configure() is True
+    assert seen == ["http://127.0.0.1:9999"]
+
+
+def test_configure_otlp_keeps_jsonl_span_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = _capture_otlp_endpoints(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4317")
+    assert bot.telemetry.configure() is True
+    with span.operation(
+        "bot.test.operation",
+        scope="bot.telemetry.test",
+        component="telemetry.test",
+        stage="probe",
+    ):
+        pass
+    provider = tracer_provider()
+    assert provider is not None
+    _ = provider.force_flush()
+    path = span_file()
+    assert path is not None
+    assert path.is_file()
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1

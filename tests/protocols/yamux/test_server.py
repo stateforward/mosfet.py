@@ -1,6 +1,7 @@
 import asyncio
 
 import hsm
+import bot
 
 from bot.protocols.yamux.events import OpenStreamEvent, OpenStreamData
 from bot.protocols.yamux.server import Server
@@ -16,7 +17,7 @@ def test_server_uses_session_state_model() -> None:
 def test_server_constructs_server_role_session() -> None:
     async def run() -> None:
         server = Server()
-        _ = await hsm.started(None, server, server.model)
+        _ = await bot.started(None, server, server.model)
 
         assert server.state() == "/Session/connected/open"
 

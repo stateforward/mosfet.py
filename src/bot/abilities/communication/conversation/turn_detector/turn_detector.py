@@ -15,6 +15,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 import pydantic
 
 from bot.protocols import attachment
@@ -29,6 +30,7 @@ ParticipantTurn: typing.TypeAlias = typing.Literal["listening", "claiming", "hol
 ParticipantChannelState: typing.TypeAlias = typing.Literal["available", "busy", "unavailable", "failed"]
 PerceptionModality: typing.TypeAlias = typing.Literal["audio", "image", "text", "event", "multimodal"]
 TurnDetectorStage: typing.TypeAlias = typing.Literal["turn"]
+_TURN_TIMEOUT_SECONDS = 5.0
 
 
 class ParticipantChannelSnapshot(pydantic.BaseModel):
@@ -221,6 +223,7 @@ class _TurnNormalizationRequestData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str = pydantic.Field(min_length=1)
+    reply_target: str | None = None
     turn: TurnCompleteData = pydantic.Field(description="Completed participant product to normalize.")
 
 
@@ -253,6 +256,7 @@ class _TurnNormalizationProvenance(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str = pydantic.Field(min_length=1)
+    reply_target: str | None = None
     conversation_ref: str = pydantic.Field(min_length=1)
     turn_ref: str = pydantic.Field(min_length=1)
     participant_ref: value.IdentityRef
@@ -460,9 +464,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
     def _normalization_provenance(
         operation_id: str,
         turn: TurnCompleteData,
+        reply_target: str | None,
     ) -> _TurnNormalizationProvenance:
         return _TurnNormalizationProvenance(
             operation_id=operation_id,
+            reply_target=reply_target,
             conversation_ref=turn.conversation_ref,
             turn_ref=turn.turn_ref,
             participant_ref=turn.participant_ref,
@@ -623,6 +629,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             context=telemetry.event_context(event),
         ) as active:
             data = event.data
+            reply_target = (
+                event.source
+                if event.target == hsm.id(instance) and event.source and event.source != hsm.id(instance)
+                else None
+            )
             if isinstance(data, turn.TurnEndData):
                 instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
             try:
@@ -641,13 +652,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     text=text,
                     audio=audio,
                     content=(text if text else audio if audio else instance._content),
-                    content_type=(
-                        "text/plain"
-                        if text
-                        else "audio/pcm"
-                        if audio
-                        else instance._content_type
-                    ),
+                    content_type=("text/plain" if text else "audio/pcm" if audio else instance._content_type),
                     sample_rate_hz=instance._audio_sample_rate_hz if audio else None,
                     channels=instance._audio_channels if audio else None,
                 )
@@ -669,7 +674,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     instance,
                     ability.TerminalErrorEvent.with_data(
                         dataclasses.replace(
-                            failure, id=event.id or None, source=hsm.id(instance), metadata=dict(event.metadata)
+                            failure,
+                            id=event.id or None,
+                            source=hsm.id(instance),
+                            target=reply_target,
+                            metadata=dict(event.metadata),
                         )
                     ),
                 )
@@ -684,7 +693,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                 instance,
                 dataclasses.replace(
                     _TurnNormalizationRequestEvent.with_data(
-                        _TurnNormalizationRequestData(operation_id=operation_id, turn=output)
+                        _TurnNormalizationRequestData(
+                            operation_id=operation_id,
+                            reply_target=reply_target,
+                            turn=output,
+                        )
                     ),
                     id=operation_id,
                     source=hsm.id(instance),
@@ -769,7 +782,12 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             and event.target == hsm.id(instance)
             and TurnDetector._matches_normalization_provenance(instance, data.provenance)
             and TurnDetector._matches_turn_product(instance, data.turn)
-            and data.provenance == TurnDetector._normalization_provenance(data.provenance.operation_id, data.turn)
+            and data.provenance
+            == TurnDetector._normalization_provenance(
+                data.provenance.operation_id,
+                data.turn,
+                data.provenance.reply_target,
+            )
         )
 
     @staticmethod
@@ -799,6 +817,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         source: hsm.Event[typing.Any],
         turn: TurnCompleteData,
         failure: FailedEventData,
+        reply_target: str | None,
     ) -> None:
         failure = failure.model_copy(
             update={
@@ -815,7 +834,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             dataclasses.replace(
                 _TurnNormalizationFailedEvent.with_data(
                     _TurnNormalizationFailedData(
-                        provenance=TurnDetector._normalization_provenance(operation_id, turn),
+                        provenance=TurnDetector._normalization_provenance(operation_id, turn, reply_target),
                         failure=failure,
                     )
                 ),
@@ -832,11 +851,13 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         instance: "TurnDetector",
         source: hsm.Event[typing.Any],
         failure: FailedEventData,
+        reply_target: str | None,
     ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=source.id or None,
             source=hsm.id(instance),
+            target=reply_target,
             metadata=dict(source.metadata),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
@@ -865,7 +886,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     dataclasses.replace(
                         _TurnNormalizationCompletedEvent.with_data(
                             _TurnNormalizationCompletedData(
-                                provenance=TurnDetector._normalization_provenance(request.operation_id, output),
+                                provenance=TurnDetector._normalization_provenance(
+                                    request.operation_id,
+                                    output,
+                                    request.reply_target,
+                                ),
                                 turn=output,
                             )
                         ),
@@ -898,13 +923,16 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     )
                 else:
                     raise ValueError("Participant normalization has no decodable content.")
-                terminal = await ability.Ability.await_child_terminal(
+                decode_operation_id = f"{request.operation_id}:decode"
+                terminal = await ability.run_terminal_operation(
                     ctx,
-                    owner=instance,
                     child=instance._decoding,
-                    operation_id=request.operation_id,
-                    input=stimulus,
-                    metadata=event.metadata,
+                    request=dataclasses.replace(
+                        instance._decoding.input_event.with_data_and_id(stimulus, decode_operation_id),
+                        metadata=dict(event.metadata),
+                    ),
+                    terminals=(instance._decoding.output_event, instance._decoding.failed_event),
+                    timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
                 )
             except asyncio.CancelledError:
                 raise
@@ -916,6 +944,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     event,
                     output,
                     FailedEventData(message=f"Participant normalization failed: {error}"),
+                    request.reply_target,
                 )
                 return
             if terminal.name == instance._decoding.failed_event.name:
@@ -927,6 +956,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     event,
                     output,
                     FailedEventData(message=str(message)),
+                    request.reply_target,
                 )
                 return
             if not isinstance(terminal.data, str) or not terminal.data.strip():
@@ -938,6 +968,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     event,
                     output,
                     FailedEventData(message="Participant normalization produced no text."),
+                    request.reply_target,
                 )
                 return
             normalized = output.model_copy(update={"text": terminal.data.strip(), "audio": b""})
@@ -947,7 +978,11 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                 dataclasses.replace(
                     _TurnNormalizationCompletedEvent.with_data(
                         _TurnNormalizationCompletedData(
-                            provenance=TurnDetector._normalization_provenance(request.operation_id, normalized),
+                            provenance=TurnDetector._normalization_provenance(
+                                request.operation_id,
+                                normalized,
+                                request.reply_target,
+                            ),
                             turn=normalized,
                         )
                     ),
@@ -969,6 +1004,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         public = dataclasses.replace(
             instance.output_event.with_data_and_id(output.turn, event.id or uuid.uuid4().hex),
             source=hsm.id(instance),
+            target=output.provenance.reply_target,
             metadata=dict(event.metadata),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(public))
@@ -1015,7 +1051,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                 event.id or uuid.uuid4().hex,
             ),
             source=hsm.id(instance),
-            target=hsm.id(instance),
+            target=(event.source if event.source and event.source != hsm.id(instance) else None),
             metadata=dict(event.metadata),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
@@ -1037,7 +1073,13 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
     ) -> None:
         failure = event.data
         assert isinstance(failure, _TurnNormalizationFailedData)
-        TurnDetector._publish_normalization_failure(ctx, instance, event, failure.failure)
+        TurnDetector._publish_normalization_failure(
+            ctx,
+            instance,
+            event,
+            failure.failure,
+            failure.provenance.reply_target,
+        )
 
     @staticmethod
     def _end_of_turn_delay(
@@ -1057,7 +1099,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             initial_state="attached",
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "TurnDetector",
         hsm.initial(hsm.target("/TurnDetector/initializing")),
         hsm.state(

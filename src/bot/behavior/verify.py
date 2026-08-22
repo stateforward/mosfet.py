@@ -11,6 +11,7 @@ import uuid
 import concurrent.futures
 
 import hsm
+import bot
 
 from bot.abilities import processing
 from bot.protocols import attachment
@@ -32,7 +33,7 @@ def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Di
 class _TerminalOwner(hsm.Instance):
     """Minimal owner that completes when the behavior ability forwards a terminal."""
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "BehaviorVerifyOwner",
         hsm.initial(hsm.target("/BehaviorVerifyOwner/waiting")),
         hsm.state("waiting"),
@@ -86,7 +87,7 @@ async def _apply_once(
         failed_event_name=behavior.failed_event.name,
     )
     ctx = hsm.Context()
-    _ = await hsm.started(ctx, owner, typing.cast(hsm.Model, owner.model))
+    _ = await bot.started(ctx, owner, typing.cast(hsm.Model, owner.model))
     owner_id = hsm.id(owner)
     _ = await behavior.attach(
         ctx,

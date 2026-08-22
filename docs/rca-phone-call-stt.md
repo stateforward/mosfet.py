@@ -44,7 +44,7 @@ Code keeps `conversation.InputEvent` enabled while **active** (queue/redeliver);
 | normalize.completed | 6 / 0 | 6 | 6 / 0 |
 | communication.input path | n/a (pre-cutover) | yes | yes / no (no speech product) |
 
-**Recheck rule:** RC-1 still dominates only if `unavailable event: bot.ability.conversation.input` is high with `HearingSpeech > 0`. On current builds that count is **zero** — do not treat RC-1 as the live primary.
+**Recheck rule:** RC-1 still dominates only if `unavailable event: bot.ability.communication.input` is high with `HearingSpeech > 0`. On current builds that count is **zero** — do not treat RC-1 as the live primary.
 
 ### RC-2 (P1, latent) — TextStimulus into voice STT
 
@@ -74,30 +74,31 @@ Not in the original mid-call STT ranking; **currently kills the demo before mid-
 | Run | Intuition | Call setup | Failure |
 |-----|-----------|------------|---------|
 | `two_20260804T192248Z` | Mercury → **HTTP 400** (`api.inceptionlabs.ai`) | dialed=0 | Provider request rejected (body not logged; client collapses to generic message). Body size ~228 B. Suspected OpenAI-compat fields (`tool_choice` / `reasoning_effort` / schema). |
-| `two_20260804T195055Z` | Gemini flash | dialed + rang | Bob: `focus_device outside available device candidates` (no answer). Alice later: unavailable `speaking.input`. Peaks silent. |
+| `two_20260804T195055Z` | Gemini flash | dialed + rang | Bob: `focus_device outside available device candidates` (no answer). Alice later logged historical pre-cutover unavailable `speaking.input`; current diagnosis uses `communication.respond` → Communication → Speaking. Peaks silent. |
 
-Gemini probe proves the tool **menu can produce dial**; Mercury 400 is provider-side. Answer/focus/speaking availability is a separate selection/topology issue.
+Gemini probe proves the tool **menu can produce dial**; Mercury 400 is provider-side. Answer/focus availability and the canonical `communication.respond` → Communication → Speaking route are separate selection/topology issues. Cognition does not select Speaking directly.
 
 ## Not root causes (unchanged + updates)
 
 - LiveKit dial / identity-as-number (works when intuition selects dial)
-- Speaking target-on-`bot` (fixed earlier)
+- Direct cognition exposure of Speaking (removed by the hard cutover; cognition selects `communication.respond`)
 - Complete absence of remote audio when call is up (original PASS)
-- RC-1 unavailable `conversation.input` on current Communication topology
+- RC-1 unavailable `communication.input` on current Communication topology
 - “Bot chose not to listen” as the explanation for pre-call STT when Mercury 400s
 
 ## One-sentence RCA (updated)
 
 **Original mid-call claim (still latent):** mid-call understanding can fail from STT packaging (RC-2/3) and a single Conversation STT chokepoint (RC-4) after RC-1 was fixed.  
-**Current dual-bot FAIL:** pre-call admit/STT and Communication routing are healthy; the run dies on **intuition provider or post-admit tool selection** (RC-5)—Mercury 400 or bad focus/speaking picks—so mid-call STT is not yet re-exercised.
+**Current dual-bot FAIL:** pre-call admit/STT and Communication routing are healthy; the run dies on **intuition provider or post-admit tool selection/routing** (RC-5)—Mercury 400, bad answer/focus picks, or failure after `communication.respond` on the Communication → Speaking route—so mid-call STT is not yet re-exercised.
 
 ## Fix order (updated)
 
 1. **RC-5a:** Make Mercury request shape valid *or* keep a known-good intuition provider (Gemini probe) for demos; surface provider error bodies on `RequestError`.
 2. **RC-5b:** When ringing, ensure answer/focus tools match live topology (stop `focus_device outside candidates`; offer only enabled events).
-3. **RC-2 / RC-3:** Only after answered media returns — TextStimulus guard + 48 kHz call-path packaging/assembly.
-4. **RC-4:** Optional second STT path only if Conversation chokepoint reappears under load.
-5. **RC-1:** Hold the line — re-open only if unavailable `conversation.input` returns.
+3. **RC-5c:** Diagnose response failures only on `communication.respond` → Communication → Speaking; do not restore direct Speaking exposure to cognition.
+4. **RC-2 / RC-3:** Only after answered media returns — TextStimulus guard + 48 kHz call-path packaging/assembly.
+5. **RC-4:** Optional second STT path only if Conversation chokepoint reappears under load.
+6. **RC-1:** Hold the line — re-open only if `unavailable event: bot.ability.communication.input` returns.
 
 ## Code anchors (paths after rehomes)
 

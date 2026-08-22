@@ -4,7 +4,7 @@ from bot.environment import SoundData
 import typing
 
 import hsm
-from bot import event_schema
+from bot import event
 import pydantic
 
 CallId = typing.Annotated[
@@ -105,6 +105,7 @@ FailureKind = typing.Literal[
 HangUpOutcome = typing.Literal["local_hang_up", "declined", "remote_hang_up", "failed", "transferred"]
 NoCallReason = typing.Literal["nothing_to_answer", "dial_not_answered", "dial_abandoned", "dial_failed"]
 
+
 class CallIdData(pydantic.BaseModel):
     """Payload scoped to one provider-neutral call identifier."""
 
@@ -116,6 +117,7 @@ class CallIdData(pydantic.BaseModel):
     )
 
     call_id: CallId
+
 
 class TransferTarget(pydantic.BaseModel):
     """Provider-neutral destination for a call transfer request."""
@@ -143,6 +145,7 @@ class TransferTarget(pydantic.BaseModel):
         examples=["helpdesk@example.com", "operator-desk", "customer-support"],
     )
 
+
 class IncomingCallData(CallIdData):
     """Signal from a phone service provider that a call is ringing."""
 
@@ -154,6 +157,7 @@ class IncomingCallData(CallIdData):
     )
 
     caller: Caller | None = None
+
 
 class DialData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to dial a number.
@@ -170,6 +174,7 @@ class DialData(pydantic.BaseModel):
 
     number: PhoneNumber
 
+
 class AnswerCallData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to answer the call that is ringing.
 
@@ -182,6 +187,7 @@ class AnswerCallData(pydantic.BaseModel):
         json_schema_extra={"examples": [{}]},
     )
 
+
 class DeclineCallData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to decline the call that is ringing."""
 
@@ -190,6 +196,7 @@ class DeclineCallData(pydantic.BaseModel):
         json_schema_extra={"examples": [{}]},
     )
 
+
 class HangUpCallData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to hang up the call it is on."""
 
@@ -197,6 +204,7 @@ class HangUpCallData(pydantic.BaseModel):
         frozen=True,
         json_schema_extra={"examples": [{}]},
     )
+
 
 class TransferCallData(pydantic.BaseModel):
     """Command from an operator or owner asking firmware to transfer the call it is on."""
@@ -222,6 +230,7 @@ class TransferCallData(pydantic.BaseModel):
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
 
+
 class DialFailedData(pydantic.BaseModel):
     """Signal from a phone service provider that an outbound dial never became a call.
 
@@ -245,6 +254,7 @@ class DialFailedData(pydantic.BaseModel):
         examples=["remote_unavailable", "call_declined", "provider_unavailable", "signaling_failed"],
     )
 
+
 class AnswerRequestData(CallIdData):
     """Firmware asking the phone service to answer one identified call.
 
@@ -252,11 +262,14 @@ class AnswerRequestData(CallIdData):
     parties: pressing answer, and telling the exchange which line is being answered.
     """
 
+
 class DeclineRequestData(CallIdData):
     """Firmware asking the phone service to decline one identified call."""
 
+
 class HangUpRequestData(CallIdData):
     """Firmware asking the phone service to hang up one identified call."""
+
 
 class TransferRequestData(CallIdData):
     """Firmware asking the phone service to transfer one identified call."""
@@ -280,6 +293,7 @@ class TransferRequestData(CallIdData):
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
 
+
 class CallConnectedData(CallIdData):
     """Signal from a phone service provider that the current call is connected."""
 
@@ -293,8 +307,10 @@ class CallConnectedData(CallIdData):
         examples=["Front desk", "+15555550123"],
     )
 
+
 class MediaReadyData(CallIdData):
     """Signal from a phone service provider that call media is ready for audio routing."""
+
 
 class ServiceAudioData(audio.AudioOutputData):
     """Signal from a phone service provider carrying audio that should play from the phone speaker."""
@@ -318,8 +334,10 @@ class ServiceAudioData(audio.AudioOutputData):
 
     call_id: CallId
 
+
 class RemoteHangUpData(CallIdData):
     """Signal from a phone service provider that the remote party ended the current call."""
+
 
 class CallFailedData(CallIdData):
     """Signal from a phone service provider that the current call failed."""
@@ -338,6 +356,7 @@ class CallFailedData(CallIdData):
         ),
         examples=["signaling_failed", "provider_unavailable"],
     )
+
 
 class TransferAcceptedData(CallIdData):
     """Signal from a phone service provider that it accepted a transfer request."""
@@ -361,6 +380,7 @@ class TransferAcceptedData(CallIdData):
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
 
+
 class TransferCompletedData(CallIdData):
     """Signal from a phone service provider that the current call transfer completed."""
 
@@ -382,6 +402,7 @@ class TransferCompletedData(CallIdData):
         description="Echoed transfer target for the completed transfer operation.",
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
+
 
 class TransferFailedData(CallIdData):
     """Signal from a phone service provider that the current call transfer failed."""
@@ -412,6 +433,7 @@ class TransferFailedData(CallIdData):
         description="Echoed transfer target for the failed transfer operation.",
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
+
 
 class PhoneCallData(CallIdData):
     """Committed public phone state for a specific call."""
@@ -508,6 +530,7 @@ class PhoneHungUpData(CallIdData):
         examples=["local_hang_up", "declined", "remote_hang_up", "failed", "transferred"],
     )
 
+
 class NoCallData(pydantic.BaseModel):
     """Committed public phone state that a requested call action left the phone with no call.
 
@@ -548,6 +571,7 @@ class NoCallData(pydantic.BaseModel):
         examples=["call_declined", "remote_unavailable", "provider_unavailable"],
     )
 
+
 class PhoneTransferData(CallIdData):
     """Committed public phone state for an in-progress or completed transfer."""
 
@@ -570,6 +594,7 @@ class PhoneTransferData(CallIdData):
         examples=[{"kind": "address", "value": "helpdesk@example.com"}],
     )
 
+
 class PhoneTransferFailedData(PhoneTransferData):
     """Committed public phone state that an attempted transfer failed and the original call remains active."""
 
@@ -591,6 +616,7 @@ class PhoneTransferFailedData(PhoneTransferData):
         description="Normalized low-cardinality failure category for the committed transfer failure.",
         examples=["timeout", "transfer_rejected"],
     )
+
 
 IncomingCallEvent = hsm.Event[IncomingCallData](
     name="phone.service.incoming_call",
@@ -630,27 +656,27 @@ ServiceTransferFailedEvent = hsm.Event[TransferFailedData](
 )
 AnswerCallEvent = hsm.Event[AnswerCallData](
     name="phone.answer_call",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=AnswerCallData,
 )
 DialEvent = hsm.Event[DialData](
     name="phone.dial",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=DialData,
 )
 DeclineCallEvent = hsm.Event[DeclineCallData](
     name="phone.decline_call",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=DeclineCallData,
 )
 HangUpCallEvent = hsm.Event[HangUpCallData](
     name="phone.hang_up_call",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=HangUpCallData,
 )
 TransferCallEvent = hsm.Event[TransferCallData](
     name="phone.transfer_call",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=TransferCallData,
 )
 

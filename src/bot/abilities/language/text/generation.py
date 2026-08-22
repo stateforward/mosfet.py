@@ -7,12 +7,15 @@ import enum
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
 
+
 def _empty_text_tool_args() -> dict[str, object]:
     return {}
+
 
 class TextRole(enum.StrEnum):
     """Provider-neutral role for text-generation messages."""
@@ -23,12 +26,14 @@ class TextRole(enum.StrEnum):
     AGENT = "assistant"
     TOOL = "tool"
 
+
 class ToolSelectionPolicy(enum.StrEnum):
     """Provider-neutral policy for tool selection during text generation."""
 
     AUTO = "auto"
     REQUIRED = "required"
     NONE = "none"
+
 
 class TextToolCall(pydantic.BaseModel):
     """A provider-neutral tool call requested by generated text."""
@@ -53,6 +58,7 @@ class TextToolCall(pydantic.BaseModel):
         description="JSON-serializable arguments for the requested tool operation.",
         examples=[{"date": "2026-03-19"}],
     )
+
 
 class TextMessage(pydantic.BaseModel):
     """A single provider-neutral message in a text-generation input."""
@@ -82,6 +88,7 @@ class TextMessage(pydantic.BaseModel):
         description="Tool calls requested by an assistant message.",
     )
 
+
 class InputData(pydantic.BaseModel):
     """Canonical input for text generation."""
 
@@ -108,6 +115,7 @@ class InputData(pydantic.BaseModel):
         ),
         examples=[ToolSelectionPolicy.AUTO],
     )
+
 
 class OutputData(pydantic.BaseModel):
     """Canonical output for text generation."""
@@ -143,8 +151,10 @@ class OutputData(pydantic.BaseModel):
         description="Tool calls requested by the generated text.",
     )
 
+
 class TextGenerator(generative.Generator[InputData, OutputData], abc.ABC):
     """Generator that produces text from text-generation input."""
+
 
 _TextGenerationApplyCompletedEvent = hsm.Event[OutputData](
     name="bot.ability.language.text.generation.apply.completed",
@@ -157,6 +167,7 @@ _TextGenerationApplyFailedEvent = hsm.Event[ability.FailureData](
     schema=ability.FailureData,
 )
 
+
 def _has_text_generation_input(
     ctx: hsm.Context,
     instance: "TextGeneration",
@@ -164,6 +175,7 @@ def _has_text_generation_input(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, InputData)
+
 
 def _has_text_generation_output(
     ctx: hsm.Context,
@@ -173,6 +185,7 @@ def _has_text_generation_output(
     del ctx, instance
     return isinstance(event.data, OutputData)
 
+
 def _has_invalid_text_generation_output(
     ctx: hsm.Context,
     instance: "TextGeneration",
@@ -180,6 +193,7 @@ def _has_invalid_text_generation_output(
 ) -> bool:
     del ctx, instance
     return not isinstance(event.data, OutputData)
+
 
 def _has_text_generation_failure(
     ctx: hsm.Context,
@@ -189,20 +203,19 @@ def _has_text_generation_failure(
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
 
+
 class TextGeneration(generative.Generative[InputData, OutputData]):
     """Ability to generate text."""
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.language.text.generation.input",
-    schema=InputData,
-
+        name="bot.ability.language.text.generation.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.language.text.generation.output",
-    schema=OutputData,
-
+        name="bot.ability.language.text.generation.output",
+        schema=OutputData,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _TextGenerationApplyCompletedEvent
@@ -222,10 +235,11 @@ class TextGeneration(generative.Generative[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "TextGeneration",
         hsm.initial(hsm.target("idle")),
         hsm.state(
@@ -261,6 +275,7 @@ class TextGeneration(generative.Generative[InputData, OutputData]):
         ),
         hsm.observe(observer),
     )
+
 
 InputEvent = TextGeneration.input_event
 OutputEvent = TextGeneration.output_event

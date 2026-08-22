@@ -6,6 +6,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 
 from bot.device import Device
 from bot.protocols import attachment
@@ -21,6 +22,7 @@ async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: 
             raise TimeoutError("Timed out waiting for condition.")
         await asyncio.sleep(0)
 
+
 class RecordingDevice(Device):
     def __init__(self) -> None:
         super().__init__()
@@ -35,6 +37,7 @@ class RecordingDevice(Device):
         done.set_result(None)
         return done
 
+
 def test_speaker_is_generic_audio_output_peripheral() -> None:
     speaker = audio.Speaker()
 
@@ -42,12 +45,13 @@ def test_speaker_is_generic_audio_output_peripheral() -> None:
     assert device_peripherals(speaker) == ()
     assert audio.Speaker.required_bot_abilities == ()
 
+
 def test_speaker_dispatches_audio_output_to_target_device() -> None:
     async def run() -> None:
         speaker = audio.Speaker()
         target = RecordingDevice()
-        _ = await hsm.started(None, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="physical-speaker"))
+        _ = await bot.started(None, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
+        _ = await bot.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="physical-speaker"))
         target.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
@@ -68,6 +72,7 @@ def test_speaker_dispatches_audio_output_to_target_device() -> None:
 
     asyncio.run(run())
 
+
 def test_speaker_transduces_attached_controller_signal_into_environment_sound() -> None:
     """A speaker converts signal into acoustic energy for the environment, the mirror of a microphone.
 
@@ -81,10 +86,16 @@ def test_speaker_transduces_attached_controller_signal_into_environment_sound() 
         controller = RecordingDevice()
         inside = RecordingDevice()
         outside = RecordingDevice()
-        _ = await hsm.started(environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller"))
-        _ = await hsm.started(environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker"))
-        _ = await hsm.started(None, outside, typing.cast(hsm.Model, outside.model), hsm.Config(id="outside-speaker"))
+        _ = await bot.started(
+            environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker")
+        )
+        _ = await bot.started(
+            environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller")
+        )
+        _ = await bot.started(
+            environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker")
+        )
+        _ = await bot.started(None, outside, typing.cast(hsm.Model, outside.model), hsm.Config(id="outside-speaker"))
         await speaker.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: speaker.state() == "/Device/attached")
         inside.events.clear()
@@ -126,8 +137,12 @@ def test_unattached_speaker_transduces_nothing() -> None:
         environment = Environment()
         speaker = audio.Speaker()
         inside = RecordingDevice()
-        _ = await hsm.started(environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
-        _ = await hsm.started(environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker"))
+        _ = await bot.started(
+            environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker")
+        )
+        _ = await bot.started(
+            environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker")
+        )
         inside.events.clear()
         data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 

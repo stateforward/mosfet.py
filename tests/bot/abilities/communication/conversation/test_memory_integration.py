@@ -6,6 +6,7 @@ import sqlite3
 import typing
 
 import hsm
+import bot
 import pytest
 
 from bot.abilities import ability
@@ -18,7 +19,71 @@ from tests.hsm_instance_state import start_ability_tree
 
 
 def _empty_memory_output() -> memory_ability.OutputData:
-    return memory_ability.OutputData(results=())
+    return memory_ability.OutputData(results=(memory_ability.StatementResult(rowcount=0),))
+
+
+class _MisroutingMemory(ability.Ability[memory_ability.InputData, memory_ability.OutputData]):
+    input_event = memory_ability.Memory.input_event
+    output_event = memory_ability.Memory.output_event
+    failed_event = memory_ability.Memory.failed_event
+
+    @staticmethod
+    def emit_wrong_source(
+        ctx: hsm.Context,
+        instance: "_MisroutingMemory",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del instance
+        assert event.source
+        _ = hsm.dispatch_to(
+            ctx,
+            dataclasses.replace(
+                memory_ability.Memory.output_event.with_data(_empty_memory_output()),
+                id=event.id,
+                source="wrong-memory",
+                target=event.source,
+                metadata=dict(event.metadata),
+            ),
+            event.source,
+        )
+
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+        "MisroutingMemory",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(
+                hsm.on(memory_ability.Memory.input_event),
+                hsm.effect(emit_wrong_source),
+            ),
+        ),
+    )
+
+
+class _SilentMemory(ability.Ability[memory_ability.InputData, memory_ability.OutputData]):
+    input_event = memory_ability.Memory.input_event
+    output_event = memory_ability.Memory.output_event
+    failed_event = memory_ability.Memory.failed_event
+
+    @staticmethod
+    def accept_without_terminal(
+        ctx: hsm.Context,
+        instance: "_SilentMemory",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx, instance, event
+
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+        "SilentMemory",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(
+                hsm.on(memory_ability.Memory.input_event),
+                hsm.effect(accept_without_terminal),
+            ),
+        ),
+    )
 
 
 def test_conversation_recalls_and_persists_relationship_memory() -> None:
@@ -135,9 +200,7 @@ def test_remember_failure_rolls_back_new_detector_and_profile() -> None:
                 )
 
             assert len(created) == 2
-            assert ability_instance.detector_refs == (
-                (first.session_ref, (1.0, 0.0)),
-            )
+            assert ability_instance.detector_refs == ((first.session_ref, (1.0, 0.0)),)
 
             connection.execute("DROP TRIGGER fail_conversation_remember")
             connection.commit()
@@ -242,87 +305,47 @@ def test_memory_failure_is_a_typed_conversation_failure() -> None:
 
 def test_memory_rejects_mismatched_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
-        connection = sqlite3.connect(":memory:", check_same_thread=False)
-        try:
-            memory = memory_ability.Memory(connection=connection)
-            ability_instance = conversation.Conversation(memory=memory)
-            context = hsm.Context()
-            await start_ability_tree(context, memory)
-            await start_ability_tree(context, ability_instance)
+        memory = _MisroutingMemory()
+        ability_instance = conversation.Conversation(memory=memory)
+        context = hsm.Context()
+        await start_ability_tree(context, memory)
+        await start_ability_tree(context, ability_instance)
+        monkeypatch.setattr(conversation_module, "_TURN_TIMEOUT_SECONDS", 0.01)
 
-            async def mismatched_terminal(
-                ctx: hsm.Context,
-                *,
-                owner: hsm.Instance,
-                child: ability.Ability[typing.Any, typing.Any],
-                operation_id: str,
-                input: object,
-                metadata: typing.Mapping[str, object],
-            ) -> hsm.Event[typing.Any]:
-                del ctx, owner, input, metadata
-                return dataclasses.replace(
-                    child.output_event.with_data(_empty_memory_output()),
-                    id=operation_id,
-                    source="wrong-memory",
-                )
-
-            monkeypatch.setattr(ability.Ability, "await_child_terminal", mismatched_terminal)
-
-            with pytest.raises(RuntimeError, match="stage='memory'"):
-                await conversation.contribute_conversation_input(
-                    ability_instance,
-                    conversation.TurnData(
-                        source_ids=frozenset({"caller"}),
-                        target_ids=frozenset({"bot"}),
-                        content="mismatched terminal",
-                        content_type="text/plain",
-                    ),
-                    ctx=context,
-                )
-        finally:
-            connection.close()
+        with pytest.raises(RuntimeError, match="stage='memory'.*timed out"):
+            await conversation.contribute_conversation_input(
+                ability_instance,
+                conversation.TurnData(
+                    source_ids=frozenset({"caller"}),
+                    target_ids=frozenset({"bot"}),
+                    content="mismatched terminal",
+                    content_type="text/plain",
+                ),
+                ctx=context,
+            )
 
     asyncio.run(run())
 
 
 def test_memory_timeout_is_a_typed_conversation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> None:
-        connection = sqlite3.connect(":memory:", check_same_thread=False)
-        try:
-            memory = memory_ability.Memory(connection=connection)
-            ability_instance = conversation.Conversation(memory=memory)
-            context = hsm.Context()
-            await start_ability_tree(context, memory)
-            await start_ability_tree(context, ability_instance)
+        memory = _SilentMemory()
+        ability_instance = conversation.Conversation(memory=memory)
+        context = hsm.Context()
+        await start_ability_tree(context, memory)
+        await start_ability_tree(context, ability_instance)
+        monkeypatch.setattr(conversation_module, "_TURN_TIMEOUT_SECONDS", 0.01)
 
-            async def never_terminal(
-                ctx: hsm.Context,
-                *,
-                owner: hsm.Instance,
-                child: ability.Ability[typing.Any, typing.Any],
-                operation_id: str,
-                input: object,
-                metadata: typing.Mapping[str, object],
-            ) -> hsm.Event[typing.Any]:
-                del ctx, owner, child, operation_id, input, metadata
-                await asyncio.Future[None]()
-                raise AssertionError("unreachable")
-
-            monkeypatch.setattr(ability.Ability, "await_child_terminal", never_terminal)
-            monkeypatch.setattr(conversation_module, "_TURN_TIMEOUT_SECONDS", 0.01)
-
-            with pytest.raises(RuntimeError, match="stage='memory'.*timed out"):
-                await conversation.contribute_conversation_input(
-                    ability_instance,
-                    conversation.TurnData(
-                        source_ids=frozenset({"caller"}),
-                        target_ids=frozenset({"bot"}),
-                        content="timed out memory",
-                        content_type="text/plain",
-                    ),
-                    ctx=context,
-                )
-        finally:
-            connection.close()
+        with pytest.raises(RuntimeError, match="stage='memory'.*timed out"):
+            await conversation.contribute_conversation_input(
+                ability_instance,
+                conversation.TurnData(
+                    source_ids=frozenset({"caller"}),
+                    target_ids=frozenset({"bot"}),
+                    content="timed out memory",
+                    content_type="text/plain",
+                ),
+                ctx=context,
+            )
 
     asyncio.run(run())

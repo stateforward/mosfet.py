@@ -43,6 +43,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 from sqlalchemy.sql import Executable
 
 from bot import abilities
@@ -287,7 +288,7 @@ class TerminalCollector(hsm.Instance):
         instance._received.append(event)
         instance._waiters.resolve(event)
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "TerminalCollector",
         hsm.initial(hsm.target("collecting")),
         hsm.state("collecting", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_collect))),
@@ -296,7 +297,7 @@ class TerminalCollector(hsm.Instance):
 
 async def started_collector(environment: Environment) -> TerminalCollector:
     collector = TerminalCollector()
-    _ = await hsm.started(environment, collector, typing.cast(hsm.Model, TerminalCollector.model))
+    _ = await bot.started(environment, collector, typing.cast(hsm.Model, TerminalCollector.model))
     environment.join(collector)
     return collector
 
@@ -357,7 +358,7 @@ async def ringing_phone(
 
     watcher = RingWatcher()
     phone = phone_device.Phone(service=watcher)
-    _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+    _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
     await awaited(watcher.attached(), timeout=_DEVICE_TIMEOUT_S, what="phone service attach")
     ringing = watcher.expect(phone_device.RingingEvent.name)
     elevated = collector.expect(
@@ -367,12 +368,12 @@ async def ringing_phone(
     )
     await watcher.receive(
         phone.context(),
-        phone_device.IncomingCallEvent.with_data(
-            phone_device.IncomingCallData(call_id=call_id, caller=call_id)
-        ),
+        phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller=call_id)),
     )
     _ = await awaited(ringing, timeout=_DEVICE_TIMEOUT_S, what=f"{phone_device.RingingEvent.name} for {call_id}")
-    stimulus = await awaited(elevated, timeout=_DEVICE_TIMEOUT_S, what=f"environment.sound ring elevation for {call_id}")
+    stimulus = await awaited(
+        elevated, timeout=_DEVICE_TIMEOUT_S, what=f"environment.sound ring elevation for {call_id}"
+    )
     return phone, watcher, stimulus
 
 
@@ -420,9 +421,7 @@ def installed_behavior(store: memory.Memory, name: str) -> behavior.Instance | N
 
     clauses = behavior_storage.select_behavior_by_name_clauses(name)
     output = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses))
-        )
+        memory.InputData(statements=memory.compile_statements(*(typing.cast(Executable, clause) for clause in clauses)))
     )
     if len(output.results) < 2:
         return None

@@ -171,11 +171,7 @@ def select_all_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
 def select_active_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
     """Core clauses: ACTIVE behaviors only (Autonomy runtime load)."""
 
-    behaviors = (
-        select(behavior_table)
-        .where(behavior_table.c.status == STATUS_ACTIVE)
-        .order_by(behavior_table.c.name)
-    )
+    behaviors = select(behavior_table).where(behavior_table.c.status == STATUS_ACTIVE).order_by(behavior_table.c.name)
     triggers = select(behavior_trigger_table).order_by(
         behavior_trigger_table.c.behavior_name,
         behavior_trigger_table.c.trigger,

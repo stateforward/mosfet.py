@@ -1294,12 +1294,12 @@ class PhoneService(hsm.Instance):
 
         require_environment_scope(environment, target, participant="Phone service target")
         _, track_path = self._ensure_media()
-        if not bot.lifecycle.is_started(track_path):
-            _ = await hsm.started(environment, track_path, track_path.model)
         # Start this service before room connect so its signaling handlers are registered by the
         # time setup can arrive; an unattached phone answers RPC with RECIPIENT_NOT_FOUND.
         if not bot.lifecycle.is_started(self):
-            _ = await hsm.started(environment, self, self.model)
+            _ = await bot.started(environment, self, self.model, owner=target)
+        if not bot.lifecycle.is_started(track_path):
+            _ = await bot.started(environment, track_path, track_path.model, owner=self)
         require_environment_scope(environment, self, participant="PhoneService")
         await self.dispatch(environment, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
         target_ref = self._attached_phone_target_ref
@@ -1309,6 +1309,7 @@ class PhoneService(hsm.Instance):
                 "LiveKit phone service is already attached to another phone event target.",
                 failure_kind="provider_unavailable",
             )
+        _ = bot.register(self, self.model, owner=target)
         if self._room_connect is not None and self._local_track_sid is None:
             await track_path.connect_room(track_path.context(), self._room_connect)
 
@@ -1321,6 +1322,10 @@ class PhoneService(hsm.Instance):
         require_environment_scope(environment, target, participant="Phone service target")
         require_environment_scope(environment, self, participant="PhoneService")
         await self.dispatch(environment, _ServiceDetachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
+        target_ref = self._attached_phone_target_ref
+        current_target = None if target_ref is None else target_ref()
+        if current_target is None:
+            _ = bot.register(self, self.model, clear_owner=True)
 
     async def connect_room(
         self,
@@ -1335,7 +1340,7 @@ class PhoneService(hsm.Instance):
         if not bot.lifecycle.is_started(track_path):
             # Parent the track path under this service only while the service is live.
             parent = self.context() if bot.lifecycle.is_started(self) else None
-            _ = await hsm.started(parent, track_path, track_path.model)
+            _ = await bot.started(parent, track_path, track_path.model, owner=self)
         await track_path.connect_room(
             track_path.context(),
             RoomAudioConnectData(url=url, token=token, track_name=track_name),
@@ -1357,13 +1362,17 @@ class PhoneService(hsm.Instance):
         # cannot deliver after the service is stopped (only detach effect cleared it before).
         self._attached_phone_target_ref = None
         self._unbind_room_signaling()
-        await hsm.Instance.stop(self, ctx)
+        if bot.lifecycle.is_started(self):
+            await hsm.Instance.stop(self, ctx)
+        if self.model is not None:
+            _ = bot.register(self, self.model, clear_owner=True)
         if track_path is None:
             return
         # Track path is created by _ensure_media before start; only stop if started.
-        if not bot.lifecycle.is_started(track_path):
-            return
-        await hsm.stop(track_path, ctx)
+        if bot.lifecycle.is_started(track_path):
+            await hsm.stop(track_path, ctx)
+        if track_path.model is not None:
+            _ = bot.register(track_path, track_path.model, clear_owner=True)
 
     async def publish_audio(self, output: audio.AudioOutputData) -> None:
         """Publish generated or encoded audio through the local LiveKit audio track."""
@@ -2088,7 +2097,7 @@ class PhoneService(hsm.Instance):
 
         return self.dispatch(ctx, ServiceTransferFailedEvent.with_data(data))
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "PhoneService",
         hsm.attribute(_ACTIVE_OPERATION_ATTRIBUTE),
         hsm.initial(hsm.target("/PhoneService/unconnected")),

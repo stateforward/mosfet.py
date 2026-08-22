@@ -601,7 +601,9 @@ def test_text_generator_rejects_unsuccessful_finish_reason() -> None:
         raise AssertionError("Expected TextGenerationError.")
 
 
-def test_text_generator_records_otel_request_when_configured(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_text_generator_records_otel_request_when_configured(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Live TextGenerator.generate records OTEL; covers generator requests used by processing."""
 
     import json

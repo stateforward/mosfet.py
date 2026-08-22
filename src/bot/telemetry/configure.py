@@ -30,6 +30,7 @@ import pathlib
 import threading
 
 from opentelemetry import _logs, trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
@@ -44,8 +45,10 @@ _DEFAULT_LOG_FILE = "otel-logs.jsonl"
 _DEFAULT_SPAN_FILE = "otel-spans.jsonl"
 _SERVICE_NAME = "stateforward.bot"
 _EXPORT_ATTR = "bot.otel.jsonl_export"
+_OTLP_EXPORT_ATTR = "bot.otel.otlp_export"
 _LOG_FILE_ATTR = "bot.otel.log_file"
 _SPAN_FILE_ATTR = "bot.otel.span_file"
+_TRACES_PATH = "/v1/traces"
 
 
 @dataclasses.dataclass
@@ -93,6 +96,34 @@ def _resolve_file(
     return pathlib.Path(default)
 
 
+def _strip_http_traces_path(endpoint: str) -> str:
+    """Drop a leftover OTLP/HTTP ``/v1/traces`` suffix; gRPC uses host:port only."""
+
+    trimmed = endpoint.rstrip("/")
+    if trimmed.endswith(_TRACES_PATH):
+        return trimmed[: -len(_TRACES_PATH)]
+    return trimmed
+
+
+def otlp_endpoint() -> str | None:
+    """Return the configured OTLP gRPC endpoint, or ``None`` when unset.
+
+    Reads ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT``, then
+    ``BOT_OTEL_EXPORTER_OTLP_ENDPOINT``, then ``OTEL_EXPORTER_OTLP_ENDPOINT``.
+    Does not append ``/v1/traces``. A leftover HTTP suffix is stripped.
+    """
+
+    for name in (
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "BOT_OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            return _strip_http_traces_path(raw)
+    return None
+
+
 def _confine_file(path: pathlib.Path) -> pathlib.Path:
     """Resolve ``path`` and require it to stay under the process working directory."""
 
@@ -100,18 +131,12 @@ def _confine_file(path: pathlib.Path) -> pathlib.Path:
     try:
         resolved = path.expanduser().resolve(strict=False)
     except OSError as error:
-        message = (
-            "export file could not be resolved under the process working "
-            + f"directory ({allowed}): {path}"
-        )
+        message = "export file could not be resolved under the process working " + f"directory ({allowed}): {path}"
         raise ValueError(message) from error
     try:
         _ = resolved.relative_to(allowed)
     except ValueError as error:
-        message = (
-            "export file must resolve under the process working "
-            + f"directory ({allowed}); got {resolved}"
-        )
+        message = "export file must resolve under the process working " + f"directory ({allowed}); got {resolved}"
         raise ValueError(message) from error
     return resolved
 
@@ -168,14 +193,16 @@ def _configure_locked(
     resolved_span_path = _confine_file(
         _resolve_file(span_file, env_var="BOT_OTEL_SPAN_FILE", default=_DEFAULT_SPAN_FILE)
     )
-    resource = Resource.create(
-        {
-            "service.name": _SERVICE_NAME,
-            _EXPORT_ATTR: "true",
-            _LOG_FILE_ATTR: str(resolved_path),
-            _SPAN_FILE_ATTR: str(resolved_span_path),
-        }
-    )
+    otlp_url = otlp_endpoint()
+    resource_attributes: dict[str, str] = {
+        "service.name": _SERVICE_NAME,
+        _EXPORT_ATTR: "true",
+        _LOG_FILE_ATTR: str(resolved_path),
+        _SPAN_FILE_ATTR: str(resolved_span_path),
+    }
+    if otlp_url is not None:
+        resource_attributes[_OTLP_EXPORT_ATTR] = "true"
+    resource = Resource.create(resource_attributes)
     provider = LoggerProvider(resource=resource)
     # Batch export (CORE-OBS-001): keep emit off the hot path; callers that
     # need immediate visibility must force_flush() (tests / live proofs).
@@ -184,17 +211,26 @@ def _configure_locked(
     )
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(BatchSpanProcessor(JsonlFileSpanExporter(resolved_span_path)))
+    if otlp_url is not None:
+        tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_url)))
     _RUNTIME.provider = provider
     _RUNTIME.tracer_provider = tracer_provider
     _RUNTIME.configured = True
     # Best-effort global install; emission uses the retained providers so tests can rebind.
     _logs.set_logger_provider(provider)
     trace.set_tracer_provider(tracer_provider)
-    _LOG.info(
-        "OpenTelemetry export enabled logs=%s spans=%s",
-        resolved_path,
-        resolved_span_path,
-    )
+    if otlp_url is None:
+        _LOG.info(
+            "OpenTelemetry export enabled logs=%s spans=%s",
+            resolved_path,
+            resolved_span_path,
+        )
+    else:
+        _LOG.info(
+            "OpenTelemetry export enabled logs=%s spans=%s otlp=true",
+            resolved_path,
+            resolved_span_path,
+        )
     return True
 
 
@@ -224,9 +260,14 @@ def configure(
 
     Log path comes from ``log_file``, else ``BOT_OTEL_LOG_FILE``, else
     ``otel-logs.jsonl``. Span path comes from ``span_file``, else
-    ``BOT_OTEL_SPAN_FILE``, else ``otel-spans.jsonl``. Span attributes stay
-    low-cardinality and payload-free (see ``bot.telemetry.span``), so the span
-    file carries no prompts or media.
+    ``BOT_OTEL_SPAN_FILE``, else ``otel-spans.jsonl``. When
+    ``OTEL_EXPORTER_OTLP_TRACES_ENDPOINT``, ``BOT_OTEL_EXPORTER_OTLP_ENDPOINT``,
+    or ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set, a second batch processor exports
+    OTLP gRPC to that collector. The endpoint is the gRPC origin
+    (``http://127.0.0.1:4317``); ``/v1/traces`` is not appended and a leftover
+    HTTP suffix is stripped. Span attributes stay low-cardinality and
+    payload-free (see ``bot.telemetry.span``), so neither export carries prompts
+    or media.
 
     Idempotent: subsequent calls return the prior result without reinstalling.
     """
@@ -266,6 +307,9 @@ def reset() -> None:
             if retained is not None:
                 with contextlib.suppress(Exception):
                     retained.shutdown()
+    from bot.telemetry import control
+
+    control.reset()
 
 
 def is_enabled() -> bool:
@@ -316,6 +360,7 @@ __all__ = [
     "is_enabled",
     "log_file",
     "logger_provider",
+    "otlp_endpoint",
     "reset",
     "span_file",
     "tracer_provider",

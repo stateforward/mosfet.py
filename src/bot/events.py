@@ -2,7 +2,7 @@ import typing
 
 import pydantic
 import hsm
-from bot import event_schema
+from bot import event
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import PlainSerializer
 
@@ -176,12 +176,10 @@ class InputEventData(pydantic.BaseModel):
     )
 
 
-def _jsonable_bot_observed_event(event: hsm.Event[typing.Any]) -> dict[str, object]:
-    # An observed event is only ever serialized toward a model, so it carries the model-facing
-    # projection: media is described by size, never rendered as base64 the model cannot use.
+def _jsonable_bot_observed_event(observed_event: hsm.Event[typing.Any]) -> dict[str, object]:
     return {
-        "event": event.name,
-        "data": event_schema.model_facing_json_value(event.data),
+        "event": observed_event.name,
+        "data": event.event_json_value(observed_event.data),
     }
 
 
@@ -233,7 +231,7 @@ class ClearFocusEventData(pydantic.BaseModel):
             "description": (
                 "Clear body focus so no device is the active attention target. Use only when focus "
                 "should end (for example the focused device is gone). Do not use this as a default "
-                "response to user speech — prefer speaking.input and/or reasoning.input. Why this "
+                "response to user speech — prefer a behavior/topology route or reasoning input. Why this "
                 "was selected is selection-envelope reason, not a field here."
             ),
             "examples": [{}],
@@ -338,7 +336,7 @@ RebootEvent = hsm.Event[RebootEventData](
     schema=RebootEventData,
 )
 # Body ingress, never a model tool: an occasion is something that happens to a bot, so it keeps
-# the default event kind rather than the tool-offerable event_schema.EventKind. A bot cannot
+# the default event kind rather than the tool-offerable event.EventKind. A bot cannot
 # select having a moment.
 InputEvent = hsm.Event[InputEventData](
     name="bot.input",
@@ -347,12 +345,12 @@ InputEvent = hsm.Event[InputEventData](
 )
 FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=FocusDeviceEventData,
 )
 ClearFocusEvent = hsm.Event[ClearFocusEventData](
     name="bot.clear_focus",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=ClearFocusEventData,
 )
 ProcessingCompletedEvent = hsm.Event[ProcessingCompletedEventData](

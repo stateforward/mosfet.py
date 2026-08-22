@@ -12,7 +12,7 @@ import hsm
 import bot.device
 
 from bot import lifecycle
-from bot.event_schema import validate_event_data
+from bot.event import validate_event_data
 from bot.protocols import attachment
 from bot.telemetry import observer
 from bot.environment import SoundEvent, Environment, require_environment_scope, space
@@ -708,7 +708,9 @@ class PhoneFirmware(hsm.Instance):
 
         data = event.data
         assert isinstance(data, ServiceAudioData)
-        PhoneFirmware._dispatch_to_peripheral(ctx, instance, instance._speaker, audio.OutputEvent.with_data(data), event)
+        PhoneFirmware._dispatch_to_peripheral(
+            ctx, instance, instance._speaker, audio.OutputEvent.with_data(data), event
+        )
 
     @staticmethod
     def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
@@ -1004,7 +1006,7 @@ class PhoneFirmware(hsm.Instance):
         assert call_id is not None
         instance._closed_call_ids = frozenset((*instance._closed_call_ids, call_id))
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "Phone",
         hsm.initial(hsm.target("/Phone/hung_up")),
         hsm.state(
@@ -1470,7 +1472,13 @@ class Phone(bot.device.Device):
         if isinstance(data, command_schemas):
             return event
         schema = event.schema
-        if schema is not DialData and schema is not AnswerCallData and schema is not DeclineCallData and schema is not HangUpCallData and schema is not TransferCallData:
+        if (
+            schema is not DialData
+            and schema is not AnswerCallData
+            and schema is not DeclineCallData
+            and schema is not HangUpCallData
+            and schema is not TransferCallData
+        ):
             return None
         try:
             validated = validate_event_data(event, {} if data is None else data)

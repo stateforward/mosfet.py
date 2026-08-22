@@ -7,6 +7,7 @@ import enum
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
@@ -323,20 +324,18 @@ class MemoryClassification(classifying.Classifying[InputData, OutputData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.memory.classification.input",
-    schema=InputData,
-
+        name="bot.ability.memory.classification.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.memory.classification.output",
-    schema=OutputData,
-
+        name="bot.ability.memory.classification.output",
+        schema=OutputData,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _MemoryClassificationApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryClassificationApplyFailedEvent
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "MemoryClassification",
         hsm.initial(hsm.target("idle")),
         hsm.state(

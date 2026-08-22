@@ -5,6 +5,7 @@ from bot.abilities import processing
 
 import asyncio
 import collections.abc
+import datetime
 import typing
 
 import hsm
@@ -324,6 +325,39 @@ def test_associative_memory_decodes_sources_then_processes_graph_associations() 
     assert len(outputs[0].sources) == 2
     assert outputs[0].sources[0].record.content == "Gabe prefers terse handoff notes."
     assert outputs[0].sources[1].record.content == "Gabe asked for concise final reports."
+
+
+def test_associative_memory_directed_operation_preserves_requester_through_processing() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        association = RecordingAssociativeMemory(
+            processor=PreferenceAssociationProcessor(),
+            encoder=GeneratedMemoryEncoder(),
+            decoder=GeneratedMemoryDecoder(),
+        )
+        await start_ability_tree(association)
+        terminal = await abilities.run_terminal_operation(
+            association.context(),
+            child=association,
+            request=association.input_event.with_data_and_id(
+                memory.associative.InputData(
+                    records=source_records(),
+                    context="Build graph associations for a knowledge store.",
+                    context_ref="active-task",
+                    subject_ref="operator",
+                ),
+                "associative:directed",
+            ),
+            terminals=(association.output_event, association.failed_event),
+            timeout=datetime.timedelta.max,
+        )
+        return terminal, hsm.id(association)
+
+    terminal, association_id = asyncio.run(run())
+
+    assert terminal.id == "associative:directed"
+    assert terminal.source == association_id
+    assert terminal.target and terminal.target != association_id
+    assert isinstance(terminal.data, memory.associative.OutputData)
 
 
 def test_associative_memory_routes_wrong_association_to_failure() -> None:

@@ -7,9 +7,12 @@ import base64
 import binascii
 import collections.abc
 import dataclasses
+import datetime
 import typing
+import uuid
 
 import hsm
+import bot
 
 from bot.protocols import attachment
 import pydantic
@@ -27,6 +30,7 @@ ReadingStage: typing.TypeAlias = typing.Literal[
 
 # Minimal correlation id only (HSM-CORRELATION-001); not a source_event bag.
 _READING_ACTIVE_OPERATION_ID_ATTRIBUTE = "reading_active_operation_id"
+_STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 
 
 class InputData(pydantic.BaseModel):
@@ -161,7 +165,6 @@ class _ReadingClassifiedEventData(pydantic.BaseModel):
     classification: vision.classification.OutputData
 
 
-
 class _ReadingOutputCandidateEventData(pydantic.BaseModel):
     """Private completion payload for conversation-ready reading output candidates."""
 
@@ -262,7 +265,12 @@ def _reading_event_with_context(
     if operation_id is not None:
         event = event.with_data_and_id(event.data, operation_id)
     # Telemetry only; stage payloads ride private completions / activity locals.
-    return dataclasses.replace(event, metadata=dict(source.metadata))
+    return dataclasses.replace(
+        event,
+        source=source.source,
+        target=source.target,
+        metadata=dict(source.metadata),
+    )
 
 
 def _dispatch_reading_terminal_output(
@@ -272,7 +280,15 @@ def _dispatch_reading_terminal_output(
     output: OutputData,
 ) -> None:
     terminal = _reading_event_with_context(instance.output_event.with_data(output), event, public_metadata=True)
-    terminal = dataclasses.replace(terminal, source=hsm.id(instance))
+    terminal = dataclasses.replace(
+        terminal,
+        source=hsm.id(instance),
+        target=(
+            event.source
+            if event.target == hsm.id(instance) and event.source and event.source != hsm.id(instance)
+            else None
+        ),
+    )
     _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
 
@@ -283,7 +299,15 @@ def _dispatch_reading_terminal_failure(
     failure: FailedEventData,
 ) -> None:
     terminal = _reading_event_with_context(instance.failed_event.with_data(failure), source, public_metadata=True)
-    terminal = dataclasses.replace(terminal, source=hsm.id(instance))
+    terminal = dataclasses.replace(
+        terminal,
+        source=hsm.id(instance),
+        target=(
+            source.source
+            if source.target == hsm.id(instance) and source.source and source.source != hsm.id(instance)
+            else None
+        ),
+    )
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
 
@@ -305,6 +329,28 @@ def _reading_output_encoder(instance: "Reading") -> encoding.Encoding[typing.Any
 
 def _stage_failure(stage: ReadingStage, error: BaseException) -> FailedEventData:
     return FailedEventData(stage=stage, message=str(error))
+
+
+async def _run_reading_child(
+    instance: "Reading",
+    event: hsm.Event[typing.Any],
+    *,
+    child: ability.Ability[typing.Any, typing.Any],
+    child_input: object,
+    parent_operation_id: str,
+    stage: ReadingStage,
+) -> hsm.Event[typing.Any]:
+    child_operation_id = f"{parent_operation_id}:{stage}:{uuid.uuid4().hex}"
+    return await ability.run_terminal_operation(
+        instance.context(),
+        child=child,
+        request=dataclasses.replace(
+            child.input_event.with_data_and_id(child_input, child_operation_id),
+            metadata=dict(event.metadata),
+        ),
+        terminals=(child.output_event, child.failed_event),
+        timeout=_STAGE_OPERATION_TIMEOUT,
+    )
 
 
 async def _run_reading_classification(
@@ -342,13 +388,13 @@ async def _run_reading_classification(
         )
         return
     child = _reading_visual_classifier(instance)
-    terminal = await ability.Ability.await_child_terminal(
-        ctx,
-        owner=instance,
+    terminal = await _run_reading_child(
+        instance,
+        event,
         child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
-        operation_id=operation_id,
-        input=classification_input,
-        metadata=event.metadata,
+        child_input=classification_input,
+        parent_operation_id=operation_id,
+        stage="classification",
     )
     if terminal.name == child.failed_event.name:
         message = getattr(terminal.data, "message", "Reading classification child failed.")
@@ -356,9 +402,7 @@ async def _run_reading_classification(
             ctx,
             instance,
             _reading_event_with_context(
-                _ReadingStageFailedEvent.with_data(
-                    FailedEventData(stage="classification", message=str(message))
-                ),
+                _ReadingStageFailedEvent.with_data(FailedEventData(stage="classification", message=str(message))),
                 event,
             ),
         )
@@ -420,13 +464,13 @@ async def _run_text_decoding(
         )
         return
     child = _reading_text_decoder(instance)
-    terminal = await ability.Ability.await_child_terminal(
-        ctx,
-        owner=instance,
+    terminal = await _run_reading_child(
+        instance,
+        event,
         child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
-        operation_id=operation_id,
-        input=content,
-        metadata=event.metadata,
+        child_input=content,
+        parent_operation_id=operation_id,
+        stage="text_decoding",
     )
     if terminal.name == child.failed_event.name:
         message = getattr(terminal.data, "message", "Reading text decoder failed.")
@@ -500,13 +544,13 @@ async def _run_image_decoding(
         )
         return
     child = _reading_image_decoder(instance)
-    terminal = await ability.Ability.await_child_terminal(
-        ctx,
-        owner=instance,
+    terminal = await _run_reading_child(
+        instance,
+        event,
         child=typing.cast(ability.Ability[typing.Any, typing.Any], child),
-        operation_id=operation_id,
-        input=content,
-        metadata=event.metadata,
+        child_input=content,
+        parent_operation_id=operation_id,
+        stage="image_decoding",
     )
     if terminal.name == child.failed_event.name:
         message = getattr(terminal.data, "message", "Reading image decoder failed.")
@@ -591,13 +635,13 @@ async def _run_output_encoding(
         confidence=candidate.confidence,
     )
     child = typing.cast(ability.Ability[typing.Any, typing.Any], _reading_output_encoder(instance))
-    terminal = await ability.Ability.await_child_terminal(
-        ctx,
-        owner=instance,
+    terminal = await _run_reading_child(
+        instance,
+        event,
         child=child,
-        operation_id=operation_id,
-        input=output_candidate,
-        metadata=event.metadata,
+        child_input=output_candidate,
+        parent_operation_id=operation_id,
+        stage="output_encoding",
     )
     if terminal.name == child.failed_event.name:
         message = getattr(terminal.data, "message", "Reading encoder failed.")
@@ -605,9 +649,7 @@ async def _run_output_encoding(
             ctx,
             instance,
             _reading_event_with_context(
-                _ReadingStageFailedEvent.with_data(
-                    FailedEventData(stage="output_encoding", message=str(message))
-                ),
+                _ReadingStageFailedEvent.with_data(FailedEventData(stage="output_encoding", message=str(message))),
                 event,
             ),
         )
@@ -789,7 +831,7 @@ class Reading(ability.Ability[InputData, OutputData]):
             self._output_encoder,
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Reading",
         hsm.attribute(_READING_ACTIVE_OPERATION_ID_ATTRIBUTE),
         hsm.initial(hsm.target("/Reading/initializing")),

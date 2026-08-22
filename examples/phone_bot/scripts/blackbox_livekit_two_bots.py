@@ -7,7 +7,7 @@ came from a bot deciding to speak.
 
 The two bots are not symmetric, because a call is not symmetric. Somebody walks up to one of them
 and **says something out loud** — "Call Bob at 555-0142." — which reaches it as sound in its
-environment, through its ears, its voice detector and its speech decoder, the same way anything
+environment, through its ears, its voice-activity classifier and its speech decoder, the same way anything
 else it hears does. Nobody says anything to the other one. Both have the same phone, both are on
 the same exchange and both can dial; having heard a sentence is a thing that happened to the
 caller, not a thing it must act on — whether to dial, and whether to answer, are the bots'

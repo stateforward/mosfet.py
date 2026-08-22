@@ -12,6 +12,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import pathlib
 import sqlite3
 import typing
 import uuid
@@ -25,6 +26,12 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_n
 def test_reflection_never_uses_metadata_for_coordination() -> None:
     for module in (reflection_impl, revision):
         assert_metadata_is_not_coordination(module)
+
+
+def test_reflection_revision_progresses_from_typed_child_terminals() -> None:
+    source = pathlib.Path(typing.cast(str, reflection_impl.__file__)).read_text(encoding="utf-8")
+
+    assert "Ability.await_child_terminal" not in source
 
 
 class EmptyProcessor(processing.Processor):
@@ -69,7 +76,7 @@ class AttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "ReflectionAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -91,7 +98,9 @@ class AttachmentOwner(hsm.Instance):
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
-    for _ in range(100):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1.0
+    while loop.time() < deadline:
         if condition():
             return
         await asyncio.sleep(0)
@@ -133,7 +142,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         reflection = cognition.Reflection(processor=HangingProcessor(), memory=store)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         input = reflection_input()
@@ -178,7 +187,7 @@ def test_reflection_waits_for_direct_child_cancel_before_acknowledging() -> None
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -199,7 +208,6 @@ def test_reflection_waits_for_direct_child_cancel_before_acknowledging() -> None
             target=hsm.id(reflection),
         )
         _ = await hsm.dispatch(ctx, reflection, cancel)
-        await asyncio.sleep(0.02)
         await wait_until(lambda: bool(owner.lifecycle))
         lifecycle, state, cancelled = owner.lifecycle, reflection.state(), processor.cancelled
         await reflection.stop(reflection.context())
@@ -233,7 +241,7 @@ def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -284,7 +292,7 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -303,7 +311,6 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
             target=hsm.id(reflection),
         )
         _ = await hsm.dispatch(ctx, reflection, cancel)
-        await asyncio.sleep(0.02)
         await wait_until(lambda: bool(owner.lifecycle))
         result = list(owner.lifecycle), processor.calls, reflection.state()
         await reflection.stop(reflection.context())
@@ -325,7 +332,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class StubbornProcessing(processing.Processing):
-        submodel = hsm.define(
+        submodel = bot.define(
             "StubbornReflectionProcessing",
             hsm.initial(hsm.target("/StubbornReflectionProcessing/waiting")),
             hsm.state(
@@ -341,7 +348,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         monkeypatch.setattr(
             reflection_impl,
             "_CANCEL_TEARDOWN_TIMEOUT",
-            datetime.timedelta(milliseconds=10),
+            datetime.timedelta(0),
         )
         reflection, connection = reflection_ability()
         stubborn = StubbornProcessing(processor=EmptyProcessor())
@@ -357,7 +364,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         )
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -381,9 +388,8 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
                 target=hsm.id(reflection),
             ),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: reflection.state().endswith("/rebooting"))
-        await asyncio.sleep(0.01)
+        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
         result = list(owner.lifecycle), reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -404,10 +410,12 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
         reflection, connection = reflection_ability()
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
-        request_id = getattr(reflection_module.Reflection, "_child_id")(reflection, getattr(reflection_impl, "_SELECT_ID_SUFFIX"))
+        request_id = getattr(reflection_module.Reflection, "_child_id")(
+            reflection, getattr(reflection_impl, "_SELECT_ID_SUFFIX")
+        )
         wrong_operation = dataclasses.replace(
             processing.CancelledEvent.with_data(
                 processing.CancelledData(operation_id="wrong-request", token="guard-token")
@@ -422,7 +430,9 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
             source="forged-child",
             target=hsm.id(reflection),
         )
-        operation_matches = getattr(reflection_module.Reflection, "_matches_cancelled")(ctx, reflection, wrong_operation)
+        operation_matches = getattr(reflection_module.Reflection, "_matches_cancelled")(
+            ctx, reflection, wrong_operation
+        )
         source_matches = getattr(reflection_module.Reflection, "_matches_cancelled")(ctx, reflection, wrong_source)
         await reflection.stop(reflection.context())
         connection.close()
@@ -488,12 +498,12 @@ def test_reflection_revision_cancel_guard_requires_typed_parent_correlation(
 
 def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
+        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=100))
         processor = HangingProcessor()
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -502,7 +512,6 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
             reflection,
             reflection.input_event.with_data_and_id(reflection_input(), "timed-reflection"),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: any(event.name == cognition.Reflection.failed_event.name for event in owner.lifecycle))
         result = list(owner.lifecycle), reflection.state(), processor.cancelled
         await reflection.stop(reflection.context())
@@ -519,7 +528,7 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
 
 def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
+        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(0))
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
@@ -534,7 +543,7 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -543,7 +552,6 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
             reflection,
             reflection.input_event.with_data_and_id(reflection_input(), "timed-change"),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: any(event.name == cognition.Reflection.failed_event.name for event in owner.lifecycle))
         result = list(owner.lifecycle), reflection.state(), processor.cancelled
         await reflection.stop(reflection.context())
@@ -624,8 +632,8 @@ def test_reflection_rejects_forged_behavior_mutation_during_select() -> None:
         ctx = hsm.Context()
         owner = AttachmentOwner()
         intruder = AttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
-        _ = await hsm.started(ctx, intruder, intruder.model)
+        _ = await bot.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, intruder, intruder.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         turn = reflection_input()
@@ -673,7 +681,7 @@ def test_reflection_waits_for_aggregate_attachment_completion(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -747,7 +755,7 @@ def test_reflection_defers_detach_during_initialization_then_detaches_once(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -844,7 +852,7 @@ def test_reflection_detaches_once_and_cancels_active_processing(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_with_processor(processor)
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -909,7 +917,7 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -975,7 +983,7 @@ def test_reflection_reports_aggregate_attachment_failure_and_accepts_retry(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1050,7 +1058,7 @@ def test_reflection_detaches_once_through_group_and_can_reattach(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1116,7 +1124,7 @@ def test_reflection_reports_detach_failure_and_accepts_retry(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

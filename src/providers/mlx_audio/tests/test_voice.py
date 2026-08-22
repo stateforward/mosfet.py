@@ -8,7 +8,9 @@ from bot.abilities.hearing import speech
 
 import asyncio
 import dataclasses
+import io
 import typing
+import wave
 
 from bot.providers.mlx_audio import VoiceDecoder, VoiceEncoder
 
@@ -19,7 +21,10 @@ class FixedSpeechDecoder(speech.SpeechDecoder):
 
     @typing.override
     async def decode(self, input: bytes) -> bytes:
-        assert input == b"encoded speech"
+        with wave.open(io.BytesIO(input), "rb") as stream:
+            assert stream.getframerate() == 16_000
+            assert stream.getnchannels() == 1
+            assert stream.readframes(1)
         return self.output
 
 
@@ -58,7 +63,14 @@ def test_voice_decoder_uses_mlx_speech_decoder() -> None:
     decoder = VoiceDecoder(speech_decoder=FixedSpeechDecoder(output=b"hello caller"))
 
     output = asyncio.run(
-        decoder.decode(turn_detector.AudioStimulus(source_participant_ref="caller", content=b"encoded speech"))
+        decoder.decode(
+            turn_detector.AudioStimulus(
+                source_participant_ref="caller",
+                content=b"encoded speech",
+                sample_rate_hz=16_000,
+                channels=1,
+            )
+        )
     )
 
     assert output == "hello caller"

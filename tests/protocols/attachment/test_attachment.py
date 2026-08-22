@@ -6,6 +6,7 @@ import datetime
 import typing
 
 import hsm
+import bot
 
 from bot.protocols import attachment
 
@@ -39,7 +40,7 @@ class Requester(hsm.Instance):
         instance.outcomes.append(event)
         instance.settled.set()
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "AttachmentRequester",
         hsm.initial(hsm.target("waiting")),
         hsm.state(
@@ -96,7 +97,7 @@ class UnfinishedAttachment(hsm.Instance, attachment.Attachment):
     ) -> collections.abc.Awaitable[None]:
         return hsm.dispatch(ctx, self, event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "UnfinishedAttachment",
         hsm.initial(hsm.target("detached")),
         hsm.state(
@@ -140,8 +141,8 @@ def test_attach_timeout_failure_correlates_to_its_request() -> None:
         ctx = hsm.Context()
         requester = Requester()
         component = UnfinishedAttachment()
-        _ = await hsm.started(ctx, requester, requester.model)
-        _ = await hsm.started(ctx, component, component.model)
+        _ = await bot.started(ctx, requester, requester.model)
+        _ = await bot.started(ctx, component, component.model)
         requester.request_id = "attachment-request-1"
         await component.attach(
             ctx,

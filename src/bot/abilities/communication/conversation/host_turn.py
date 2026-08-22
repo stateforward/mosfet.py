@@ -36,12 +36,14 @@ from .conversation import (
     append_conversation_message,
 )
 
-import asyncio
 import collections.abc
+import datetime
 import typing
 import uuid
 
 import hsm
+
+_TURN_TIMEOUT_SECONDS = 5.0
 
 
 def _target_device_ref(participated: ParticipatedTurn) -> str:
@@ -93,18 +95,18 @@ async def _apply_and_await_output(
     *,
     ctx: hsm.Context,
     accept: collections.abc.Callable[[object], bool],
+    terminals: tuple[hsm.Event[typing.Any], ...] | None = None,
 ) -> object:
     """Dispatch to an attached ability and await its terminal output without re-owning it."""
 
     operation_id = uuid.uuid4().hex
-    result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
-    machine.register_terminal_waiter(operation_id, result)
-    input_event = machine.input_event.with_data_and_id(input, operation_id)
-    try:
-        _ = await hsm.dispatch(ctx, machine, input_event)
-        terminal = await asyncio.wait_for(result, timeout=5.0)
-    finally:
-        machine.clear_terminal_waiter(operation_id)
+    terminal = await ability.run_terminal_operation(
+        ctx,
+        child=machine,
+        request=machine.input_event.with_data_and_id(input, operation_id),
+        terminals=(machine.output_event, machine.failed_event) if terminals is None else terminals,
+        timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
+    )
     if terminal.name == machine.failed_event.name:
         raise RuntimeError(f"{type(machine).__name__} failed during host conversation turn: {terminal.data!r}")
     if not accept(terminal.data):
@@ -135,6 +137,7 @@ async def contribute_conversation_turn(
         message,
         ctx=context,
         accept=_accept_contribution_payload,
+        terminals=(conversation.output_event, cognition.InputEvent, conversation.failed_event),
     )
     if isinstance(payload, Messages):
         response = payload

@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -37,6 +39,56 @@ jobs:
 
       - name: Check release metadata
         run: uv run --locked python scripts/check_release_version.py
+
+      - name: Root Ruff
+        run: uv run --locked ruff check .
+
+      - name: Root Ruff format (changed Python files)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+            head_sha="$PR_HEAD_SHA"
+          else
+            base_sha="$PUSH_BASE_SHA"
+            head_sha="$PUSH_HEAD_SHA"
+            if [[ "$base_sha" =~ ^0+$ ]]; then
+              base_sha="$(git hash-object -t tree /dev/null)"
+            fi
+          fi
+
+          changed_python_files=()
+          while IFS= read -r -d '' path; do
+            changed_python_files+=("$path")
+          done < <(git diff --name-only --diff-filter=ACMR -z "$base_sha" "$head_sha" -- '*.py')
+          if (( ${#changed_python_files[@]} == 0 )); then
+            echo "No changed Python files to format-check."
+            exit 0
+          fi
+
+          uv run --locked ruff format --check -- "${changed_python_files[@]}"
+
+      - name: Root basedpyright
+        run: uv run --locked basedpyright --level error
+
+      - name: Root non-live tests
+        run: uv run --locked python -m pytest -q -m 'not live'
+
+      - name: Listen-speak example quality gates
+        run: |
+          uv run --locked --project examples/listen_speak_bot ruff check \
+            examples/listen_speak_bot/src \
+            tests/examples/test_listen_speak_bot.py
+          uv run --locked --project examples/listen_speak_bot ruff format --check \
+            examples/listen_speak_bot/src \
+            tests/examples/test_listen_speak_bot.py
+          uv run --locked basedpyright --project examples/listen_speak_bot
+          uv run --locked python -m pytest -q -m 'not live' tests/examples/test_listen_speak_bot.py
 
       - name: Ruff
         run: |
@@ -131,6 +183,60 @@ jobs:
 
       - name: Build packages
         run: uv build --all-packages --no-sources
+
+      - name: Install and import every built wheel in clean environments
+        shell: bash
+        run: |
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if (( ${#wheels[@]} == 0 )); then
+            echo "No wheels were built."
+            exit 1
+          fi
+
+          core_wheels=(dist/stateforward_bot-*.whl)
+          if (( ${#core_wheels[@]} != 1 )); then
+            echo "Expected exactly one stateforward.bot wheel, found ${#core_wheels[@]}."
+            exit 1
+          fi
+          core_wheel="${core_wheels[0]}"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+
+          for wheel in "${wheels[@]}"; do
+            filename="$(basename "$wheel")"
+            case "$filename" in
+              stateforward_bot-*.whl) import_name="bot" ;;
+              bot_provider_elevenlabs-*.whl) import_name="bot.providers.elevenlabs" ;;
+              bot_provider_gemini-*.whl) import_name="bot.providers.gemini" ;;
+              bot_provider_livekit-*.whl) import_name="bot.providers.livekit" ;;
+              bot_provider_mlx_audio-*.whl) import_name="bot.providers.mlx_audio" ;;
+              bot_provider_mlx_vlm-*.whl) import_name="bot.providers.mlx_vlm" ;;
+              bot_provider_moonshine-*.whl) import_name="bot.providers.moonshine" ;;
+              bot_provider_openai_compat-*.whl) import_name="bot.providers.openai_compat" ;;
+              bot_provider_postgres_memory-*.whl) import_name="bot.providers.postgres_memory" ;;
+              bot_provider_pyannote-*.whl) import_name="bot.providers.pyannote" ;;
+              bot_provider_sqlite_memory-*.whl) import_name="bot.providers.sqlite_memory" ;;
+              *)
+                echo "No import smoke mapping for built wheel: $filename"
+                exit 1
+                ;;
+            esac
+
+            environment="$smoke_root/${filename%.whl}"
+            uv venv --python "$(command -v python)" "$environment"
+            python_bin="$environment/bin/python"
+            if [[ "$wheel" == "$core_wheel" ]]; then
+              uv pip install --python "$python_bin" "$wheel"
+            else
+              uv pip install --python "$python_bin" "$core_wheel" "$wheel"
+            fi
+            (
+              cd "$environment"
+              PYTHONNOUSERSITE=1 PYTHONPATH= SMOKE_IMPORT="$import_name" \
+                "$python_bin" -c 'import importlib, os; importlib.import_module(os.environ["SMOKE_IMPORT"])'
+            )
+          done
 
       - name: Prune uv cache
         if: always()

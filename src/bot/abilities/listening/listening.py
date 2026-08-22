@@ -21,8 +21,8 @@ from ..hearing import sound
 from ..hearing import speech
 from ..hearing import voice
 
-import asyncio
 import dataclasses
+import datetime
 import typing
 import uuid
 
@@ -30,6 +30,7 @@ import hsm
 
 from bot.protocols import attachment
 
+import bot
 from bot.abilities import cognition
 from bot import telemetry
 from bot.telemetry import observer
@@ -37,10 +38,16 @@ from bot.telemetry import span
 from bot.environment import SoundData, SoundEvent
 from ..speaking import EfferenceData, EfferenceEvent
 
+_STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _SensitivityCompletedEvent = hsm.Event[sensitivity.OutputData](
     name="bot.ability.listening.sensitivity.completed",
     kind=hsm.CompletionEventKind,
     schema=sensitivity.OutputData,
+)
+_SensitivityFailedEvent = hsm.Event[interpretation.FailedEventData](
+    name="bot.ability.listening.sensitivity.failed",
+    kind=hsm.ErrorEventKind,
+    schema=interpretation.FailedEventData,
 )
 
 
@@ -86,7 +93,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     def __init__(
         self,
         *,
-        voice_detector: voice.detection.VoiceDetector,
+        voice_activity_classifier: voice.detection.VoiceActivityClassifier,
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
@@ -100,7 +107,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         super().__init__()
         self._sensitivity = sensitivity.Sensitivity()
         self._interpretation = interpretation.Interpretation(
-            voice_detector=voice_detector,
+            voice_activity_classifier=voice_activity_classifier,
             sound_classifier=sound_classifier,
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
@@ -113,6 +120,27 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     def _has_sensed_sound(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, sensitivity.OutputData)
+
+    @staticmethod
+    def _has_sensitivity_failure(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, interpretation.FailedEventData)
+
+    @staticmethod
+    def _emit_sensitivity_failure(
+        ctx: hsm.Context,
+        instance: "Listening",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        assert isinstance(data, interpretation.FailedEventData)
+        terminal = dataclasses.replace(
+            instance.failed_event.with_data_and_id(data, event.id),
+            source=hsm.id(instance),
+            target=None,
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _forward_efference_copy(
@@ -159,35 +187,63 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             # says the sound reached the ear and stopped there.
             active.set_attribute("bot.audio.byte.count", len(sound.audio))
             operation_id = event.id if event.id else uuid.uuid4().hex
+            child_operation_id = f"{operation_id}:sensitivity:{uuid.uuid4().hex}"
             stage = instance._sensitivity
-            # Owner-local waiter: Future on Listening, not a peer Future on Sensitivity.
-            waiter = ability.Ability.prepare_child_terminal_wait(instance, stage, operation_id)
             try:
-                # Dispatched by hand rather than through the shared child-terminal helper for one
-                # reason: that helper stamps the envelope source with whoever asked, and here the
-                # source is which transducer made the sound. That is the field the body's own
-                # command is correlated against, and overwriting it with "Listening asked" would
-                # leave nothing to correlate.
-                await hsm.dispatch(
-                    ctx,
-                    stage,
-                    dataclasses.replace(
-                        stage.input_event.with_data_and_id(sound, operation_id),
-                        source=event.source,
-                        target=hsm.id(stage),
+                terminal = await ability.run_terminal_operation(
+                    instance.context(),
+                    child=stage,
+                    request=dataclasses.replace(
+                        sensitivity.ScoreEvent.with_data_and_id(
+                            sensitivity.ScoreData(stimulus=bot.StimulusData.from_event(event)),
+                            child_operation_id,
+                        ),
                         metadata=dict(event.metadata),
                     ),
+                    terminals=(stage.output_event, stage.failed_event),
+                    timeout=_STAGE_OPERATION_TIMEOUT,
                 )
-                terminal = await waiter
-            except asyncio.CancelledError:
-                if not waiter.done():
-                    _ = waiter.cancel()
-                raise
-            finally:
-                ability.Ability.clear_child_terminal_wait(instance, stage, operation_id)
+            except TimeoutError:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    telemetry.inject_context(
+                        dataclasses.replace(
+                            _SensitivityFailedEvent.with_data_and_id(
+                                interpretation.FailedEventData(
+                                    stage="sensitivity",
+                                    message="Listening sensitivity timed out.",
+                                ),
+                                operation_id,
+                            ),
+                            source=event.source,
+                            metadata=dict(event.metadata),
+                        )
+                    ),
+                )
+                return
             sensed = terminal.data
             if not isinstance(sensed, sensitivity.OutputData):
-                raise AssertionError("listening sensitivity must always return a scored sound.")
+                failure = (
+                    interpretation.FailedEventData.from_ability_failure(stage="sensitivity", failure=sensed)
+                    if isinstance(sensed, ability.FailureData)
+                    else interpretation.FailedEventData(
+                        stage="sensitivity",
+                        message="Listening sensitivity failed.",
+                    )
+                )
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    telemetry.inject_context(
+                        dataclasses.replace(
+                            _SensitivityFailedEvent.with_data_and_id(failure, operation_id),
+                            source=event.source,
+                            metadata=dict(event.metadata),
+                        )
+                    ),
+                )
+                return
             active.set_attribute("bot.sound.level.scored", sensed.perceived_level_db is not None)
             _ = hsm.dispatch(
                 ctx,
@@ -240,7 +296,11 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         products leave through the terminal the owner is already attached to.
         """
 
-        _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(event))
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            ability.TerminalOutputEvent.with_data(dataclasses.replace(event, target=None)),
+        )
 
     @staticmethod
     def _emit_interpretation_failure(
@@ -248,9 +308,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         instance: "Listening",
         event: hsm.Event[typing.Any],
     ) -> None:
-        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(event))
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            ability.TerminalErrorEvent.with_data(dataclasses.replace(event, target=None)),
+        )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Listening",
         hsm.initial(hsm.target("/Listening/initializing")),
         hsm.state(
@@ -305,6 +369,12 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                     hsm.on(_SensitivityCompletedEvent),
                     hsm.guard(_has_sensed_sound),
                     hsm.effect(_hand_to_interpretation),
+                    hsm.target("/Listening/Perceiving/Listening"),
+                ),
+                hsm.transition(
+                    hsm.on(_SensitivityFailedEvent),
+                    hsm.guard(_has_sensitivity_failure),
+                    hsm.effect(_emit_sensitivity_failure),
                     hsm.target("/Listening/Perceiving/Listening"),
                 ),
             ),

@@ -12,10 +12,12 @@ import pytest
 from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
 from tests.type_helpers import invalid_value
 
+
 class FixedSpeechEncoder(abilities.Encoder[bytes, bytes]):
     @override
     async def encode(self, input: bytes) -> bytes:
         return b"encoded:" + input
+
 
 class WrongSpeechEncoder(abilities.Encoder[bytes, bytes]):
     @override
@@ -23,11 +25,13 @@ class WrongSpeechEncoder(abilities.Encoder[bytes, bytes]):
         del input
         return invalid_value(bytes, "not speech bytes")
 
+
 class FailingSpeechEncoder(abilities.Encoder[bytes, bytes]):
     @override
     async def encode(self, input: bytes) -> bytes:
         del input
         raise RuntimeError("encoder unavailable")
+
 
 class RecordingSpeechEncoding(speech.SpeechEncoding):
     outputs: list[bytes]
@@ -50,18 +54,22 @@ class RecordingSpeechEncoding(speech.SpeechEncoding):
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
+
 async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
     for _ in range(100):
         if condition():
             return
         await asyncio.sleep(0.001)
 
+
 def require_model(model: hsm.Model | None) -> hsm.Model:
     assert model is not None
     return model
 
+
 async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     await start_abilities_for_test(hsm.Context() if ctx is None else ctx, ability)
+
 
 def test_speech_encoding_uses_injected_encoder() -> None:
     async def run() -> tuple[str, list[bytes]]:
@@ -76,6 +84,7 @@ def test_speech_encoding_uses_injected_encoder() -> None:
 
     assert active_state == "/RecordingSpeechEncodingLifecycle/attached/behavior/idle"
     assert outputs == [b"encoded:speech"]
+
 
 def test_speech_encoding_rejects_input_event_with_wrong_payload_type() -> None:
     async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
@@ -95,6 +104,7 @@ def test_speech_encoding_rejects_input_event_with_wrong_payload_type() -> None:
     assert outputs == []
     assert failures == []
 
+
 def test_speech_encoding_routes_wrong_output_type_to_failure() -> None:
     async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
         ability = RecordingSpeechEncoding(encoder=WrongSpeechEncoder())
@@ -112,6 +122,7 @@ def test_speech_encoding_routes_wrong_output_type_to_failure() -> None:
     assert len(failures) == 1
     assert "output schema" in failures[0].message
 
+
 def test_speech_encoding_routes_encoder_exception_to_failure() -> None:
     async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
         ability = RecordingSpeechEncoding(encoder=FailingSpeechEncoder())
@@ -128,6 +139,7 @@ def test_speech_encoding_routes_encoder_exception_to_failure() -> None:
     assert outputs == []
     assert len(failures) == 1
     assert failures[0].message == "encoder unavailable"
+
 
 def test_speech_encoding_is_concrete_ability() -> None:
     ability = speech.SpeechEncoding(encoder=FixedSpeechEncoder())

@@ -9,11 +9,12 @@ import dataclasses
 import io
 import pathlib
 import struct
+import threading
 import wave
 
 import pytest
 
-from bot.providers.mlx_audio import VoiceDetectionError, VoiceDetector
+from bot.providers.mlx_audio import VoiceDetectionError, VoiceActivityClassifier
 from bot.providers.mlx_audio._mlx import VoiceActivityEvent
 
 SPEECH_WAV = (pathlib.Path(__file__).parent / "assets" / "speech.wav").read_bytes()
@@ -80,11 +81,11 @@ def wav_container(pcm: bytes, *, sample_rate_hz: int, channels: int = 1) -> byte
     return buffer.getvalue()
 
 
-def classify(detector: VoiceDetector, audio: bytes) -> voice.detection.ApplyData:
-    return asyncio.run(detector.classify(audio))
+def classify(classifier: VoiceActivityClassifier, audio: bytes) -> voice.detection.ApplyData:
+    return asyncio.run(classifier.classify(audio))
 
 
-def test_voice_detector_reports_a_talkspurt_that_straddles_a_chunk_boundary() -> None:
+def test_voice_activity_classifier_reports_a_talkspurt_that_straddles_a_chunk_boundary() -> None:
     """A talkspurt split across chunks must stay audible in every chunk it covers.
 
     This is the defect the streaming API exists to remove. Driven per chunk by the offline
@@ -105,10 +106,10 @@ def test_voice_detector_reports_a_talkspurt_that_straddles_a_chunk_boundary() ->
             )
         )
     )
-    detector = VoiceDetector(session=session)
+    classifier = VoiceActivityClassifier(session=session)
 
-    first = classify(detector, silence_pcm(1200))
-    second = classify(detector, silence_pcm(1200))
+    first = classify(classifier, silence_pcm(1200))
+    second = classify(classifier, silence_pcm(1200))
 
     assert first.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.959, end_seconds=1.2),)
     assert second.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.2),), (
@@ -116,7 +117,7 @@ def test_voice_detector_reports_a_talkspurt_that_straddles_a_chunk_boundary() ->
     )
 
 
-def test_voice_detector_closes_a_span_on_a_later_chunk_using_the_session_clock() -> None:
+def test_voice_activity_classifier_closes_a_span_on_a_later_chunk_using_the_session_clock() -> None:
     session = FakeStreamingSession(
         events=iter(
             (
@@ -125,25 +126,25 @@ def test_voice_detector_closes_a_span_on_a_later_chunk_using_the_session_clock()
             )
         )
     )
-    detector = VoiceDetector(session=session)
+    classifier = VoiceActivityClassifier(session=session)
 
-    first = classify(detector, silence_pcm(1000))
-    second = classify(detector, silence_pcm(1000))
+    first = classify(classifier, silence_pcm(1000))
+    second = classify(classifier, silence_pcm(1000))
 
     # 600 ms is inside chunk 1; 1500 ms is 500 ms into chunk 2 on the session clock.
     assert first.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.6, end_seconds=1.0),)
     assert second.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.5),)
 
 
-def test_voice_detector_reports_no_voice_when_the_session_stays_silent() -> None:
+def test_voice_activity_classifier_reports_no_voice_when_the_session_stays_silent() -> None:
     session = FakeStreamingSession(events=iter(((), ())))
-    detector = VoiceDetector(session=session)
+    classifier = VoiceActivityClassifier(session=session)
 
-    assert classify(detector, silence_pcm(1000)).segments == ()
-    assert classify(detector, silence_pcm(1000)).segments == ()
+    assert classify(classifier, silence_pcm(1000)).segments == ()
+    assert classify(classifier, silence_pcm(1000)).segments == ()
 
 
-def test_voice_detector_opens_and_closes_within_one_chunk() -> None:
+def test_voice_activity_classifier_opens_and_closes_within_one_chunk() -> None:
     session = FakeStreamingSession(
         events=iter(
             (
@@ -154,23 +155,23 @@ def test_voice_detector_opens_and_closes_within_one_chunk() -> None:
             )
         )
     )
-    detector = VoiceDetector(session=session)
+    classifier = VoiceActivityClassifier(session=session)
 
-    assert classify(detector, silence_pcm(1000)).segments == (
+    assert classify(classifier, silence_pcm(1000)).segments == (
         voice.detection.VoiceDetectionSegment(start_seconds=0.2, end_seconds=0.7),
     )
 
 
-def test_voice_detector_feeds_raw_pcm_at_its_configured_rate() -> None:
+def test_voice_activity_classifier_feeds_raw_pcm_at_its_configured_rate() -> None:
     session = FakeStreamingSession(events=iter(((),)))
-    detector = VoiceDetector(session=session, sample_rate_hz=48_000, channels=1)
+    classifier = VoiceActivityClassifier(session=session, sample_rate_hz=48_000, channels=1)
 
-    _ = classify(detector, silence_pcm(100, sample_rate_hz=48_000))
+    _ = classify(classifier, silence_pcm(100, sample_rate_hz=48_000))
 
     assert session.chunks == [(2 * 48_000 * 100 // 1000, 48_000, 1)]
 
 
-def test_voice_detector_prefers_the_rate_declared_by_a_wav_container() -> None:
+def test_voice_activity_classifier_prefers_the_rate_declared_by_a_wav_container() -> None:
     """A container is self-describing, so it overrides the configured raw-PCM rate."""
 
     sessions: list[FakeStreamingSession] = []
@@ -181,23 +182,16 @@ def test_voice_detector_prefers_the_rate_declared_by_a_wav_container() -> None:
         sessions.append(session)
         return session
 
-    detector = VoiceDetector(load_session=load_session, sample_rate_hz=48_000)
+    classifier = VoiceActivityClassifier(load_session=load_session, sample_rate_hz=48_000)
     pcm = silence_pcm(100, sample_rate_hz=8_000)
 
-    _ = classify(detector, wav_container(pcm, sample_rate_hz=8_000))
+    _ = classify(classifier, wav_container(pcm, sample_rate_hz=8_000))
 
     assert sessions[0].chunks == [(len(pcm), 8_000, 1)]
 
 
-def test_voice_detector_judges_a_container_apart_from_the_live_stream() -> None:
-    """A self-contained recording must not inherit speech state from the room around it.
-
-    This is the regression that cost the phone its ring. One detector serves one ear, and both
-    the room stream and the phone's own ring sample arrive through it. When the container was
-    fed into the same continuous session, a ring that landed while the room was mid-talkspurt
-    inherited that open speech and came back as *voice* -- which routes it to speech-to-text
-    instead of sound classification, so the bot never perceives a ring and never answers.
-    """
+def test_voice_activity_classifier_judges_a_container_apart_from_the_live_stream() -> None:
+    """A self-contained clip uses an isolated session and cannot inherit live-stream speech state."""
 
     stream_session = FakeStreamingSession(
         # The stream opens a talkspurt and stays inside it.
@@ -211,10 +205,10 @@ def test_voice_detector_judges_a_container_apart_from_the_live_stream() -> None:
         clip_sessions.append(session)
         return session
 
-    detector = VoiceDetector(session=stream_session, load_session=load_session, sample_rate_hz=16_000)
+    classifier = VoiceActivityClassifier(session=stream_session, load_session=load_session, sample_rate_hz=16_000)
 
-    assert classify(detector, silence_pcm(1000)).segments, "stream is mid-talkspurt"
-    ring = classify(detector, wav_container(silence_pcm(1500), sample_rate_hz=16_000))
+    assert classify(classifier, silence_pcm(1000)).segments, "stream is mid-talkspurt"
+    ring = classify(classifier, wav_container(silence_pcm(1500), sample_rate_hz=16_000))
 
     assert ring.segments == (), "a container must be judged on its own, not on the room's speech"
     # The container went to its own session and never touched the stream's.
@@ -222,7 +216,7 @@ def test_voice_detector_judges_a_container_apart_from_the_live_stream() -> None:
     assert len(stream_session.chunks) == 1
 
 
-def test_voice_detector_keeps_the_stream_clock_across_an_interleaved_container() -> None:
+def test_voice_activity_classifier_keeps_the_stream_clock_across_an_interleaved_container() -> None:
     """A clip passing through must not advance or disturb the stream it interrupts."""
 
     stream_session = FakeStreamingSession(
@@ -233,22 +227,22 @@ def test_voice_detector_keeps_the_stream_clock_across_an_interleaved_container()
             )
         )
     )
-    detector = VoiceDetector(
+    classifier = VoiceActivityClassifier(
         session=stream_session,
         load_session=lambda model_id: FakeStreamingSession(events=iter(((),))),
         sample_rate_hz=16_000,
     )
 
-    _ = classify(detector, silence_pcm(1000))
-    _ = classify(detector, wav_container(silence_pcm(5000), sample_rate_hz=16_000))
-    resumed = classify(detector, silence_pcm(1000))
+    _ = classify(classifier, silence_pcm(1000))
+    _ = classify(classifier, wav_container(silence_pcm(5000), sample_rate_hz=16_000))
+    resumed = classify(classifier, silence_pcm(1000))
 
     # The clip's 5000 ms must not have moved the stream clock: 1200 ms is still 200 ms into
     # the second stream chunk. If the clip had advanced it, this span would be clamped to 0.
     assert resumed.segments == (voice.detection.VoiceDetectionSegment(start_seconds=0.2, end_seconds=1.0),)
 
 
-def test_voice_detector_loads_one_session_and_reuses_it_across_chunks() -> None:
+def test_voice_activity_classifier_loads_one_session_and_reuses_it_across_chunks() -> None:
     sessions: list[FakeStreamingSession] = []
 
     def load_session(model_id: str) -> FakeStreamingSession:
@@ -257,54 +251,419 @@ def test_voice_detector_loads_one_session_and_reuses_it_across_chunks() -> None:
         sessions.append(session)
         return session
 
-    detector = VoiceDetector(model_id="test-model", load_session=load_session)
+    classifier = VoiceActivityClassifier(model_id="test-model", load_session=load_session)
 
-    _ = classify(detector, silence_pcm(100))
-    _ = classify(detector, silence_pcm(100))
+    _ = classify(classifier, silence_pcm(100))
+    _ = classify(classifier, silence_pcm(100))
 
     # A session per chunk would reset the stream and reintroduce exactly the boundary blindness
-    # this detector exists to avoid.
+    # this classifier exists to avoid.
     assert len(sessions) == 1
     assert len(sessions[0].chunks) == 2
 
 
-def test_voice_detector_rejects_pcm_that_is_not_aligned_to_its_channel_count() -> None:
-    detector = VoiceDetector(session=FakeStreamingSession(events=iter(((),))), channels=2)
+def test_voice_activity_classifier_runs_concurrent_calls_on_one_owned_worker() -> None:
+    first_started = threading.Event()
+    release = threading.Event()
+    workers: list[threading.Thread] = []
+
+    class RecordingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            workers.append(threading.current_thread())
+            first_started.set()
+            assert release.wait(timeout=1.0)
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    classifier = VoiceActivityClassifier(session=RecordingSession())
+
+    async def run() -> None:
+        first = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(first_started.wait, 1.0)
+        second = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        await asyncio.sleep(0)
+        release.set()
+        assert await first == await second == voice.detection.ApplyData(segments=())
+        await classifier.aclose()
+
+    asyncio.run(run())
+    assert len(workers) == 2
+    assert workers[0] is workers[1]
+
+
+def test_voice_activity_classifier_shutdown_cancels_queued_work() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStreamingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            started.set()
+            assert release.wait(timeout=1.0)
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    classifier = VoiceActivityClassifier(session=BlockingStreamingSession())
+
+    async def run() -> None:
+        first = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        _ = await asyncio.to_thread(started.wait, 1.0)
+        second = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        await asyncio.sleep(0)
+        classifier.shutdown()
+        _ = second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        release.set()
+        assert await first == voice.detection.ApplyData(segments=())
+
+        with pytest.raises(RuntimeError, match="closed"):
+            _ = await classifier.classify(silence_pcm(100))
+
+    asyncio.run(run())
+
+
+def test_voice_activity_classifier_rejects_work_beyond_one_active_and_one_queued_call() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStreamingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            started.set()
+            assert release.wait(timeout=1.0)
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    classifier = VoiceActivityClassifier(session=BlockingStreamingSession())
+
+    async def run() -> None:
+        active = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(started.wait, 1.0)
+        queued = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        await asyncio.sleep(0)
+        with pytest.raises(VoiceDetectionError, match="capacity"):
+            _ = await classifier.classify(silence_pcm(100))
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        assert await active == voice.detection.ApplyData(segments=())
+        await classifier.aclose()
+
+    asyncio.run(run())
+
+
+def test_voice_activity_classifier_queued_cancellation_prevents_stream_advance() -> None:
+    first_started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class BlockingStreamingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            nonlocal calls
+            del pcm, sample_rate_hz, channels
+            calls += 1
+            first_started.set()
+            assert release.wait(timeout=1.0)
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    classifier = VoiceActivityClassifier(session=BlockingStreamingSession())
+
+    async def run() -> None:
+        active = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(first_started.wait, 1.0)
+        queued = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        await asyncio.sleep(0)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        assert await active == voice.detection.ApplyData(segments=())
+        await classifier.aclose()
+
+    asyncio.run(run())
+    assert calls == 1
+
+
+def test_voice_activity_classifier_active_cancellation_still_advances_owned_stream() -> None:
+    first_started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+
+    class BlockingStreamingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            nonlocal calls
+            del pcm, sample_rate_hz, channels
+            calls += 1
+            first_started.set()
+            assert release.wait(timeout=1.0)
+            finished.set()
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    classifier = VoiceActivityClassifier(session=BlockingStreamingSession())
+
+    async def run() -> None:
+        active = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(first_started.wait, 1.0)
+        active.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+        assert not finished.is_set()
+        queued = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        await asyncio.sleep(0)
+        with pytest.raises(VoiceDetectionError, match="capacity"):
+            _ = await classifier.classify(silence_pcm(100))
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1.0)
+        assert await classifier.classify(silence_pcm(100)) == voice.detection.ApplyData(segments=())
+        await classifier.aclose()
+
+    asyncio.run(run())
+    assert calls == 2
+
+
+def test_voice_activity_classifier_close_is_bounded_when_native_work_never_returns() -> None:
+    started = threading.Event()
+
+    class PermanentlyBlockedSession:
+        worker: threading.Thread | None = None
+
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            self.worker = threading.current_thread()
+            started.set()
+            threading.Event().wait()
+            raise AssertionError("unreachable")
+
+        def in_speech(self) -> bool:
+            return False
+
+    session = PermanentlyBlockedSession()
+    classifier = VoiceActivityClassifier(session=session)
+
+    async def start() -> asyncio.Task[voice.detection.ApplyData]:
+        work = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(started.wait, 1.0)
+        return work
+
+    work = asyncio.run(start())
+    closed = threading.Event()
+    closer = threading.Thread(target=lambda: (classifier.close(), closed.set()))
+    closer.start()
+    assert closed.wait(timeout=0.5), "close must have a finite terminal bound"
+    closer.join(timeout=0.1)
+    assert session.worker is not None
+    assert session.worker.daemon
+    work.cancel()
+
+
+def test_voice_activity_classifier_aclose_is_bounded_when_native_work_never_returns() -> None:
+    started = threading.Event()
+
+    class PermanentlyBlockedSession:
+        worker: threading.Thread | None = None
+
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            self.worker = threading.current_thread()
+            started.set()
+            threading.Event().wait()
+            raise AssertionError("unreachable")
+
+        def in_speech(self) -> bool:
+            return False
+
+    session = PermanentlyBlockedSession()
+    classifier = VoiceActivityClassifier(session=session)
+
+    async def run() -> None:
+        work = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(started.wait, 1.0)
+        await asyncio.wait_for(classifier.aclose(), timeout=0.5)
+        assert session.worker is not None
+        assert session.worker.daemon
+        work.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+
+    asyncio.run(run())
+
+
+def test_voice_activity_classifier_repeated_lifecycles_stop_cooperative_workers() -> None:
+    workers: list[threading.Thread] = []
+
+    class RecordingSession:
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            workers.append(threading.current_thread())
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    async def run() -> None:
+        for _ in range(5):
+            classifier = VoiceActivityClassifier(session=RecordingSession())
+            assert await classifier.classify(silence_pcm(100)) == voice.detection.ApplyData(segments=())
+            await classifier.aclose()
+
+    asyncio.run(run())
+    assert len(workers) == 5
+    assert all(not worker.is_alive() for worker in workers)
+
+
+def test_voice_activity_classifier_aclose_waits_for_active_work() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStreamingSession:
+        worker: threading.Thread | None = None
+
+        def process_pcm(
+            self,
+            pcm: bytes,
+            *,
+            sample_rate_hz: int,
+            channels: int,
+        ) -> tuple[VoiceActivityEvent, ...]:
+            del pcm, sample_rate_hz, channels
+            self.worker = threading.current_thread()
+            started.set()
+            assert release.wait(timeout=1.0)
+            return ()
+
+        def in_speech(self) -> bool:
+            return False
+
+    session = BlockingStreamingSession()
+    classifier = VoiceActivityClassifier(session=session)
+
+    async def run() -> None:
+        work = asyncio.create_task(classifier.classify(silence_pcm(100)))
+        assert await asyncio.to_thread(started.wait, 1.0)
+        closing = asyncio.create_task(classifier.aclose())
+        await asyncio.sleep(0)
+        try:
+            assert not closing.done()
+        finally:
+            release.set()
+        await closing
+        assert await work == voice.detection.ApplyData(segments=())
+
+        worker = session.worker
+        assert worker is not None
+        assert not worker.is_alive()
+        with pytest.raises(RuntimeError, match="closed"):
+            _ = await classifier.classify(silence_pcm(100))
+
+    asyncio.run(run())
+
+
+def test_voice_activity_classifier_rejects_pcm_that_is_not_aligned_to_its_channel_count() -> None:
+    classifier = VoiceActivityClassifier(session=FakeStreamingSession(events=iter(((),))), channels=2)
 
     with pytest.raises(VoiceDetectionError):
-        _ = classify(detector, b"\x00\x00\x00")
+        _ = classify(classifier, b"\x00\x00\x00")
 
 
-def test_voice_detector_wraps_session_failures() -> None:
-    detector = VoiceDetector(session=FailingStreamingSession())
+def test_voice_activity_classifier_wraps_session_failures() -> None:
+    classifier = VoiceActivityClassifier(session=FailingStreamingSession())
 
     with pytest.raises(VoiceDetectionError) as error:
-        _ = classify(detector, silence_pcm(100))
+        _ = classify(classifier, silence_pcm(100))
 
     assert isinstance(error.value.__cause__, RuntimeError)
 
 
-def test_voice_detector_is_awaitable() -> None:
-    detector = VoiceDetector(session=FakeStreamingSession(events=iter(((),))))
+def test_voice_activity_classifier_is_awaitable() -> None:
+    classifier = VoiceActivityClassifier(session=FakeStreamingSession(events=iter(((),))))
 
-    output = detector.classify(silence_pcm(100))
+    output = classifier.classify(silence_pcm(100))
 
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output) == voice.detection.ApplyData(segments=())
 
 
 @pytest.mark.parametrize(("sample_rate_hz", "channels"), [(0, 1), (-1, 1), (16_000, 0)])
-def test_voice_detector_rejects_non_positive_audio_shape(sample_rate_hz: int, channels: int) -> None:
+def test_voice_activity_classifier_rejects_non_positive_audio_shape(sample_rate_hz: int, channels: int) -> None:
     with pytest.raises(ValueError):
-        _ = VoiceDetector(sample_rate_hz=sample_rate_hz, channels=channels)
+        _ = VoiceActivityClassifier(sample_rate_hz=sample_rate_hz, channels=channels)
 
 
-def test_voice_detector_satisfies_the_core_detector_contract() -> None:
-    assert isinstance(VoiceDetector(session=FakeStreamingSession(events=iter(()))), voice.VoiceDetector)
+def test_voice_activity_classifier_satisfies_the_core_classifier_contract() -> None:
+    assert isinstance(
+        VoiceActivityClassifier(session=FakeStreamingSession(events=iter(()))), voice.VoiceActivityClassifier
+    )
 
 
 @pytest.mark.live
-def test_real_detector_hears_no_voice_in_the_ring_but_hears_speech() -> None:
+def test_real_classifier_hears_no_voice_in_the_ring_but_hears_speech() -> None:
     """Pin what a real Silero VAD perceives in the shipped ring, against a paired positive control.
 
     The ring must come back as *not* voice. Voice routes hearing to speech-to-text; the ring has to
@@ -313,25 +672,25 @@ def test_real_detector_hears_no_voice_in_the_ring_but_hears_speech() -> None:
     voice in a ringtone would silently cost the phone its ring perception.
 
     The speech assertion is what makes the ring assertion mean anything, and it is not optional.
-    Empty ``segments`` is equally what this detector returns when the weights fail to load, when
+    Empty ``segments`` is equally what this classifier returns when the weights fail to load, when
     the model returns nothing, or when it degrades to always-empty -- the ring assertion passes
-    trivially in every one of those cases. Putting real speech against a detector proves it
+    trivially in every one of those cases. Putting real speech against a classifier proves it
     loaded, ran, and emitted begin/end spans, which is what turns "no segments" into "correctly
     heard no voice." Neither half is worth keeping without the other.
 
-    Each half gets its own detector: one session is one continuous stream, so replaying a second
-    clip through the first detector would splice unrelated audio into the same talkspurt.
+    Each half gets its own classifier: one session is one continuous stream, so replaying a second
+    clip through the first classifier would splice unrelated audio into the same talkspurt.
     """
 
-    assert asyncio.run(VoiceDetector().classify(phone.RING_SOUND_WAV)).segments == ()
-    speech = asyncio.run(VoiceDetector().classify(SPEECH_WAV))
+    assert asyncio.run(VoiceActivityClassifier().classify(phone.RING_SOUND_WAV)).segments == ()
+    speech = asyncio.run(VoiceActivityClassifier().classify(SPEECH_WAV))
 
     assert speech.segments
     assert speech.segments[0].end_seconds > speech.segments[0].start_seconds
 
 
 @pytest.mark.live
-def test_real_detector_hears_the_same_speech_however_the_stream_is_chunked() -> None:
+def test_real_classifier_hears_the_same_speech_however_the_stream_is_chunked() -> None:
     """Chunking must not change what is heard -- the property the offline API could not give.
 
     Feeding identical audio as one clip and as many small clips has to reach the same verdict.
@@ -343,9 +702,9 @@ def test_real_detector_hears_the_same_speech_however_the_stream_is_chunked() -> 
         rate = stream.getframerate()
         pcm = stream.readframes(stream.getnframes())
 
-    whole = asyncio.run(VoiceDetector(sample_rate_hz=rate).classify(pcm))
+    whole = asyncio.run(VoiceActivityClassifier(sample_rate_hz=rate).classify(pcm))
 
-    chunked = VoiceDetector(sample_rate_hz=rate)
+    chunked = VoiceActivityClassifier(sample_rate_hz=rate)
     chunk_bytes = 2 * (rate // 10)  # 100 ms chunks
     heard = [
         segment
@@ -358,7 +717,7 @@ def test_real_detector_hears_the_same_speech_however_the_stream_is_chunked() -> 
 
 
 @pytest.mark.live
-def test_real_detector_still_hears_no_voice_in_a_ring_that_lands_mid_talkspurt() -> None:
+def test_real_classifier_still_hears_no_voice_in_a_ring_that_lands_mid_talkspurt() -> None:
     """The live shape of the ring regression, against the real model.
 
     One ear, two sources: the room stream and the phone's own ring sample. The ring has to read
@@ -371,7 +730,7 @@ def test_real_detector_still_hears_no_voice_in_a_ring_that_lands_mid_talkspurt()
         rate = stream.getframerate()
         speech = stream.readframes(stream.getnframes())
 
-    detector = VoiceDetector(sample_rate_hz=rate)
+    classifier = VoiceActivityClassifier(sample_rate_hz=rate)
 
-    assert classify(detector, speech).segments, "the room stream is mid-talkspurt"
-    assert classify(detector, phone.RING_SOUND_WAV).segments == ()
+    assert classify(classifier, speech).segments, "the room stream is mid-talkspurt"
+    assert classify(classifier, phone.RING_SOUND_WAV).segments == ()

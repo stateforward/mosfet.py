@@ -49,7 +49,7 @@ from bot.providers.mlx_audio import (
     VoiceEncoder,
     SpeechDecoder,
     SpeechEncoder,
-    VoiceDetector,
+    VoiceActivityClassifier,
     VoiceDiarizer,
 )
 
@@ -57,6 +57,6 @@ voice_decoder = VoiceDecoder()
 voice_encoder = VoiceEncoder()
 speech = SpeechEncoding(encoder=SpeechEncoder())
 transcription = SpeechDecoding(decoder=SpeechDecoder())
-detection = VoiceDetection(classifier=VoiceDetector())
+detection = VoiceDetection(classifier=VoiceActivityClassifier())
 diarization = VoiceDiarization(classifier=VoiceDiarizer())
 ```

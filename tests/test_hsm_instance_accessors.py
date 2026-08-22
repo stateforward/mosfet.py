@@ -42,7 +42,7 @@ _FORBIDDEN_PUBLIC_HSM_OWNED_MEMBER_ANNOTATIONS = {
     "src/bot/abilities/listening/interpretation.py:Interpretation.speech_decoder",
     "src/bot/abilities/listening/interpretation.py:Interpretation.speech_decoding",
     "src/bot/abilities/listening/interpretation.py:Interpretation.voice_detection",
-    "src/bot/abilities/listening/interpretation.py:Interpretation.voice_detector",
+    "src/bot/abilities/listening/interpretation.py:Interpretation.voice_activity_classifier",
     "src/bot/abilities/listening/interpretation.py:Interpretation.voice_diarization",
     "src/bot/abilities/listening/interpretation.py:Interpretation.voice_diarizer",
     "src/bot/abilities/listening/listening.py:Listening.interpretation",

@@ -1,13 +1,16 @@
-"""Device-free listen → speak bot example (macOS ``say`` + mixed cognition).
+"""Device-free Listening/cognition bot example (macOS ``say`` + mixed cognition).
 
 Flow:
 
 1. macOS ``say`` renders *Hey I'm Gabe how are you* into a WAV asset.
 2. ``environment.sound`` carries that audio into bot **input** (Listening).
-3. Offline VAD + fixed STT hand a transcript stimulus to cognition.
-4. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning select
-   ``bot.ability.speaking.input``.
-5. Speaking encodes the reply with ``say`` again and writes a reply WAV.
+3. MLX Audio Silero VAD + PyAnnote voice embeddings hand a provider-neutral source identity
+   with the speech product to cognition.
+4. Communication is acquired and its seeded behavior can admit the identity-bearing speech into
+   Conversation; Conversation retains the existing MLX Audio Whisper STT path.
+5. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning produce cognition output.
+6. Cognition may select Communication's semantic response, which routes through the internal
+   Speaking port and writes the reply WAV.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import functools
+import io
 import json
 import logging
 import os
@@ -26,24 +31,40 @@ import subprocess
 import sys
 import tempfile
 import typing
+import wave
 from typing import override
 
 import hsm
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 
 import bot
 from bot.abilities import cognition
+from bot.abilities import ability
+from bot.abilities import communication
+from bot.abilities import decoding
 from bot.abilities import encoding
 from bot.abilities import listening
 from bot.abilities import memory
 from bot.abilities import speaking
-from bot.abilities.hearing import speech
+from bot.abilities.communication import conversation
 from bot.abilities.hearing import voice
 from bot.bot import Bot
 from bot.providers.gemini import ChatClient as GeminiChatClient
 from bot.providers.gemini import Processor as GeminiProcessor
+from bot.providers.mlx_audio import SpeechDecoder
+from bot.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder
+from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.environment import SoundData, SoundEvent, Environment
+from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier
+from bot.providers.pyannote import SpeakerEmbeddingInference
+from bot.providers.pyannote import SpeakerEmbeddingInferenceLoader
+from bot.devices import audio
+from bot.environment import Environment, SoundData, SoundEvent, space
+from bot.abilities import classifying
+from bot.abilities.communication.conversation import turn_detector
 
 # Capture before any local named ``cognition`` shadows the package (constructor param).
 _Cognition = cognition.Cognition
@@ -61,6 +82,8 @@ _DEFAULT_CHANNELS = 1
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 DEFAULT_MERCURY_MODEL = "mercury-2"
 DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
+DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
+DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 
 
 def _configure_logging(*, verbose: bool = False) -> None:
@@ -88,33 +111,52 @@ def _summarize_selections(output: object) -> str:
     return f"handled type={type(output).__name__}"
 
 
-def _log_ability_terminals(machine: typing.Any, *, name: str, model: str) -> None:
-    """Log intuition/reasoning terminals so a run shows which ability closed the turn."""
+_SummaryStatus = typing.Literal["ok", "incomplete", "failed"]
+_SummaryReason = typing.Literal[
+    "response_spoken",
+    "no_response_selected",
+    "conversation_failed",
+    "processing_failed",
+    "response_execution_failed",
+]
 
-    from bot.abilities import ability
 
-    original = machine.dispatch
+class _OperatorSummary(BaseModel):
+    """Bounded, provider-neutral output for operators and JSON consumers."""
 
-    def dispatch(ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        # Ability terminals arrive as TerminalOutput/Error wrapping the public event.
-        if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
-            public = typing.cast(hsm.Event[typing.Any], event.data)
-            if public.name == machine.output_event.name:
-                # Typed terminal data only — never event.metadata for behavior (HSM-COMPLETION-001).
-                _LOG.info(
-                    "%s terminal model=%s outcome=%s",
-                    name,
-                    model,
-                    _summarize_selections(public.data),
-                )
-        elif event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
-            public = typing.cast(hsm.Event[typing.Any], event.data)
-            if public.name == machine.failed_event.name:
-                message = getattr(public.data, "message", public.data)
-                _LOG.warning("%s failed model=%s message=%s", name, model, message)
-        return original(ctx, event)
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    machine.dispatch = dispatch  # type: ignore[method-assign]
+    status: _SummaryStatus
+    status_reason: _SummaryReason
+    heard_audio_bytes: int = Field(ge=0)
+    reply_audio_bytes: int = Field(ge=0)
+    listening_handoffs: int = Field(ge=0)
+    processing_completed: int = Field(ge=0)
+    response_selections: int = Field(ge=0)
+
+
+def _build_operator_summary(
+    *,
+    status: _SummaryStatus,
+    status_reason: _SummaryReason,
+    heard_audio_bytes: int,
+    reply_audio_bytes: int,
+    listening_handoffs: int,
+    processing_completed: int,
+    response_selections: int,
+) -> dict[str, object]:
+    """Project one run into a stable JSON-safe summary without provider payloads."""
+
+    summary = _OperatorSummary(
+        status=status,
+        status_reason=status_reason,
+        heard_audio_bytes=heard_audio_bytes,
+        reply_audio_bytes=reply_audio_bytes,
+        listening_handoffs=listening_handoffs,
+        processing_completed=processing_completed,
+        response_selections=response_selections,
+    )
+    return typing.cast(dict[str, object], summary.model_dump(mode="json"))
 
 
 def _strip_env_value(value: str) -> str:
@@ -211,11 +253,29 @@ class CognitionConfig:
 class AppConfig:
     env_path: pathlib.Path | None = None
     cognition: CognitionConfig = dataclasses.field(default_factory=CognitionConfig)
+    vad_model_id: str = DEFAULT_SILERO_VAD_MODEL
+    stt_model_id: str | None = None
+    voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
         env = _merged_env(path)
-        return cls(env_path=path, cognition=CognitionConfig.from_env(env))
+        return cls(
+            env_path=path,
+            cognition=CognitionConfig.from_env(env),
+            vad_model_id=(
+                _env_first(env, "BOT_SILERO_VAD_MODEL", "BOT_VAD_MODEL", "SILERO_VAD_MODEL") or DEFAULT_SILERO_VAD_MODEL
+            ),
+            stt_model_id=_env_first(env, "BOT_STT_MODEL", "BOT_WHISPER_MODEL", "STT_MODEL", "WHISPER_MODEL"),
+            voice_identity_model_id=(
+                _env_first(
+                    env,
+                    "BOT_PYANNOTE_VOICE_IDENTITY_MODEL",
+                    "PYANNOTE_VOICE_IDENTITY_MODEL",
+                )
+                or DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
+            ),
+        )
 
     def with_cognition_overrides(self, *, model: str | None = None, api_key: str | None = None) -> typing.Self:
         return dataclasses.replace(
@@ -238,7 +298,13 @@ def _require_macos_speech_tools() -> None:
 
 
 def _say_to_wav(text: str, destination: pathlib.Path, *, sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ) -> bytes:
-    """Render ``text`` with macOS ``say`` and convert to 16-bit mono WAV."""
+    """Render ``text`` with macOS ``say`` and convert to 16-bit mono WAV.
+
+    The subprocess boundary is synchronous inside its worker thread. Cancelling an
+    awaiter does not terminate an already-running ``say`` or ``afconvert`` process;
+    the worker either leaves the existing destination untouched on failure or
+    publishes the complete converted file after both commands succeed.
+    """
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="listen-speak-") as tmp:
@@ -267,30 +333,36 @@ def _say_to_wav(text: str, destination: pathlib.Path, *, sample_rate_hz: int = _
     return data
 
 
-class AlwaysVoiceDetector(voice.detection.VoiceDetector):
-    """Offline VAD: every acoustic chunk is voice (no ML dependency)."""
+def _silence_wav(
+    *,
+    duration_seconds: float = 0.5,
+    sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
+    channels: int = _DEFAULT_CHANNELS,
+) -> bytes:
+    """Build a valid signed 16-bit PCM WAV chunk for the end of an utterance."""
 
-    @override
-    async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        del input
-        return voice.detection.ApplyData(segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=1.0),))
-
-
-class FixedTranscriptDecoder(speech.SpeechDecoder):
-    """Offline STT: return a fixed UTF-8 transcript for the demo asset."""
-
-    def __init__(self, transcript: str = _HEARD_PHRASE) -> None:
-        self.transcript = transcript
-        self.calls: list[int] = []
-
-    @override
-    async def decode(self, input: bytes) -> bytes:
-        self.calls.append(len(input))
-        return self.transcript.encode("utf-8")
+    if duration_seconds <= 0:
+        raise ValueError("silence duration must be positive.")
+    frame_count = max(1, round(duration_seconds * sample_rate_hz))
+    pcm = b"\x00" * (frame_count * channels * 2)
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(channels)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate_hz)
+        stream.writeframes(pcm)
+    return output.getvalue()
 
 
 class SayEncoder(encoding.Encoder[bytes, bytes]):
-    """Offline TTS: encode UTF-8 text with macOS ``say`` into WAV bytes."""
+    """Offline TTS: encode UTF-8 text with macOS ``say`` into WAV bytes.
+
+    A caller-supplied destination remains caller-owned. Without one, the encoder
+    owns a temporary destination and closes and removes it after rendering,
+    including after failure or cancellation. Cancellation waits for the native
+    render worker to settle before releasing that temporary path, and a cancelled
+    invocation does not publish ``audio`` or ``calls``.
+    """
 
     def __init__(
         self,
@@ -308,8 +380,32 @@ class SayEncoder(encoding.Encoder[bytes, bytes]):
         text = input.decode("utf-8").strip()
         if not text:
             raise ValueError("SayEncoder requires non-blank text.")
-        path = self.destination or pathlib.Path(tempfile.mkstemp(suffix=".wav", prefix="say-reply-")[1])
-        audio = await asyncio.to_thread(_say_to_wav, text, path, sample_rate_hz=self.sample_rate_hz)
+        owns_path = self.destination is None
+        if owns_path:
+            descriptor, raw_path = tempfile.mkstemp(suffix=".wav", prefix="say-reply-")
+            os.close(descriptor)
+            path = pathlib.Path(raw_path)
+        else:
+            assert self.destination is not None
+            path = self.destination
+        render_audio = functools.partial(
+            _say_to_wav,
+            text=text,
+            destination=path,
+            sample_rate_hz=self.sample_rate_hz,
+        )
+        render = asyncio.create_task(asyncio.to_thread(render_audio))
+        try:
+            audio = await asyncio.shield(render)
+        except asyncio.CancelledError:
+            try:
+                _ = await render
+            except Exception as error:
+                _LOG.debug("Say render failed while a cancelled encoding settled.", exc_info=error)
+            raise
+        finally:
+            if owns_path:
+                path.unlink(missing_ok=True)
         self.audio = audio
         self.calls.append(text)
         return audio
@@ -329,8 +425,43 @@ def _mercury_intuition_client(config: CognitionConfig) -> OpenAIChatClient:
     )
 
 
+def _pyannote_voice_classifier(
+    model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL,
+    *,
+    inference: SpeakerEmbeddingInference | None = None,
+    load_inference: SpeakerEmbeddingInferenceLoader | None = None,
+) -> PyannoteVoiceClassifier:
+    """Create the local PyAnnote embedding adapter, with an explicit test seam."""
+
+    if load_inference is not None:
+        return PyannoteVoiceClassifier(
+            model_id=model_id,
+            inference=inference,
+            load_inference=load_inference,
+        )
+    return PyannoteVoiceClassifier(model_id=model_id, inference=inference)
+
+
+def _conversation(*, speech_decoder: SpeechDecoder) -> conversation.Conversation:
+    """Keep MLX Whisper on the identity-correlated Conversation turn path."""
+
+    return conversation.Conversation(
+        turn_detector=turn_detector.TurnDetector(
+            # TurnDetector invokes its decoder only for audio ParticipationStimulus values;
+            # the provider's narrower VoiceDecoder contract is the intended boundary here.
+            decoder=typing.cast(
+                decoding.Decoder[turn_detector.ParticipationStimulus, str],
+                MlxVoiceDecoder(speech_decoder=speech_decoder),
+            ),
+            end_of_turn_silence_seconds=0.5,
+        ),
+    )
+
+
 def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
-    """Mercury 2 intuition (fast OpenAI-compat); Gemini for reasoning/reflection."""
+    """Run seeded Communication behaviors before Mercury intuition and Gemini reasoning."""
+
+    store = memory.Memory()
 
     intuition_ability = cognition.Intuition(
         processor=OpenAIProcessor(
@@ -343,16 +474,6 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
         provider="gemini_slow_reasoning",
     )
     reasoning_ability = cognition.Reasoning(processor=deliberate_processor)
-    _log_ability_terminals(
-        intuition_ability,
-        name="intuition",
-        model=config.intuition_model,
-    )
-    _log_ability_terminals(
-        reasoning_ability,
-        name="reasoning",
-        model=config.model,
-    )
     _LOG.info(
         "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
         config.intuition_model,
@@ -360,27 +481,428 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
         config.model,
     )
     return cognition.Cognition(
+        autonomy=cognition.Autonomy(
+            memory=store,
+            seeded_behaviors=(communication.speech_heard_seed(),),
+        ),
         intuition=intuition_ability,
         reasoning=reasoning_ability,
         reflection=cognition.Reflection(
             processor=deliberate_processor,
-            memory=memory.Memory(),
+            memory=store,
         ),
     )
 
 
+class _ProgressDecisionData(BaseModel):
+    """One processing outcome selected by the progress topology."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    operation_id: str = Field(min_length=1)
+
+
+_ResponseSelectedEvent = hsm.Event[_ProgressDecisionData](
+    name="listen_speak.progress.response_selected",
+    schema=_ProgressDecisionData,
+)
+_NoResponseEvent = hsm.Event[_ProgressDecisionData](
+    name="listen_speak.progress.no_response",
+    schema=_ProgressDecisionData,
+)
+_ContinueProcessingEvent = hsm.Event[_ProgressDecisionData](
+    name="listen_speak.progress.continue_processing",
+    schema=_ProgressDecisionData,
+)
+
+
+class _RunTerminalData(BaseModel):
+    """Typed terminal emitted by the demo progress actor."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reason: typing.Literal[
+        "completed",
+        "conversation_failed",
+        "processing_failed",
+        "response_execution_failed",
+        "timed_out",
+    ]
+    response_selections: int = Field(ge=0)
+
+
+_RunTerminalEvent = hsm.Event[_RunTerminalData](
+    name="listen_speak.progress.terminal",
+    schema=_RunTerminalData,
+)
+
+
+_TerminalData = typing.TypeVar("_TerminalData")
+
+
+class _TerminalSubscription(typing.Generic[_TerminalData]):
+    """Non-actor subscription boundary for one typed terminal."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[_TerminalData] = asyncio.Queue(maxsize=1)
+        self._terminal: _TerminalData | None = None
+
+    def publish(self, terminal: _TerminalData) -> None:
+        if self._terminal is None:
+            self._terminal = terminal
+            self._queue.put_nowait(terminal)
+
+    async def receive(self, *, timeout: float) -> _TerminalData:
+        if self._terminal is not None:
+            return self._terminal
+        return await asyncio.wait_for(self._queue.get(), timeout=timeout)
+
+    def latest(self) -> _TerminalData | None:
+        return self._terminal
+
+
+class _RunRecord:
+    """External observation record; it never decides actor progression."""
+
+    def __init__(self) -> None:
+        self.terminals = _TerminalSubscription[hsm.Event[_RunTerminalData]]()
+        self.completed: list[bot.ProcessingCompletedEventData] = []
+        self.failures: list[bot.ProcessingFailedEventData] = []
+        self.listening_handoffs: list[cognition.InputData] = []
+        self.conversation_failures: list[ability.FailureData] = []
+
+
+class _RunProgress(hsm.Instance):
+    """HSM-owned demo progress with explicit classification and terminal states."""
+
+    _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=120)
+    _record: _RunRecord
+    _conversation_handoff_ids: set[str]
+    _processing_completed_ids: set[str]
+    _selected_response_operation_ids: set[str]
+    _speaking_terminal_ids: set[str]
+    _no_response_completed: bool
+
+    def __init__(self, record: _RunRecord) -> None:
+        super().__init__()
+        self._record = record
+        self._conversation_handoff_ids = set()
+        self._processing_completed_ids = set()
+        self._selected_response_operation_ids = set()
+        self._speaking_terminal_ids = set()
+        self._no_response_completed = False
+
+    @staticmethod
+    def _is_conversation_handoff(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, instance
+        data = event.data
+        return (
+            isinstance(data, cognition.InputData)
+            and isinstance(data.stimulus, hsm.Event)
+            and isinstance(data.stimulus.data, conversation.Messages)
+        )
+
+    @staticmethod
+    def _record_handoff(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance._conversation_handoff_ids.add(event.id)
+
+    @staticmethod
+    def _matches_handoff(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return any(
+            event.id == operation_id or event.id.startswith(f"{operation_id}:")
+            for operation_id in instance._conversation_handoff_ids
+        )
+
+    @staticmethod
+    def _record_processing_completed(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        if not isinstance(data, bot.ProcessingCompletedEventData):
+            return
+        instance._processing_completed_ids.add(event.id)
+        selected = isinstance(data.output, tuple) and any(
+            isinstance(selection, cognition.EventData) and selection.event == communication.RespondEvent.name
+            for selection in data.output
+        )
+        if selected:
+            outcome = _ResponseSelectedEvent
+        elif not data.output:
+            outcome = _NoResponseEvent
+        else:
+            outcome = _ContinueProcessingEvent
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                outcome.with_data(_ProgressDecisionData(operation_id=event.id)),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _record_response_selected(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        data = event.data
+        if isinstance(data, _ProgressDecisionData):
+            instance._selected_response_operation_ids.add(data.operation_id)
+
+    @staticmethod
+    def _record_no_response(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx, event
+        instance._no_response_completed = True
+
+    @staticmethod
+    def _matches_selected_response(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return any(
+            event.id == operation_id or event.id.startswith(f"{operation_id}:")
+            for operation_id in instance._selected_response_operation_ids
+        )
+
+    @staticmethod
+    def _record_speaking_terminal(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        matching = (
+            operation_id
+            for operation_id in instance._selected_response_operation_ids
+            if event.id == operation_id or event.id.startswith(f"{operation_id}:")
+        )
+        operation_id = max(matching, key=len)
+        instance._speaking_terminal_ids.add(operation_id)
+
+    @staticmethod
+    def _ready(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, event
+        selections = instance._selected_response_operation_ids
+        return (bool(selections) or instance._no_response_completed) and selections <= instance._speaking_terminal_ids
+
+    @staticmethod
+    def _publish_terminal(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+        *,
+        reason: typing.Literal[
+            "completed",
+            "conversation_failed",
+            "processing_failed",
+            "response_execution_failed",
+            "timed_out",
+        ],
+    ) -> None:
+        terminal = dataclasses.replace(
+            _RunTerminalEvent.with_data(
+                _RunTerminalData(
+                    reason=reason,
+                    response_selections=len(instance._selected_response_operation_ids),
+                )
+            ),
+            id=event.id,
+            source=hsm.id(instance),
+            metadata=dict(event.metadata),
+        )
+        instance._record.terminals.publish(terminal)
+        del ctx
+
+    @staticmethod
+    def _publish_completed(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> None:
+        _RunProgress._publish_terminal(ctx, instance, event, reason="completed")
+
+    @staticmethod
+    def _publish_conversation_failed(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        _RunProgress._publish_terminal(ctx, instance, event, reason="conversation_failed")
+
+    @staticmethod
+    def _publish_processing_failed(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        _RunProgress._publish_terminal(ctx, instance, event, reason="processing_failed")
+
+    @staticmethod
+    def _publish_response_failed(
+        ctx: hsm.Context,
+        instance: "_RunProgress",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        _RunProgress._record_speaking_terminal(ctx, instance, event)
+        _RunProgress._publish_terminal(ctx, instance, event, reason="response_execution_failed")
+
+    @staticmethod
+    def _publish_timed_out(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> None:
+        _RunProgress._publish_terminal(ctx, instance, event, reason="timed_out")
+
+    @staticmethod
+    def _timeout(ctx: hsm.Context, instance: "_RunProgress", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        del ctx, event
+        return instance._processing_timeout
+
+    model: typing.ClassVar[hsm.Model] = bot.define(
+        "ListenSpeakRunProgress",
+        hsm.initial(hsm.target("tracking")),
+        hsm.state(
+            "tracking",
+            hsm.transition(
+                hsm.on(cognition.InputEvent),
+                hsm.guard(_is_conversation_handoff),
+                hsm.effect(_record_handoff),
+            ),
+            hsm.transition(
+                hsm.on(bot.ProcessingCompletedEvent),
+                hsm.guard(_matches_handoff),
+                hsm.effect(_record_processing_completed),
+                hsm.target("../classifying_processing"),
+            ),
+            hsm.transition(
+                hsm.on(bot.ProcessingFailedEvent),
+                hsm.guard(_matches_handoff),
+                hsm.effect(_publish_processing_failed),
+                hsm.target("../done"),
+            ),
+            hsm.transition(
+                hsm.on(conversation.FailedEvent),
+                hsm.effect(_publish_conversation_failed),
+                hsm.target("../done"),
+            ),
+            hsm.transition(
+                hsm.on(speaking.OutputEvent),
+                hsm.guard(_matches_selected_response),
+                hsm.effect(_record_speaking_terminal),
+                hsm.target("../routing_readiness"),
+            ),
+            hsm.transition(
+                hsm.on(ability.FailedEvent),
+                hsm.guard(_matches_selected_response),
+                hsm.effect(_publish_response_failed),
+                hsm.target("../done"),
+            ),
+            hsm.transition(
+                hsm.after(_timeout),
+                hsm.effect(_publish_timed_out),
+                hsm.target("../done"),
+            ),
+        ),
+        hsm.state(
+            "classifying_processing",
+            hsm.transition(
+                hsm.on(_ResponseSelectedEvent),
+                hsm.effect(_record_response_selected),
+                hsm.target("../routing_readiness"),
+            ),
+            hsm.transition(
+                hsm.on(_NoResponseEvent),
+                hsm.effect(_record_no_response),
+                hsm.target("../routing_readiness"),
+            ),
+            hsm.transition(
+                hsm.on(_ContinueProcessingEvent),
+                hsm.target("../tracking"),
+            ),
+        ),
+        hsm.choice(
+            "routing_readiness",
+            hsm.transition(
+                hsm.guard(_ready),
+                hsm.effect(_publish_completed),
+                hsm.target("/ListenSpeakRunProgress/done"),
+            ),
+            hsm.transition(hsm.target("/ListenSpeakRunProgress/tracking")),
+        ),
+        hsm.final("done"),
+    )
+
+
+class _TrackedCommunication(communication.Communication):
+    """Demo communication route that forwards response terminals to run progress."""
+
+    _run_progress: _RunProgress
+
+    def __init__(
+        self,
+        *,
+        active_conversation: conversation.Conversation,
+        speaking: speaking.Speaking,
+        run_progress: _RunProgress,
+    ) -> None:
+        self._run_progress = run_progress
+        super().__init__(active_conversation=active_conversation, speaking=speaking)
+
+    @staticmethod
+    def _observed_event(observation: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
+        data = observation.data
+        if not isinstance(data, dict):
+            return None
+        event = data.get("event")
+        return event if isinstance(event, hsm.Event) else None
+
+    @staticmethod
+    def _forward_response_terminal(
+        ctx: hsm.Context,
+        instance: "_TrackedCommunication",
+        observation: hsm.Event[typing.Any],
+    ) -> None:
+        event = _TrackedCommunication._observed_event(observation)
+        if event is not None:
+            _ = hsm.dispatch(ctx, instance._run_progress, event)
+
+    submodel: typing.ClassVar[hsm.Model | None] = hsm.redefine(
+        typing.cast(hsm.Model, communication.Communication.submodel),
+        "Communication",
+        hsm.observe(speaking.OutputEvent, _forward_response_terminal),
+        hsm.observe(ability.FailedEvent, _forward_response_terminal),
+    )
+
+
 class ListenSpeakBot(Bot):
-    """Bot with no devices: Listening input + Speaking output + Gemini cognition."""
+    """Bot with no devices: real Listening input plus cognition and an internal Speaking port."""
 
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=120)
     _listening: listening.Listening
     _speaking: speaking.Speaking
-    _decoder: FixedTranscriptDecoder
+    _speaker: audio.Speaker
+    _decoder: SpeechDecoder
+    _owned_voice_activity_classifier: SileroVoiceActivityClassifier | None
     _encoder: SayEncoder
     _cognition_config: CognitionConfig
-    _completed: list[bot.ProcessingCompletedEventData]
-    _failures: list[bot.ProcessingFailedEventData]
-    _listening_handoffs: list[cognition.InputData]
+    _conversation: conversation.Conversation
+    _communication: _TrackedCommunication
+    _run_record: _RunRecord
+    _run_progress: _RunProgress
+    _activation_terminals: _TerminalSubscription[hsm.Event[typing.Any]]
+    _deactivation_terminals: _TerminalSubscription[hsm.Event[typing.Any]]
 
     def __init__(
         self,
@@ -388,22 +910,63 @@ class ListenSpeakBot(Bot):
         reply_wav: pathlib.Path,
         cognition: CognitionConfig | cognition.Cognition | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
+        vad_model_id: str = DEFAULT_SILERO_VAD_MODEL,
+        stt_model_id: str | None = None,
+        voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL,
+        voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None,
+        voice_classifier: classifying.Classifier[
+            voice.identification.InputData,
+            voice.identification.OutputData,
+        ]
+        | None = None,
+        voice_identification_inference: SpeakerEmbeddingInference | None = None,
+        voice_identification_loader: SpeakerEmbeddingInferenceLoader | None = None,
     ) -> None:
-        self._decoder = FixedTranscriptDecoder()
+        self._run_record = _RunRecord()
+        self._run_progress = _RunProgress(self._run_record)
+        self._decoder = SpeechDecoder() if stt_model_id is None else SpeechDecoder(model_id=stt_model_id)
         self._encoder = SayEncoder(destination=reply_wav, sample_rate_hz=sample_rate_hz)
-        self._listening = listening.Listening(
-            voice_detector=AlwaysVoiceDetector(),
-            speech_decoder=self._decoder,
+        classifier = (
+            voice_classifier
+            if voice_classifier is not None
+            else _pyannote_voice_classifier(
+                model_id=voice_identity_model_id,
+                inference=voice_identification_inference,
+                load_inference=voice_identification_loader,
+            )
         )
-        # No Speaker device: encoder still produces WAV; avoids self-hearing loop.
-        # listening= for composition-time nerve wiring (no mouth ⇒ no copy issued either way).
+        if voice_activity_classifier is None:
+            owned_voice_activity_classifier = SileroVoiceActivityClassifier(
+                model_id=vad_model_id,
+                sample_rate_hz=sample_rate_hz,
+                channels=_DEFAULT_CHANNELS,
+            )
+            selected_voice_activity_classifier = owned_voice_activity_classifier
+        else:
+            owned_voice_activity_classifier = None
+            selected_voice_activity_classifier = voice_activity_classifier
+        self._owned_voice_activity_classifier = owned_voice_activity_classifier
+        self._listening = listening.Listening(
+            voice_activity_classifier=selected_voice_activity_classifier,
+            speech_decoder=None,
+            voice_classifier=classifier,
+        )
+        self._conversation = _conversation(speech_decoder=self._decoder)
+        # The internal Speaker produces WAV and keeps composition-time efference wiring active.
+        self._speaker = audio.Speaker()
         self._speaking = speaking.Speaking(
             encoder=self._encoder,
-            speaker=None,
+            speaker=self._speaker,
             listening=self._listening,
+            conversation=self._conversation,
             sample_rate_hz=sample_rate_hz,
             channels=_DEFAULT_CHANNELS,
             media_type="audio/wav",
+        )
+        self._communication = _TrackedCommunication(
+            active_conversation=self._conversation,
+            speaking=self._speaking,
+            run_progress=self._run_progress,
         )
         if isinstance(cognition, _Cognition):
             cognition_instance = cognition
@@ -416,35 +979,274 @@ class ListenSpeakBot(Bot):
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),
+            acquired_abilities=(self._communication,),
         )
-        self._completed = []
-        self._failures = []
-        self._listening_handoffs = []
+        self._activation_terminals = _TerminalSubscription()
+        self._deactivation_terminals = _TerminalSubscription()
+
+    @staticmethod
+    def _observation_event(event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
+        data = event.data
+        if not isinstance(data, dict):
+            return None
+        observed = data.get("event")
+        return observed if isinstance(observed, hsm.Event) else None
+
+    @staticmethod
+    def _forward_progress(ctx: hsm.Context, instance: "ListenSpeakBot", event: hsm.Event[typing.Any]) -> None:
+        _ = hsm.dispatch(ctx, instance._run_progress, event)
+
+    @staticmethod
+    def _observe_cognition_handoff(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        observation: hsm.Event[typing.Any],
+    ) -> None:
+        event = ListenSpeakBot._observation_event(observation)
+        if event is None:
+            return
+        ListenSpeakBot._record_cognition_handoff_event(ctx, instance, event)
+
+    @staticmethod
+    def _record_cognition_handoff_event(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        if not isinstance(event.data, cognition.InputData):
+            return
+        stimulus = event.data.stimulus
+        if (
+            event.source == hsm.id(instance._listening)
+            and isinstance(stimulus, hsm.Event)
+            and isinstance(stimulus.data, conversation.Messages)
+        ):
+            instance._run_record.listening_handoffs.append(event.data)
+        ListenSpeakBot._forward_progress(ctx, instance, event)
+
+    @staticmethod
+    def _observe_processing_completed(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        observation: hsm.Event[typing.Any],
+    ) -> None:
+        event = ListenSpeakBot._observation_event(observation)
+        if event is None:
+            return
+        ListenSpeakBot._record_processing_completed_event(ctx, instance, event)
+
+    @staticmethod
+    def _record_processing_completed_event(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        if not isinstance(event.data, bot.ProcessingCompletedEventData):
+            return
+        instance._run_record.completed.append(event.data)
+        _LOG.info("bot processing completed id=%s selections=%s", event.id, _summarize_selections(event.data.output))
+        ListenSpeakBot._forward_progress(ctx, instance, event)
+
+    @staticmethod
+    def _observe_processing_failed(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        observation: hsm.Event[typing.Any],
+    ) -> None:
+        event = ListenSpeakBot._observation_event(observation)
+        if event is None:
+            return
+        ListenSpeakBot._record_processing_failed_event(ctx, instance, event)
+
+    @staticmethod
+    def _record_processing_failed_event(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        if not isinstance(event.data, bot.ProcessingFailedEventData):
+            return
+        instance._run_record.failures.append(event.data)
+        _LOG.warning("bot processing failed id=%s", event.id)
+        ListenSpeakBot._forward_progress(ctx, instance, event)
+
+    @staticmethod
+    def _from_conversation(ctx: hsm.Context, instance: "ListenSpeakBot", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, ability.FailureData) and event.source == hsm.id(instance._conversation)
+
+    @staticmethod
+    def _observe_conversation_failure(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        data = event.data
+        if not isinstance(data, ability.FailureData):
+            return
+        instance._run_record.conversation_failures.append(data)
+        _LOG.warning("conversation failed id=%s message=%s", event.id, data.message)
+        ListenSpeakBot._forward_progress(ctx, instance, event)
+
+    @staticmethod
+    def _observe_conversation_failure_transition(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        observation: hsm.Event[typing.Any],
+    ) -> None:
+        event = ListenSpeakBot._observation_event(observation)
+        if event is not None and event.source == hsm.id(instance._conversation):
+            ListenSpeakBot._observe_conversation_failure(ctx, instance, event)
+
+    @staticmethod
+    def _from_speaking(ctx: hsm.Context, instance: "ListenSpeakBot", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return event.source == hsm.id(instance._speaking)
+
+    @staticmethod
+    def _forward_speaking_terminal(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        ListenSpeakBot._forward_progress(ctx, instance, event)
+
+    @staticmethod
+    def _is_activation_terminal(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return (
+            isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData))
+            and event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _publish_activation_terminal(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance._activation_terminals.publish(event)
+
+    @staticmethod
+    def _is_deactivation_terminal(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return (
+            isinstance(event.data, bot.DeactivatingDoneEventData)
+            and event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _publish_deactivation_terminal(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        instance._deactivation_terminals.publish(event)
+
+    model: typing.ClassVar[hsm.Model] = hsm.redefine(
+        Bot.model,
+        "ListenSpeakBot",
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(bot.ActivatingDoneEvent),
+            hsm.guard(_is_activation_terminal),
+            hsm.effect(_publish_activation_terminal),
+        ),
+        hsm.transition(
+            hsm.source("activation_cleanup"),
+            hsm.on(bot.ActivatingFailedEvent),
+            hsm.guard(_is_activation_terminal),
+            hsm.effect(_publish_activation_terminal),
+        ),
+        hsm.transition(
+            hsm.source("inactive"),
+            hsm.on(bot.DeactivatingDoneEvent),
+            hsm.guard(_is_deactivation_terminal),
+            hsm.effect(_publish_deactivation_terminal),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(cognition.InputEvent),
+            hsm.effect(_record_cognition_handoff_event),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(bot.ProcessingCompletedEvent),
+            hsm.effect(_record_processing_completed_event),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(bot.ProcessingFailedEvent),
+            hsm.effect(_record_processing_failed_event),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(conversation.FailedEvent),
+            hsm.guard(_from_conversation),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(speaking.OutputEvent),
+            hsm.guard(_from_speaking),
+            hsm.effect(_forward_speaking_terminal),
+        ),
+        hsm.transition(
+            hsm.source("active"),
+            hsm.on(ability.FailedEvent),
+            hsm.guard(_from_speaking),
+            hsm.effect(_forward_speaking_terminal),
+        ),
+        hsm.observe(cognition.InputEvent, _observe_cognition_handoff),
+        hsm.observe(bot.ProcessingCompletedEvent, _observe_processing_completed),
+        hsm.observe(bot.ProcessingFailedEvent, _observe_processing_failed),
+        hsm.observe(conversation.FailedEvent, _observe_conversation_failure_transition),
+    )
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.ProcessingCompletedEvent.name:
-            completed = event.data
-            assert isinstance(completed, bot.ProcessingCompletedEventData)
-            self._completed.append(completed)
-            _LOG.info("bot processing completed selections=%s", _summarize_selections(completed.output))
-        if event.name == bot.ProcessingFailedEvent.name:
-            failure = event.data
-            assert isinstance(failure, bot.ProcessingFailedEventData)
-            self._failures.append(failure)
-            _LOG.warning("bot processing failed message=%s", failure.message)
-        if event.name == cognition.InputEvent.name and event.source == hsm.id(self._listening):
-            handoff = event.data
-            assert isinstance(handoff, cognition.InputData)
-            self._listening_handoffs.append(handoff)
-            stimulus = handoff.stimulus
-            stimulus_name = getattr(stimulus, "name", type(stimulus).__name__)
-            _LOG.info("listening handoff to cognition stimulus=%s", stimulus_name)
-        if event.name == speaking.InputEvent.name:
-            data = event.data
-            text = getattr(data, "text", None)
-            _LOG.info("speaking.input text=%r", text)
-        return super().dispatch(ctx, event)
+    async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
+        _ = await bot.started(environment, self._run_progress, self._run_progress.model)
+        try:
+            attached = await super().attach(environment, placement=placement)
+            await self.wait_for_activation()
+            return attached
+        except BaseException:
+            await hsm.stop(self._run_progress, hsm.Context())
+            await self._close_owned_audio_workers()
+            raise
+
+    @override
+    async def detach(self, environment: Environment) -> typing.Self:
+        try:
+            detached = await super().detach(environment)
+            try:
+                _ = await self._deactivation_terminals.receive(timeout=self._deactivation_timeout.total_seconds())
+            except TimeoutError as error:
+                raise RuntimeError("Timed out waiting for ListenSpeakBot deactivation.") from error
+            return detached
+        finally:
+            await hsm.stop(self._run_progress, hsm.Context())
+            await self._close_owned_audio_workers()
+
+    async def _close_owned_audio_workers(self) -> None:
+        close_operations: list[collections.abc.Awaitable[None]] = [self._decoder.aclose()]
+        if self._owned_voice_activity_classifier is not None:
+            close_operations.append(self._owned_voice_activity_classifier.aclose())
+        results = await asyncio.gather(*close_operations, return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise BaseExceptionGroup("ListenSpeakBot audio worker cleanup failed.", failures)
 
     def listening(self) -> listening.Listening:
         return self._listening
@@ -452,7 +1254,16 @@ class ListenSpeakBot(Bot):
     def speaking(self) -> speaking.Speaking:
         return self._speaking
 
-    def decoder(self) -> FixedTranscriptDecoder:
+    def speaker(self) -> audio.Speaker:
+        return self._speaker
+
+    def conversation(self) -> conversation.Conversation:
+        return self._conversation
+
+    def communication(self) -> communication.Communication:
+        return self._communication
+
+    def decoder(self) -> SpeechDecoder:
         return self._decoder
 
     def encoder(self) -> SayEncoder:
@@ -462,22 +1273,45 @@ class ListenSpeakBot(Bot):
         return self._cognition_config
 
     def completed(self) -> tuple[bot.ProcessingCompletedEventData, ...]:
-        return tuple(self._completed)
+        return tuple(self._run_record.completed)
 
     def failures(self) -> tuple[bot.ProcessingFailedEventData, ...]:
-        return tuple(self._failures)
+        return tuple(self._run_record.failures)
 
     def listening_handoffs(self) -> tuple[cognition.InputData, ...]:
-        return tuple(self._listening_handoffs)
+        return tuple(self._run_record.listening_handoffs)
 
+    async def wait_for_conversation_processing(self) -> None:
+        terminal = await self._run_record.terminals.receive(timeout=self._processing_timeout.total_seconds())
+        if isinstance(terminal.data, _RunTerminalData) and terminal.data.reason == "timed_out":
+            raise RuntimeError("Timed out waiting for ListenSpeakBot conversation processing.")
 
-async def _wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 90.0) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        if condition():
-            return
-        await asyncio.sleep(0.05)
-    raise TimeoutError("Timed out waiting for listen→speak pipeline.")
+    async def wait_for_activation(self) -> None:
+        """Wait for the public activation terminal and surface typed activation failure."""
+
+        try:
+            terminal = await self._activation_terminals.receive(timeout=self._processing_timeout.total_seconds())
+        except TimeoutError as error:
+            raise RuntimeError("Timed out waiting for ListenSpeakBot activation.") from error
+        if isinstance(terminal.data, bot.ActivatingFailedEventData):
+            raise RuntimeError("ListenSpeakBot activation failed.")
+
+    def conversation_failures(self) -> tuple[ability.FailureData, ...]:
+        return tuple(self._run_record.conversation_failures)
+
+    def response_selection_count(self) -> int:
+        terminal = self._run_record.terminals.latest()
+        if terminal is None or not isinstance(terminal.data, _RunTerminalData):
+            return 0
+        return terminal.data.response_selections
+
+    def response_execution_failed(self) -> bool:
+        terminal = self._run_record.terminals.latest()
+        return (
+            terminal is not None
+            and isinstance(terminal.data, _RunTerminalData)
+            and terminal.data.reason == "response_execution_failed"
+        )
 
 
 async def run(
@@ -486,7 +1320,7 @@ async def run(
     assets_dir: pathlib.Path | None = None,
     config: AppConfig | None = None,
 ) -> dict[str, object]:
-    """Run the device-free listen→speak pipeline once and return a summary dict."""
+    """Run the device-free Listening→cognition pipeline once and return a summary dict."""
 
     _require_macos_speech_tools()
     app_config = config or AppConfig.from_env_file(_DEFAULT_ENV_PATH if _DEFAULT_ENV_PATH.exists() else None)
@@ -504,90 +1338,79 @@ async def run(
     _LOG.info("generating heard audio with say path=%s phrase=%r", heard_wav, _HEARD_PHRASE)
     heard_audio = await asyncio.to_thread(_say_to_wav, _HEARD_PHRASE, heard_wav)
 
-    body = ListenSpeakBot(reply_wav=reply_wav, cognition=app_config.cognition)
+    body = ListenSpeakBot(
+        reply_wav=reply_wav,
+        cognition=app_config.cognition,
+        vad_model_id=app_config.vad_model_id,
+        stt_model_id=app_config.stt_model_id,
+        voice_identity_model_id=app_config.voice_identity_model_id,
+    )
     environment = Environment()
     _ = await body.attach(environment)
-    await _wait_until(lambda: (body.state() or "").endswith("/unfocused"))
-    _LOG.info("bot active state=%s", body.state())
-
-    sound = SoundEvent.with_data(
-        SoundData(
-            audio=heard_audio,
-            media_type="audio/wav",
-            sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
-            channels=_DEFAULT_CHANNELS,
-            kind="speech",
-        )
-    )
-    _LOG.info(
-        "dispatching environment.sound bytes=%s intuition_model=%s reasoning_model=%s",
-        len(heard_audio),
-        app_config.cognition.intuition_model,
-        app_config.cognition.model,
-    )
-    await body.dispatch(environment, sound)
-
-    await _wait_until(
-        lambda: (
-            (bool(body.encoder().calls) and body.encoder().audio is not None and bool(body.completed()))
-            or bool(body.failures())
-        )
-        and bool(body.listening_handoffs())
-        and bool(body.decoder().calls)
-    )
-    if body.failures() and not body.encoder().calls:
-        failure_messages = [failure.message for failure in body.failures()]
-        await body.detach(environment)
-        return {
-            "status": "failed",
-            "heard_phrase": _HEARD_PHRASE,
-            "cognition_model": app_config.cognition.model,
-            "processing_failures": failure_messages,
-            "bot_state": body.state(),
-        }
-
-    await body.detach(environment)
-    await _wait_until(lambda: (body.state() or "").endswith("/inactive") or body.state() is None, timeout=5.0)
-
-    spoken = body.encoder().calls[0] if body.encoder().calls else ""
-    reply_audio = body.encoder().audio or b""
-    if not reply_audio and reply_wav.exists():
-        reply_audio = reply_wav.read_bytes()
-    completed_outputs: list[object] = []
-    for completed in body.completed():
-        output = completed.output
-        if isinstance(output, tuple):
-            completed_outputs.append(
-                [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in output]
+    _LOG.info("bot attached")
+    try:
+        sound = SoundEvent.with_data(
+            SoundData(
+                audio=heard_audio,
+                media_type="audio/wav",
+                sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
+                channels=_DEFAULT_CHANNELS,
+                kind="speech",
             )
-        else:
-            completed_outputs.append(output)
-    summary: dict[str, object] = {
-        "status": "ok",
-        "heard_phrase": _HEARD_PHRASE,
-        "heard_wav": str(heard_wav),
-        "heard_bytes": len(heard_audio),
-        "cognition_model": app_config.cognition.model,
-        "intuition_model": app_config.cognition.intuition_model,
-        "intuition_base_url": app_config.cognition.intuition_base_url,
-        "cognition_client": (
-            f"mercury={app_config.cognition.intuition_model}@{app_config.cognition.intuition_base_url} "
-            f"gemini={app_config.cognition.model}"
-        ),
-        "stt_calls": len(body.decoder().calls),
-        "listening_handoffs": len(body.listening_handoffs()),
-        "spoken_text": spoken,
-        "reply_wav": str(reply_wav),
-        "reply_bytes": len(reply_audio),
-        "processing_completed": len(body.completed()),
-        "processing_outputs": completed_outputs,
-        "processing_failures": [failure.message for failure in body.failures()],
-        "bot_state": body.state(),
-    }
+        )
+        _LOG.info(
+            "dispatching environment.sound bytes=%s intuition_model=%s reasoning_model=%s",
+            len(heard_audio),
+            app_config.cognition.intuition_model,
+            app_config.cognition.model,
+        )
+        await body.dispatch(environment, sound)
+
+        silence_audio = _silence_wav(sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ, channels=_DEFAULT_CHANNELS)
+        _LOG.info("dispatching environment.sound silence bytes=%s", len(silence_audio))
+        await body.dispatch(
+            environment,
+            SoundEvent.with_data(
+                SoundData(
+                    audio=silence_audio,
+                    media_type="audio/wav",
+                    sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
+                    channels=_DEFAULT_CHANNELS,
+                    kind="silence",
+                )
+            ),
+        )
+
+        await body.wait_for_conversation_processing()
+        response_selections = body.response_selection_count()
+        summary_counts = {
+            "heard_audio_bytes": len(heard_audio),
+            "reply_audio_bytes": 0,
+            "listening_handoffs": len(body.listening_handoffs()),
+            "processing_completed": len(body.completed()),
+            "response_selections": response_selections,
+        }
+        if body.conversation_failures():
+            return _build_operator_summary(status="failed", status_reason="conversation_failed", **summary_counts)
+        if body.failures():
+            return _build_operator_summary(status="failed", status_reason="processing_failed", **summary_counts)
+        if body.response_execution_failed():
+            return _build_operator_summary(status="failed", status_reason="response_execution_failed", **summary_counts)
+    finally:
+        await body.detach(environment)
+
+    reply_audio = body.encoder().audio or b""
+    has_speaking_output = bool(body.encoder().calls)
+    summary_counts["reply_audio_bytes"] = len(reply_audio)
+    summary = _build_operator_summary(
+        status="ok" if has_speaking_output else "incomplete",
+        status_reason="response_spoken" if has_speaking_output else "no_response_selected",
+        **summary_counts,
+    )
 
     if play:
         for label, path in (("heard", heard_wav), ("reply", reply_wav)):
-            if path.exists():
+            if path.exists() and (label == "heard" or body.encoder().calls):
                 print(f"Playing {label}: {path}", file=sys.stderr)
                 _ = subprocess.run(["afplay", str(path)], check=False)
 
@@ -596,12 +1419,12 @@ async def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Device-free listen→speak bot with Mercury 2 intuition + Gemini reasoning (macOS say)."
+        description="Device-free Listening→cognition demo with Mercury 2 intuition + Gemini reasoning (macOS say)."
     )
     _ = parser.add_argument(
         "--play",
         action="store_true",
-        help="Play the heard and reply WAVs with afplay after the run.",
+        help="Play the heard WAV, and any reply WAV produced by a Speaking route, with afplay.",
     )
     _ = parser.add_argument(
         "--json",
@@ -646,7 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
-        print("stateforward.bot listen→speak (device-free, Gemini cognition)")
+        print("stateforward.bot listen→cognition (device-free, Gemini cognition)")
         for key, value in summary.items():
             print(f"  {key}: {value}")
     return 0 if summary.get("status") == "ok" else 1
@@ -654,10 +1477,10 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "AppConfig",
-    "AlwaysVoiceDetector",
     "CognitionConfig",
     "DEFAULT_GEMINI_MODEL",
-    "FixedTranscriptDecoder",
+    "DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL",
+    "DEFAULT_SILERO_VAD_MODEL",
     "ListenSpeakBot",
     "SayEncoder",
     "load_env",

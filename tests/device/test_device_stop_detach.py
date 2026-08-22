@@ -19,7 +19,7 @@ def require_model(model: hsm.Model | None) -> hsm.Model:
 
 
 class _EmptyFirmware(hsm.Instance):
-    model = hsm.define("EmptyFirmware", hsm.initial(hsm.target("ready")), hsm.state("ready"))
+    model = bot.define("EmptyFirmware", hsm.initial(hsm.target("ready")), hsm.state("ready"))
 
 
 class _TestDevice(Device):
@@ -43,13 +43,13 @@ def test_device_stop_then_detach_does_not_dispatch() -> None:
     async def run() -> bool:
         environment = Environment()
         device = _TestDevice()
-        _ = await hsm.started(environment, device, require_model(device.model))
+        _ = await bot.started(environment, device, require_model(device.model))
         assert bot.lifecycle.is_started(device) is True
         owner = hsm.Instance()
-        _ = await hsm.started(
+        _ = await bot.started(
             environment,
             owner,
-            hsm.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
+            bot.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await device.attach(
             environment,
@@ -72,12 +72,12 @@ def test_device_reattach_after_stop_requires_restart() -> None:
     async def run() -> None:
         environment = Environment()
         device = _TestDevice()
-        _ = await hsm.started(environment, device, require_model(device.model))
+        _ = await bot.started(environment, device, require_model(device.model))
         owner = hsm.Instance()
-        _ = await hsm.started(
+        _ = await bot.started(
             environment,
             owner,
-            hsm.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
+            bot.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await device.stop(environment)
         assert bot.lifecycle.is_started(device) is False

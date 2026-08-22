@@ -43,6 +43,11 @@ The CI cost tradeoff is deliberate:
   dependency caching.
 - Do build release artifacts with `uv build --all-packages --no-sources` so the
   packages are checked in a publish-like mode.
+- Do fail CI unless every wheel produced by that build installs with its local
+  core wheel into a separate clean virtual environment and its public package
+  imports with the repository and user site removed from Python's import path.
+- Keep the wheel-to-import mapping exhaustive: an unknown built wheel fails the
+  smoke gate until its public import is named explicitly.
 - Keep the workflow as a package publish-readiness lane until the broader repo
   Ruff and basedpyright baseline is intentionally cleaned up.
 

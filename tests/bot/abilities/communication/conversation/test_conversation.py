@@ -14,6 +14,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 import pytest
 
@@ -941,8 +942,8 @@ def test_failed_detector_readiness_stops_and_does_not_cache_detector(
         instance: hsm.Instance | hsm.Group,
         ctx: hsm.Context | None = None,
     ) -> typing.Awaitable[None]:
-        assert isinstance(instance, turn_detector.TurnDetector)
-        stopped.append(instance)
+        if isinstance(instance, turn_detector.TurnDetector):
+            stopped.append(instance)
         return stop(instance, ctx)
 
     monkeypatch.setattr(hsm, "dispatch", fail_readiness)
@@ -1100,7 +1101,7 @@ def test_conversation_input_rehydrates_audio_bytes_from_base64_selection() -> No
 
     import base64
 
-    from bot.event_schema import validate_event_data
+    from bot.event import validate_event_data
     from bot.abilities.communication import conversation
 
     audio = bytes((0, 1, 2, 3, 4, 5, 6, 7)) * 20
@@ -1117,32 +1118,22 @@ def test_conversation_input_rehydrates_audio_bytes_from_base64_selection() -> No
     assert validated.content_type == "audio/raw"
 
 
-def test_project_json_value_encodes_bytes_as_urlsafe_base64_only() -> None:
-    """Agnostic JSON projection: media bytes are URL-safe base64 (pydantic wire form)."""
+def test_event_json_value_omits_unowned_raw_media() -> None:
+    """Canonical JSON omits raw media fields and items without encoding them."""
 
     import base64
 
-    from bot import event_schema
-    from bot.abilities.cognition import autonomy
-    from bot.behavior import runtime as behavior_runtime
+    from bot import event
 
     # Bytes that differ between std (+/) and urlsafe (-_) alphabets.
     audio = bytes((0xFB, 0xFF, 0xFE, 0x00, 0x01, 0x02, 0x03, 0x04)) * 32
     expected = base64.urlsafe_b64encode(audio).decode("ascii")
     assert base64.b64encode(audio).decode("ascii") != expected  # std uses +/
-    for project in (
-        event_schema.project_json_value,
-        autonomy._json_like,
-        behavior_runtime._json_like,
-    ):
-        projected = project({"content": audio, "nested": {"blob": audio}, "ids": [audio[:4]]})
-        assert isinstance(projected, dict)
-        assert projected["content"] == expected
-        assert projected["nested"]["blob"] == expected
-        assert projected["ids"][0] == base64.urlsafe_b64encode(audio[:4]).decode("ascii")
-        assert not str(projected["content"]).startswith("b'")
-    assert event_schema.bytes_from_base64(expected) == audio
-    assert event_schema.bytes_from_base64(audio) == audio
+    payload = {"content": audio, "nested": {"blob": audio}, "ids": [audio[:4]], "kept": "value"}
+    expected_tree = {"nested": {}, "ids": [], "kept": "value"}
+    assert event.event_json_value(payload) == expected_tree
+    assert event.bytes_from_base64(expected) == audio
+    assert event.bytes_from_base64(audio) == audio
     # Round-trip matches pydantic ser_json_bytes="base64".
     from pydantic import BaseModel, ConfigDict
 
@@ -1152,10 +1143,27 @@ def test_project_json_value_encodes_bytes_as_urlsafe_base64_only() -> None:
 
     pyd = _Payload(audio=audio).model_dump(mode="json")["audio"]
     assert pyd == expected
-    assert event_schema.bytes_from_base64(pyd) == audio
-    # Standard alphabet still rehydrates (urlsafe decoder accepts +/).
+    assert event.bytes_from_base64(pyd) == audio
+    # Standard alphabet is not part of the URL-safe wire contract.
     std = base64.b64encode(audio).decode("ascii")
-    assert event_schema.bytes_from_base64(std) == audio
+    with pytest.raises(ValueError, match="base64"):
+        event.bytes_from_base64(std)
+
+
+def test_conversation_input_rejects_malformed_audio_base64() -> None:
+    from bot.abilities.communication import conversation
+    from bot.event import validate_event_data
+
+    with pytest.raises(pydantic.ValidationError, match="base64"):
+        validate_event_data(
+            conversation.InputEvent,
+            {
+                "source_ids": ["caller"],
+                "target_ids": [],
+                "content": "AA=",
+                "content_type": "audio/raw",
+            },
+        )
 
 
 def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
@@ -1164,7 +1172,7 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
     from bot.abilities import listening
     from bot.abilities.communication import conversation
     from bot.abilities.hearing import voice
-    from bot.event_schema import validate_event_data
+    from bot.event import validate_event_data
 
     audio = bytes((i % 256 for i in range(115_202)))
     speech = listening.SpeechData(
@@ -1184,7 +1192,7 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
         source_ids=frozenset({tuple(-0.03482 + i * 0.001 for i in range(16))}),
     )
     dumped = speech.model_dump(mode="json")
-    # Real admit path: selection carries SpeechData content + packaging metadata.
+    # Real admit path: the established Pydantic JSON contract carries the encoded audio payload.
     validated = validate_event_data(
         conversation.InputEvent,
         {
@@ -1227,13 +1235,13 @@ def test_processing_dispatch_accepts_typed_event_data_instance() -> None:
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
         assert conv.model is not None
-        _ = await hsm.started(ctx, conv, conv.model)
+        _ = await bot.started(ctx, conv, conv.model)
 
         class Owner(hsm.Instance):
-            model = hsm.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         _ = await conv.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 5
@@ -1274,6 +1282,7 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
     import base64
 
     import hsm
+    import bot
     from bot.abilities import processing
     from bot.abilities.communication.conversation import turn_detector
     from bot.abilities.communication import conversation
@@ -1287,13 +1296,13 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
         assert conv.model is not None
-        _ = await hsm.started(ctx, conv, conv.model)
+        _ = await bot.started(ctx, conv, conv.model)
 
         class Owner(hsm.Instance):
-            model = hsm.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         _ = await conv.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         # wait inactive
         loop = asyncio.get_running_loop()
@@ -1345,9 +1354,9 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
 
     from bot.abilities import processing
 
-    class IdentityDecoder(decoding.Decoder[object, str]):
+    class IdentityDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
         @typing.override
-        async def decode(self, input: object) -> str:
+        async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
             if isinstance(input, turn_detector.TextStimulus):
                 return input.content
             raise AssertionError(input)
@@ -1482,3 +1491,71 @@ def test_conversation_commits_cumulative_bidirectional_history() -> None:
     history = asyncio.run(append())
     assert tuple(item.sequence for item in history.messages) == (0, 1)
     assert tuple(item.direction for item in history.messages) == ("inbound", "outbound")
+
+
+def test_concurrent_host_appends_complete_their_own_operations() -> None:
+    async def run() -> tuple[conversation.Messages, conversation.Messages]:
+        ability = conversation.Conversation()
+        context = hsm.Context()
+        await start_ability_tree(context, ability)
+
+        def message(content: str) -> conversation.Message:
+            return conversation.Message(
+                sequence=0,
+                direction="outbound",
+                source_ids=frozenset(),
+                target_ids=frozenset({"caller"}),
+                content=content,
+                content_type="text/plain",
+                provenance=conversation.MessageProvenance(event=f"test.append.{content}"),
+            )
+
+        first = asyncio.create_task(conversation.append_conversation_message(ability, message("first"), ctx=context))
+        second = asyncio.create_task(conversation.append_conversation_message(ability, message("second"), ctx=context))
+        return await first, await second
+
+    first, second = asyncio.run(run())
+    histories = sorted((first, second), key=lambda history: len(history.messages))
+    assert len(histories[0].messages) == 1
+    assert len(histories[1].messages) == 2
+    assert {item.content for item in histories[1].messages if isinstance(item.content, str)} == {
+        "first",
+        "second",
+    }
+
+
+def test_concurrent_host_contributions_preserve_each_input() -> None:
+    async def run() -> tuple[conversation.ParticipatedTurn, conversation.ParticipatedTurn]:
+        ability = conversation.Conversation()
+        context = hsm.Context()
+        await start_ability_tree(context, ability)
+
+        def input_data(source: str, content: str) -> conversation.TurnData:
+            return conversation.TurnData(
+                source_ids=frozenset({source}),
+                target_ids=frozenset({"bot"}),
+                content=content,
+                content_type="text/plain",
+            )
+
+        first = asyncio.create_task(
+            conversation.contribute_conversation_input(
+                ability,
+                input_data("alice", "first"),
+                ctx=context,
+            )
+        )
+        second = asyncio.create_task(
+            conversation.contribute_conversation_input(
+                ability,
+                input_data("bob", "second"),
+                ctx=context,
+            )
+        )
+        return await first, await second
+
+    first, second = asyncio.run(run())
+    assert first.input.content == "first"
+    assert first.participation.perception.readable == "first"
+    assert second.input.content == "second"
+    assert second.participation.perception.readable == "second"

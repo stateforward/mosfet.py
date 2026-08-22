@@ -18,8 +18,10 @@ from pathlib import Path
 import collections.abc
 import dataclasses
 import datetime
+import io
 import inspect
 import typing
+import wave
 
 import hsm
 import pydantic
@@ -30,8 +32,8 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_
 from bot.bot import Bot
 import bot.bot as bot_module
 from bot.device import Device
-from bot import event_schema
-from bot.event_schema import event_json_schema
+from bot import event as event_contract
+from bot.event import event_json_schema
 from bot.protocols import attachment
 
 from bot.abilities.speaking import EfferenceData, EfferenceEvent
@@ -216,6 +218,21 @@ class SequenceAbility(processing.Processing):
     @property
     def calls(self) -> list[processing.InputData]:
         return self._seq.calls
+
+
+class CyclingSelectionProcessor(processing.Processor):
+    calls: list[processing.InputData]
+    outputs: tuple[cognition.types.OutputData, ...]
+
+    def __init__(self, *outputs: cognition.types.OutputData) -> None:
+        self.calls = []
+        self.outputs = outputs
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        self.calls.append(input)
+        output = self.outputs[(len(self.calls) - 1) % len(self.outputs)]
+        return processing.coerce_event_selections(output) or ()
 
 
 class BlockingSequenceProcessor(processing.Processor):
@@ -460,7 +477,7 @@ _StubCancelEvent = hsm.Event[_StubCancelData](name="test.stub.cancel", schema=_S
 class _BaseStubCognition(abilities.Ability[cognition.InputData, typing.Any]):
     """Cognition stub that records cancel dispatches and never produces output."""
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "StubCognition",
         hsm.initial(hsm.target("idle")),
         hsm.state("idle"),
@@ -512,6 +529,27 @@ class BasicAgent(Bot):
             failure = event.data
             assert isinstance(failure, bot.ProcessingFailedEventData)
             self.failures.append(failure)
+        return super().dispatch(ctx, event)
+
+
+class LifecycleRecordingAgent(BasicAgent):
+    lifecycle_events: list[hsm.Event[typing.Any]]
+
+    def __init__(self, devices: collections.abc.Mapping[str, Device]) -> None:
+        super().__init__(devices)
+        self.lifecycle_events = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if isinstance(
+            event.data,
+            (
+                bot.ActivatingDoneEventData,
+                bot.ActivatingFailedEventData,
+                bot.DeactivatingDoneEventData,
+            ),
+        ):
+            self.lifecycle_events.append(event)
         return super().dispatch(ctx, event)
 
 
@@ -1009,7 +1047,7 @@ def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it()
         environment = Environment()
         model = cognition_ability.model
         assert model is not None
-        _ = await hsm.started(environment, cognition_ability, model)
+        _ = await bot.started(environment, cognition_ability, model)
 
         _ = await active_bot.attach(environment)
         await asyncio.sleep(0.05)
@@ -1055,10 +1093,10 @@ def test_bot_attachment_group_preserves_preexisting_device_attachment() -> None:
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
         environment = Environment()
 
-        _ = await hsm.started(environment, active_bot, active_bot.model)
+        _ = await bot.started(environment, active_bot, active_bot.model)
         first_device_model = first_device.model
         assert first_device_model is not None
-        _ = await hsm.started(environment, first_device, first_device_model)
+        _ = await bot.started(environment, first_device, first_device_model)
         await first_device.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=active_bot)),
@@ -1353,7 +1391,7 @@ async def answered_phone_in_environment() -> tuple[Environment, phone_device.Pho
     phone = phone_device.Phone()
     phone_model = phone.model
     assert phone_model is not None
-    _ = await hsm.started(environment, phone, phone_model)
+    _ = await bot.started(environment, phone, phone_model)
     await answer_phone(phone)
     return environment, phone
 
@@ -1431,7 +1469,7 @@ def test_bot_events_use_pydantic_schemas() -> None:
     assert "payload" in input_properties
     # An occasion is ingress, never a model tool: a bot cannot select having a moment.
     assert bot.InputEvent.kind == hsm.EventKind
-    assert bot.InputEvent.kind != event_schema.EventKind
+    assert bot.InputEvent.kind != event_contract.EventKind
     assert bot.FocusDeviceEvent.name == "bot.focus_device"
     assert focus_device_schema == bot.FocusDeviceEventData.model_json_schema()
     assert bot.ClearFocusEvent.name == "bot.clear_focus"
@@ -1502,16 +1540,17 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "/Bot/active/processing" in model.members
     assert "/Bot/active/cancelling_processing" in model.members
     assert "bot.activate" in transitions["/Bot/inactive"]
-    assert "bot.lifecycle.completed" in transitions["/Bot/activating"]
-    assert "bot.lifecycle.failed" in transitions["/Bot/activating"]
-    assert "attachment.attach.complete" not in transitions["/Bot/activating"]
+    assert "attachment.attach.complete" in transitions["/Bot/activating"]
+    assert "attachment.attach.failed" in transitions["/Bot/activating"]
+    assert "bot.lifecycle.completed" not in transitions["/Bot/activating"]
+    assert "bot.lifecycle.failed" not in transitions["/Bot/activating"]
     assert "bot.activating.failed" not in transitions["/Bot/activating"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/activation_cleanup"]
-    assert "bot.lifecycle.completed" in transitions["/Bot/deactivating"]
-    assert "bot.lifecycle.failed" in transitions["/Bot/deactivating"]
+    assert "attachment.detached" in transitions["/Bot/deactivating"]
+    assert "attachment.detach.failed" in transitions["/Bot/deactivating"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/deactivation_cleanup"]
-    assert "bot.lifecycle.completed" in transitions["/Bot/reboot_deactivating"]
-    assert "bot.lifecycle.failed" in transitions["/Bot/reboot_deactivating"]
+    assert "attachment.detached" in transitions["/Bot/reboot_deactivating"]
+    assert "attachment.detach.failed" in transitions["/Bot/reboot_deactivating"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/reboot_cleanup_preserve"]
     assert "bot.lifecycle.cleanup.done" in transitions["/Bot/reboot_cleanup_reset"]
     assert any("_bot_deactivation_timeout" in event for event in transitions["/Bot/deactivating"])
@@ -1813,14 +1852,12 @@ def test_bot_processes_environment_broadcast_from_configured_device_event() -> N
 
 
 _VOICE_APPLY = voice.detection.ApplyData(
-    segments=(
-        voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.91),
-    )
+    segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.91),)
 )
 _SILENCE_APPLY = voice.detection.ApplyData(segments=())
 
 
-class FixedVoiceDetector(voice.detection.VoiceDetector):
+class FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     """Always returns the same ApplyData (ring/no-voice fixtures)."""
 
     output: voice.detection.ApplyData
@@ -1856,7 +1893,7 @@ class FixedVoiceDetector(voice.detection.VoiceDetector):
         return self.output
 
 
-class ContentVoiceDetector(voice.detection.VoiceDetector):
+class ContentVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
     """Voice when audio is non-zero; silence when it is near-empty (closes HearingSpeech).
 
     Streaming VAD needs a silence frame after speech. Tests inject zero PCM via
@@ -1904,13 +1941,13 @@ class RecordingListening(listening.Listening):
         else:
             decoder = speech_decoder
         # Voice path: content-based VAD so zero-PCM silence frames end HearingSpeech.
-        detector: voice.detection.VoiceDetector
+        voice_activity_classifier: voice.detection.VoiceActivityClassifier
         if is_voice:
-            detector = ContentVoiceDetector()
+            voice_activity_classifier = ContentVoiceActivityClassifier()
         else:
-            detector = FixedVoiceDetector(is_voice=False)
+            voice_activity_classifier = FixedVoiceActivityClassifier(is_voice=False)
         super().__init__(
-            voice_detector=detector,
+            voice_activity_classifier=voice_activity_classifier,
             sound_classifier=sound_classifier,
             speech_decoder=decoder,
         )
@@ -1952,16 +1989,44 @@ def silence_sound(
     )
 
 
-async def close_hearing_speech(bot: Bot, environment: Environment, **sound_kwargs: object) -> None:
+def wav_frame(audio_bytes: bytes, *, sample_rate_hz: int = 16_000, channels: int = 1) -> bytes:
+    """Build the canonical PCM-in-WAV decoder input produced by Listening."""
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as stream:
+        stream.setnchannels(channels)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate_hz)
+        stream.writeframes(audio_bytes)
+    return buffer.getvalue()
+
+
+async def close_hearing_speech(
+    bot: Bot,
+    environment: Environment,
+    *,
+    sample_rate_hz: int = 16_000,
+    channels: int = 1,
+    amplitude_db: float | None = None,
+    received_level_db: float | None = 0.0,
+) -> None:
     """Dispatch a silence frame so streaming VAD can End an open HearingSpeech window.
 
     Default ``received_level_db=0.0`` keeps the silence frame below the product threshold so
     closing VAD does not invent a deliberative turn of its own.
     """
 
-    if "received_level_db" not in sound_kwargs:
-        sound_kwargs["received_level_db"] = 0.0
-    await bot.dispatch(environment, SoundEvent.with_data(silence_sound(**sound_kwargs)))  # type: ignore[arg-type]
+    await bot.dispatch(
+        environment,
+        SoundEvent.with_data(
+            silence_sound(
+                sample_rate_hz=sample_rate_hz,
+                channels=channels,
+                amplitude_db=amplitude_db,
+                received_level_db=received_level_db,
+            )
+        ),
+    )
 
 
 def ring_hearing(*, is_voice: bool = False) -> RecordingListening:
@@ -2053,7 +2118,7 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
         active_bot.actions.clear()
         # Signal into the speaker; the speaker is the transducer that makes it environment sound.
         await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return (
             active_bot.state(),
@@ -2103,7 +2168,7 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
 
         # Signal into the speaker; the speaker is the transducer that makes it environment sound.
         await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: len(owner_ability.calls) == 1 and owning_agent.state() == "/Bot/active/focused")
 
         return (
             owner_ability.calls,
@@ -2422,7 +2487,11 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
             cognition.types.EventData(
                 event=phone_device.HangUpCallEvent.name,
                 reason="hang up a call the phone is not on",
-            )
+            ),
+            cognition.types.EventData(
+                event=phone_device.HangUpCallEvent.name,
+                reason="hang up a call the phone is not on",
+            ),
         )
         active_bot = AbilityAgent(devices={"phone": phone_device.Phone()}, cognition=ability)
 
@@ -2440,7 +2509,10 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
     assert state == "/Bot/active/focused"
     assert actions == []
     assert len(failures) == 1
-    assert failures[0].message == f"Processing selected unavailable event: {phone_device.HangUpCallEvent.name}."
+    assert (
+        failures[0].message
+        == f"Selection rejected: Processing selected unavailable event: {phone_device.HangUpCallEvent.name}."
+    )
 
 
 def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
@@ -2451,7 +2523,13 @@ def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
                 event=phone_device.AnswerCallEvent.name,
                 data={"call_id": "call-123"},
                 reason="answer incoming call",
-            )
+            ),
+            cognition.types.EventData(
+                target="phone",
+                event=phone_device.AnswerCallEvent.name,
+                data={"call_id": "call-123"},
+                reason="answer incoming call",
+            ),
         )
         active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability)
 
@@ -2471,7 +2549,7 @@ def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
     assert len(failures) == 1
     assert (
         failures[0].message
-        == f"Processing selected unavailable event for target phone: {phone_device.AnswerCallEvent.name}."
+        == f"Selection rejected: Processing selected unavailable event for target phone: {phone_device.AnswerCallEvent.name}."
     )
 
 
@@ -2483,7 +2561,13 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
                 event=phone_device.AnswerCallEvent.name,
                 data={"call_id": "call-123"},
                 reason="answer incoming call",
-            )
+            ),
+            cognition.types.EventData(
+                target="browser",
+                event=phone_device.AnswerCallEvent.name,
+                data={"call_id": "call-123"},
+                reason="answer incoming call",
+            ),
         )
         active_bot = AbilityAgent(devices={"phone": phone_device.Phone(), "browser": Device()}, cognition=ability)
 
@@ -2503,7 +2587,7 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
     assert len(failures) == 1
     assert (
         failures[0].message
-        == f"Processing selected unavailable event for target browser: {phone_device.AnswerCallEvent.name}."
+        == f"Selection rejected: Processing selected unavailable event for target browser: {phone_device.AnswerCallEvent.name}."
     )
 
 
@@ -2515,7 +2599,13 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
                 event=bot.FocusDeviceEvent.name,
                 data={"device": "browser"},
                 reason="target mismatch",
-            )
+            ),
+            cognition.types.EventData(
+                target="phone",
+                event=bot.FocusDeviceEvent.name,
+                data={"device": "browser"},
+                reason="target mismatch",
+            ),
         )
         active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=ability)
 
@@ -2534,7 +2624,10 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
     assert focused_device
     assert actions == []
     assert len(failures) == 1
-    assert failures[0].message == "Processing selected focus_device outside available device candidates."
+    assert (
+        failures[0].message
+        == "Selection rejected: Processing selected focus_device outside available device candidates."
+    )
 
 
 def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() -> None:
@@ -2604,7 +2697,17 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
                     "target": {"kind": "queue", "value": "operator"},
                 },
                 reason="transfer call",
-            )
+            ),
+            cognition.types.EventData(
+                target="phone",
+                event=phone_device.TransferCallEvent.name,
+                data={
+                    "call_id": "call-123",
+                    "transfer_id": "transfer-123",
+                    "target": {"kind": "queue", "value": "operator"},
+                },
+                reason="transfer call",
+            ),
         )
         environment, phone = await answered_phone_in_environment()
         await emit_phone_service_event(
@@ -2632,8 +2735,65 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
     assert actions == []
     assert len(failures) == 1
     assert failures[0].message.startswith(
-        f"Processing selected invalid event data for event: {phone_device.TransferCallEvent.name}"
+        "Selection rejected: Processing selected invalid event data for event: phone.transfer_call: phone.transfer_call|"
     )
+    assert "input_value" not in failures[0].message
+
+
+def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_rejections() -> None:
+    async def run() -> tuple[int, list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+        processor = CyclingSelectionProcessor(
+            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 0}),),
+            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={}),),
+            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 1}),),
+        )
+        active_bot = AbilityAgent(
+            devices=configured_devices("phone", "browser"),
+            cognition=as_cognition(processor),
+        )
+
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
+
+        return len(processor.calls), active_bot.failures, active_bot.actions
+
+    calls, failures, actions = asyncio.run(run())
+
+    assert calls == 3
+    assert len(failures) == 1
+    assert "input_value" not in failures[0].message
+    assert actions == []
+
+
+def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> None:
+    async def run() -> tuple[int, list[bot.ProcessingFailedEventData]]:
+        processor = CyclingSelectionProcessor(
+            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 0}),),
+            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 1}),),
+        )
+        active_bot = AbilityAgent(
+            devices=configured_devices("phone", "browser"),
+            cognition=as_cognition(processor),
+        )
+
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
+
+        return len(processor.calls), active_bot.failures
+
+    calls, failures = asyncio.run(run())
+
+    assert calls == 2
+    assert len(failures) == 1
+    assert "input_value" not in failures[0].message
 
 
 def test_focused_agent_dispatches_multi_event_focus_selection() -> None:
@@ -2881,6 +3041,7 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
         ability = SequenceAbility(
             no_output("stay on phone"),
             focus_output("screen", "bad target"),
+            focus_output("screen", "bad target"),
             no_output("observe retained focus"),
         )
         cognitive = InputRecordingCognition(ability)
@@ -2901,7 +3062,7 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             active_bot.context(),
             bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=2)),
         )
-        await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), cognitive.inputs, active_bot.actions, active_bot.failures
 
@@ -2911,7 +3072,10 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
     assert inputs[2].focus == "phone"
     assert actions == [no_output("stay on phone"), no_output("observe retained focus")]
     assert len(failures) == 1
-    assert failures[0].message == "Processing selected focus_device outside available device candidates."
+    assert (
+        failures[0].message
+        == "Selection rejected: Processing selected focus_device outside available device candidates."
+    )
 
 
 def test_focused_agent_ability_can_clear_focus() -> None:
@@ -3646,6 +3810,79 @@ def test_bot_activation_dispatches_completion_after_queueing_device_notification
     asyncio.run(run())
 
 
+def test_bot_activation_emits_correlated_public_completion_after_attachment() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        active_bot = LifecycleRecordingAgent(devices={"phone": Device()})
+        environment = Environment()
+        _ = await bot.started(environment, active_bot, active_bot.model)
+        environment.join(active_bot)
+        request = dataclasses.replace(
+            bot.ActivateEvent.with_data(bot.ActivateEventData()),
+            id="activation-request",
+            source="activation-owner",
+            target=hsm.id(active_bot),
+            metadata={"traceparent": "00-activation"},
+        )
+        await active_bot.dispatch(environment, request)
+        await wait_until(lambda: len(active_bot.lifecycle_events) == 1)
+        terminal = active_bot.lifecycle_events[0]
+        await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return terminal
+
+    terminal = asyncio.run(run())
+
+    assert isinstance(terminal.data, bot.ActivatingDoneEventData)
+    assert terminal.id == "activation-request"
+    assert terminal.source == terminal.target
+    assert terminal.source
+    assert terminal.metadata == {"traceparent": "00-activation"}
+
+
+def test_bot_activation_emits_public_failure_without_public_completion() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], ...]:
+        active_bot = LifecycleRecordingAgent(devices={"failing": ImmediatelyFailingInitializingDevice()})
+        environment = Environment()
+        _ = await active_bot.attach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(active_bot.lifecycle_events) == 1)
+        terminals = tuple(active_bot.lifecycle_events)
+        await active_bot.detach(environment)
+        return terminals
+
+    terminals = asyncio.run(run())
+
+    assert len(terminals) == 1
+    assert isinstance(terminals[0].data, bot.ActivatingFailedEventData)
+
+
+def test_bot_deactivation_emits_correlated_public_completion_after_cleanup() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        active_bot = LifecycleRecordingAgent(devices={"phone": Device()})
+        environment = await start_bot_with_devices(active_bot)
+        active_bot.lifecycle_events.clear()
+        request = dataclasses.replace(
+            bot.DeactivateEvent.with_data(bot.DeactivateEventData()),
+            id="deactivation-request",
+            source="deactivation-owner",
+            target=hsm.id(active_bot),
+            metadata={"traceparent": "00-deactivation"},
+        )
+
+        await active_bot.dispatch(environment, request)
+        await wait_until(lambda: len(active_bot.lifecycle_events) == 1)
+        terminal = active_bot.lifecycle_events[0]
+        environment.leave(active_bot)
+        return terminal
+
+    terminal = asyncio.run(run())
+
+    assert isinstance(terminal.data, bot.DeactivatingDoneEventData)
+    assert terminal.id == "deactivation-request"
+    assert terminal.source == terminal.target
+    assert terminal.source
+    assert terminal.metadata == {"traceparent": "00-deactivation"}
+
+
 def test_bot_rejects_stale_attachment_terminal_from_previous_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3846,7 +4083,7 @@ def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
         environment = Environment()
         started_device_model = started_device.model
         assert started_device_model is not None
-        _ = await hsm.started(environment, started_device, started_device_model)
+        _ = await bot.started(environment, started_device, started_device_model)
         _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await wait_until(lambda: device_bots(started_device) == (active_bot,))
@@ -3891,8 +4128,8 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
     # Wired, not idle: the phone powers its transducers and its firmware attaches to them during
     # bring-up, so they sit attached for the life of the phone. Call state gates the uplink in
     # firmware topology, not the wiring.
-    assert microphone_state == "/Device/attached"
-    assert speaker_state == "/Device/attached"
+    assert microphone_state == "/DeviceMicrophone/attached"
+    assert speaker_state == "/DeviceSpeaker/attached"
     assert agent_scope
     assert phone_scope
     assert mic_scope
@@ -4019,7 +4256,7 @@ async def somebody_speaks(
     """
 
     mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
-    _ = await hsm.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    _ = await bot.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     voice = speaking.Speaking(
         encoder=UtteranceEncoder(),
         speaker=mouth,
@@ -4066,9 +4303,9 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
     assert [stimulus.name for stimulus in stimuli] == [listening.SpeechEvent.name]
     assert isinstance(stimuli[0].data, listening.SpeechData)
     assert stimuli[0].data.content_type == "text/plain"
-    assert stimuli[0].data.content == (b"decoded:spoken:Call Bob at 555-0142." + silence_sound().audio).decode(
-        "utf-8", errors="replace"
-    )
+    assert stimuli[0].data.content == (
+        b"decoded:" + wav_frame(b"spoken:Call Bob at 555-0142." + silence_sound().audio)
+    ).decode("utf-8", errors="replace")
 
 
 def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
@@ -4269,9 +4506,7 @@ def test_a_bot_does_not_deliberate_its_own_utterance() -> None:
     """
 
     async def run() -> tuple[list[processing.InputData], list[bytes]]:
-        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(
-            utterance_seconds=0.4
-        )
+        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.4)
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
         # Close streaming VAD so speech decoding can finish on the attenuated own-voice frame.
@@ -4337,9 +4572,7 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     """
 
     async def run() -> list[processing.InputData]:
-        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(
-            utterance_seconds=0.6
-        )
+        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.6)
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
         # Mid-utterance: the mouth is still committed and the sensitivity window is still open.
@@ -4357,7 +4590,7 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
     assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
-        (b"decoded:spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio).decode(
+        (b"decoded:" + wav_frame(b"spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio)).decode(
             "utf-8", errors="replace"
         )
     ]
@@ -4401,7 +4634,7 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
     assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
-        (b"decoded:spoken:Are you there?" + silence_sound().audio).decode("utf-8", errors="replace")
+        (b"decoded:" + wav_frame(b"spoken:Are you there?" + silence_sound().audio)).decode("utf-8", errors="replace")
     ]
 
 

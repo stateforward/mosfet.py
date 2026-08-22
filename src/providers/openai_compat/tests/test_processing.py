@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from bot.abilities import processing
 from bot.abilities.language import text
+from bot.environment import SoundData
 from bot.protocols import attachment
 from bot.providers.openai_compat import Processor, ProcessingError, TextGenerator
 
 import asyncio
-import base64
 import collections.abc
 import dataclasses
 import json
@@ -70,7 +70,7 @@ class _ProcessForTestOwner(hsm.Instance):
             message = failure.message if failure is not None and hasattr(failure, "message") else str(failure)
             future.set_exception(RuntimeError(message))
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "ProcessForTestOwner",
         hsm.initial(hsm.target("/ProcessForTestOwner/recording")),
         hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
@@ -96,7 +96,7 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     context = hsm.Context().with_value(hsm.Keys.Instances, weakref.WeakValueDictionary())
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
-    _ = await hsm.started(context, owner, owner.model)
+    _ = await bot.started(context, owner, owner.model)
     _ = await ability.attach(
         context,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -126,7 +126,7 @@ def test_processor_returns_empty_events_without_schemas() -> None:
 def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> None:
     stimulus = hsm.Event[bytes](
         name="bot.ability.hearing.speech.decoding.output",
-        data=b"Hey I'm Gabe how are you",
+        data=SoundData(audio=b"Hey I'm Gabe how are you", media_type="audio/pcm", sample_rate_hz=16_000),
         kind=hsm.CompletionEventKind,
     )
     generator = RecordingGenerator(content="[]")
@@ -141,11 +141,12 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     content = next(
         message.content for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER
     )
-    # Raw media never reaches the prompt, in any encoding; the model gets a size descriptor.
+    # Raw media never reaches the prompt, in any encoding; owning Data retains only metadata.
     assert "Hey I'm Gabe how are you" not in content
-    assert base64.b64encode(b"Hey I'm Gabe how are you").decode("ascii") not in content
-    assert 'content="bytes:24"' in content
+    assert "bytes:" not in content
+    assert "<environment:sound" in content
     assert 'stimulus:event="bot.ability.hearing.speech.decoding.output"' in content
+    assert 'media_type="audio/pcm"' in content
     assert "TypeAdapter" not in content
     # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
     assert "phone.answer_call" not in content
@@ -221,6 +222,7 @@ def test_processor_process_records_otel_wire_payload(
     monkeypatch.chdir(tmp_path)
     bot.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+
     def _noop_set_logger_provider(_provider: object) -> None:
         return None
 

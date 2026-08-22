@@ -3,8 +3,9 @@ from __future__ import annotations
 from bot.abilities.hearing import voice
 
 import asyncio
-import concurrent.futures
+import functools
 import io
+import threading
 import typing
 import wave
 
@@ -16,6 +17,7 @@ from ._mlx import (
     VoiceActivityEvent,
     load_streaming_voice_detection_session,
 )
+from .speech_decoder import BoundedWorker
 
 _SCOPE = "bot.providers.mlx_audio"
 _COMPONENT = "mlx_audio.voice_detection"
@@ -43,8 +45,8 @@ def _unwrap_wav(audio: bytes) -> tuple[bytes, int, int]:
         raise VoiceDetectionError(message) from error
 
 
-class VoiceDetector(voice.VoiceDetector):
-    """Voice detector backed by MLX Audio's streaming Silero VAD.
+class VoiceActivityClassifier(voice.VoiceActivityClassifier):
+    """Voice-activity classifier backed by MLX Audio's streaming Silero VAD.
 
     The model is a streaming one: it consumes fixed 16 kHz frames and reports where speech
     begins and ends against its own continuous clock. Headerless PCM is fed through one
@@ -63,6 +65,13 @@ class VoiceDetector(voice.VoiceDetector):
     ``classify`` answers per chunk with chunk-local spans, which is what the core
     ``VoiceDetection`` ability turns into sticky Start/End presence boundaries.
 
+    The classifier accepts at most one active and one queued chunk. Further calls fail with
+    ``VoiceDetectionError`` instead of retaining unbounded audio. Cancelling a queued call removes
+    it before native execution; cancelling an active call cancels only the caller's wait because
+    MLX native work cannot be interrupted, and the stream advances when that work completes.
+    ``close`` and ``aclose`` wait up to 100 ms for cooperative work, then leave a permanently
+    blocked native call isolated to a daemon worker that cannot hold process shutdown open.
+
     ``sample_rate_hz`` and ``channels`` describe the raw PCM stream. A container declares its
     own and overrides both.
     """
@@ -73,7 +82,9 @@ class VoiceDetector(voice.VoiceDetector):
     load_session: StreamingVoiceDetectionSessionLoader
 
     _stream_session: StreamingVoiceDetectionSession | None
-    _worker: concurrent.futures.ThreadPoolExecutor | None
+    _worker: BoundedWorker | None
+    _worker_lock: threading.Lock
+    _closed: bool
     _elapsed_ms: float
     _in_speech: bool
 
@@ -96,36 +107,96 @@ class VoiceDetector(voice.VoiceDetector):
         self.load_session = load_session
         self._stream_session = session
         self._worker = None
+        self._worker_lock = threading.Lock()
+        self._closed = False
         self._elapsed_ms = 0.0
         self._in_speech = False
 
     @typing.override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        # One worker thread for the life of the detector, not a pool. MLX binds its compute
+        # One worker thread for the life of the classifier, not a pool. MLX binds its compute
         # stream to the thread that created it, so a session driven from a second thread fails
         # with "no Stream(gpu) in current thread". The single worker also serializes chunks, and
         # order matters here: the session's clock only makes sense if chunks arrive in sequence.
         #
         # That same long life is why the trace context is bound here, at hand-over, and not where
         # the worker is created: the worker outlives every chunk, so a context captured at
-        # bring-up would file each chunk's span under whatever was happening when the detector
+        # bring-up would file each chunk's span under whatever was happening when the classifier
         # first woke up. `run_in_executor` does not copy the caller's context the way
         # `asyncio.to_thread` does, so without this bind each chunk starts its own trace.
-        return await asyncio.get_running_loop().run_in_executor(
-            self._resolve_worker(),
-            span.bind(self._classify_blocking),
-            input,
-        )
+        loop = asyncio.get_running_loop()
+        with self._worker_lock:
+            if self._closed:
+                raise RuntimeError("MLX Audio voice activity classifier is closed.")
+            worker = self._resolve_worker_unlocked()
+            result = worker.try_submit(functools.partial(span.bind(self._classify_blocking), input))
+        if result is None:
+            with span.operation(
+                "bot.provider.mlx_audio.voice_detection.admission",
+                scope=_SCOPE,
+                component=_COMPONENT,
+                stage="admission",
+            ):
+                raise VoiceDetectionError("MLX Audio voice activity classifier capacity is exhausted.")
+        return await asyncio.wrap_future(result, loop=loop)
 
-    def _resolve_worker(self) -> concurrent.futures.ThreadPoolExecutor:
+    def _resolve_worker_unlocked(self) -> BoundedWorker:
         worker = self._worker
         if worker is None:
-            worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-voice-detection")
+            worker = BoundedWorker(name="mlx-voice-detection")
             self._worker = worker
         return worker
 
+    def shutdown(self) -> None:
+        """Reject new work and cancel queued calls without waiting for active classification."""
+
+        worker = self._begin_shutdown()
+        if worker is not None:
+            worker.close(wait=False)
+
+    def close(self) -> None:
+        """Reject work, cancel queued calls, and wait at most 100 ms for active work."""
+
+        worker = self._begin_shutdown()
+        if worker is None:
+            return
+        with span.operation(
+            "bot.provider.mlx_audio.voice_detection.close",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="close",
+        ):
+            worker.close(wait=True)
+
+    async def aclose(self) -> None:
+        """Perform bounded terminal cleanup, deferring cancellation until it finishes."""
+
+        worker = self._begin_shutdown()
+        if worker is None:
+            return
+        with span.operation(
+            "bot.provider.mlx_audio.voice_detection.close",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="close",
+        ):
+            shutdown = asyncio.create_task(
+                asyncio.to_thread(worker.close, wait=True),
+                name="mlx-audio-voice-detection-close",
+            )
+            try:
+                await asyncio.shield(shutdown)
+            except asyncio.CancelledError:
+                await shutdown
+                raise
+
+    def _begin_shutdown(self) -> BoundedWorker | None:
+        with self._worker_lock:
+            self._closed = True
+            return self._worker
+
     def _classify_blocking(self, audio: bytes) -> voice.detection.ApplyData:
-        # Runs on the detector's single worker thread, so the stream state below is touched by
+        # Runs on the classifier's single worker thread, so the stream state below is touched by
         # one thread at a time without further locking.
         #
         # `bot.audio.session` is the load-bearing dimension: a container gets a throwaway session
@@ -261,5 +332,5 @@ def _segments_from_events(
 
 __all__ = [
     "VoiceDetectionError",
-    "VoiceDetector",
+    "VoiceActivityClassifier",
 ]

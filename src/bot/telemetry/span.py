@@ -75,9 +75,7 @@ def normalized_kind(kind: str) -> str:
     """Coerce a failure kind to ``lower_snake_case`` within the length bound."""
 
     split = _CAMEL_BOUNDARY.sub("_", kind.strip())
-    cleaned = "".join(
-        character if character.isascii() and character.isalnum() else "_" for character in split.lower()
-    )
+    cleaned = "".join(character if character.isascii() and character.isalnum() else "_" for character in split.lower())
     collapsed = "_".join(part for part in cleaned.split("_") if part)
     if not collapsed:
         return _UNKNOWN_KIND

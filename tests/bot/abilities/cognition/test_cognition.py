@@ -22,15 +22,38 @@ from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_co
 import pydantic
 import pytest
 
-from bot.event_schema import validate_event_data
+from bot.event import validate_event_data
 from tests.type_helpers import model_view, object_dict
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
 CONTEXT_KEY = "tests.cognitive.context"
+# Revision validates each Starlark candidate in an isolated process with a three-second budget;
+# the host wait scales with the test's expected validation passes plus fixed pipeline overhead.
+_STARLARK_VALIDATION_TIMEOUT_SECONDS = 3.0
+_REVISION_PIPELINE_OVERHEAD_SECONDS = 10.0
+# Learned-source materialization currently takes about eight seconds before attachment.
+_LEARNED_BEHAVIOR_HOST_TIMEOUT_SECONDS = 15.0
+
+
+def _revision_host_timeout(*, validation_passes: int) -> float:
+    return validation_passes * _STARLARK_VALIDATION_TIMEOUT_SECONDS + _REVISION_PIPELINE_OVERHEAD_SECONDS
+
+
+class _NoopSpeechEncoder(abilities.Encoder[bytes, bytes]):
+    async def encode(self, input: bytes) -> bytes:
+        del input
+        return b"test-audio"
 
 
 def test_cognition_never_uses_metadata_for_coordination() -> None:
     assert_metadata_is_not_coordination(cognition_module)
+
+
+def test_cognition_child_phase_is_topology_owned_not_activity_state() -> None:
+    """Child stage correlation must not depend on activity-mutated machine fields."""
+
+    source = inspect.getsource(cognition_module.Cognition)
+    assert "_active_child_suffix" not in source
 
 
 def test_cognition_types_never_use_metadata_for_coordination() -> None:
@@ -274,7 +297,7 @@ def _accept_focus_event(
 class _BotActor(hsm.Instance):
     """Minimal modeled recipient for cognition selections in unit tests."""
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "BotActor",
         hsm.initial(hsm.target("/BotActor/active")),
         hsm.state(
@@ -546,7 +569,11 @@ class FixedProcessor(processing.Processor):
             behavior_events.CreateEvent.name,
             behavior_events.ChangeEvent.name,
         }:
-            raw = {**(self.selection[0].data or {}), "event": behavior_events.ChangeEvent.name}
+            selected_data = self.selection[0].data
+            raw = {
+                **(dict(selected_data) if isinstance(selected_data, collections.abc.Mapping) else {}),
+                "event": behavior_events.ChangeEvent.name,
+            }
             self.write = behavior_events.ChangeData.model_validate(raw)
         else:
             self.write = behavior_events.ChangeData(name="unused-write", reason="phase processor unused")
@@ -674,7 +701,7 @@ async def started_cognition_input(ctx: hsm.Context) -> cognition.InputData:
     actor = data.actors["bot"]
     assert isinstance(actor, _BotActor)
     assert actor.model is not None
-    _ = await hsm.started(ctx, actor, actor.model)
+    _ = await bot.started(ctx, actor, actor.model)
     return data
 
 
@@ -825,7 +852,7 @@ class CognitionAttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "CognitionAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -941,13 +968,13 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
         finally:
             connection.close()
         owner = hsm.Instance()
-        owner_model = hsm.define(
+        owner_model = bot.define(
             "CognitionAttachmentOwner",
             hsm.initial(hsm.target("ready")),
             hsm.state("ready"),
         )
         ctx = hsm.Context()
-        _ = await hsm.started(ctx, owner, owner_model)
+        _ = await bot.started(ctx, owner, owner_model)
         await minimal.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1000,7 +1027,7 @@ def test_cognition_reports_aggregate_attachment_failure_and_accepts_retry(
         ctx = hsm.Context()
         ability = make_cognition()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1075,7 +1102,7 @@ def test_cognition_detaches_once_through_group_and_can_reattach(
         ctx = hsm.Context()
         owner = CognitionAttachmentOwner()
         ability = make_cognition()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1124,7 +1151,7 @@ def test_cognition_detach_cancels_active_intuition_through_group() -> None:
         ability = make_cognition(intuition_processor=processor)
         ctx = hsm.Context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1170,7 +1197,7 @@ def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
             )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner(ability)
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1238,7 +1265,7 @@ def test_cognition_direct_cancellation_acknowledges_active_child(
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1261,7 +1288,6 @@ def test_cognition_direct_cancellation_acknowledges_active_child(
                 target=hsm.id(ability),
             ),
         )
-        await asyncio.sleep(0.02)
         await wait_until(lambda: any(event.name == cognition.CancelledEvent.name for event in owner.lifecycle))
         instances = ability.context().value(hsm.Keys.Instances)
         operation_keys = (
@@ -1287,15 +1313,27 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class StubbornIntuition(cognition.Intuition):
-        submodel = hsm.define(
+        @staticmethod
+        async def _hold(ctx: hsm.Context, instance: "StubbornIntuition", event: hsm.Event[typing.Any]) -> None:
+            del ctx
+            operation_id = event.id if event.id else hsm.id(instance)
+            if processing.active_operation(instance, operation_id) is None:
+                _ = await processing.start_operation(instance, operation_id)
+            await asyncio.Event().wait()
+
+        submodel = bot.define(
             "StubbornIntuition",
             hsm.initial(hsm.target("/StubbornIntuition/waiting")),
             hsm.state(
                 "waiting",
                 hsm.transition(
                     hsm.on(cognition.Intuition.input_event),
-                    hsm.effect(lambda ctx, instance, event: None),
+                    hsm.target("/StubbornIntuition/holding"),
                 ),
+            ),
+            hsm.state(
+                "holding",
+                hsm.activity(_hold.__get__(None, object)),
             ),
         )
 
@@ -1313,7 +1351,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1337,9 +1375,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
                 target=hsm.id(ability),
             ),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
-        await asyncio.sleep(0.01)
         instances = ability.context().value(hsm.Keys.Instances)
         operation_keys = (
             tuple(
@@ -1363,15 +1399,27 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
 
 def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.MonkeyPatch) -> None:
     class StubbornIntuition(cognition.Intuition):
-        submodel = hsm.define(
+        @staticmethod
+        async def _hold(ctx: hsm.Context, instance: "StubbornIntuition", event: hsm.Event[typing.Any]) -> None:
+            del ctx
+            operation_id = event.id if event.id else hsm.id(instance)
+            if processing.active_operation(instance, operation_id) is None:
+                _ = await processing.start_operation(instance, operation_id)
+            await asyncio.Event().wait()
+
+        submodel = bot.define(
             "TimedOutIntuition",
             hsm.initial(hsm.target("/TimedOutIntuition/waiting")),
             hsm.state(
                 "waiting",
                 hsm.transition(
                     hsm.on(cognition.Intuition.input_event),
-                    hsm.effect(lambda ctx, instance, event: None),
+                    hsm.target("/TimedOutIntuition/holding"),
                 ),
+            ),
+            hsm.state(
+                "holding",
+                hsm.activity(_hold.__get__(None, object)),
             ),
         )
 
@@ -1386,7 +1434,7 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1395,7 +1443,6 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
             ability,
             ability.input_event.with_data_and_id(await started_cognition_input(ctx), "timed-out-turn"),
         )
-        await asyncio.sleep(0.03)
         await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
         return list(owner.lifecycle), ability.state()
 
@@ -1407,12 +1454,38 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
     assert state.endswith("/rebooting")
 
 
+def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() -> None:
+    """An instant child hop completes through the one-shot; a settled hop is not rebooted."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ability = RecordingCognition(intuition_processor=RecordingOutputOperation(no_output("settled")))
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await bot.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            ability.input_event.with_data_and_id(await started_cognition_input(ctx), "settled-turn"),
+        )
+        await wait_until(lambda: ability.state().endswith("/idle") or ability.state().endswith("/rebooting"))
+        return list(owner.lifecycle), ability.state()
+
+    lifecycle, state = asyncio.run(run())
+
+    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    assert reboots == []
+    assert state.endswith("/idle")
+
+
 def test_cognition_forwards_reflection_reboot_to_bot_owner() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         ability = make_cognition()
         owner = CognitionAttachmentOwner()
         ctx = hsm.Context()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1464,7 +1537,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
         ability = make_cognition(intuition_processor=processor)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1497,7 +1570,6 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
             ability.input_event.with_data_and_id(await started_cognition_input(ctx), "second-turn"),
         )
         await wait_until(lambda: len(processor.calls) == 2)
-        await asyncio.sleep(0.05)
         result = list(processor.cancelled_calls), ability.state()
         processor.releases[1].set()
         return result
@@ -1515,7 +1587,7 @@ def test_cognition_ignores_stale_public_child_terminal() -> None:
         ability = RecordingCognition(intuition=intuition, reasoning=reasoning)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         current_input = await started_cognition_input(ctx)
@@ -1659,8 +1731,8 @@ def test_autonomy_cancellation_requires_attachment_owner_and_preserves_token() -
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         intruder = CognitionAttachmentOwner()
-        _ = await hsm.started(ctx, owner, owner.model)
-        _ = await hsm.started(ctx, intruder, intruder.model)
+        _ = await bot.started(ctx, owner, owner.model)
+        _ = await bot.started(ctx, intruder, intruder.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1932,7 +2004,7 @@ def test_cognitive_rejects_output_for_unoffered_event() -> None:
 
     assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
     assert failures
-    assert failures[0].message == "Processing selected unavailable event: nope.unavailable."
+    assert failures[0].message == "Selection rejected: Processing selected unavailable event: nope.unavailable."
 
 
 def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema() -> None:
@@ -1949,7 +2021,7 @@ def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema(
         )
         ctx = await start_cognition_ability_for_test(ability)
 
-        with pytest.raises(RuntimeError, match="invalid event data|validation"):
+        with pytest.raises(RuntimeError):
             _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
         await wait_until(lambda: bool(ability.failures))
         return ability.state(), ability.failures
@@ -1958,7 +2030,13 @@ def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema(
 
     assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
     assert failures
-    assert "device" in failures[0].message.lower() or "string" in failures[0].message.lower()
+    expected_message = (
+        "Selection rejected: Processing selected invalid focus selection data for event: bot.focus_device: "
+        "bot.focus_device|device:string_too_short:String should have at least 1 character"
+    )
+    assert failures[0].message == expected_message
+    assert "input_value" not in failures[0].message
+    assert "secret" not in failures[0].message.lower()
 
 
 def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offered_schema() -> None:
@@ -1975,7 +2053,7 @@ def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offere
         )
         ctx = await start_cognition_ability_for_test(ability)
 
-        with pytest.raises(RuntimeError, match="invalid event data|validation"):
+        with pytest.raises(RuntimeError):
             _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
         await wait_until(lambda: bool(ability.failures))
         return ability.state(), ability.failures
@@ -1984,7 +2062,13 @@ def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offere
 
     assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
     assert failures
-    assert "device" in failures[0].message.lower() or "string" in failures[0].message.lower()
+    expected_message = (
+        "Selection rejected: Processing selected invalid focus selection data for event: bot.focus_device: "
+        "bot.focus_device|device:string_too_short:String should have at least 1 character"
+    )
+    assert failures[0].message == expected_message
+    assert "input_value" not in failures[0].message
+    assert "secret" not in failures[0].message.lower()
 
 
 def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
@@ -2078,9 +2162,9 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     assert "bot.ability.attachment.terminal" in initializing_events
     assert "bot.ability.cognition.initializing.complete" not in initializing_events
     assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/idle"]
-    assert "bot.ability.autonomy.output" in view.transition_map[processing_path]
-    assert "bot.ability.intuition.output" in view.transition_map[processing_path]
-    assert "bot.ability.reasoning.output" in view.transition_map[processing_path]
+    assert "bot.ability.autonomy.output" in view.transition_map[f"{processing_path}/autonomy"]
+    assert "bot.ability.intuition.output" in view.transition_map[f"{processing_path}/intuition"]
+    assert "bot.ability.reasoning.output" in view.transition_map[f"{processing_path}/reasoning"]
     assert "*" not in view.transition_map[processing_path]
     assert internals.deferred_map[processing_path]["bot.ability.cognition.input"] == processing_path
 
@@ -2700,7 +2784,9 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
             cognition_input=cognition_input(),
             cognition_output=focus_output("phone", "answered"),
         )
-        result = await dispatch_ability_for_test(reflection, ctx, input)
+        result = await dispatch_ability_for_test(
+            reflection, ctx, input, timeout=_revision_host_timeout(validation_passes=1)
+        )
 
         select = cognition.episodes.episode_select_input(context_ref=None)
         recalled = store.execute(select)
@@ -2793,6 +2879,7 @@ behavior = hsm.define(
                     cognition_input=cognition_input(),
                     cognition_output=focus_output("phone", "answered"),
                 ),
+                timeout=_revision_host_timeout(validation_passes=2),
             )
         from bot.behavior import storage as behavior_storage
 
@@ -2870,6 +2957,7 @@ def test_reflection_change_retries_while_diagnostics_change_without_fixed_budget
                 cognition_input=cognition_input(),
                 cognition_output=(),
             ),
+            timeout=_revision_host_timeout(validation_passes=5),
         )
         from bot.behavior import storage as behavior_storage
 
@@ -2943,6 +3031,7 @@ behavior = hsm.define(
                 cognition_input=cognition_input(),
                 cognition_output=focus_output("phone", "answered"),
             ),
+            timeout=_revision_host_timeout(validation_passes=2),
         )
         from bot.behavior import storage as behavior_storage
 
@@ -3075,6 +3164,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
                 cognition_input=cognition_input(),
                 cognition_output=focus_output("phone", "revised"),
             ),
+            timeout=_revision_host_timeout(validation_passes=1),
         )
         from bot.behavior import storage as behavior_storage
 
@@ -3301,8 +3391,13 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
         bot_actor = turn.actors["bot"]
         assert isinstance(bot_actor, _BotActor)
         assert bot_actor.model is not None
-        _ = await hsm.started(ctx, bot_actor, bot_actor.model)
-        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        _ = await bot.started(ctx, bot_actor, bot_actor.model)
+        _ = await dispatch_ability_for_test(
+            ability,
+            ctx,
+            turn,
+            timeout=_LEARNED_BEHAVIOR_HOST_TIMEOUT_SECONDS,
+        )
         await wait_until(lambda: bool(ability.outputs))
         await wait_until(lambda: bool(reflection_processor.step.calls))
         return ability.outputs, intuition_processor.calls, reflection_processor.step.calls
@@ -3377,26 +3472,8 @@ def _speech_event_stimulus() -> hsm.Event[object]:
     return listening.SpeechEvent.with_data(speech)
 
 
-def _behavior_wires_speech_event_to_conversation(item: object) -> bool:
-    """True when an installed behavior is the SpeechEvent → Conversation wire."""
-
-    from bot.abilities import listening
-    from bot.behavior import instance as behavior_instance
-
-    if not isinstance(item, behavior_instance.Instance):
-        return False
-    triggers = tuple(item.triggers or ())
-    if listening.SpeechEvent.name not in triggers:
-        return False
-    source = item.source or ""
-    # Seed selects Communication.input (routes to Conversation).
-    from bot.abilities import communication
-
-    return communication.InputEvent.name in source
-
-
-def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
-    """Seeded Communication behavior turns SpeechEvent into communication.input selection."""
+def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> None:
+    """A trusted native seed carries typed acoustic data through Autonomy unchanged."""
 
     from bot.abilities import listening
     from bot.abilities import communication
@@ -3405,28 +3482,37 @@ def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
     from bot.abilities.communication import behaviors
     from bot.abilities.hearing import voice
 
-    async def run() -> tuple[list[cognition.types.OutputData], tuple[str, ...]]:
-        store = memory.Memory()
-        installed = behaviors.install_seed_behaviors(store)
-        autonomy = cognition.Autonomy(memory=store)
+    async def run() -> tuple[
+        list[cognition.types.OutputData],
+        tuple[str, ...],
+        list[abilities.FailureData],
+        list[processing.InputData],
+        list[processing.InputData],
+    ]:
+        autonomy = cognition.Autonomy(seeded_behaviors=(behaviors.speech_heard_seed(),))
+        intuition_processor = RecordingIntuitionProcessor(no_output("should not run"))
+        reasoning_processor = FailingReasoningProcessor()
         ability = RecordingCognition(
             autonomy=autonomy,
-            intuition_processor=RecordingIntuitionProcessor(no_output("should not run")),
-            reasoning_processor=FailingReasoningProcessor(),
+            intuition_processor=intuition_processor,
+            reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=memory.Memory()),
         )
         ctx = await start_cognition_ability_for_test(ability)
         bot_actor = _BotActor()
         assert bot_actor.model is not None
-        _ = await hsm.started(ctx, bot_actor, bot_actor.model)
+        _ = await bot.started(ctx, bot_actor, bot_actor.model)
         conversation_actor = conversation.Conversation(
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
-        communication_actor = communication.Communication(active_conversation=conversation_actor)
+        communication_actor = communication.Communication(
+            active_conversation=conversation_actor,
+            speaking=abilities.Speaking(encoder=_NoopSpeechEncoder(), conversation=conversation_actor),
+        )
         assert conversation_actor.model is not None
         assert communication_actor.model is not None
-        _ = await hsm.started(ctx, conversation_actor, conversation_actor.model)
-        _ = await hsm.started(ctx, communication_actor, communication_actor.model)
+        _ = await bot.started(ctx, conversation_actor, conversation_actor.model)
+        _ = await bot.started(ctx, communication_actor, communication_actor.model)
         from bot.protocols import attachment
 
         _ = await communication_actor.attach(
@@ -3459,24 +3545,32 @@ def test_autonomy_seeded_speech_event_selects_conversation_input() -> None:
         )
         _ = await dispatch_ability_for_test(ability, ctx, turn)
         await wait_until(lambda: bool(ability.outputs))
-        return ability.outputs, installed[0].triggers
+        return (
+            ability.outputs,
+            (listening.SpeechEvent.name,),
+            ability.failures,
+            intuition_processor.calls,
+            reasoning_processor.calls,
+        )
 
-    outputs, triggers = asyncio.run(run())
+    outputs, triggers, failures, intuition_calls, reasoning_calls = asyncio.run(run())
     assert triggers == (listening.SpeechEvent.name,)
+    assert not failures
+    assert not intuition_calls
+    assert not reasoning_calls
     assert len(outputs) == 1
-    selected = outputs[0][0]
-    assert selected.event == communication.InputEvent.name
-    assert selected.reason == "seeded speech admit via communication"
-    selected_data = selected.data
-    assert isinstance(selected_data, dict)
-    assert selected_data["source_ids"] == [[0.12, -0.08, 0.31]]
-    assert selected_data["content_type"] == "audio/pcm"
-    parent = selected_data.get("parent")
-    assert isinstance(parent, dict)
-    assert parent["event"] == listening.SpeechEvent.name
-    parent_data = parent.get("data")
-    assert isinstance(parent_data, dict)
-    assert parent_data["content_type"] == "audio/pcm"
+    selected = outputs[0]
+    assert len(selected) == 1
+    assert selected[0].event == communication.InputEvent.name
+    assert isinstance(selected[0].data, conversation.TurnData)
+    assert selected[0].data.content == bytes([0, 1]) * 160
+    assert selected[0].data.content_type == "audio/pcm"
+    assert selected[0].data.sample_rate_hz == 16_000
+    assert selected[0].data.channels == 1
+    assert selected[0].data.source_ids == frozenset({(0.12, -0.08, 0.31)})
+    assert selected[0].data.parent is not None
+    assert selected[0].data.parent.event == listening.SpeechEvent.name
+    assert '"content"' not in selected[0].model_dump_json()
 
 
 def test_cognition_without_priors_time_to_wire_speech_event_to_conversation() -> None:

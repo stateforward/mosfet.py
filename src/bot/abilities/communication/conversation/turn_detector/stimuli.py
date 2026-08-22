@@ -97,7 +97,9 @@ class ContentStimulus(pydantic.BaseModel):
 
     kind: typing.Literal["content"] = pydantic.Field(default="content")
     source_participant_ref: value.IdentityRef = pydantic.Field(description="Participant that produced the content.")
-    content: object = pydantic.Field(description="Uninterpreted content payload.")
+    content: object = pydantic.Field(
+        description="Uninterpreted content payload.",
+    )
     content_type: str = pydantic.Field(min_length=1, description="Content modality or media type.")
 
 

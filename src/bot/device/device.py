@@ -6,6 +6,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 import pydantic
 
 from bot import abilities
@@ -21,7 +22,7 @@ from bot.device.events import (
 from bot.telemetry import observer
 from bot.environment import Environment, require_environment_scope, space
 
-_DEFAULT_FIRMWARE = hsm.define(
+_DEFAULT_FIRMWARE = bot.define(
     "DeviceFirmware",
     hsm.initial(hsm.target("initialized")),
     hsm.state("initialized"),
@@ -183,26 +184,25 @@ class Device(hsm.Instance, attachment.Attachment):
         # One resolved scope for the whole set, so a bare ``ctx`` cannot leave each machine in an
         # instance map of its own — attaching across those would read as a foreign environment.
         scope = Environment.from_context(ctx)
-        parent_model = data if isinstance(data, hsm.Model) else type(self).model
-        if parent_model is None:
-            raise RuntimeError(f"{type(self).__name__} has no lifecycle model.")
-        import bot
-
+        owner_model = data if isinstance(data, hsm.Model) else type(self).model
+        owner_name = owner_model.qualified_name if owner_model is not None else None
+        used_names: set[str] = set()
         for peripheral in Device._powered_peripherals(self):
-            if lifecycle.is_started(peripheral):
-                continue
-            peripheral_model = type(peripheral).model
-            if peripheral_model is None:
+            base_model = type(peripheral).model
+            if base_model is None:
                 raise RuntimeError(f"{type(peripheral).__name__} has no lifecycle model.")
-            runtime_name = f"{parent_model.qualified_name.removeprefix('/')}{type(peripheral).__name__}"
-            runtime_model = hsm.redefine(peripheral_model, runtime_name)
-            _ = await bot.started(
-                scope,
-                peripheral,
-                runtime_model,
-                config=hsm.Config(data=runtime_model),
-                owner=parent_model.qualified_name,
-            )
+            model_name = f"{owner_model.qualified_name.removeprefix('/') if owner_model is not None else ''}{type(peripheral).__name__}"
+            unique_name = model_name
+            suffix = 2
+            while unique_name in used_names:
+                unique_name = f"{model_name}{suffix}"
+                suffix += 1
+            used_names.add(unique_name)
+            model = hsm.redefine(base_model, unique_name)
+            if lifecycle.is_started(peripheral):
+                _ = bot.register(peripheral, model, owner=owner_name)
+                continue
+            _ = await bot.started(scope, peripheral, model, owner=owner_name)
         instance = await super().start(scope, data)
         # Presence is a property of being started in an environment, not of being owned by a bot.
         # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both
@@ -311,6 +311,8 @@ class Device(hsm.Instance, attachment.Attachment):
         # delete it as untested.
         Environment.from_context(self.context()).leave(self)
         await hsm.Instance.stop(self, ctx)
+        if self.model is not None:
+            _ = bot.register(self, self.model, clear_owner=True)
 
         firmware = self._firmware
         if firmware is not None:
@@ -330,13 +332,17 @@ class Device(hsm.Instance, attachment.Attachment):
                         _ = typed_map.pop(firmware_id, None)
                 if self._firmware is firmware:
                     self._firmware = None
+            _ = bot.register(firmware, self.firmware_model, clear_owner=True)
 
         # Genuine reverse of start: firmware goes down before the transducers it holds
         # attachments to, so it can never emit at an already-stopped peripheral, and the
         # peripherals go last. Stopping one that never started is idempotent, which the Bot
         # cleanup boundary relies on. This is the only teardown path peripherals have.
         for peripheral in Device._powered_peripherals(self):
+            model = type(peripheral).model
             await peripheral.stop(ctx)
+            if model is not None:
+                _ = bot.register(peripheral, model, clear_owner=True)
 
     @typing.override
     async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:
@@ -362,6 +368,9 @@ class Device(hsm.Instance, attachment.Attachment):
         await self.stop(ctx)
         # Device.start, not hsm.Instance.start: restart must re-join the presence stop left.
         _ = await self.start(ctx, data)
+        # Restart does not go through bot.started, so restore the studio owner that stop cleared.
+        if self.model is not None:
+            _ = bot.register(self, self.model, owner=self.model.qualified_name)
         return self
 
     @typing.override
@@ -425,9 +434,7 @@ class Device(hsm.Instance, attachment.Attachment):
             peripheral_snapshot = lifecycle.snapshot_if_started(peripheral)
             if peripheral_snapshot is None or not peripheral_snapshot.Attributes:
                 continue
-            peripheral_attributes = typing.cast(
-                collections.abc.Mapping[str, object], peripheral_snapshot.Attributes
-            )
+            peripheral_attributes = typing.cast(collections.abc.Mapping[str, object], peripheral_snapshot.Attributes)
             observation: dict[str, object] = {
                 key.rpartition("/")[2]: value for key, value in peripheral_attributes.items()
             }
@@ -447,11 +454,14 @@ class Device(hsm.Instance, attachment.Attachment):
         # Firmware outlives this activity: parent under the device machine context, not activity ctx.
         # Activity cancel on state exit would otherwise mark firmware/service contexts done (HSM-CONTEXT-001).
         lifetime = self.context()
-        self._firmware = await hsm.started(
+        owner_model = type(self).model
+        owner_name = owner_model.qualified_name if owner_model is not None else None
+        self._firmware = await bot.started(
             lifetime,
             self._create_firmware_instance(ctx, event),
             self.firmware_model,
             hsm.Config(Data=event.data),
+            owner=owner_name,
         )
         self._on_firmware_started(ctx, event)
         await self._after_firmware_started(lifetime, event)
@@ -619,7 +629,7 @@ class Device(hsm.Instance, attachment.Attachment):
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:
         del ctx, event
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "Device",
         hsm.initial(hsm.target("initializing")),
         hsm.state(

@@ -18,8 +18,6 @@ from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_co
 from tests.type_helpers import object_dict
 
 
-
-
 def _insert_content(
     *,
     content: str,
@@ -33,6 +31,7 @@ def _insert_content(
 ) -> memory.Statement:
     import uuid
     from sqlalchemy import insert
+
     table = memory.memory_table
     clause = insert(table).values(
         memory_id=memory_id or uuid.uuid4().hex,
@@ -51,12 +50,14 @@ def _insert_content(
 
 def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, limit: int = 50) -> memory.Statement:
     from sqlalchemy import or_, select
+
     table = memory.memory_table
     clause = select(table).where(table.c.query_tags == query_tags)
     if context_ref is not None:
         clause = clause.where(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
     clause = clause.order_by(table.c.created_at).limit(limit)
     return memory.compile_statement(clause)
+
 
 def test_memory_is_sql_transaction_ability_without_encoder() -> None:
     assert "encoder" not in inspect.signature(memory.Memory).parameters
@@ -84,9 +85,7 @@ def test_memory_apply_select_and_insert_transaction() -> None:
                         query_tags="handoff",
                     ),
                     memory.Statement(
-                        sql=(
-                            f"SELECT content FROM {memory.MEMORY_TABLE} WHERE context_ref = ? ORDER BY created_at"
-                        ),
+                        sql=(f"SELECT content FROM {memory.MEMORY_TABLE} WHERE context_ref = ? ORDER BY created_at"),
                         parameters=("active-task",),
                     ),
                 )

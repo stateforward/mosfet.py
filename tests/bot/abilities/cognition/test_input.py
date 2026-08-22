@@ -31,7 +31,7 @@ def _accept_focus(
 class _FocusBotActor(hsm.Instance):
     """Minimal body stand-in that enables focus via model-offerable topology (not a schema list)."""
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "FocusBotActor",
         hsm.initial(hsm.target("/FocusBotActor/active")),
         hsm.state(
@@ -105,7 +105,7 @@ def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
         bot_actor = _FocusBotActor()
         ctx = shared_hsm_context()
         assert bot_actor.model is not None
-        _ = await hsm.started(ctx, bot_actor, bot_actor.model)
+        _ = await bot.started(ctx, bot_actor, bot_actor.model)
         offered = {event.name for event in processing.enabled_call_events(bot_actor)}
         assert bot.FocusDeviceEvent.name in offered
         assert bot.ClearFocusEvent.name in offered
@@ -133,8 +133,8 @@ def test_build_processing_input_records_multi_actor_enablers() -> None:
         right = _FocusBotActor()
         ctx = shared_hsm_context()
         assert left.model is not None and right.model is not None
-        _ = await hsm.started(ctx, left, left.model)
-        _ = await hsm.started(ctx, right, right.model)
+        _ = await bot.started(ctx, left, left.model)
+        _ = await bot.started(ctx, right, right.model)
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
                 stimulus=bot.InputEventData(target_device="phone", priority=0),
@@ -203,7 +203,7 @@ def _note_snapshot_attributes(ctx: hsm.Context, instance: hsm.Instance, event: h
 class _SnapshotAttributeDevice(Device):
     """Device whose firmware declares observation attributes from a behavioral state."""
 
-    firmware_model: typing.ClassVar[hsm.Model] = hsm.define(
+    firmware_model: typing.ClassVar[hsm.Model] = bot.define(
         "SnapshotAttributeFirmware",
         hsm.attribute("current_caller"),
         hsm.attribute("escapade"),
@@ -229,7 +229,7 @@ class _OwnerBotActor(hsm.Instance):
         del ctx, event
         _ = instance.set("owned_devices", dict(instance._owned))
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "OwnerBotActor",
         hsm.attribute("owned_devices"),
         hsm.initial(hsm.target("/OwnerBotActor/active")),
@@ -244,10 +244,10 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
         device = _SnapshotAttributeDevice()
         unowned = Device()
         environment = Environment()
-        _ = await hsm.started(environment, device, typing.cast(hsm.Model, device.model))
-        _ = await hsm.started(environment, unowned, typing.cast(hsm.Model, unowned.model))
+        _ = await bot.started(environment, device, typing.cast(hsm.Model, device.model))
+        _ = await bot.started(environment, unowned, typing.cast(hsm.Model, unowned.model))
         owner = _OwnerBotActor({"phone": hsm.id(device)})
-        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
         firmware = device_firmware(device)
         await wait_until(lambda: firmware is not None and bot.lifecycle.is_started(firmware))
         built = cognition_input.build_processing_input(
@@ -324,12 +324,12 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
     async def run() -> processing.InputData:
         environment = Environment()
         phone = phone_device.Phone()
-        _ = await hsm.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
         firmware = device_firmware(phone)
         await wait_until(lambda: firmware is not None and bot.lifecycle.is_started(firmware))
         await wait_until(lambda: phone.state() == "/Device/detached")
         owner = _OwnerBotActor({"phone": hsm.id(phone)})
-        _ = await hsm.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
 
         assert isinstance(firmware, phone_device.PhoneFirmware)
         await firmware.event_recorder().receive(

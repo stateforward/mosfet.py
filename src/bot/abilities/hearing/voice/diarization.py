@@ -7,6 +7,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
@@ -230,10 +231,11 @@ class VoiceDiarization(classifying.Classifying[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "VoiceDiarization",
         hsm.initial(hsm.target("idle")),
         hsm.state(

@@ -5,6 +5,7 @@ import enum
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.protocols.yamux.frame import INITIAL_STREAM_WINDOW
@@ -106,6 +107,7 @@ class StreamWindowData(pydantic.BaseModel):
 @dataclasses.dataclass(frozen=True, slots=True)
 class _StreamOperationFailure:
     message: str
+
 
 _AcknowledgeEvent = hsm.Event[None](name="protocol.yamux.stream.acknowledge")
 _SendEvent = hsm.Event[StreamSendData](
@@ -313,30 +315,22 @@ class Stream(hsm.Instance):
     @staticmethod
     def _reject_send_window_update(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        instance._operation_failure = _StreamOperationFailure(
-            "Yamux stream send window cannot be updated."
-        )
+        instance._operation_failure = _StreamOperationFailure("Yamux stream send window cannot be updated.")
 
     @staticmethod
     def _reject_receive_window_grant(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        instance._operation_failure = _StreamOperationFailure(
-            "Yamux stream receive window cannot be granted."
-        )
+        instance._operation_failure = _StreamOperationFailure("Yamux stream receive window cannot be granted.")
 
     @staticmethod
     def _reject_local_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        instance._operation_failure = _StreamOperationFailure(
-            "Yamux stream local writes are already closed."
-        )
+        instance._operation_failure = _StreamOperationFailure("Yamux stream local writes are already closed.")
 
     @staticmethod
     def _reject_remote_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        instance._operation_failure = _StreamOperationFailure(
-            "Yamux stream remote writes are already closed."
-        )
+        instance._operation_failure = _StreamOperationFailure("Yamux stream remote writes are already closed.")
 
     @staticmethod
     def _reject_reset(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
@@ -346,9 +340,7 @@ class Stream(hsm.Instance):
     @staticmethod
     def _reject_acknowledge(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
         del ctx
-        instance._operation_failure = _StreamOperationFailure(
-            "Yamux stream is not awaiting acknowledgement."
-        )
+        instance._operation_failure = _StreamOperationFailure("Yamux stream is not awaiting acknowledgement.")
 
     @staticmethod
     def _record_sent(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
@@ -412,7 +404,7 @@ class Stream(hsm.Instance):
         instance._awaiting_ack = False
         instance._feed_eof()
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "Stream",
         hsm.initial(hsm.target("/Stream/routing_initial")),
         hsm.transition(

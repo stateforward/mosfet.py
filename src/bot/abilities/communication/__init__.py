@@ -1,22 +1,28 @@
-"""Communication ability: engage Conversations; ships speech-admit behaviors."""
+"""Communication ability: engage Conversations and route selected responses to Speaking."""
 
 from . import behaviors, communication, conversation
-from .behaviors import install_seed_behaviors, speech_heard_instance
+from .behaviors import SpeechHeard, speech_heard_seed
 from .communication import (
     ActivateData,
     ActivateEvent,
     Communication,
+    FailedEvent,
     InputEvent,
+    RespondData,
+    RespondEvent,
 )
 
 __all__ = [
     "ActivateData",
     "ActivateEvent",
     "Communication",
+    "FailedEvent",
     "InputEvent",
+    "RespondData",
+    "RespondEvent",
     "behaviors",
     "communication",
     "conversation",
-    "install_seed_behaviors",
-    "speech_heard_instance",
+    "SpeechHeard",
+    "speech_heard_seed",
 ]

@@ -5,7 +5,7 @@ present across clips and emits public **Start** / **End** events only on boundar
 (no-voice → voice, voice → no-voice). Mid-voice and continued silence do not re-emit Start/End.
 
 Every clip still completes the ability apply with ``ApplyData`` (segment bag) so an owning
-machine can ``await_child_terminal`` without reaching into ``classifier``. Boundary events are
+machine can use a one-shot terminal operation without reaching into ``classifier``. Boundary events are
 additional public products on transitions; they are not a substitute for the apply terminal.
 """
 
@@ -17,6 +17,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
@@ -36,25 +37,19 @@ class VoiceDetectionSegment(pydantic.BaseModel):
 
     start_seconds: float = pydantic.Field(
         ge=0.0,
-        description=(
-            "Inclusive start of this voice span, in seconds from the beginning of the inspected audio input."
-        ),
+        description=("Inclusive start of this voice span, in seconds from the beginning of the inspected audio input."),
         examples=[0.0],
     )
     end_seconds: float = pydantic.Field(
         ge=0.0,
-        description=(
-            "Exclusive end of this voice span, in seconds from the beginning of the inspected audio input."
-        ),
+        description=("Exclusive end of this voice span, in seconds from the beginning of the inspected audio input."),
         examples=[0.7],
     )
     confidence: float | None = pydantic.Field(
         default=None,
         ge=0.0,
         le=1.0,
-        description=(
-            "Optional provider confidence for this span, normalized from 0.0 to 1.0 when available."
-        ),
+        description=("Optional provider confidence for this span, normalized from 0.0 to 1.0 when available."),
         examples=[0.92],
     )
 
@@ -68,7 +63,7 @@ class VoiceDetectionSegment(pydantic.BaseModel):
 
 
 class ApplyData(pydantic.BaseModel):
-    """Private apply result: clip-local voice spans from the detector (not a public product).
+    """Private apply result: clip-local voice spans from the voice-activity classifier (not a public product).
 
     Empty ``segments`` means no voice in this clip. Used only to decide Start/End boundaries.
     Downstream turn assembly may still receive segment lists via Listening products, not this event.
@@ -90,9 +85,7 @@ class ApplyData(pydantic.BaseModel):
 
     segments: tuple[VoiceDetectionSegment, ...] = pydantic.Field(
         default=(),
-        description=(
-            "Voice spans in the inspected audio, ordered by ascending start_seconds. Empty means no voice."
-        ),
+        description=("Voice spans in the inspected audio, ordered by ascending start_seconds. Empty means no voice."),
         examples=[
             [{"start_seconds": 0.0, "end_seconds": 0.7, "confidence": 0.92}],
             [],
@@ -167,7 +160,7 @@ class EndData(pydantic.BaseModel):
     )
 
 
-class VoiceDetector(classifying.Classifier[bytes, ApplyData], abc.ABC):
+class VoiceActivityClassifier(classifying.Classifier[bytes, ApplyData], abc.ABC):
     """Classifier that detects voice spans in raw hearing input."""
 
 
@@ -190,7 +183,7 @@ EndEvent = hsm.Event[EndData](
     name="bot.ability.hearing.voice.detection.end",
     schema=EndData,
 )
-# Apply terminal product (every clip). Owners orchestrate with await_child_terminal on this.
+# Apply terminal product (every clip). Owners orchestrate with one-shot terminal operations.
 OutputEvent = hsm.Event[ApplyData](
     name="bot.ability.hearing.voice.detection.output",
     schema=ApplyData,
@@ -260,7 +253,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
     )
     start_event: typing.ClassVar[hsm.Event[StartData]] = StartEvent
     end_event: typing.ClassVar[hsm.Event[EndData]] = EndEvent
-    # Apply completion product for await_child_terminal / Ability.apply waiters.
+    # Apply completion product for one-shot terminal operations and Ability.apply callers.
     output_event: typing.ClassVar[hsm.Event[ApplyData]] = OutputEvent
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _VoiceDetectionApplyCompletedEvent
@@ -268,7 +261,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
     _open_voice_end_seconds: float | None
     _open_voice_confidence: float | None
 
-    def __init__(self, *, classifier: VoiceDetector) -> None:
+    def __init__(self, *, classifier: VoiceActivityClassifier) -> None:
         super().__init__(classifier=classifier)
         self._open_voice_end_seconds = None
         self._open_voice_confidence = None
@@ -317,9 +310,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
         instance: "VoiceDetection",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return _has_invalid_voice_detection_output(ctx, instance, event) and not VoiceDetection._voice_is_open(
-            instance
-        )
+        return _has_invalid_voice_detection_output(ctx, instance, event) and not VoiceDetection._voice_is_open(instance)
 
     @staticmethod
     def _has_invalid_output_while_open(
@@ -327,9 +318,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
         instance: "VoiceDetection",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return _has_invalid_voice_detection_output(ctx, instance, event) and VoiceDetection._voice_is_open(
-            instance
-        )
+        return _has_invalid_voice_detection_output(ctx, instance, event) and VoiceDetection._voice_is_open(instance)
 
     @staticmethod
     def _has_apply_failure_while_closed(
@@ -353,14 +342,13 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
         instance: "VoiceDetection",
         event: hsm.Event[typing.Any],
     ) -> None:
-        failure = ability.FailureData(
-            message="Voice detection produced output that does not match its apply schema."
-        )
+        failure = ability.FailureData(message="Voice detection produced output that does not match its apply schema.")
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else None,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -371,13 +359,14 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
         event: hsm.Event[typing.Any],
         apply_data: ApplyData,
     ) -> None:
-        """Complete the apply waiter with clip-local segments (always, every clip)."""
+        """Complete the apply operation with clip-local segments (always, every clip)."""
 
         public = dataclasses.replace(
             instance.output_event.with_data(apply_data),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else None,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(public))
 
@@ -426,9 +415,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
             ctx,
             instance,
             event,
-            StartEvent.with_data(
-                StartData(start_seconds=first.start_seconds, confidence=first.confidence)
-            ),
+            StartEvent.with_data(StartData(start_seconds=first.start_seconds, confidence=first.confidence)),
         )
         VoiceDetection._terminal_apply(ctx, instance, event, data)
 
@@ -481,7 +468,7 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
         assert isinstance(data, ApplyData)
         VoiceDetection._terminal_apply(ctx, instance, event, data)
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "VoiceDetection",
         hsm.initial(hsm.target("NoVoiceDetected")),
         # Presence composites only monitor; one shared Detecting owns classify + failure (HI-01).
@@ -579,5 +566,5 @@ __all__ = [
     "StartEvent",
     "VoiceDetection",
     "VoiceDetectionSegment",
-    "VoiceDetector",
+    "VoiceActivityClassifier",
 ]

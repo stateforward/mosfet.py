@@ -8,6 +8,7 @@ import uuid
 import weakref
 
 import hsm
+import bot
 
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
@@ -37,7 +38,7 @@ async def start_abilities_for_test(
             failed_event=ability.failed_event,
             ability=ability,
         )
-        _ = await hsm.started(ctx, recorder, require_model(recorder.model))
+        _ = await bot.started(ctx, recorder, require_model(recorder.model))
         _ = await ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
@@ -122,7 +123,7 @@ def _mirror_terminal_event(
         values.append(data)
 
 
-_AbilityTerminalRecorder.model = hsm.define(
+_AbilityTerminalRecorder.model = bot.define(
     "AbilityTerminalRecorder",
     hsm.initial(hsm.target("/AbilityTerminalRecorder/recording")),
     hsm.state(
@@ -154,7 +155,7 @@ async def dispatch_ability_for_test(
             failed_event=ability.failed_event,
             ability=ability,
         )
-        _ = await hsm.started(shared_ctx, recorder, require_model(recorder.model))
+        _ = await bot.started(shared_ctx, recorder, require_model(recorder.model))
         _ = await ability.attach(
             shared_ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),

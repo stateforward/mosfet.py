@@ -85,15 +85,15 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "bot-provider-elevenlabs" not in pyproject
     assert "from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder" in source
     assert "from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder" in source
-    assert "from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector" in source
+    assert "from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
     assert "from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
     assert "from bot.providers.openai_compat import Processor as OpenAIProcessor" in source
-    assert "AlwaysVoiceDetector" not in source
-    assert "PeakEnergyVoiceDetector" not in source
-    # The streaming detector consumes raw PCM directly, so no PCM->WAV wrapper stands in front
+    assert "AlwaysVoiceActivityClassifier" not in source
+    assert "PeakEnergyVoiceActivityClassifier" not in source
+    # The streaming voice-activity classifier consumes raw PCM directly, so no PCM->WAV wrapper stands in front
     # of it any more; it is told the room's audio shape instead.
-    assert "PcmAwareVoiceDetector" not in source
-    assert "_silero_voice_detector" in source
+    assert "PcmAwareVoiceActivityClassifier" not in source
+    assert "_silero_voice_activity_classifier" in source
     assert "sample_rate_hz=config.input_sample_rate_hz" in source
     assert "_pyannote_voice_classifier" in source
     assert "voice_classifier=classifier" in source
@@ -135,6 +135,24 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "openai_terra_reasoning" in source
 
 
+def test_phone_bot_startup_does_not_poll_machine_snapshots() -> None:
+    source = _example_source()
+    wait_start = source.index("async def _wait_for_active_bot")
+    wait_end = source.index("async def start_bot", wait_start)
+    readiness_source = source[wait_start:wait_end]
+    lifecycle_start = source.index("def _resolve_activation_lifecycle")
+    lifecycle_end = source.index("async def wait_for_activation", lifecycle_start)
+    lifecycle_source = source[lifecycle_start:lifecycle_end]
+
+    assert ".state()" not in readiness_source
+    assert "wait_for_activation" in readiness_source
+    assert "isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData))" in source
+    assert "bot.ActivatingDoneEventData" in source
+    assert "bot.ActivatingFailedEventData" in source
+    assert "request_id" not in lifecycle_source
+    assert '"attach"' not in lifecycle_source
+
+
 def test_somebody_in_the_bots_room_is_heard_or_not_by_where_they_are_standing() -> None:
     """Saying something out loud is a sound in a place, subject to the room it is said in.
 
@@ -152,6 +170,7 @@ import asyncio
 import typing
 
 import hsm
+import bot
 from bot import abilities
 from bot.environment import Environment, SoundData, SoundEvent, space
 from phone_bot_example import person
@@ -169,7 +188,7 @@ class Ear(hsm.Instance):
         if isinstance(event.data, SoundData):
             instance._heard.append(event.data)
 
-    model = hsm.define(
+    model = bot.define(
         "Ear",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -199,7 +218,7 @@ async def main() -> None:
     ):
         ear = Ear(heard)
         ears[name] = ear
-        _ = await hsm.started(environment, ear, ear.model, hsm.Config(id=name))
+        _ = await bot.started(environment, ear, ear.model, hsm.Config(id=name))
         environment.join(ear, placement=space.Placement(position=position, threshold_db=20.0))
 
     someone = person.Person(
@@ -349,6 +368,7 @@ def test_a_person_whose_voice_is_already_taken_stops_waiting() -> None:
 import asyncio
 
 import hsm
+import bot
 from bot.environment import Environment, space
 from bot.protocols import attachment
 from phone_bot_example import person
@@ -365,7 +385,7 @@ class Bystander(hsm.Instance):
     def _hold(ctx, instance, event) -> None:
         instance.holding.set()
 
-    model = hsm.define(
+    model = bot.define(
         "Bystander",
         hsm.initial(hsm.target("waiting")),
         hsm.state(
@@ -385,7 +405,7 @@ class Refused(person.Person):
 
     async def enter(self, environment):
         bystander = Bystander()
-        _ = await hsm.started(environment, bystander, bystander.model)
+        _ = await bot.started(environment, bystander, bystander.model)
         _ = await self._voice.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=bystander)),
@@ -541,7 +561,8 @@ def test_the_example_uses_number_as_identity_and_optional_dial_plan() -> None:
 def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
     source = _example_source()
 
-    assert "autonomy=cognition.Autonomy(memory=store)" in source
+    assert "seeded_behaviors=(communication_ability.speech_heard_seed(),)" in source
+    assert "memory=store" in source
     assert "reasoning=cognition.Reasoning(processor=deliberate, memory=store)" in source
     assert "reflection=cognition.Reflection(processor=reflection_processor, memory=store)" in source
 
@@ -686,7 +707,7 @@ def test_phone_bot_example_start_bot_returns_active_bot() -> None:
 
     assert _run_phone_bot_python(code) == "\n".join(
         [
-            "/PhoneBot/active/unfocused",
+            "/probe/active/unfocused",
             "/ExampleConversationLifecycle/attached/behavior/inactive",
         ]
     )
@@ -903,7 +924,7 @@ async def main() -> None:
     _ = await body.attach(environment)
     for _ in range(100):
         await asyncio.sleep(0.05)
-        if body.state().startswith("/PhoneBot/active"):
+        if body.state().startswith("/probe/active"):
             break
     voice = object.__getattribute__(body, "_voice")
     print(lifecycle.is_started(voice))
@@ -916,6 +937,117 @@ asyncio.run(main())
     assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/detached"])
 
 
+def test_two_labeled_phone_bots_publish_distinct_roots_and_owned_devices() -> None:
+    """Each labeled body is an Environment root; its handset remains nested under that body."""
+
+    code = """
+import asyncio
+import importlib
+import json
+import os
+
+import hsm
+
+os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:4317"
+define = importlib.import_module("bot.define")
+published = []
+define.post_model = lambda payload, url: published.append((dict(payload), url))
+
+from bot.environment import Environment, space
+import phone_bot_example
+
+
+async def main() -> None:
+    environment = Environment()
+    alice = phone_bot_example.PhoneBot("Alice")
+    bob = phone_bot_example.PhoneBot("Bob")
+    alice_placement = space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0)
+    bob_placement = space.Placement(position=space.Position(x=100.0, y=0.0), threshold_db=20.0)
+    alice = await phone_bot_example.start_bot(
+        "Alice",
+        environment=environment,
+        placement=alice_placement,
+    )
+    bob = await phone_bot_example.start_bot(
+        "Bob",
+        environment=environment,
+        placement=bob_placement,
+    )
+
+    assert alice.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+    assert bob.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+    assert alice in environment._participants.values()
+    assert bob in environment._participants.values()
+    assert environment._placements[alice] == alice_placement
+    assert environment._placements[bob] == bob_placement
+    assert alice_placement.position.distance_to(bob_placement.position) >= 100.0
+
+    def records(path):
+        interesting = {
+            "/Alice",
+            "/Bob",
+            "/AlicePhone",
+            "/BobPhone",
+            "/Phone",
+            "/PhoneService",
+            "/Microphone",
+            "/Speaker",
+            "/Display",
+        }
+        return sorted(
+            (
+                (payload["name"], payload.get("owner"))
+                for payload, url in published
+                if url.endswith(path)
+                and (
+                    payload["name"] in interesting
+                    or payload.get("owner") in {"/Alice", "/Bob", "/AlicePhone", "/BobPhone"}
+                )
+            ),
+            key=lambda record: (record[0], record[1] or ""),
+        )
+
+    print(json.dumps({"topology": records("/v1/models"), "live": records("/v1/models/live")}))
+
+
+asyncio.run(main())
+"""
+
+    result = json.loads(_run_phone_bot_python(code))
+    assert set(map(tuple, result["topology"])) >= {
+        ("/Alice", None),
+        ("/Bob", None),
+        ("/AlicePhone", "/Alice"),
+        ("/BobPhone", "/Bob"),
+    }
+    assert set(map(tuple, result["live"])) >= {
+        ("/Alice", None),
+        ("/Bob", None),
+        ("/AlicePhone", "/Alice"),
+        ("/BobPhone", "/Bob"),
+    }
+    assert not {
+        ("/Phone", "/Alice"),
+        ("/Phone", "/Bob"),
+    } & set(map(tuple, result["topology"]))
+    assert not {
+        ("/Phone", "/Alice"),
+        ("/Phone", "/Bob"),
+    } & set(map(tuple, result["live"]))
+    for records in (result["topology"], result["live"]):
+        assert not {
+            ("/Phone", "/AlicePhone"),
+            ("/Phone", "/BobPhone"),
+        } & set(map(tuple, records))
+        nested = {
+            (name, owner)
+            for name, owner in records
+            if owner in {"/AlicePhone", "/BobPhone"}
+        }
+        assert all(owner in {"/AlicePhone", "/BobPhone"} for _, owner in nested)
+        assert len({name for name, _ in nested}) == len(nested)
+
+
 def test_phone_bot_listening_speech_products_carry_source_ids_into_conversation() -> None:
     """Listening labels speech; Communication seed + Conversation.input admit labeled products."""
 
@@ -924,8 +1056,9 @@ from __future__ import annotations
 
 import asyncio
 
+import bot
 import hsm
-from bot.abilities import listening, memory
+from bot.abilities import listening
 from bot.abilities.communication import conversation
 from bot.abilities.communication import behaviors
 from bot.abilities.hearing import voice
@@ -954,9 +1087,8 @@ async def main() -> None:
         config,
         voice_classifier=_pyannote_voice_classifier(config, inference=FixedInference()),
     )
-    store = memory.Memory()
-    installed = behaviors.install_seed_behaviors(store)
-    assert installed[0].triggers == (listening.SpeechEvent.name,)
+    seeded = behaviors.speech_heard_seed()
+    assert seeded.triggers == (listening.SpeechEvent.name,)
 
     speech = listening.SpeechData(
         content=bytes([0, 1]) * 160,
@@ -979,12 +1111,12 @@ async def main() -> None:
     conversation_ability = conversation.Conversation()
     ctx = hsm.Context()
     assert conversation_ability.model is not None
-    _ = await hsm.started(ctx, conversation_ability, conversation_ability.model)
+    _ = await bot.started(ctx, conversation_ability, conversation_ability.model)
     from bot.protocols import attachment
     class Owner(hsm.Instance):
-        model = hsm.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+        model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
     owner = Owner()
-    _ = await hsm.started(ctx, owner, owner.model)
+    _ = await bot.started(ctx, owner, owner.model)
     _ = await conversation_ability.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -1009,7 +1141,7 @@ async def main() -> None:
     print(bool(speech.source_ids))
     print(list(next(iter(speech.source_ids))))
     print("/active/" in (conversation_ability.state() or ""))
-    print(installed[0].name)
+    print(seeded.name)
 
 
 asyncio.run(main())
@@ -1025,6 +1157,7 @@ asyncio.run(main())
     )
 
 
+@pytest.mark.live
 def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
     """Real PhoneBot + live cognition: time until SpeechEvent→Conversation behavior appears.
 
@@ -1156,11 +1289,10 @@ asyncio.run(main())
 
     import os
     import subprocess
-    import sys
 
     proc = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd="examples/phone_bot",
+        ["uv", "run", "--project", "examples/phone_bot", "python", "-c", code],
+        cwd=_repo_root(),
         env=os.environ.copy(),
         capture_output=True,
         text=True,
@@ -1174,62 +1306,3 @@ asyncio.run(main())
         pytest.skip("cognition credentials unavailable for live e2e")
     assert proc.returncode == 0, out
     assert "WIRED" in out, out
-
-
-def test_labeled_phone_bots_share_environment_instances_and_publish_distinct_owners() -> None:
-    code = """
-import asyncio
-import importlib
-
-import hsm
-import phone_bot_example as example
-from bot.environment import Environment, space
-
-
-async def main() -> None:
-    start = importlib.import_module("bot.start")
-    published = []
-    start.publish = lambda payload: published.append(payload)
-    start.publish_live = lambda payload: published.append(payload)
-    environment = Environment()
-    alice_placement = space.Placement(position=space.Position(x=0, y=0))
-    bob_placement = space.Placement(position=space.Position(x=100, y=0))
-    alice = await example.start_bot(
-        "Alice", environment=environment, placement=alice_placement
-    )
-    bob = await example.start_bot(
-        "Bob", environment=environment, placement=bob_placement
-    )
-    assert alice_placement.position.distance_to(bob_placement.position) >= 100
-    instances = environment.value(hsm.Keys.Instances)
-    assert alice.context().value(hsm.Keys.Instances) is instances
-    assert bob.context().value(hsm.Keys.Instances) is instances
-    assert environment._placements[alice] == alice_placement
-    assert environment._placements[bob] == bob_placement
-    assert {payload["name"] for payload in published if payload["name"] in {"/Alice", "/Bob"}} == {"/Alice", "/Bob"}
-    assert alice_placement.position.distance_to(bob_placement.position) >= 100
-    children = [
-        payload
-        for payload in published
-        if payload["name"] in {"/AlicePhone", "/BobPhone", "/AlicePhoneMicrophone", "/BobPhoneMicrophone"}
-    ]
-    assert not {("/Phone", "/AlicePhone"), ("/Phone", "/BobPhone")} & {
-        (payload["name"], payload["owner"]) for payload in published
-    }
-    assert {payload["name"] for payload in children} == {
-        "/AlicePhone",
-        "/BobPhone",
-        "/AlicePhoneMicrophone",
-        "/BobPhoneMicrophone",
-    }
-    assert len({payload["name"] for payload in children}) == len(children)
-    assert {
-        payload["owner"]
-        for payload in children
-        if payload["name"].endswith("Microphone")
-    } == {"/AlicePhone", "/BobPhone"}
-
-
-asyncio.run(main())
-"""
-    assert _run_phone_bot_python(code) == ""

@@ -4,6 +4,7 @@ import logging
 import typing
 
 import hsm
+import bot
 import pydantic
 import pytest
 
@@ -165,7 +166,7 @@ def test_hsm_observe_records_transition_without_dispatch_telemetry_api(monkeypat
     go_event = hsm.Event[None](name="demo.go")
 
     class Demo(_DemoInstance):
-        model: typing.ClassVar[hsm.Model] = hsm.define(
+        model: typing.ClassVar[hsm.Model] = bot.define(
             "Demo",
             hsm.initial(hsm.target("idle")),
             hsm.state(
@@ -184,7 +185,7 @@ def test_hsm_observe_records_transition_without_dispatch_telemetry_api(monkeypat
 
     async def run() -> None:
         demo = Demo()
-        _ = await hsm.started(None, demo, demo.model)
+        _ = await bot.started(None, demo, demo.model)
         await hsm.dispatch(None, demo, go_event)
 
     asyncio.run(run())
@@ -206,7 +207,7 @@ def test_hsm_observe_metric_failure_does_not_block_domain_transition(monkeypatch
         effects.append(event.name)
 
     class Demo(_DemoInstance):
-        model: typing.ClassVar[hsm.Model] = hsm.define(
+        model: typing.ClassVar[hsm.Model] = bot.define(
             "Demo",
             hsm.initial(hsm.target("idle")),
             hsm.state(
@@ -227,7 +228,7 @@ def test_hsm_observe_metric_failure_does_not_block_domain_transition(monkeypatch
 
     async def run() -> Demo:
         demo = Demo()
-        _ = await hsm.started(None, demo, demo.model)
+        _ = await bot.started(None, demo, demo.model)
         await hsm.dispatch(None, demo, go_event)
         return demo
 

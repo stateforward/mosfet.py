@@ -1,5 +1,6 @@
 from bot import behavior
 
+
 def test_behavior_package_exports_public_domain_api() -> None:
     assert behavior.Instance is behavior.instance.Instance
     assert behavior.start is behavior.instance.start

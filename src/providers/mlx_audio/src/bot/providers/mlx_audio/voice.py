@@ -5,7 +5,9 @@ from bot.abilities.communication import conversation
 from bot.abilities.hearing import speech
 
 import dataclasses
+import io
 import typing
+import wave
 
 from .speech_decoder import SpeechDecoder
 from .speech_encoder import SpeechEncoder
@@ -19,7 +21,18 @@ class VoiceDecoder(conversation.voice.VoiceDecoder):
 
     @typing.override
     async def decode(self, input: conversation.turn_detector.AudioStimulus) -> str:
-        decoded = await self.speech_decoder.decode(input.content)
+        audio = input.content
+        if not audio.startswith(b"RIFF"):
+            if input.sample_rate_hz is None:
+                raise ValueError("MLX Audio raw PCM decoding requires a sample rate.")
+            output = io.BytesIO()
+            with wave.open(output, "wb") as stream:
+                stream.setnchannels(input.channels or 1)
+                stream.setsampwidth(2)
+                stream.setframerate(input.sample_rate_hz)
+                stream.writeframes(audio)
+            audio = output.getvalue()
+        decoded = await self.speech_decoder.decode(audio)
         return decoded.decode("utf-8")
 
 

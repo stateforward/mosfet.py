@@ -5,6 +5,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 
 from bot.telemetry import observer
 
@@ -62,14 +63,12 @@ class SpeechEncoding(encoding.Encoding[bytes, bytes]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = bytes
     input_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
-    name="bot.ability.vocal.speech.encoding.input",
-    schema=bytes,
-
+        name="bot.ability.vocal.speech.encoding.input",
+        schema=bytes,
     )
     output_event: typing.ClassVar[hsm.Event[bytes]] = hsm.Event[bytes](
-    name="bot.ability.vocal.speech.encoding.output",
-    schema=bytes,
-
+        name="bot.ability.vocal.speech.encoding.output",
+        schema=bytes,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _SpeechEncodingApplyCompletedEvent
@@ -81,18 +80,17 @@ class SpeechEncoding(encoding.Encoding[bytes, bytes]):
         instance: "SpeechEncoding",
         event: hsm.Event[typing.Any],
     ) -> None:
-        failure = ability.FailureData(
-            message="SpeechEncoding produced output that does not match its output schema."
-        )
+        failure = ability.FailureData(message="SpeechEncoding produced output that does not match its output schema.")
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "SpeechEncoding",
         hsm.initial(hsm.target("idle")),
         hsm.state(

@@ -8,7 +8,7 @@ import typing
 import uuid
 
 import hsm
-from bot import event_schema
+from bot import event
 
 import pydantic
 
@@ -218,6 +218,7 @@ class _ReasoningCapability(pydantic.BaseModel):
     operation_id: str
     actor_id: str
     token: str
+    reply_to: str | None = None
 
 
 class _RecalledEventData(pydantic.BaseModel):
@@ -363,7 +364,7 @@ class Reasoning(processing.Processing):
     # only after autonomy and intuition leave the turn unhandled.
     input_event: typing.ClassVar[hsm.Event[CallData | InputData]] = hsm.Event[CallData | InputData](
         name=types.DELIBERATIVE_HANDOFF_EVENT_NAME,
-        kind=event_schema.EventKind,
+        kind=event.EventKind,
         schema=CallData,
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
@@ -451,7 +452,12 @@ class Reasoning(processing.Processing):
         return isinstance(event.data, _ReasoningStageFailedData) and Reasoning._matches_operation(instance, event)
 
     @staticmethod
-    async def _start_operation(instance: "Reasoning", operation_id: str) -> _ReasoningCapability:
+    async def _start_operation(
+        instance: "Reasoning",
+        operation_id: str,
+        *,
+        reply_to: str | None,
+    ) -> _ReasoningCapability:
         operation = processing.active_operation(instance, operation_id)
         if operation is None:
             operation = await processing.start_operation(instance, operation_id)
@@ -459,6 +465,7 @@ class Reasoning(processing.Processing):
             operation_id=operation_id,
             actor_id=hsm.id(operation),
             token=uuid.uuid4().hex,
+            reply_to=reply_to,
         )
 
     @staticmethod
@@ -490,12 +497,14 @@ class Reasoning(processing.Processing):
         operation_id: str | None,
         metadata: dict[str, object],
         failure: types.FailureData,
+        target: str | None,
     ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=operation_id,
             metadata=_public_metadata(metadata),
             source=hsm.id(instance),
+            target=target,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
         if operation_id is not None:
@@ -509,12 +518,14 @@ class Reasoning(processing.Processing):
         operation_id: str | None,
         metadata: dict[str, object],
         output: types.CompletionData,
+        target: str | None,
     ) -> None:
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
             id=operation_id,
             metadata=_public_metadata(metadata),
             source=hsm.id(instance),
+            target=target,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
         if operation_id is not None:
@@ -530,6 +541,7 @@ class Reasoning(processing.Processing):
             operation_id=event.id or None,
             metadata=dict(event.metadata),
             failure=types.FailureData(message=data.failure.message, turn=data.turn),
+            target=data.capability.reply_to,
         )
 
     @staticmethod
@@ -546,7 +558,11 @@ class Reasoning(processing.Processing):
             context=telemetry.event_context(event),
         ):
             operation_id = event.id if event.id else uuid.uuid4().hex
-            capability = await Reasoning._start_operation(instance, operation_id)
+            capability = await Reasoning._start_operation(
+                instance,
+                operation_id,
+                reply_to=event.source if event.target == hsm.id(instance) and event.source else None,
+            )
             metadata = dict(event.metadata)
 
             def dispatch_stage(event_type: hsm.Event[typing.Any], data: object) -> None:
@@ -779,6 +795,7 @@ class Reasoning(processing.Processing):
             operation_id=event.id or None,
             metadata=dict(event.metadata),
             output=types.CompletionData(turn=data.turn, output=data.reasoned.result),
+            target=data.capability.reply_to,
         )
 
     @staticmethod
@@ -791,6 +808,7 @@ class Reasoning(processing.Processing):
             operation_id=event.id or None,
             metadata=dict(event.metadata),
             output=types.CompletionData(turn=data.turn, output=data.result),
+            target=data.capability.reply_to,
         )
 
     @staticmethod
@@ -873,7 +891,7 @@ class Reasoning(processing.Processing):
                 ),
             )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Reasoning",
         hsm.initial(hsm.target("/Reasoning/initializing")),
         hsm.state(

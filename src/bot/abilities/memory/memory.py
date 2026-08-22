@@ -15,6 +15,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
@@ -126,14 +127,12 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = SourceData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = CandidateData
     input_event: typing.ClassVar[hsm.Event[SourceData]] = hsm.Event[SourceData](
-    name="bot.ability.memory.generation.input",
-    schema=SourceData,
-
+        name="bot.ability.memory.generation.input",
+        schema=SourceData,
     )
     output_event: typing.ClassVar[hsm.Event[CandidateData]] = hsm.Event[CandidateData](
-    name="bot.ability.memory.generation.output",
-    schema=CandidateData,
-
+        name="bot.ability.memory.generation.output",
+        schema=CandidateData,
     )
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _MemoryGenerationApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryGenerationApplyFailedEvent
@@ -142,8 +141,7 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
         self,
         *,
         generator: MemoryGenerator,
-        encoder: encoding.Encoder[classification_mod.GeneratedMemory, classification_mod.EncodedMemory]
-        | None = None,
+        encoder: encoding.Encoder[classification_mod.GeneratedMemory, classification_mod.EncodedMemory] | None = None,
     ) -> None:
         super().__init__()
         self.generator = generator
@@ -226,9 +224,7 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
 
     @staticmethod
     def _dispatch_invalid_output(ctx: hsm.Context, instance: "MemoryGeneration", event: hsm.Event[typing.Any]) -> None:
-        failure = ability.FailureData(
-            message="MemoryGeneration produced output that does not match its output schema."
-        )
+        failure = ability.FailureData(message="MemoryGeneration produced output that does not match its output schema.")
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
             id=event.id or None,
@@ -237,7 +233,7 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "MemoryGeneration",
         hsm.initial(hsm.target("/MemoryGeneration/idle")),
         hsm.state(
@@ -304,22 +300,26 @@ def memory_model(*, name: str, input_event: hsm.Event[InputData]) -> hsm.Model:
     def dispatch_output(ctx: hsm.Context, instance: "Memory", event: hsm.Event[typing.Any]) -> None:
         output = event.data
         assert isinstance(output, OutputData)
+        requester = event.source if event.source and event.source != hsm.id(instance) else ""
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=requester,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     def dispatch_failure(ctx: hsm.Context, instance: "Memory", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
+        requester = event.source if event.source and event.source != hsm.id(instance) else ""
         terminal = dataclasses.replace(
             instance.failed_event.with_data(data),
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=requester,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -339,6 +339,7 @@ def memory_model(*, name: str, input_event: hsm.Event[InputData]) -> hsm.Model:
                 dataclasses.replace(
                     failed.with_data(ability.FailureData(message=str(error))),
                     id=event.id or None,
+                    source=event.source,
                     metadata=dict(event.metadata),
                 ),
             )
@@ -349,11 +350,12 @@ def memory_model(*, name: str, input_event: hsm.Event[InputData]) -> hsm.Model:
             dataclasses.replace(
                 completed.with_data(output),
                 id=event.id or None,
+                source=event.source,
                 metadata=dict(event.metadata),
             ),
         )
 
-    return hsm.define(
+    return bot.define(
         name,
         hsm.initial(hsm.target(f"{root}/idle")),
         hsm.state(
@@ -396,14 +398,12 @@ class Memory(store.MemoryStore):
 
     default_scope: typing.ClassVar[str] = "memory"
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.memory.input",
-    schema=InputData,
-
+        name="bot.ability.memory.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.memory.output",
-    schema=OutputData,
-
+        name="bot.ability.memory.output",
+        schema=OutputData,
     )
     submodel: typing.ClassVar[hsm.Model | None] = memory_model(name="Memory", input_event=input_event)
 

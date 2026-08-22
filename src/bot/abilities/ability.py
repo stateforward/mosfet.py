@@ -4,9 +4,9 @@ import dataclasses
 import datetime
 import typing
 import uuid
-import weakref
 
 import hsm
+import bot
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
@@ -18,6 +18,13 @@ from bot.telemetry import observer
 TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
 _DataType = type[object] | tuple[type[object], ...] | None
+
+
+def _private_instance_scope(parent: hsm.Context) -> hsm.Context:
+    """Create an explicitly addressed scope for private one-shot attachment actors."""
+
+    instances: dict[str, hsm.Instance] = {}
+    return hsm.Context(parent=parent, values={hsm.Keys.Instances: instances})
 
 
 class _CompositeAttachmentTerminalData(pydantic.BaseModel):
@@ -102,7 +109,7 @@ class _CompositeAttachmentReply(hsm.Instance):
                 ),
             )
 
-        return hsm.define(
+        return bot.define(
             "AbilityAttachmentReply",
             hsm.initial(hsm.target("waiting")),
             hsm.state(
@@ -169,6 +176,15 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     """Specific event-driven operational capacity.
 
     Answers: What operations can the system perform?
+
+    Terminal emission:
+        When this ability emits a terminal output or failure event, delivery
+        is target-first and at most once. A set (truthy) ``target`` is
+        delivered once to that address and is never also delivered to the
+        attachment owner. An absent or empty ``target`` is delivered once to
+        the first attachment owner, or dropped when no owner is attached.
+        The emitted event's ``source`` is rewritten to this child; a
+        caller-supplied source is not preserved.
     """
 
     _attachment_limit: typing.ClassVar[int | None] = 1
@@ -194,118 +210,6 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     input_data_type: typing.ClassVar[_DataType] = None
     output_data_type: typing.ClassVar[_DataType] = None
     submodel: typing.ClassVar[hsm.Model | None] = None
-    # Host-boundary waiters for THIS ability's own terminals (contribute / host apply).
-    # Keyed by operation id on the emitting machine — never a peer Future map.
-    _terminal_waiters: dict[str, asyncio.Future[hsm.Event[typing.Any]]]
-    # Owner-local waiters for child ops this ability started. Keyed by (child_id, operation_id).
-    # Peers never write Futures into a child's dict; completion is owner-side.
-    _child_terminal_waiters: dict[tuple[str, str], asyncio.Future[hsm.Event[typing.Any]]]
-    # Child-local reply routing only (weakref to the Ability that started the wait). Not Futures.
-    # Lets unattached children notify the owner that holds the waiter. Residual cross-machine
-    # write is reply identity only; the Future stays on the owner.
-    _terminal_reply_owners: dict[str, weakref.ref["Ability[typing.Any, typing.Any]"]]
-
-    def register_terminal_waiter(
-        self,
-        operation_id: str,
-        waiter: asyncio.Future[hsm.Event[typing.Any]],
-    ) -> None:
-        """Register a host Future completed when this ability emits a terminal for ``operation_id``.
-
-        Host-boundary only (this machine's own apply). For child ops use
-        :meth:`prepare_child_terminal_wait` so the Future lives on the owner.
-        """
-
-        if not operation_id:
-            raise ValueError("operation_id is required.")
-        self._terminal_waiters[operation_id] = waiter
-
-    def clear_terminal_waiter(self, operation_id: str) -> None:
-        """Drop a host terminal waiter if it is still registered."""
-
-        _ = self._terminal_waiters.pop(operation_id, None)
-
-    def _complete_child_terminal_waiter(
-        self,
-        child_id: str,
-        terminal: hsm.Event[typing.Any],
-    ) -> None:
-        """Resolve an owner-local waiter for one child terminal (idempotent)."""
-
-        operation_id = terminal.id if terminal.id else ""
-        if not operation_id:
-            return
-        waiter = self._child_terminal_waiters.pop((child_id, operation_id), None)
-        if isinstance(waiter, asyncio.Future) and not waiter.done():
-            waiter.set_result(terminal)
-
-    @staticmethod
-    def prepare_child_terminal_wait(
-        owner: "Ability[typing.Any, typing.Any]",
-        child: "Ability[typing.Any, typing.Any]",
-        operation_id: str,
-    ) -> asyncio.Future[hsm.Event[typing.Any]]:
-        """Owner-local wait for one child terminal; child only stores a reply weakref.
-
-        The Future is registered on ``owner`` under ``(child_id, operation_id)``. The child
-        records a weakref to ``owner`` so unattached terminals can still complete the owner
-        waiter without the parent planting a Future on the child.
-        """
-
-        if not operation_id:
-            raise ValueError("operation_id is required.")
-        waiter: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
-        owner._child_terminal_waiters[(hsm.id(child), operation_id)] = waiter
-        child._terminal_reply_owners[operation_id] = weakref.ref(owner)
-        return waiter
-
-    @staticmethod
-    def clear_child_terminal_wait(
-        owner: "Ability[typing.Any, typing.Any]",
-        child: "Ability[typing.Any, typing.Any]",
-        operation_id: str,
-    ) -> None:
-        """Drop owner-local waiter and child reply routing for one child op."""
-
-        _ = owner._child_terminal_waiters.pop((hsm.id(child), operation_id), None)
-        _ = child._terminal_reply_owners.pop(operation_id, None)
-
-    @staticmethod
-    async def await_child_terminal(
-        ctx: hsm.Context,
-        *,
-        owner: "Ability[typing.Any, typing.Any]",
-        child: "Ability[typing.Any, typing.Any]",
-        operation_id: str,
-        input: object,
-        metadata: collections.abc.Mapping[str, object],
-    ) -> hsm.Event[typing.Any]:
-        """Dispatch one child apply and await its terminal by envelope id (HSM-CORRELATION-001).
-
-        Registers an owner-local waiter (never a Future on ``child``), dispatches the child's
-        input event with ``source=owner`` / ``target=child`` / ``id=operation_id``, and returns
-        the terminal event. Cancels the waiter cleanly when the owning activity exits.
-        """
-
-        if not operation_id:
-            raise ValueError("operation_id is required.")
-        waiter = Ability.prepare_child_terminal_wait(owner, child, operation_id)
-        try:
-            child_event = dataclasses.replace(
-                child.input_event.with_data_and_id(input, operation_id),
-                source=hsm.id(owner),
-                target=hsm.id(child),
-                metadata=dict(metadata),
-            )
-            await hsm.dispatch(ctx, child, child_event)
-            return await waiter
-        except asyncio.CancelledError:
-            Ability.clear_child_terminal_wait(owner, child, operation_id)
-            if not waiter.done():
-                _ = waiter.cancel()
-            raise
-        finally:
-            Ability.clear_child_terminal_wait(owner, child, operation_id)
 
     @staticmethod
     def _carries_event(
@@ -322,36 +226,28 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         instance: "Ability[typing.Any, typing.Any]",
         event: hsm.Event[typing.Any],
     ) -> None:
+        """Deliver one child terminal under the Ability terminal emission postcondition."""
+
         terminal = event.data
         assert isinstance(terminal, hsm.Event)
-        operation_id = terminal.id if terminal.id else ""
         child_id = hsm.id(instance)
-        # Host self-waiters for this ability's own apply (contribute / host_turn).
-        waiter = instance._terminal_waiters.pop(operation_id, None) if operation_id else None
-        if isinstance(waiter, asyncio.Future) and not waiter.done():
-            waiter.set_result(terminal)
-        # Owner-local child waiters: complete via reply bind (unattached) and/or attachment owner.
-        reply_owner: Ability[typing.Any, typing.Any] | None = None
-        if operation_id:
-            reply_ref = instance._terminal_reply_owners.pop(operation_id, None)
-            if reply_ref is not None:
-                resolved = reply_ref()
-                if isinstance(resolved, Ability):
-                    reply_owner = resolved
-                    reply_owner._complete_child_terminal_waiter(child_id, terminal)
+        routed = dataclasses.replace(
+            terminal,
+            source=child_id,
+            metadata=dict(terminal.metadata),
+        )
+        if routed.target:
+            _ = hsm.dispatch_to(ctx, routed, routed.target)
+            return
         if not instance._attachments:
             return
         owner = instance._attachments[0]
-        if isinstance(owner, Ability) and owner is not reply_owner and operation_id:
-            owner._complete_child_terminal_waiter(child_id, terminal)
         _ = hsm.dispatch(
             ctx,
             owner,
             dataclasses.replace(
-                terminal,
-                source=child_id,
+                routed,
                 target=hsm.id(owner),
-                metadata=dict(terminal.metadata),
             ),
         )
 
@@ -394,14 +290,11 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         reply: hsm.Instance | None = None
         source: hsm.Instance = instance._attachment_group
         try:
-            private_scope = hsm.Context(
-                parent=instance.context(),
-                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
-            )
+            private_scope = _private_instance_scope(instance.context())
             # Start the group when it is not live yet, then attach members.
             if not lifecycle.is_started(instance._attachment_group):
                 try:
-                    _ = await hsm.started(private_scope, instance._attachment_group, instance._attachment_group.model)
+                    _ = await bot.started(private_scope, instance._attachment_group, instance._attachment_group.model)
                 except Exception:
                     source = instance
                     raise
@@ -459,10 +352,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         assert isinstance(request, attachment.DetachData)
         reply: hsm.Instance | None = None
         try:
-            private_scope = hsm.Context(
-                parent=instance.context(),
-                values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
-            )
+            private_scope = _private_instance_scope(instance.context())
             reply = await instance._start_composite_attachment_reply(
                 instance._attachment_group,
                 request,
@@ -571,11 +461,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             request_id=event.id,
             metadata=dict(event.metadata),
         )
-        private_scope = hsm.Context(
-            parent=self.context(),
-            values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
-        )
-        reply = await hsm.started(
+        private_scope = _private_instance_scope(self.context())
+        reply = await bot.started(
             private_scope,
             _CompositeAttachmentReply(),
             _CompositeAttachmentReply.model_for(operation),
@@ -702,7 +589,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             and event.data.terminal.name in {attachment.AttachFailedEvent.name, attachment.DetachedEvent.name}
         )
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "Ability",
         hsm.initial(hsm.target("/Ability/detached")),
         hsm.state(
@@ -838,7 +725,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             )
             composite_transitions = ()
 
-        return hsm.define(
+        return bot.define(
             f"{name}Lifecycle",
             hsm.initial(hsm.target(f"{root}/{initial_state}")),
             hsm.state(
@@ -942,9 +829,6 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._attachment_request_id = ""
-        self._terminal_waiters = {}
-        self._child_terminal_waiters = {}
-        self._terminal_reply_owners = {}
 
     @typing.override
     def attach(
@@ -961,7 +845,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 return
             # Restart when not live.
             if not lifecycle.is_started(self):
-                _ = await hsm.started(ctx, self, model)
+                _ = await bot.started(ctx, self, model)
             _ = await hsm.dispatch(ctx, self, event)
 
         task = asyncio.Task(
@@ -1038,6 +922,140 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         )
 
 
+class _TerminalOperation(hsm.Instance):
+    """One-shot reply address; all operation data is closure-bound in its model."""
+
+
+async def run_terminal_operation(
+    ctx: hsm.Context,
+    *,
+    child: Ability[typing.Any, typing.Any],
+    request: hsm.Event[typing.Any],
+    terminals: tuple[hsm.Event[typing.Any], ...],
+    timeout: datetime.timedelta,
+    on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
+) -> hsm.Event[typing.Any]:
+    """Dispatch one request and await its correlated terminal through a one-shot HSM.
+
+    ``request`` remains the canonical domain event. This function only addresses its envelope:
+    the operation actor becomes ``source``, ``child`` becomes ``target``, and ``request.id`` is
+    preserved for correlation. The child must return one of ``terminals`` with the same id,
+    ``source=hsm.id(child)``, and ``target`` set to the operation actor.
+
+    The caller must supply a started ``child`` with an HSM addressing scope. The operation actor
+    shares that address map so the child can deliver its terminal directly, while its lifetime is
+    parented to ``ctx`` rather than the child's lifetime.
+
+    Child terminal emission follows the Ability terminal postcondition: a set
+    target is delivered once to that address and never also to the owner; an
+    absent or empty target is delivered once to the attachment owner or
+    dropped; source is rewritten to the emitting child.
+
+    The result awaitable is invocation-local and captured by the operation model; it is never
+    stored on an HSM instance or in a shared registry. Caller cancellation stops only this reply
+    actor. A child whose domain supports cancellation must still be sent its declared typed
+    cancellation event by the owning caller; work already dispatched may otherwise continue and
+    emit a late terminal, which cannot settle this or any later operation.
+
+    Raises:
+        ValueError: If the request id, terminal set, or timeout is invalid.
+        RuntimeError: If ``child`` is not started in an addressable HSM scope.
+        TimeoutError: If no correlated terminal arrives before the modeled HSM timeout.
+    """
+
+    operation_id = request.id
+    if not operation_id:
+        raise ValueError("Terminal operation request.id is required.")
+    if not terminals:
+        raise ValueError("Terminal operation requires at least one terminal event.")
+    if timeout < datetime.timedelta(0):
+        raise ValueError("Terminal operation timeout cannot be negative.")
+
+    instances = child.context().value(hsm.Keys.Instances)
+    if not isinstance(instances, collections.abc.MutableMapping):
+        raise RuntimeError("Terminal operation child must be started in an addressable HSM scope.")
+    child_id = hsm.id(child)
+    operation_scope = hsm.Context(
+        parent=ctx,
+        values={hsm.Keys.Instances: instances},
+    )
+    result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+
+    def correlated(
+        operation_ctx: hsm.Context,
+        instance: _TerminalOperation,
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del operation_ctx
+        return event.id == operation_id and event.source == child_id and event.target == hsm.id(instance)
+
+    def settle(
+        operation_ctx: hsm.Context,
+        instance: _TerminalOperation,
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del operation_ctx, instance
+        if on_terminal is not None:
+            on_terminal(event)
+        if not result.done():
+            result.set_result(event)
+
+    def timeout_delay(
+        operation_ctx: hsm.Context,
+        instance: _TerminalOperation,
+        event: hsm.Event[typing.Any],
+    ) -> datetime.timedelta:
+        del operation_ctx, instance, event
+        return timeout
+
+    def expire(
+        operation_ctx: hsm.Context,
+        instance: _TerminalOperation,
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del operation_ctx, instance, event
+        if not result.done():
+            result.set_exception(TimeoutError("Ability terminal operation timed out."))
+
+    operation_model = bot.define(
+        "AbilityTerminalOperation",
+        hsm.initial(hsm.target("waiting")),
+        hsm.state(
+            "waiting",
+            hsm.transition(
+                hsm.on(*terminals),
+                hsm.guard(correlated),
+                hsm.effect(settle),
+                hsm.target("/AbilityTerminalOperation/completed"),
+            ),
+            hsm.transition(
+                hsm.after(timeout_delay),
+                hsm.effect(expire),
+                hsm.target("/AbilityTerminalOperation/timed_out"),
+            ),
+        ),
+        hsm.final("completed"),
+        hsm.final("timed_out"),
+        hsm.observe(observer),
+    )
+    operation = _TerminalOperation()
+    try:
+        _ = await bot.started(operation_scope, operation, operation_model)
+        await hsm.dispatch(
+            ctx,
+            child,
+            dataclasses.replace(
+                request,
+                source=hsm.id(operation),
+                target=child_id,
+                metadata=dict(request.metadata),
+            ),
+        )
+        return await result
+    finally:
+        await asyncio.shield(hsm.stop(operation, hsm.Context()))
+
+
 __all__ = [
     "FailedEvent",
     "InputEvent",
@@ -1049,4 +1067,5 @@ __all__ = [
     "FailureData",
     "TInput",
     "TOutput",
+    "run_terminal_operation",
 ]

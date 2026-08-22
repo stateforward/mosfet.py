@@ -15,7 +15,7 @@ from .detection import (
     StartEvent,
     VoiceDetection,
     VoiceDetectionSegment,
-    VoiceDetector,
+    VoiceActivityClassifier,
 )
 from .diarization import (
     VoiceDiarization,
@@ -39,7 +39,7 @@ __all__ = [
     "VoiceDiarizationSegment",
     "VoiceDetection",
     "VoiceDetectionSegment",
-    "VoiceDetector",
+    "VoiceActivityClassifier",
     "VoiceDiarizer",
     "VoiceIdentification",
     "VoiceEmbedding",

@@ -7,6 +7,7 @@ import collections.abc
 import typing
 
 import hsm
+import bot
 
 from bot.device import Device
 from bot.devices.phone import display as display_module
@@ -45,7 +46,7 @@ def test_caller_id_event_sets_caller_id_while_detached() -> None:
 
     async def run() -> str | None:
         display = display_module.Display()
-        _ = await hsm.started(None, display, typing.cast(hsm.Model, display.model))
+        _ = await bot.started(None, display, typing.cast(hsm.Model, display.model))
         await wait_until(lambda: display.state() == "/Device/detached")
 
         await display.dispatch(
@@ -66,7 +67,7 @@ def test_caller_id_event_sets_caller_id_while_attached() -> None:
         environment = Environment()
         display = display_module.Display()
         controller = hsm.Instance()
-        _ = await hsm.started(environment, display, typing.cast(hsm.Model, display.model))
+        _ = await bot.started(environment, display, typing.cast(hsm.Model, display.model))
         await display.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: display.state() == "/Device/attached")
 
@@ -91,7 +92,7 @@ def test_caller_id_event_with_none_clears_a_previously_shown_caller() -> None:
 
     async def run() -> tuple[str | None, str | None]:
         display = display_module.Display()
-        _ = await hsm.started(None, display, typing.cast(hsm.Model, display.model))
+        _ = await bot.started(None, display, typing.cast(hsm.Model, display.model))
         await wait_until(lambda: display.state() == "/Device/detached")
 
         await display.dispatch(

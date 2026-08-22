@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from bot.abilities import processing
 from bot.abilities.language import text
+from bot.environment import SoundData
 from bot.protocols import attachment
 from bot.providers.gemini.processing import Processor, ProcessingError
 
 import asyncio
-import base64
 import dataclasses
 import json
 import typing
@@ -14,6 +14,7 @@ import uuid
 import weakref
 
 import hsm
+import bot
 import pydantic
 import pytest
 
@@ -64,7 +65,7 @@ class _ProcessForTestOwner(hsm.Instance):
             message = failure.message if hasattr(failure, "message") else str(failure)
             future.set_exception(RuntimeError(message))
 
-    model: typing.ClassVar[hsm.Model | None] = hsm.define(
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
         "ProcessForTestOwner",
         hsm.initial(hsm.target("/ProcessForTestOwner/recording")),
         hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
@@ -90,7 +91,7 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     context = hsm.Context().with_value(hsm.Keys.Instances, weakref.WeakValueDictionary())
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
-    _ = await hsm.started(context, owner, owner.model)
+    _ = await bot.started(context, owner, owner.model)
     _ = await ability.attach(
         context,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -110,16 +111,17 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
 def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> None:
     stimulus = hsm.Event[bytes](
         name="bot.ability.hearing.speech.decoding.output",
-        data=b"Hey I'm Gabe how are you",
+        data=SoundData(audio=b"Hey I'm Gabe how are you", media_type="audio/pcm", sample_rate_hz=16_000),
         kind=hsm.CompletionEventKind,
     )
     input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
     content = input.model_facing_payload()
-    # Raw media never reaches the prompt, in any encoding; the model gets a size descriptor.
+    # Raw media never reaches the prompt, in any encoding; owning Data retains only metadata.
     assert "Hey I'm Gabe how are you" not in content
-    assert base64.b64encode(b"Hey I'm Gabe how are you").decode("ascii") not in content
-    assert 'content="bytes:24"' in content
+    assert "bytes:" not in content
+    assert "<environment:sound" in content
     assert 'stimulus:event="bot.ability.hearing.speech.decoding.output"' in content
+    assert 'media_type="audio/pcm"' in content
     assert "TypeAdapter" not in content
     # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
     assert "phone.answer_call" not in content

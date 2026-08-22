@@ -6,7 +6,7 @@ import collections.abc
 import typing
 
 import hsm
-from bot import event_schema
+from bot import event
 import pydantic
 
 # Model-facing deliberate (System-2) handoff event name. Reasoning owns the event; intuition
@@ -30,7 +30,10 @@ _Reference = typing.Annotated[
     ),
 ]
 
-EventPayload = dict[str, object]
+# Runtime selections may retain a typed payload produced by a trusted native ability. Model and
+# learned-behavior boundaries still use the canonical JSON projection; ``EventData`` serializes
+# that projection only when a JSON boundary is crossed.
+EventPayload: typing.TypeAlias = object
 
 
 class EventData(pydantic.BaseModel):
@@ -71,9 +74,9 @@ class EventData(pydantic.BaseModel):
     data: EventPayload | None = pydantic.Field(
         default=None,
         description=(
-            "Optional JSON-serializable event data for the selected event. Do not include raw audio, message text, "
-            "credentials, provider-specific objects, or high-cardinality diagnostics. Do not put selection "
-            "rationale here — use reason on this envelope."
+            "Optional typed domain payload for the selected event. Trusted native abilities may retain a typed "
+            "Pydantic payload through internal dispatch; model and learned-behavior JSON projections omit raw "
+            "media. Do not put selection rationale here — use reason on this envelope."
         ),
         examples=[{"device": "device-a"}],
     )
@@ -83,6 +86,12 @@ class EventData(pydantic.BaseModel):
         description="Optional reason this event was selected.",
         examples=["Attention should move to that device for this turn."],
     )
+
+    @pydantic.field_serializer("data", when_used="json")
+    def _serialize_data(self, value: object | None) -> object | None:
+        """Project typed domain data at JSON boundaries without mutating runtime payloads."""
+
+        return None if value is None else event.event_json_value(value)
 
 
 # Always a tuple of selected events. Empty tuple = no dispatch.
@@ -116,7 +125,7 @@ class IgnoreData(pydantic.BaseModel):
 
 IgnoreEvent = hsm.Event[IgnoreData](
     name="bot.ability.cognition.ignore",
-    kind=event_schema.EventKind,
+    kind=event.EventKind,
     schema=IgnoreData,
 )
 
@@ -158,7 +167,7 @@ class CompletionData(pydantic.BaseModel):
     )
 
     turn: TurnData
-    output: OutputData | None = None
+    output: OutputData | processing.Events | None = None
 
 
 class FailureData(ability.FailureData):
@@ -231,15 +240,22 @@ async def dispatch_selected_events(
 
     current_focus = focused_device if focused_device else None
     for selection in to_dispatch:
-        error = bot.Bot.attention_selection_error(
-            selection,
-            focus_candidates=candidates,
-            configured_device_names=configured_device_names,
-            enforce_candidates=enforce_candidates,
-            focused_device=current_focus,
-        )
+        try:
+            error = bot.Bot.attention_selection_error(
+                selection,
+                focus_candidates=candidates,
+                configured_device_names=configured_device_names,
+                enforce_candidates=enforce_candidates,
+                focused_device=current_focus,
+            )
+        except pydantic.ValidationError as validation_error:
+            raise processing.SelectionRejectionError.from_validation(
+                event_name=selection.event,
+                prefix=f"Processing selected invalid focus selection data for event: {selection.event}",
+                error=validation_error,
+            ) from validation_error
         if error is not None:
-            raise RuntimeError(error)
+            raise processing.SelectionRejectionError(error)
 
     await processing.dispatch_selected_events(
         ctx,

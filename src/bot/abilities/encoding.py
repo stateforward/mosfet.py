@@ -6,6 +6,7 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 
 from bot.telemetry import observer
 
@@ -70,6 +71,7 @@ class Encoding(ability.Ability[ability.TInput, ability.TOutput]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
@@ -86,6 +88,7 @@ class Encoding(ability.Ability[ability.TInput, ability.TOutput]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -98,27 +101,29 @@ class Encoding(ability.Ability[ability.TInput, ability.TOutput]):
         try:
             output = await instance._apply(ctx, event.data)
         except Exception as error:
-            _ = hsm.dispatch(
+            _ = instance.dispatch(
                 ctx,
-                instance,
                 dataclasses.replace(
                     instance._apply_failed_event.with_data(ability.FailureData(message=str(error))),
                     id=event.id or None,
+                    source=event.source,
+                    target=event.target,
                     metadata=dict(event.metadata),
                 ),
             )
             return
-        _ = hsm.dispatch(
+        _ = instance.dispatch(
             ctx,
-            instance,
             dataclasses.replace(
                 instance._apply_completed_event.with_data(output),
                 id=event.id or None,
+                source=event.source,
+                target=event.target,
                 metadata=dict(event.metadata),
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Encoding",
         hsm.initial(hsm.target("/Encoding/idle")),
         hsm.state(

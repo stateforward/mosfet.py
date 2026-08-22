@@ -13,13 +13,19 @@ uv run --project examples/phone_bot phone-bot-example
 
 `listen_speak_bot` is its own example package (macOS only, device-free). It uses
 `say` and `afconvert` to render *Hey I'm Gabe how are you* into a WAV, injects
-that audio as `environment.sound` into a bot with no devices, runs **Listening** →
-**Mercury 2** intuition (OpenAI-compatible) / Gemini **reasoning**
-(`gemini-3.5-flash`) → **Speaking**, and writes a reply WAV under
-`examples/listen_speak_bot/assets/`. STT is a fixed offline transcript and TTS is
-macOS `say`; cognition requires `BOT_MERCURY_API_KEY` (intuition) and
-`BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or phone device.
-Pass `--play` to `afplay` the heard and reply audio.
+that audio as `environment.sound` into a bot with no devices, attaches real **Listening**
+(MLX Audio VAD + Whisper STT) and an acquired **Communication** ability, then runs **Mercury 2**
+intuition (OpenAI-compatible) / Gemini **reasoning** (`gemini-3.5-flash`) and reports the cognition run.
+The real Listening product carries a provider-neutral source identity into Communication, whose
+native seeded behavior admits the typed speech into Conversation. Cognition can select
+`communication.respond`, which routes through the injected Speaking port and produces a reply WAV.
+The run remains `status: incomplete` when cognition does not select a response. Cognition requires
+`BOT_MERCURY_API_KEY`
+(intuition) and `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or
+phone device. `--play` plays only the generated heard WAV in this slice.
+
+Listening and Speaking remain body composition ports, not direct cognition tools. Communication
+offers the semantic `communication.respond` action and owns the temporary route to Speaking.
 
 `phone_bot` is its own example package because it depends on real provider
 packages: LiveKit for the phone device and room audio, OpenAI-compatible

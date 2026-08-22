@@ -12,6 +12,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 from pydantic.json_schema import SkipJsonSchema
 import pydantic
 from sqlalchemy.sql import ClauseElement
@@ -32,6 +33,8 @@ from bot.telemetry import span
 from .. import episodes
 from .. import input
 from .. import types
+
+_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 
 CHANGE_INSTRUCTIONS = (
     "You are in the changing phase: author or revise Starlark for the stored behavior. "
@@ -324,7 +327,9 @@ def _load_behavior(store: memory.Memory, name: str) -> Instance | None:
 
 
 def _store_behavior(store: memory.Memory, behavior: Instance) -> None:
-    _ = store.execute(memory.InputData(statements=_compile_statements(behavior_storage.replace_behavior_clauses(behavior))))
+    _ = store.execute(
+        memory.InputData(statements=_compile_statements(behavior_storage.replace_behavior_clauses(behavior)))
+    )
 
 
 def _draft(intent: CreateData) -> Instance:
@@ -419,14 +424,12 @@ class Revision(processing.Processing):
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.reflection.revision.input",
-    schema=InputData,
-
+        name="bot.ability.reflection.revision.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.reflection.revision.output",
-    schema=OutputData,
-
+        name="bot.ability.reflection.revision.output",
+        schema=OutputData,
     )
     failed_event: typing.ClassVar[hsm.Event[FailureData]] = hsm.Event[FailureData](
         name=ability.FailedEvent.name,
@@ -621,17 +624,33 @@ class Revision(processing.Processing):
                 schemas=(ChangeEvent,),
                 actors={},
             )
-            await hsm.dispatch(
-                ctx,
-                instance._change_processing,
-                dataclasses.replace(
-                    instance._change_processing.input_event.with_data_and_id(
-                        request,
-                        Revision._child_id(write.operation_id, write.attempt, data.generation),
-                    ),
-                    metadata=dict(event.metadata),
+            # Route the change child through the settled one-shot terminal operation so its
+            # correlated terminal is accepted regardless of the parent's transient state
+            # (HSM-CONTEXT-001 / HSM-DELIVERY-001). The operation stamps source/target on the
+            # child input envelope, which `_emit_output` echoes back on the child terminal.
+            child_request = dataclasses.replace(
+                instance._change_processing.input_event.with_data_and_id(
+                    request,
+                    Revision._child_id(write.operation_id, write.attempt, data.generation),
                 ),
+                metadata=dict(event.metadata),
             )
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=instance._change_processing,
+                request=child_request,
+                terminals=(
+                    instance._change_processing.output_event,
+                    instance._change_processing.failed_event,
+                ),
+                timeout=_CHILD_OPERATION_TIMEOUT,
+            )
+            # Leave `starting` for `authoring` before handing the settled correlated child
+            # terminal back to the same typed continuations. The terminal is queued after
+            # _StartedEvent (both are synchronous, non-awaited dispatches) so `authoring`
+            # consumes it once entered, and `_matches_change_output` / `_matches_change_failure`
+            #  -> `_check_change` / `_fail_child` run unchanged. Nothing runs after the state
+            # -transition-causing dispatch, so the activity is never cancelled mid-work.
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -644,6 +663,15 @@ class Revision(processing.Processing):
                         generation=data.generation,
                         attempt=write.attempt,
                     ),
+                ),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    terminal,
+                    source=hsm.id(instance._change_processing),
+                    target=hsm.id(instance),
                 ),
             )
 
@@ -1050,7 +1078,7 @@ class Revision(processing.Processing):
     def _request_reboot(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
         processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Revision",
         hsm.initial(hsm.target("/Revision/initializing")),
         hsm.state(
@@ -1094,8 +1122,18 @@ class Revision(processing.Processing):
         ),
         hsm.state(
             "starting",
-            hsm.defer(input_event, processing.CancelEvent),
+            hsm.defer(input_event),
             hsm.activity(_dispatch_change),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(_queue_requested_cancel),
+            ),
+            hsm.transition(
+                hsm.on(_CancelRequestedEvent),
+                hsm.guard(_has_cancel_requested),
+                hsm.target("/Revision/starting_cancel"),
+            ),
             hsm.transition(
                 hsm.on(_StartedEvent),
                 hsm.guard(_has_started),

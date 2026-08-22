@@ -16,6 +16,7 @@ from bot import abilities
 
 SkillSourceKind = typing.Literal["markdown", "starlark"]
 
+
 class SkillSource(pydantic.BaseModel):
     """Stored source for a skill."""
 
@@ -49,6 +50,7 @@ class SkillSource(pydantic.BaseModel):
         examples=["# Summarize support calls\nPrefer concise summaries with open questions."],
     )
 
+
 @dataclass(frozen=True)
 class Skill:
     """Learned proficiency built on one or more abilities.
@@ -61,5 +63,6 @@ class Skill:
     description: str = ""
     examples: tuple[str, ...] = ()
     source: SkillSource | None = None
+
 
 __all__ = ["Skill", "SkillSource", "SkillSourceKind"]

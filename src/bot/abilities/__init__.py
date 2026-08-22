@@ -46,6 +46,7 @@ from .ability import (
     FailureData,
     TInput,
     TOutput,
+    run_terminal_operation,
 )
 
 if typing.TYPE_CHECKING:
@@ -161,6 +162,7 @@ __all__ = [
     "Stage",
     "TInput",
     "TOutput",
+    "run_terminal_operation",
     "VoiceDecoder",
     "VoiceEncoder",
     "TurnData",

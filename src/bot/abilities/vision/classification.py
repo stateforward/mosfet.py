@@ -8,12 +8,14 @@ import dataclasses
 import typing
 
 import hsm
+import bot
 import pydantic
 
 from bot.telemetry import observer
 
 VisualClassificationInputKind: typing.TypeAlias = typing.Literal["image", "text"]
 VisualClassificationKind: typing.TypeAlias = typing.Literal["image", "text", "unreadable"]
+
 
 class InputData(pydantic.BaseModel):
     """InputData for classifying a readable visual or text source before reading."""
@@ -74,6 +76,7 @@ class InputData(pydantic.BaseModel):
             raise ValueError("image visual classification input requires bytes content.")
         return self
 
+
 class OutputData(pydantic.BaseModel):
     """Provider-neutral classification used to route reading input."""
 
@@ -101,8 +104,10 @@ class OutputData(pydantic.BaseModel):
         examples=[0.87],
     )
 
+
 class VisualClassifier(classifying.Classifier[InputData, OutputData], abc.ABC):
     """Classifier that routes readable visual or text input before decoding."""
+
 
 _VisualClassificationApplyCompletedEvent = hsm.Event[OutputData](
     name="bot.ability.vision.classification.apply.completed",
@@ -115,6 +120,7 @@ _VisualClassificationApplyFailedEvent = hsm.Event[ability.FailureData](
     schema=ability.FailureData,
 )
 
+
 def _has_visual_classification_input(
     ctx: hsm.Context,
     instance: "VisualClassification",
@@ -122,6 +128,7 @@ def _has_visual_classification_input(
 ) -> bool:
     del ctx, instance
     return isinstance(event.data, InputData)
+
 
 def _has_visual_classification_output(
     ctx: hsm.Context,
@@ -131,6 +138,7 @@ def _has_visual_classification_output(
     del ctx, instance
     return isinstance(event.data, OutputData)
 
+
 def _has_invalid_visual_classification_output(
     ctx: hsm.Context,
     instance: "VisualClassification",
@@ -138,6 +146,7 @@ def _has_invalid_visual_classification_output(
 ) -> bool:
     del ctx, instance
     return not isinstance(event.data, OutputData)
+
 
 def _has_visual_classification_failure(
     ctx: hsm.Context,
@@ -147,20 +156,19 @@ def _has_visual_classification_failure(
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
 
+
 class VisualClassification(classifying.Classifying[InputData, OutputData]):
     """Ability to classify reading input before text or image decoding."""
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-    name="bot.ability.vision.classification.input",
-    schema=InputData,
-
+        name="bot.ability.vision.classification.input",
+        schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[OutputData]] = hsm.Event[OutputData](
-    name="bot.ability.vision.classification.output",
-    schema=OutputData,
-
+        name="bot.ability.vision.classification.output",
+        schema=OutputData,
     )
 
     _apply_completed_event: typing.ClassVar[hsm.Event[object]] = _VisualClassificationApplyCompletedEvent
@@ -180,10 +188,11 @@ class VisualClassification(classifying.Classifying[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=event.source if event.target == hsm.id(instance) else "",
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = hsm.define(
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "VisualClassification",
         hsm.initial(hsm.target("/VisualClassification/Unclassified")),
         hsm.state(
@@ -219,6 +228,7 @@ class VisualClassification(classifying.Classifying[InputData, OutputData]):
         ),
         hsm.observe(observer),
     )
+
 
 __all__ = [
     "VisualClassification",

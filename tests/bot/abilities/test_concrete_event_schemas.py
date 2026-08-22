@@ -5,8 +5,10 @@ import pydantic
 
 from tests.type_helpers import object_dict
 
+
 def _type_schema(data_type: type[object]) -> dict[str, object]:
     return object_dict(pydantic.TypeAdapter(data_type).json_schema())
+
 
 def test_speech_decoding_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(hearing_speech.decoding.SpeechDecoding.input_event.schema)
@@ -22,6 +24,7 @@ def test_speech_decoding_events_use_concrete_pydantic_schemas() -> None:
     assert hearing_speech.decoding.SpeechDecoding.output_event.name == "bot.ability.hearing.speech.decoding.output"
     assert output_schema["type"] == expected_output_schema["type"]
     assert output_schema["format"] == expected_output_schema["format"]
+
 
 def test_speech_encoding_events_use_concrete_pydantic_schemas() -> None:
     input_schema = object_dict(vocal_speech.encoding.SpeechEncoding.input_event.schema)

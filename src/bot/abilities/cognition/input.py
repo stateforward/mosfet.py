@@ -5,8 +5,8 @@ Matches the usual ability/cognition naming pattern: ``*InputData`` data for ``*.
 Bot forwards live robot state — not a prebuilt decision input:
 
 - ``stimulus``: the event that had no body transition
-- ``abilities``: ability instances on the bot
-- ``actors``: named HSM instances (devices, input/output abilities, …) the cognition may snapshot/dispatch to
+- ``abilities``: innate and acquired ability instances on the bot
+- ``actors``: named HSM instances (devices, innate, and acquired abilities) the cognition may snapshot/dispatch to
 - ``focus``: name of the instance the bot is looking at, if any
 """
 
@@ -28,6 +28,8 @@ from bot.environment import Environment
 
 class InputData(pydantic.BaseModel):
     """Payload of ``bot.ability.cognition.input``: stimulus plus live body references for one turn."""
+
+    __model_facing_input__: typing.ClassVar[bool] = True
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -56,15 +58,15 @@ class InputData(pydantic.BaseModel):
         default=(),
         exclude=True,
         repr=False,
-        description="Ability instances currently attached on the bot body.",
+        description="Innate and acquired ability instances currently available to cognition.",
     )
     actors: SkipJsonSchema[collections.abc.Mapping[str, hsm.Instance]] = pydantic.Field(
         default_factory=dict,
         exclude=True,
         repr=False,
         description=(
-            "Named HSM instances available for snapshot and dispatch (devices plus bot input/output "
-            "and other attached abilities, e.g. speaking)."
+            "Named HSM instances available for snapshot and dispatch: devices, innate/acquired abilities, "
+            "not ability-owned child machines. Body input/output ports are internal composition wiring and are excluded."
         ),
     )
     focus: str | None = pydantic.Field(

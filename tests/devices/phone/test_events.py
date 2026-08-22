@@ -40,8 +40,10 @@ PHONE_EVENTS = (
     phone.CallTransferFailedEvent,
 )
 
+
 def _schema_properties(schema: object) -> dict[str, object]:
     return typing.cast(dict[str, object], object_dict(schema).get("properties", {}))
+
 
 def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     assert phone.IncomingCallEvent.name == "phone.service.incoming_call"
@@ -64,11 +66,16 @@ def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     assert phone.IncomingCallData(call_id="livekit:caller").caller is None
     assert "display_hint" not in _schema_properties(phone.IncomingCallEvent.schema)
 
+
 def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
     transfer_target = phone.TransferTarget(kind="address", value="helpdesk@example.com")
     transfer_command = phone.TransferCallData(transfer_id="transfer-123", target=transfer_target)
-    transfer_accepted = phone.TransferAcceptedData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
-    transfer_completed = phone.TransferCompletedData(call_id="call-123", transfer_id="transfer-123", target=transfer_target)
+    transfer_accepted = phone.TransferAcceptedData(
+        call_id="call-123", transfer_id="transfer-123", target=transfer_target
+    )
+    transfer_completed = phone.TransferCompletedData(
+        call_id="call-123", transfer_id="transfer-123", target=transfer_target
+    )
     transfer_failed = phone.TransferFailedData(
         call_id="call-123",
         transfer_id="transfer-123",
@@ -90,7 +97,13 @@ def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
     assert object_dict(phone.TransferCallEvent.schema)["required"] == ["transfer_id", "target"]
     assert object_dict(phone.TransferAcceptedEvent.schema)["required"] == ["call_id", "transfer_id", "target"]
     assert object_dict(phone.ServiceTransferCompletedEvent.schema)["required"] == ["call_id", "transfer_id", "target"]
-    assert object_dict(phone.ServiceTransferFailedEvent.schema)["required"] == ["call_id", "transfer_id", "failure_kind", "target"]
+    assert object_dict(phone.ServiceTransferFailedEvent.schema)["required"] == [
+        "call_id",
+        "transfer_id",
+        "failure_kind",
+        "target",
+    ]
+
 
 def test_phone_service_audio_data_describes_speaker_output_for_current_call() -> None:
     data = phone.ServiceAudioData(audio=b"playback-audio", call_id="call-123", media_type="audio/pcm", channels=1)
@@ -99,6 +112,7 @@ def test_phone_service_audio_data_describes_speaker_output_for_current_call() ->
     assert data.audio == b"playback-audio"
     assert data.media_type == "audio/pcm"
     assert data.channels == 1
+
 
 def test_phone_command_events_carry_no_call_identity() -> None:
     """Operator commands name no call: firmware already holds the one they act on."""
@@ -152,7 +166,7 @@ def test_a_phone_number_is_digits() -> None:
 def test_a_number_written_differently_is_the_same_number() -> None:
     """A number has to survive being said out loud, and formatting does not survive with it.
 
-    The instruction is spoken by a synthesizer, crosses a room as sound, passes a voice detector
+    The instruction is spoken by a synthesizer, crosses a room as sound, passes a voice-activity classifier
     and comes back through speech recognition. Whether the transcript says 555-0142 or 5550142 or
     (555) 0142 is the transcriber's choice, not the bot's — so treating them as different numbers
     would report a punctuation difference nobody controlled as a bot that dialled wrong.
@@ -213,6 +227,7 @@ def test_phone_service_request_events_carry_the_call_firmware_stamped() -> None:
     assert phone.ServiceDialRequestedEvent.name == "phone.service.dial_requested"
     assert object_dict(phone.ServiceDialRequestedEvent.schema) == phone.DialData.model_json_schema()
 
+
 def test_phone_public_events_describe_committed_firmware_state() -> None:
     ringing = phone.RingingData(caller="Front desk")
     hung_up = phone.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
@@ -264,10 +279,12 @@ def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:
     assert phone.NoCallData(reason="nothing_to_answer").failure_kind is None
     assert phone.NoCallData(reason="dial_failed", failure_kind="call_declined").failure_kind == "call_declined"
 
+
 def test_phone_event_names_do_not_use_observed_suffix() -> None:
     event_names = [event.name for event in PHONE_EVENTS]
 
     assert all("observed" not in name for name in event_names)
+
 
 def test_phone_events_are_hsm_events() -> None:
     for event in PHONE_EVENTS:

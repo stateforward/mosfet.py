@@ -59,7 +59,10 @@ class Attachment(typing.Protocol):
         del ctx
         assert isinstance(instance, Attachment)
         data = event.data
-        return isinstance(data, (events.AttachData, events.DetachData)) and instance._attachment_index(data.actor) is not None
+        return (
+            isinstance(data, (events.AttachData, events.DetachData))
+            and instance._attachment_index(data.actor) is not None
+        )
 
     @staticmethod
     def _has_attachments(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> bool:
@@ -348,5 +351,6 @@ class Attachment(typing.Protocol):
                 metadata=dict(event.metadata),
             ),
         )
+
 
 __all__ = ["Attachment"]

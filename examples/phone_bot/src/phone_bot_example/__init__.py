@@ -36,7 +36,7 @@ from bot.devices import phone as phone_device
 from bot.providers.gemini import ChatClient as GeminiChatClient
 from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
 from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
-from bot.providers.mlx_audio import VoiceDetector as SileroVoiceDetector
+from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
 from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.providers.livekit import PhoneService
@@ -428,11 +428,10 @@ def _phone_cognition(
 ) -> cognition.Cognition:
     config = config or CognitionConfig()
     store = memory if memory is not None else _memory()
-    # Communication ships a seeded autonomy wire: SpeechEvent → Conversation.input
-    # (active conversation flattened from Communication.nested_actors).
+    # Communication ships a seeded autonomy wire: SpeechEvent → Communication.input.
+    # Communication owns routing the admitted turn to its active Conversation.
     from bot.abilities import communication as communication_ability
 
-    _ = communication_ability.install_seed_behaviors(store)
     # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
     # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
     # execute capability as injected collaborators without attaching it again.
@@ -458,7 +457,10 @@ def _phone_cognition(
         config.reflection_model,
     )
     return cognition.Cognition(
-        autonomy=cognition.Autonomy(memory=store),
+        autonomy=cognition.Autonomy(
+            memory=store,
+            seeded_behaviors=(communication_ability.speech_heard_seed(),),
+        ),
         intuition=cognition.Intuition(processor=intuition),
         reasoning=cognition.Reasoning(processor=deliberate, memory=store),
         reflection=cognition.Reflection(processor=reflection_processor, memory=store),
@@ -587,14 +589,14 @@ def _gemini_speech_encoder(config: SpeechConfig) -> GeminiSpeechEncoder:
     )
 
 
-def _silero_voice_detector(config: SpeechConfig) -> SileroVoiceDetector:
+def _silero_voice_activity_classifier(config: SpeechConfig) -> SileroVoiceActivityClassifier:
     """Cheap local Silero VAD (MLX Audio), streaming. STT/TTS remain off-device Gemini.
 
-    The detector is told the shape of the raw PCM the room delivers so it can feed the model
+    The voice-activity classifier is told the shape of the raw PCM the room delivers so it can feed the model
     its own 16 kHz frames; a WAV container (the ring) describes itself and overrides this.
     """
 
-    return SileroVoiceDetector(
+    return SileroVoiceActivityClassifier(
         model_id=config.vad_model_id,
         sample_rate_hz=config.input_sample_rate_hz,
         channels=config.input_channels,
@@ -645,7 +647,7 @@ def _conversation(speech_config: SpeechConfig | None = None) -> ExampleConversat
 def _listening(
     speech_config: SpeechConfig | None = None,
     *,
-    voice_detector: voice.detection.VoiceDetector | None = None,
+    voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None,
     voice_classifier: abilities.Classifier[
         voice.identification.InputData,
         voice.identification.OutputData,
@@ -655,10 +657,14 @@ def _listening(
     """Ear: Silero VAD + pyannote voice identity (+ ring classifier). STT stays on Conversation."""
 
     config = speech_config or SpeechConfig()
-    detector = voice_detector if voice_detector is not None else _silero_voice_detector(config)
+    voice_activity_classifier = (
+        voice_activity_classifier
+        if voice_activity_classifier is not None
+        else _silero_voice_activity_classifier(config)
+    )
     classifier = voice_classifier if voice_classifier is not None else _pyannote_voice_classifier(config)
     return listening.Listening(
-        voice_detector=detector,
+        voice_activity_classifier=voice_activity_classifier,
         # Non-voice environment.sound with SoundData.kind (e.g. ring) becomes cognition.InputEvent.
         sound_classifier=sound_hearing.classification.KindSoundClassifier(),
         speech_decoder=None,
@@ -862,7 +868,6 @@ class PhoneBot(Bot):
         hsm.observe(bot.ProcessingFailedEvent, _record_phone_bot_failure),
     )
     _label: str
-    _runtime_model: hsm.Model
     _phone: phone_device.Phone
     _listening: listening.Listening
     _speaking: speaking.Speaking
@@ -875,6 +880,9 @@ class PhoneBot(Bot):
     _conversation_failures: list[abilities.FailureData]
     _listening_handoffs: list[cognition.InputData]
     _listening_failures: list[listening.FailedEventData]
+    _activation_complete: asyncio.Event
+    _activation_failed: asyncio.Event
+    _runtime_model: hsm.Model
 
     def __init__(
         self,
@@ -907,9 +915,7 @@ class PhoneBot(Bot):
         self._listening = listening if listening is not None else _listening(speech_config)
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
         speaking_instance = (
-            speaking
-            if speaking is not None
-            else _speaking(speaker=self._voice, speech_config=speech_config)
+            speaking if speaking is not None else _speaking(speaker=self._voice, speech_config=speech_config)
         )
         self._speaking = speaking_instance
         # Speaking→Listening nerve: motor-command copy is peer delivery, not body/environment.
@@ -917,7 +923,10 @@ class PhoneBot(Bot):
         # Explicit trusted effector→Conversation route; no body policy or graph traversal.
         self._speaking.link_conversation(self._conversation)
         # Bot acquires Communication; Conversation is nested under it for tool resolution.
-        self._communication = abilities.Communication(active_conversation=self._conversation)
+        self._communication = abilities.Communication(
+            active_conversation=self._conversation,
+            speaking=self._speaking,
+        )
         super().__init__(
             # Phone first: an unfocused turn falls back to the first configured device.
             devices={"phone": self._phone},
@@ -934,17 +943,46 @@ class PhoneBot(Bot):
         self._conversation_failures = []
         self._listening_handoffs = []
         self._listening_failures = []
+        self._activation_complete = asyncio.Event()
+        self._activation_failed = asyncio.Event()
 
     @typing.override
     def _model_for_instance(self) -> hsm.Model:
         return self._runtime_model
 
     @typing.override
-    def _model_for_device(self, device: device.Device) -> hsm.Model:
-        return hsm.redefine(typing.cast(hsm.Model, device.model), f"{self._label}Phone")
+    def _model_for_device(self, device: device.Device) -> hsm.Model | None:
+        model = super()._model_for_device(device)
+        if model is None:
+            return None
+        root_name = self._runtime_model.qualified_name.rpartition("/")[2]
+        return hsm.redefine(model, f"{root_name}{type(device).__name__}")
+
+    def _resolve_activation_lifecycle(self, event: hsm.Event[typing.Any]) -> None:
+        """Resolve activation readiness from the body-owned typed lifecycle terminal."""
+
+        if event.source != hsm.id(self) or event.target != hsm.id(self):
+            return
+        if isinstance(event.data, bot.ActivatingDoneEventData):
+            self._activation_complete.set()
+        elif isinstance(event.data, bot.ActivatingFailedEventData):
+            self._activation_failed.set()
+            self._activation_complete.set()
+
+    async def wait_for_activation(self, *, timeout_seconds: float = 30.0) -> None:
+        """Wait for the body lifecycle's typed activation completion or failure terminal."""
+
+        try:
+            await asyncio.wait_for(self._activation_complete.wait(), timeout=timeout_seconds)
+        except TimeoutError as error:
+            raise RuntimeError("Timed out waiting for the phone-bot activation lifecycle terminal.") from error
+        if self._activation_failed.is_set():
+            raise RuntimeError("Phone bot activation failed.")
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData)):
+            self._resolve_activation_lifecycle(event)
         if event.name == self._conversation.output_event.name:
             output = event.data
             assert isinstance(output, abilities.Messages)
@@ -1024,16 +1062,7 @@ async def _wait_until(condition: collections.abc.Callable[[], bool], *, timeout_
 
 
 async def _wait_for_active_bot(body: PhoneBot) -> None:
-    await _wait_until(
-        lambda: (body.state() or "").endswith("/active/unfocused") or (body.state() or "").endswith("/inactive"),
-        timeout_seconds=30.0,
-    )
-    if not (body.state() or "").endswith("/active/unfocused"):
-        raise RuntimeError(f"Phone bot activation failed in state {body.state()}.")
-    await _wait_until(
-        lambda: (body.conversation().state() or "").endswith("/behavior/inactive"),
-        timeout_seconds=30.0,
-    )
+    await body.wait_for_activation(timeout_seconds=30.0)
 
 
 async def start_bot(
@@ -1041,8 +1070,8 @@ async def start_bot(
     *,
     config: AppConfig | None = None,
     environment: Environment | None = None,
-    placement: space.Placement | None = None,
     connect_livekit: bool = False,
+    placement: space.Placement | None = None,
     phone: phone_device.Phone | None = None,
     voice: audio.Speaker | None = None,
     phone_service: PhoneService | None = None,
@@ -1066,12 +1095,11 @@ async def start_bot(
         memory=memory,
     )
     scope = environment if environment is not None else Environment()
-    _ = await body.attach(
-        scope,
-        placement=placement if placement is not None else space.Placement(
-            position=_BOT_ORIGIN, threshold_db=_EARS_THRESHOLD_DB
-        ),
+    resolved_placement = placement if placement is not None else space.Placement(
+        position=_BOT_ORIGIN,
+        threshold_db=_EARS_THRESHOLD_DB,
     )
+    _ = await body.attach(scope, placement=resolved_placement)
     await _wait_for_active_bot(body)
     if connect_livekit and app_config.livekit.can_connect_room():
         if phone_service is None:

@@ -26,6 +26,7 @@ import typing
 import uuid
 
 import hsm
+import bot
 
 from bot import abilities
 from bot import lifecycle
@@ -181,7 +182,7 @@ class Person(hsm.Instance):
         # and made no sound, which looks exactly like a bot that did not hear them.
         _LOG.warning("person utterance failed reason=%s", message)
 
-    model: typing.ClassVar[hsm.Model] = hsm.define(
+    model: typing.ClassVar[hsm.Model] = bot.define(
         "Person",
         hsm.initial(hsm.target("arriving")),
         hsm.state(
@@ -223,7 +224,7 @@ class Person(hsm.Instance):
 
         self._arrived = asyncio.get_running_loop().create_future()
         self._arriving_id = uuid.uuid4().hex
-        _ = await hsm.started(environment, self, self.model)
+        _ = await bot.started(environment, self, self.model)
         mouth_model = self._mouth.model
         if mouth_model is None:
             raise RuntimeError("A mouth with no lifecycle model cannot be powered.")
@@ -232,7 +233,7 @@ class Person(hsm.Instance):
         # voice may already have powered it — Speaking starts an unstarted mouth it is given —
         # so power it only when nobody has.
         if not lifecycle.is_started(self._mouth):
-            _ = await hsm.started(environment, self._mouth, mouth_model)
+            _ = await bot.started(environment, self._mouth, mouth_model)
         _ = await self._voice.attach(
             environment,
             attachment.AttachEvent.with_data_and_id(
