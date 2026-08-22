@@ -80,11 +80,13 @@ Start in `connectedCallback`, stop in `disconnectedCallback`.
 
 The graph library lives in `src/flow/` and ports React Flow's public surface as
 custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,
-`flow-background`, `flow-controls`, `flow-minimap`). Sibling HSMs own orthogonal behavior:
+`flow-node-resizer`, `flow-node-resize-control`, `flow-background`, `flow-controls`,
+`flow-minimap`). Sibling HSMs own orthogonal behavior:
 
 - `Renderer` (`clean` / `dirty` / `rendering`) coalesces paints
 - `Panner` (`fixed` / `panning`) writes CSS `translate+scale` synchronously
-- `Dragger` (`idle` / `dragging`) samples node drag at `hsm.every(16)`
+- `Dragger` (`idle` / `dragging`) samples node drag per pointermove
+- `Resizer` (`idle` / `resizing`) samples node resize per pointermove
 - `Focuser` (`unfocused` / `focused`)
 - `Selection` (`none` / `picking` / `box`)
 - `Connection` (`idle` / `connecting`)

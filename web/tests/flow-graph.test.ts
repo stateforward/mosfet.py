@@ -6,6 +6,7 @@ import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
 import { FlowEdge } from "../src/flow/edge.ts";
 import { FlowNode } from "../src/flow/node.ts";
+import { resizedBounds } from "../src/flow/resizer.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
@@ -1923,6 +1924,7 @@ describe("flow-graph", () => {
     const stopped = "stopped";
     const atLeastOneDrop = 1;
     graph.nodesDraggable = policyOn;
+    graph.nodesResizable = policyOn;
     graph.panOnDrag = policyOn;
     await waitUntil(() => /\/connected\//.test(graph.state()));
     const drops: Array<{ reason: string }> = [];
@@ -1933,9 +1935,11 @@ describe("flow-graph", () => {
     });
     await graph.stop();
     graph.nodesDraggable = policyOff;
+    graph.nodesResizable = policyOff;
     graph.panOnDrag = policyOff;
     await flush();
     assert.equal(graph.nodesDraggable, policyOn);
+    assert.equal(graph.nodesResizable, policyOn);
     assert.equal(graph.panOnDrag, policyOn);
     assert.ok(drops.length >= atLeastOneDrop);
     assert.ok(drops.some((drop) => drop.reason === stopped));
@@ -1943,6 +1947,7 @@ describe("flow-graph", () => {
     document.body.append(graph);
     await waitUntil(() => /\/connected\//.test(graph.state()));
     assert.equal(graph.nodesDraggable, policyOn);
+    assert.equal(graph.nodesResizable, policyOn);
     assert.equal(graph.panOnDrag, policyOn);
     graph.remove();
   });
@@ -2261,7 +2266,7 @@ describe("flow-graph", () => {
     document.body.append(graph);
     await waitUntil(() => /\/connected\//.test(graph.state()));
     const actors = ownedActors(graph);
-    const childCount = 6;
+    const childCount = 7;
     assert.equal(actors.length, childCount);
     for (const actor of actors) {
       assert.notEqual(actor.state(), "");
@@ -2382,6 +2387,274 @@ describe("flow-graph", () => {
     assert.equal(after?.position.x, priorX);
     assert.notEqual(after?.position.x, mutatedX);
     graph.remove();
+  });
+
+  test("se control pointer_down enters resize, not drag or pan", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const se = nodeEl.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    assert.match(graph.state(), /\/resize$/);
+    assert.doesNotMatch(graph.state(), /\/drag$/);
+    assert.doesNotMatch(graph.state(), /\/pan$/);
+    graph.remove();
+  });
+
+  test("se sample grows width and height and leaves position unchanged", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originX = 0;
+    const originY = 0;
+    const originWidth = 80;
+    const originHeight = 40;
+    graph.nodes = [{ id: "a", position: { x: originX, y: originY }, data: { label: "A" }, width: originWidth, height: originHeight }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const se = nodeEl.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    assert.match(graph.state(), /\/resize$/);
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 100, clientY: 50, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    assert.equal(graph.nodes[0]?.width, originWidth);
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 120, clientY: 70, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 120 && graph.nodes[0]?.height === 70);
+    assert.equal(graph.nodes[0]?.position.x, originX);
+    assert.equal(graph.nodes[0]?.position.y, originY);
+    assert.equal(graph.nodes[0]?.width, 120);
+    assert.equal(graph.nodes[0]?.height, 70);
+    graph.remove();
+  });
+
+  test("nw sample keeps the se corner fixed", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originX = 40;
+    const originY = 20;
+    const originWidth = 80;
+    const originHeight = 40;
+    graph.nodes = [{ id: "a", position: { x: originX, y: originY }, data: { label: "A" }, width: originWidth, height: originHeight }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const nw = nodeEl.shadowRoot?.querySelector('flow-node-resize-control[direction="nw"]');
+    assert.ok(nw instanceof HTMLElement);
+    nw.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 40, clientY: 20, pointerId: 1, bubbles: true, composed: true,
+    }));
+    nw.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 30, clientY: 10, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    nw.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 20, clientY: 0, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 100 && graph.nodes[0]?.height === 60);
+    const node = graph.nodes[0];
+    assert.ok(node !== undefined);
+    assert.equal(node.position.x, 20);
+    assert.equal(node.position.y, 0);
+    assert.equal(node.position.x + (node.width ?? 0), originX + originWidth);
+    assert.equal(node.position.y + (node.height ?? 0), originY + originHeight);
+    graph.remove();
+  });
+
+  test("min-width and min-height clamp a shrinking se resize", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const resizer = nodeEl.shadowRoot?.querySelector("flow-node-resizer");
+    assert.ok(resizer !== null && resizer !== undefined);
+    resizer.setAttribute("min-width", "50");
+    resizer.setAttribute("min-height", "30");
+    const se = resizer.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 70, clientY: 30, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 0, clientY: 0, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 50 && graph.nodes[0]?.height === 30);
+    assert.equal(graph.nodes[0]?.width, 50);
+    assert.equal(graph.nodes[0]?.height, 30);
+    graph.remove();
+  });
+
+  test("max-width and max-height clamp a growing se resize", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const resizer = nodeEl.shadowRoot?.querySelector("flow-node-resizer");
+    assert.ok(resizer !== null && resizer !== undefined);
+    resizer.setAttribute("max-width", "100");
+    resizer.setAttribute("max-height", "55");
+    const se = resizer.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 90, clientY: 50, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 200, clientY: 200, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 100 && graph.nodes[0]?.height === 55);
+    assert.equal(graph.nodes[0]?.width, 100);
+    assert.equal(graph.nodes[0]?.height, 55);
+    graph.remove();
+  });
+
+  test("keep-aspect-ratio preserves the origin ratio on se resize", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originWidth = 80;
+    const originHeight = 40;
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: originHeight }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const resizer = nodeEl.shadowRoot?.querySelector("flow-node-resizer");
+    assert.ok(resizer !== null && resizer !== undefined);
+    resizer.setAttribute("keep-aspect-ratio", "");
+    const se = resizer.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 90, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 120, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 120);
+    assert.equal(graph.nodes[0]?.width, 120);
+    assert.equal(graph.nodes[0]?.height, 60);
+    graph.remove();
+  });
+
+  test("nodesResizable=false does not enter resize", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodesResizable = false;
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const se = nodeEl.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    assert.doesNotMatch(graph.state(), /\/resize$/);
+    graph.remove();
+  });
+
+  test("public resize CustomEvents are non-cancelable with bubbles and composed", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const seen: Array<{ name: string; cancelable: boolean; bubbles: boolean; composed: boolean }> = [];
+    for (const name of ["flow-node-resize-start", "flow-node-resize", "flow-node-resize-end"]) {
+      graph.addEventListener(name, (event: Event) => {
+        seen.push({
+          name,
+          cancelable: event.cancelable,
+          bubbles: event.bubbles,
+          composed: event.composed,
+        });
+        assertPublicCustomEvent(event);
+      });
+    }
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const se = nodeEl.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    assert.ok(se instanceof HTMLElement);
+    se.dispatchEvent(new PointerEvent("pointerdown", {
+      clientX: 80, clientY: 40, pointerId: 1, bubbles: true, composed: true,
+    }));
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 100, clientY: 50, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    se.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 110, clientY: 55, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.width === 110);
+    se.dispatchEvent(new PointerEvent("pointerup", {
+      clientX: 110, clientY: 55, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => /\/idle$/.test(graph.state()));
+    assert.ok(seen.some((event) => event.name === "flow-node-resize-start"));
+    assert.ok(seen.some((event) => event.name === "flow-node-resize"));
+    assert.ok(seen.some((event) => event.name === "flow-node-resize-end"));
+    for (const event of seen) {
+      assert.equal(event.cancelable, publicEventCancelable);
+      assert.equal(event.bubbles, publicEventBubbles);
+      assert.equal(event.composed, publicEventComposed);
+    }
+    graph.remove();
+  });
+});
+
+describe("resizedBounds", () => {
+  test("clamps and fixes the opposite edge", () => {
+    const origin = { x: 10, y: 20, width: 80, height: 40 };
+    const se = resizedBounds({
+      origin,
+      direction: "se",
+      dx: 20,
+      dy: 10,
+      constraints: { minWidth: 10, minHeight: 10, keepAspectRatio: false },
+    });
+    assert.deepEqual(se, { x: 10, y: 20, width: 100, height: 50 });
+    const nw = resizedBounds({
+      origin,
+      direction: "nw",
+      dx: -10,
+      dy: -10,
+      constraints: { minWidth: 10, minHeight: 10, keepAspectRatio: false },
+    });
+    assert.equal(nw.x + nw.width, origin.x + origin.width);
+    assert.equal(nw.y + nw.height, origin.y + origin.height);
+    const clamped = resizedBounds({
+      origin,
+      direction: "se",
+      dx: -100,
+      dy: -100,
+      constraints: { minWidth: 30, minHeight: 20, keepAspectRatio: false },
+    });
+    assert.equal(clamped.width, 30);
+    assert.equal(clamped.height, 20);
   });
 });
 

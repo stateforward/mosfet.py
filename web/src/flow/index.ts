@@ -6,9 +6,12 @@ export { FlowHandle } from "./handle.ts";
 export { FlowBackground } from "./background.ts";
 export { FlowControls } from "./controls.ts";
 export { FlowMinimap } from "./minimap.ts";
+export { FlowNodeResizer } from "./node-resizer.ts";
+export { FlowNodeResizeControl } from "./resize-control.ts";
 export { Renderer, startRenderer } from "./renderer.ts";
 export { Panner, startPanner } from "./panner.ts";
 export { Dragger, startDragger } from "./dragger.ts";
+export { Resizer, startResizer, resizedBounds } from "./resizer.ts";
 export { Focuser, startFocuser } from "./focuser.ts";
 export { Selection, startSelection } from "./selection.ts";
 export { Connection, startConnection } from "./connection.ts";
@@ -40,6 +43,11 @@ export type {
   ViewportBounds,
   ConnectDetail,
   SelectionChangeDetail,
+  ResizeDirection,
+  ResizeConstraints,
+  ResizeBounds,
+  NodeResizeDetail,
+  ResizeHit,
   PointerSampleData,
   AdmitRejectedDetail,
 } from "./types.ts";

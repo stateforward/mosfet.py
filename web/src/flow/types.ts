@@ -22,6 +22,26 @@ export type HandlePosition = "top" | "right" | "bottom" | "left";
 
 export type HandleKind = "source" | "target";
 
+export type ResizeDirection = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
+export const MIN_RESIZE_WIDTH = 10;
+export const MIN_RESIZE_HEIGHT = 10;
+
+export type ResizeConstraints = {
+  readonly minWidth: number;
+  readonly minHeight: number;
+  readonly maxWidth?: number;
+  readonly maxHeight?: number;
+  readonly keepAspectRatio: boolean;
+};
+
+export type ResizeBounds = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
 export type EdgeType = "bezier" | "straight" | "step" | "smoothstep";
 
 export type Node = {
@@ -137,10 +157,32 @@ export type HandleHit = {
   readonly id?: string;
 };
 
+export type ResizeHit = {
+  readonly kind: "resize";
+  readonly node: Node;
+  readonly direction: ResizeDirection;
+};
+
 export type NodeHit = { readonly kind: "node"; readonly node: Node };
 export type EdgeHit = { readonly kind: "edge"; readonly edge: Edge };
 export type EmptyHit = { readonly kind: "empty" };
-export type PointerHit = HandleHit | NodeHit | EdgeHit | EmptyHit;
+export type PointerHit = HandleHit | ResizeHit | NodeHit | EdgeHit | EmptyHit;
+
+/**
+ * Detail of `flow-node-resize-start`, `flow-node-resize`, and
+ * `flow-node-resize-end`.
+ * Event contract: `bubbles: true`, `composed: true`, `cancelable: false`.
+ * Postcondition: the bounds are already applied on the graph for move/end
+ * (start reports the origin bounds). `node` is a copy. Listeners observe;
+ * they do not apply the resize. `preventDefault()` has no effect.
+ */
+export type NodeResizeDetail = {
+  readonly node: Node;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
 
 export type PointerSampleData = {
   readonly pointerId: number;

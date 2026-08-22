@@ -116,6 +116,53 @@ export const handleStyles = `
 :host([position="left"]) { left: -4px; top: 50%; right: auto; transform: translateY(-50%); }
 `;
 
+export const nodeResizerStyles = `
+:host {
+  display: block;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+`;
+
+export const resizeControlStyles = `
+:host {
+  display: block;
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  background: #2dd4bf;
+  border: 1px solid #0b0d12;
+  z-index: 7;
+}
+:host([direction="n"]), :host([direction="s"]) {
+  left: 8px;
+  right: 8px;
+  height: 6px;
+  cursor: ns-resize;
+}
+:host([direction="n"]) { top: -3px; }
+:host([direction="s"]) { bottom: -3px; }
+:host([direction="e"]), :host([direction="w"]) {
+  top: 8px;
+  bottom: 8px;
+  width: 6px;
+  cursor: ew-resize;
+}
+:host([direction="e"]) { right: -3px; }
+:host([direction="w"]) { left: -3px; }
+:host([direction="ne"]), :host([direction="nw"]),
+:host([direction="se"]), :host([direction="sw"]) {
+  width: 8px;
+  height: 8px;
+}
+:host([direction="ne"]) { top: -4px; right: -4px; cursor: nesw-resize; }
+:host([direction="nw"]) { top: -4px; left: -4px; cursor: nwse-resize; }
+:host([direction="se"]) { bottom: -4px; right: -4px; cursor: nwse-resize; }
+:host([direction="sw"]) { bottom: -4px; left: -4px; cursor: nesw-resize; }
+`;
+
 export const backgroundStyles = `
 :host {
   display: block;

@@ -1,6 +1,7 @@
 import { applyStyles } from "../elements/styles.ts";
 
-import { copyNode, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node } from "./types.ts";
+import { FlowNodeResizer } from "./node-resizer.ts";
+import { copyNode, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node, type ResizeConstraints } from "./types.ts";
 import { nodeStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node";
@@ -10,7 +11,9 @@ export class FlowNode extends HTMLElement {
   readonly #root: ShadowRoot;
   readonly #button: HTMLButtonElement;
   readonly #label: HTMLSpanElement;
+  readonly #resizer: FlowNodeResizer;
   #node: Node | null = null;
+  #resizable = true;
 
   constructor() {
     super();
@@ -24,7 +27,21 @@ export class FlowNode extends HTMLElement {
     this.#label.part.add("badge");
     this.#label.setAttribute("data-testid", "node-badge");
     this.#button.append(this.#label);
-    this.#root.append(document.createElement("slot"), this.#button);
+    this.#resizer = document.createElement("flow-node-resizer");
+    this.#root.append(document.createElement("slot"), this.#button, this.#resizer);
+  }
+
+  get resizable(): boolean {
+    return this.#resizable;
+  }
+
+  set resizable(value: boolean) {
+    this.#resizable = value;
+    this.#syncResizer();
+  }
+
+  resizeConstraints(): ResizeConstraints {
+    return this.#resizer.constraints();
   }
 
   /**
@@ -103,6 +120,20 @@ export class FlowNode extends HTMLElement {
     // but still expose a stable accessible name from the node id.
     const accessible = this.#label.textContent;
     this.#button.setAttribute("aria-label", accessible.length > 0 ? accessible : node.id);
+    this.#syncResizer();
+  }
+
+  #syncResizer(): void {
+    const forced = this.#resizer.visible;
+    if (forced === true) {
+      this.#resizer.hidden = false;
+      return;
+    }
+    if (forced === false) {
+      this.#resizer.hidden = true;
+      return;
+    }
+    this.#resizer.hidden = !(this.#resizable && this.#node?.selected === true);
   }
 }
 

@@ -7,6 +7,8 @@ import { FlowEdge } from "./edge.ts";
 import { Focuser, startFocuser, type FocusTarget } from "./focuser.ts";
 import { FlowNode } from "./node.ts";
 import { Panner, startPanner } from "./panner.ts";
+import { isResizeDirection } from "./resize-control.ts";
+import { Resizer, startResizer } from "./resizer.ts";
 import { edgePath, getNodesBounds } from "./path.ts";
 import { Renderer, startRenderer } from "./renderer.ts";
 import { Selection, startSelection, type SelectionBox } from "./selection.ts";
@@ -20,6 +22,8 @@ import {
   jsonCopyable,
   MAX_FLOW_EDGES,
   MAX_FLOW_NODES,
+  MIN_RESIZE_HEIGHT,
+  MIN_RESIZE_WIDTH,
   ZOOM_FACTOR,
   type AdmitRejectedDetail,
   type ConnectDetail,
@@ -32,9 +36,12 @@ import {
   type Node,
   type NodeActivateData,
   type NodeClickDetail,
+  type NodeResizeDetail,
   type PointerHit,
   type PointerOrigin,
   type PointerSampleData,
+  type ResizeBounds,
+  type ResizeConstraints,
   type XYPosition,
   type SelectionChangeDetail,
   type Viewport,
@@ -56,6 +63,7 @@ const POINTER_HIT_EMPTY = "empty" as const;
 const POINTER_HIT_NODE = "node" as const;
 const POINTER_HIT_EDGE = "edge" as const;
 const POINTER_HIT_HANDLE = "handle" as const;
+const POINTER_HIT_RESIZE = "resize" as const;
 const HANDLE_KIND_SOURCE = "source" as const;
 const HANDLE_KIND_TARGET = "target" as const;
 
@@ -98,6 +106,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     ),
     hsm.choice(
       "hit",
+      hsm.transition(
+        hsm.guard(FlowGraph.isResizeStart),
+        hsm.target("resize"),
+        hsm.effect(FlowGraph.beginResize),
+      ),
       hsm.transition(
         hsm.guard(FlowGraph.isConnectStart),
         hsm.target("connect"),
@@ -165,6 +178,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         hsm.on(FlowGraph.pointerUpEvent.name),
         hsm.target("../idle"),
         hsm.effect(FlowGraph.endDrag),
+      ),
+    ),
+    hsm.state(
+      "resize",
+      hsm.transition(
+        hsm.on(FlowGraph.pointerUpEvent.name),
+        hsm.target("../idle"),
+        hsm.effect(FlowGraph.endResize),
       ),
     ),
     hsm.state(
@@ -249,6 +270,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Focuser.changedEvent.name), hsm.effect(FlowGraph.applyFocusClass)),
       hsm.transition(hsm.on(Selection.changedEvent.name), hsm.effect(FlowGraph.rememberSelection)),
       hsm.transition(hsm.on(Dragger.movedEvent.name), hsm.effect(FlowGraph.applyNodeMoved)),
+      hsm.transition(hsm.on(Resizer.movedEvent.name), hsm.effect(FlowGraph.applyNodeResized)),
+      hsm.transition(hsm.on(Resizer.finishedEvent.name), hsm.effect(FlowGraph.applyResizeFinished)),
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
@@ -291,6 +314,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #renderer: ReturnType<typeof startRenderer> | null = null;
   #panner: ReturnType<typeof startPanner> | null = null;
   #dragger: ReturnType<typeof startDragger> | null = null;
+  #resizer: ReturnType<typeof startResizer> | null = null;
   #focuser: ReturnType<typeof startFocuser> | null = null;
   #selection: ReturnType<typeof startSelection> | null = null;
   #connection: ReturnType<typeof startConnection> | null = null;
@@ -299,6 +323,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #selectedEdgeIds: ReadonlySet<string> = new Set();
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
+  #nodesResizable = true;
   #panOnDrag = true;
   #nodesWrite: StagedNodeWrite | undefined;
   #edgesWrite: StagedEdgeWrite | undefined;
@@ -432,6 +457,28 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.#nodesDraggable = value;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
+  }
+
+  get nodesResizable(): boolean {
+    return this.#nodesResizable;
+  }
+
+  /**
+   * Store `nodesResizable` on this host. Before start this is pre-start local
+   * state, not a dropped dispatch: pointer guards and paint read the field, and
+   * no `policy_set` event is sent. After start, `policy_set` is dispatched.
+   * After stop, including while `stop()` is in flight, this setter emits
+   * `host-drop` with reason `"stopped"` and does not retain `value`. Does not
+   * call `start`.
+   */
+  set nodesResizable(value: boolean) {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.setPolicyEvent.name });
+      return;
+    }
+    this.#nodesResizable = value;
+    if (!hsm.hostWasStarted(this)) return;
+    this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesResizable: value } }));
   }
 
   get panOnDrag(): boolean {
@@ -681,9 +728,17 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#renderer = null;
     instance.#panner = null;
     instance.#dragger = null;
+    instance.#resizer = null;
     instance.#focuser = null;
     instance.#selection = null;
     instance.#connection = null;
+  }
+
+  static isResizeStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
+    if (!(instance instanceof FlowGraph) || !instance.#nodesResizable) return false;
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    const hit = event.data["hit"];
+    return isPointerHit(hit) && hit.kind === POINTER_HIT_RESIZE;
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
@@ -742,6 +797,30 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return !(instance.#nodesDraggable && nodeDrag);
   }
 
+  static beginResize(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    const sample = pointerOf(event.data);
+    if (sample?.hit.kind !== POINTER_HIT_RESIZE) return;
+    instance.#viewport.setPointerCapture(sample.pointerId);
+    const node = sample.hit.node;
+    const width = node.width ?? DEFAULT_NODE_WIDTH;
+    const height = node.height ?? DEFAULT_NODE_HEIGHT;
+    const origin = { x: node.position.x, y: node.position.y, width, height };
+    const constraints = instance.#resizeConstraints(node.id);
+    instance.#send({ machine: instance.#resizer, event: hsm.typedEvent({ event: Resizer.resizeStartEvent, data: {
+      nodeId: node.id,
+      direction: sample.hit.direction,
+      origin,
+      pointer: sample.world,
+      minWidth: constraints.minWidth,
+      minHeight: constraints.minHeight,
+      keepAspectRatio: constraints.keepAspectRatio,
+      ...(constraints.maxWidth !== undefined ? { maxWidth: constraints.maxWidth } : {}),
+      ...(constraints.maxHeight !== undefined ? { maxHeight: constraints.maxHeight } : {}),
+    } }) });
+    instance.#emitNodeResize("flow-node-resize-start", node, origin);
+  }
+
   static beginConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
@@ -794,6 +873,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragEndEvent }) });
+  }
+
+  static endResize(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    instance.#send({ machine: instance.#resizer, event: hsm.typedEvent({ event: Resizer.resizeEndEvent }) });
   }
 
   static moveBox(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1020,6 +1104,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static applySetPolicy(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
     if (typeof event.data["nodesDraggable"] === "boolean") instance.#nodesDraggable = event.data["nodesDraggable"];
+    if (typeof event.data["nodesResizable"] === "boolean") {
+      instance.#nodesResizable = event.data["nodesResizable"];
+      instance.#dirty();
+    }
     if (typeof event.data["panOnDrag"] === "boolean") instance.#panOnDrag = event.data["panOnDrag"];
   }
 
@@ -1083,6 +1171,28 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (typeof nodeId !== "string" || position === null) return;
     instance.#nodes = instance.#nodes.map((node) => node.id === nodeId ? { ...node, position } : node);
     instance.#dirty();
+  }
+
+  static applyNodeResized(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    const bounds = resizeMovedOf(event.data);
+    if (bounds === null) return;
+    instance.#nodes = instance.#nodes.map((node) => node.id === bounds.nodeId
+      ? { ...node, position: { x: bounds.x, y: bounds.y }, width: bounds.width, height: bounds.height }
+      : node);
+    const node = instance.#nodes.find((item) => item.id === bounds.nodeId);
+    if (node === undefined) return;
+    instance.#emitNodeResize("flow-node-resize", node, bounds);
+    instance.#dirty();
+  }
+
+  static applyResizeFinished(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph)) return;
+    const bounds = resizeMovedOf(event.data);
+    if (bounds === null) return;
+    const node = instance.#nodes.find((item) => item.id === bounds.nodeId);
+    if (node === undefined) return;
+    instance.#emitNodeResize("flow-node-resize-end", node, bounds);
   }
 
   static paintDraft(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1173,6 +1283,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.#renderer,
       this.#panner,
       this.#dragger,
+      this.#resizer,
       this.#focuser,
       this.#selection,
       this.#connection,
@@ -1193,6 +1304,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       },
     });
     this.#dragger = startDragger({ ctx });
+    this.#resizer = startResizer({ ctx });
     this.#focuser = startFocuser({ ctx });
     this.#selection = startSelection({ ctx });
     this.#connection = startConnection({ ctx });
@@ -1217,6 +1329,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       // host pointer model still receives the sample for click/box/connect flow.
       this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
       this.#send({ machine: this.#dragger, event: hsm.typedEvent({ event: Dragger.dragSampleEvent, data: { world: sample.world } }) });
+      this.#send({ machine: this.#resizer, event: hsm.typedEvent({ event: Resizer.resizeSampleEvent, data: { world: sample.world } }) });
       this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
     };
     const onPointerUp = (event: Event): void => {
@@ -1380,6 +1493,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       }
       const painted = copiedNodeValue({ ...node, selected: this.#selectedNodeIds.has(node.id) });
       if (painted !== null) element.node = painted;
+      element.resizable = this.#nodesResizable;
     }
     for (const [id, element] of this.#nodeElements) {
       if (seenNodes.has(id)) continue;
@@ -1502,7 +1616,46 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
+  #resizeConstraints(nodeId: string): ResizeConstraints {
+    const element = this.#nodeElements.get(nodeId);
+    return element?.resizeConstraints() ?? {
+      minWidth: MIN_RESIZE_WIDTH,
+      minHeight: MIN_RESIZE_HEIGHT,
+      keepAspectRatio: false,
+    };
+  }
+
+  #emitNodeResize(name: "flow-node-resize-start" | "flow-node-resize" | "flow-node-resize-end", node: Node, bounds: ResizeBounds): void {
+    const copied = copiedNodeValue({
+      ...node,
+      position: { x: bounds.x, y: bounds.y },
+      width: bounds.width,
+      height: bounds.height,
+    });
+    if (copied === null) return;
+    this.dispatchEvent(new CustomEvent<NodeResizeDetail>(name, {
+      detail: { node: copied, x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+      bubbles: EVENT_BUBBLES,
+      composed: EVENT_COMPOSED,
+      cancelable: false,
+    }));
+  }
+
   #hitFromEvent(event: Event): PointerHit {
+    for (const target of event.composedPath()) {
+      if (!(target instanceof HTMLElement) || target.localName !== "flow-node-resize-control") continue;
+      const direction = target.getAttribute("direction");
+      if (!isResizeDirection(direction)) continue;
+      let node: Node | null = null;
+      for (const ancestor of event.composedPath()) {
+        if (ancestor instanceof FlowNode && ancestor.node !== null) {
+          node = ancestor.node;
+          break;
+        }
+      }
+      if (node === null) continue;
+      return { kind: POINTER_HIT_RESIZE, node, direction };
+    }
     for (const target of event.composedPath()) {
       if (!(target instanceof HTMLElement) || target.localName !== "flow-handle") continue;
       const nodeHost = target.closest("flow-node");
@@ -1636,7 +1789,22 @@ function isPointerHit(value: unknown): value is PointerHit {
       && isHandlePosition(value["position"])
       && (!("id" in value) || typeof value["id"] === "string");
   }
+  if (kind === POINTER_HIT_RESIZE) {
+    return isNode(value["node"]) && isResizeDirection(value["direction"]);
+  }
   return false;
+}
+
+function resizeMovedOf(value: unknown): ({ readonly nodeId: string } & ResizeBounds) | null {
+  if (!hsm.isRecord(value)) return null;
+  const nodeId = value["nodeId"];
+  const x = value["x"];
+  const y = value["y"];
+  const width = value["width"];
+  const height = value["height"];
+  if (typeof nodeId !== "string") return null;
+  if (!isFiniteNumber(x) || !isFiniteNumber(y) || !isFiniteNumber(width) || !isFiniteNumber(height)) return null;
+  return { nodeId, x, y, width, height };
 }
 
 function hitOf(value: unknown): PointerHit | null {
