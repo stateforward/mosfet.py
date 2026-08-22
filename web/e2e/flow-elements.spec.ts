@@ -46,6 +46,7 @@ const PAGE_ZOOM_UNCHANGED = true;
 const NESTED_NODES_DRAGGABLE = false;
 const NESTED_PAN_ON_DRAG = true;
 const FLOW_GRAPH_CONNECTED = true;
+const FLOW_GRAPH_STARTED = true;
 const FRAME_PART_SELECTOR = '[part="frame"]';
 
 test("flow-handle registers, attaches, and reflects kind and position", async ({ page }) => {
@@ -311,9 +312,11 @@ test("bot-machine-graph nested connect leaves flow-graph nodes not draggable", a
       nodesDraggable?: boolean;
       panOnDrag?: boolean;
       isConnected?: boolean;
+      state?: () => string;
     } | null;
     const snapshot = {
       connected: flow?.isConnected === true,
+      started: typeof flow?.state === "function" && flow.state() !== "",
       nodesDraggable: flow?.nodesDraggable,
       panOnDrag: flow?.panOnDrag,
     };
@@ -322,6 +325,7 @@ test("bot-machine-graph nested connect leaves flow-graph nodes not draggable", a
   }, { framePartSelector: FRAME_PART_SELECTOR });
 
   expect(result.connected).toBe(FLOW_GRAPH_CONNECTED);
+  expect(result.started).toBe(FLOW_GRAPH_STARTED);
   expect(result.nodesDraggable).toBe(NESTED_NODES_DRAGGABLE);
   expect(result.panOnDrag).toBe(NESTED_PAN_ON_DRAG);
 });

@@ -233,7 +233,14 @@ export function flowModelFromGraphs(graphs: readonly MachineGraph[]): FlowGraphM
   return { nodes, edges, bounds, origin };
 }
 
-export function focusBoundsForMachine(graphs: readonly MachineGraph[], machineName: string, model: FlowGraphModel): GraphHit["bounds"] | null {
+export function focusBoundsForMachine(args: {
+  graphs: readonly MachineGraph[];
+  machineName: string;
+  model: FlowGraphModel;
+}): GraphHit["bounds"] | null {
+  const graphs = args.graphs;
+  const machineName = args.machineName;
+  const model = args.model;
   if (!graphs.some((graph) => graph.name === machineName)) return null;
   const names = new Set([machineName]);
   const byName = new Map(graphs.map((graph) => [graph.name, graph]));

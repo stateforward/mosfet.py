@@ -67,7 +67,9 @@ describe("bot-machine-graph flow host", () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
     const flow = flowFrame(host);
-    await waitUntil(() => flow.isConnected);
+    await waitUntil(() => flow.isConnected && flow.state() !== "");
+    assert.notEqual(flow.state(), "");
+    assert.match(flow.state(), /connected|pointer/);
     assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
     assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
     host.remove();

@@ -122,6 +122,8 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   #held: readonly MachineGraph[] = [];
   #focusableNames: ReadonlySet<string> = new Set();
   #resizeObserver: ResizeObserver | null = null;
+  #started = false;
+  #pendingGraphs: readonly MachineGraph[] | undefined;
 
   constructor() {
     super();
@@ -146,6 +148,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   set graphs(value: readonly MachineGraph[]) {
+    if (!this.#started) {
+      this.#pendingGraphs = [...value];
+      return;
+    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: [...value] } satisfies GraphsAdmitData }));
   }
 
@@ -175,6 +181,15 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   connectedCallback(): void {
     hsm.start(this, BotMachineGraph.model);
+    this.#started = true;
+    const pendingGraphs = this.#pendingGraphs;
+    this.#pendingGraphs = undefined;
+    if (pendingGraphs !== undefined) {
+      this.#live(hsm.typedEvent({
+        event: BotMachineGraph.graphsEvent,
+        data: { graphs: pendingGraphs } satisfies GraphsAdmitData,
+      }));
+    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.attachEvent }));
   }
 
@@ -279,7 +294,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     const machineName = event.data["machineName"];
     if (typeof machineName !== "string") return;
     const model = instance.#model ?? flowModelFromGraphs(instance.#held);
-    const bounds = focusBoundsForMachine(instance.#held, machineName, model);
+    const bounds = focusBoundsForMachine({ graphs: instance.#held, machineName, model });
     if (bounds === null) {
       throw new TypeError("focus_machine taken without focus bounds");
     }
@@ -404,7 +419,9 @@ function focusableMachineNames(args: {
 }): ReadonlySet<string> {
   const names = new Set<string>();
   for (const graph of args.graphs) {
-    if (focusBoundsForMachine(args.graphs, graph.name, args.model) !== null) names.add(graph.name);
+    if (focusBoundsForMachine({ graphs: args.graphs, machineName: graph.name, model: args.model }) !== null) {
+      names.add(graph.name);
+    }
   }
   return names;
 }

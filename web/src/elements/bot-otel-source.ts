@@ -79,6 +79,8 @@ export class BotOtelSource extends OtelSource {
   readonly #badge: HTMLButtonElement;
   readonly #error: HTMLParagraphElement;
   #abort: AbortController | null = null;
+  #started = false;
+  #pendingReady = false;
 
   constructor() {
     super();
@@ -101,6 +103,10 @@ export class BotOtelSource extends OtelSource {
   }
 
   replayReady(): void {
+    if (!this.#started) {
+      this.#pendingReady = true;
+      return;
+    }
     this.emitReady();
   }
 
@@ -119,10 +125,15 @@ export class BotOtelSource extends OtelSource {
       );
     };
     this.boot();
+    this.#started = true;
     this.requestAttach();
     this.#abort = new AbortController();
     this.#root.addEventListener("click", this.#onClick, { signal: this.#abort.signal });
     this.#render(this.snapshot());
+    if (this.#pendingReady) {
+      this.#pendingReady = false;
+      this.emitReady();
+    }
     void this.dispatch("source.connect.requested", { origin: documentOrigin(this) }).catch(catchFailure(this));
   }
 
