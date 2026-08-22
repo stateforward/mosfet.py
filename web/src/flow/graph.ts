@@ -427,22 +427,87 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     applyStyles(this.#root, cssText);
   }
 
+  /**
+   * Dispatch `fit_view`.
+   *
+   * Inputs: none. Outputs: void; this method always dispatches and does not
+   * report whether a fit ran.
+   * Ownership: this host owns the dispatch; Panner applies the fit.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: none. Classification: runtime-safe.
+   */
   fitView(): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
   }
 
+  /**
+   * Dispatch `fit_bounds` with `bounds`.
+   *
+   * Inputs: `bounds` is the world-space rectangle to fit. Outputs: void; this
+   * method always dispatches and does not report whether a fit ran.
+   * Ownership: this host owns the dispatch; Panner applies the fit.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: world coordinates in `bounds`. Classification: runtime-safe.
+   */
   fitBounds(bounds: ViewportBounds): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.fitBoundsEvent, data: { bounds } }));
   }
 
+  /**
+   * Dispatch `zoom_in`.
+   *
+   * Inputs: none. Outputs: void; this method always dispatches and does not
+   * report the resulting zoom.
+   * Ownership: this host owns the dispatch; Panner applies the zoom.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: none. Classification: runtime-safe.
+   */
   zoomIn(): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
   }
 
+  /**
+   * Dispatch `zoom_out`.
+   *
+   * Inputs: none. Outputs: void; this method always dispatches and does not
+   * report the resulting zoom.
+   * Ownership: this host owns the dispatch; Panner applies the zoom.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: none. Classification: runtime-safe.
+   */
   zoomOut(): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
   }
 
+  /**
+   * Dispatch `set_viewport` with `viewport`.
+   *
+   * Inputs: `viewport` is `{ x, y, zoom }`. Outputs: void; this method always
+   * dispatches and does not report whether the viewport changed.
+   * Ownership: this host owns the dispatch; Panner applies the viewport.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: pan in pixels, zoom as a scale factor. Classification: runtime-safe.
+   */
   setViewport(viewport: Viewport): void {
     this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: viewport }));
   }
@@ -462,8 +527,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * `nodeId` or `nodePath` resolve to a painted node. Machine and viewport
    * kinds do not DOM-focus a descendant or set `aria-activedescendant`.
    * Ownership: this graph owns Focuser/Panner dispatch. Lifetime: one focus
-   * request. Concurrency: runtime-safe on the graph dispatch thread.
-   * Failure modes: missing bounds or missing node are no-ops.
+   * request; unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: runtime-safe on the graph dispatch thread.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; missing bounds or missing node are no-ops.
    * Classification: runtime-safe.
    */
   focusTarget(target: FocusTarget): void {

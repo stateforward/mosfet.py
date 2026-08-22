@@ -177,6 +177,20 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs } satisfies GraphsAdmitData }));
   }
 
+  /**
+   * Dispatch `fit_view`.
+   *
+   * Inputs: none. Outputs: void; this method always dispatches and does not
+   * report whether a fit ran.
+   * Ownership: this host owns the dispatch; the nested `flow-graph` applies
+   * the fit.
+   * Lifetime: unstarted or stopped hosts surface host-drop through
+   * `catchFailure(this)`.
+   * Concurrency: `#live` queues overlapping calls as HSM events.
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; the viewport is unchanged.
+   * Units: none. Classification: runtime-safe.
+   */
   fit(): void {
     this.#live(hsm.typedEvent({ event: BotMachineGraph.fitEvent }));
   }
