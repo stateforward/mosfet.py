@@ -181,38 +181,49 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   /**
    * Dispatch `fit_view`.
    *
-   * Inputs: none. Outputs: void; this method always dispatches and does not
-   * report whether a fit ran.
+   * Inputs: none. Outputs: void; does not report whether a fit ran.
    * Ownership: this host owns the dispatch; the nested `flow-graph` applies
    * the fit.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: none. Classification: runtime-safe.
    */
   fit(): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: BotMachineGraph.fitEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.fitEvent }));
   }
 
   /**
    * Dispatch `focus_machine` with `machineName`.
    *
-   * Inputs: `machineName` is the machine path to focus. Outputs: void; this
-   * method always dispatches and does not report whether a machine exists.
+   * Inputs: `machineName` is the machine path to focus. Outputs: void; does
+   * not report whether a machine exists.
    * Ownership: this host owns the dispatch; the inner graph applies or no-ops
    * in `applyFocus`. Lifetime: safe after `connectedCallback`/`start`;
-   * unstarted or stopped hosts surface host-drop through `catchFailure(this)`.
+   * unstarted hosts surface host-drop through `catchFailure(this)`. After
+   * stop, including while `stop()` is in flight, this method emits `host-drop`
+   * with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
-   * Failure modes: a missing machine or a held machine without painted fit
-   * bounds is ignored by the unguarded `focus_machine` fallback (no
-   * `fitBounds`, `data-node-count` unchanged).
+   * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
+   * `"unstarted"` or `"stopped"`; a missing machine or a held machine without
+   * painted fit bounds is ignored by the unguarded `focus_machine` fallback
+   * (no `fitBounds`, `data-node-count` unchanged).
    * Callers observe `data-node-count` and viewport/`fitBounds` effects rather
    * than a boolean return.
    * Classification: runtime-safe.
    */
   focusMachine(machineName: string): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: BotMachineGraph.focusEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.focusEvent, data: { machineName } satisfies FocusData }));
   }
 

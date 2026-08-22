@@ -282,6 +282,44 @@ describe("bot-machine-graph flow host", () => {
     host.remove();
   });
 
+  test("fit and focusMachine during in-flight stop emit host-drop stopped and do not fit", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    const phone = graphFor("/Phone");
+    const phoneNodeCount = phone.nodes.length;
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    host.graphs = [phone];
+    await waitUntil(() => host.getAttribute("data-node-count") === String(phoneNodeCount));
+    const flow = flowFrame(host);
+    const spy = spyFitView(flow);
+    const priorFits = spy.count();
+    const drops: Array<{ reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    try {
+      const stopping = host.stop();
+      host.fit();
+      host.focusMachine("/Phone");
+      await new Promise<void>((resolve) => {
+        globalThis.setTimeout(resolve, YIELD_MS);
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      assert.equal(spy.count(), priorFits);
+      assert.ok(drops.length >= atLeastOneDrop);
+      assert.ok(drops.some((drop) => drop.reason === stopped));
+      await stopping;
+      assert.equal(spy.count(), priorFits);
+    } finally {
+      spy.restore();
+      host.remove();
+    }
+  });
+
   test("graphs write before append applies after nested connect without dropping fit", async () => {
     const host = document.createElement("bot-machine-graph");
     const flow = flowFrame(host);
