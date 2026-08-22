@@ -308,6 +308,59 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("kind-only node pointer_down does not enter drag", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodesDraggable = true;
+    const kindOnlyNode = { kind: "node" };
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: { ...pointerData(), hit: kindOnlyNode },
+    }));
+    assert.doesNotMatch(graph.state(), /\/drag$/);
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerSampleEvent,
+      data: {
+        ...pointerData({
+          eventType: "pointermove",
+          origin: { x: 10, y: 10 },
+          client: { x: 40, y: 10 },
+          viewport: { x: 40, y: 10 },
+          world: { x: 40, y: 10 },
+        }),
+        hit: kindOnlyNode,
+      },
+    }));
+    assert.doesNotMatch(graph.state(), /\/drag$/);
+    graph.remove();
+  });
+
+  test("kind-only edge pointer_down does not emit a click path into drag", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const kindOnlyEdge = { kind: "edge" };
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: { ...pointerData(), hit: kindOnlyEdge },
+    }));
+    assert.doesNotMatch(graph.state(), /\/drag$/);
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerSampleEvent,
+      data: {
+        ...pointerData({
+          eventType: "pointermove",
+          origin: { x: 10, y: 10 },
+          client: { x: 40, y: 10 },
+          viewport: { x: 40, y: 10 },
+          world: { x: 40, y: 10 },
+        }),
+        hit: kindOnlyEdge,
+      },
+    }));
+    assert.doesNotMatch(graph.state(), /\/drag$/);
+    graph.remove();
+  });
+
   test("incomplete handle pointer_down does not enter connect", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
@@ -617,32 +670,23 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
-  test("nodes write before connect emits host-drop", async () => {
+  test("nodes write before connect applies after the child starts", async () => {
     const graph = document.createElement("flow-graph");
     const noNodes = 0;
-    const atLeastOneDrop = 1;
-    const unstarted = "unstarted";
-    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    const admitted = 1;
+    const drops: Event[] = [];
     graph.addEventListener("host-drop", (event: Event) => {
-      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
-        drops.push({
-          cancelable: event.cancelable,
-          bubbles: event.bubbles,
-          composed: event.composed,
-          reason: event.detail["reason"],
-        });
-      }
+      drops.push(event);
     });
-    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: {} }];
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
     await flush();
     assert.equal(graph.nodes.length, noNodes);
-    assert.ok(drops.length >= atLeastOneDrop);
-    for (const drop of drops) {
-      assert.equal(drop.cancelable, publicEventCancelable);
-      assert.equal(drop.bubbles, publicEventBubbles);
-      assert.equal(drop.composed, publicEventComposed);
-    }
-    assert.ok(drops.some((drop) => drop.reason === unstarted));
+    assert.equal(drops.length, noNodes);
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes.length === admitted);
+    assert.equal(graph.nodes[0]?.id, "a");
+    assert.equal(drops.length, noNodes);
+    graph.remove();
   });
 
   test("set nodes while disconnected apply after reconnect", async () => {

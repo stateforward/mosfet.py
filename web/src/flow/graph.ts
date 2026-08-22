@@ -52,6 +52,12 @@ const EVENT_BUBBLES = true;
 const EVENT_COMPOSED = true;
 const GRAPH_ROLE = "group";
 const KEYBOARD_CLICK_DETAIL = 0;
+const POINTER_HIT_EMPTY: PointerHit["kind"] = "empty";
+const POINTER_HIT_NODE: PointerHit["kind"] = "node";
+const POINTER_HIT_EDGE: PointerHit["kind"] = "edge";
+const POINTER_HIT_HANDLE: PointerHit["kind"] = "handle";
+const HANDLE_KIND_SOURCE: HandleKind = "source";
+const HANDLE_KIND_TARGET: HandleKind = "target";
 
 export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly attachEvent = { name: "graph_attach", kind: hsm.Kinds.Event } as const;
@@ -287,6 +293,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
   #panOnDrag = true;
+  #started = false;
+  #pendingNodes: readonly Node[] | undefined;
+  #pendingEdges: readonly Edge[] | undefined;
   #unlisten: (() => void) | null = null;
 
   constructor() {
@@ -319,6 +328,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodes(value: readonly Node[]) {
+    if (!this.#started) {
+      this.#pendingNodes = value;
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
   }
 
@@ -327,6 +340,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set edges(value: readonly Edge[]) {
+    if (!this.#started) {
+      this.#pendingEdges = value;
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
   }
 
@@ -336,6 +353,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set nodesDraggable(value: boolean) {
     this.#nodesDraggable = value;
+    if (!this.#started) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
   }
 
@@ -345,6 +363,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set panOnDrag(value: boolean) {
     this.#panOnDrag = value;
+    if (!this.#started) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
   }
 
@@ -400,6 +419,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start(this, FlowGraph.model);
+    this.#started = true;
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }
 
@@ -443,6 +463,16 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         panOnDrag: instance.#panOnDrag,
       },
     }));
+    const pendingNodes = instance.#pendingNodes;
+    instance.#pendingNodes = undefined;
+    if (pendingNodes !== undefined) {
+      instance.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: pendingNodes } }));
+    }
+    const pendingEdges = instance.#pendingEdges;
+    instance.#pendingEdges = undefined;
+    if (pendingEdges !== undefined) {
+      instance.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: pendingEdges } }));
+    }
     instance.#send({ machine: instance.#renderer, event: hsm.typedEvent({ event: Renderer.markDirtyEvent }) });
   }
 
@@ -469,44 +499,63 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static isConnectStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerSampleFieldsPresent(event.data) && handleHitIs({ hit: hitField(event.data), handleKind: "source" });
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    const hit = event.data["hit"];
+    if (!hsm.isRecord(hit) || hit["kind"] !== POINTER_HIT_HANDLE) return false;
+    if (hit["handleKind"] !== HANDLE_KIND_SOURCE || !isNode(hit["node"])) return false;
+    return isHandlePosition(hit["position"]);
   }
 
   static isConnectComplete(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerSampleFieldsPresent(event.data) && handleHitIs({ hit: hitField(event.data), handleKind: "target" });
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    const hit = event.data["hit"];
+    if (!hsm.isRecord(hit) || hit["kind"] !== POINTER_HIT_HANDLE) return false;
+    if (hit["handleKind"] !== HANDLE_KIND_TARGET || !isNode(hit["node"])) return false;
+    return isHandlePosition(hit["position"]);
   }
 
   static isBoxStart(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
     if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
-    return event.data["shiftKey"] === true && hitKindIs({ hit: hitField(event.data), kind: "empty" });
+    const hit = event.data["hit"];
+    return event.data["shiftKey"] === true && hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_EMPTY;
   }
 
   static isNodePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerSampleFieldsPresent(event.data) && hitKindIs({ hit: hitField(event.data), kind: "node" });
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    const hit = event.data["hit"];
+    return hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_NODE && isNode(hit["node"]);
   }
 
   static isEdgePress(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return pointerSampleFieldsPresent(event.data) && hitKindIs({ hit: hitField(event.data), kind: "edge" });
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
+    const hit = event.data["hit"];
+    return hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_EDGE && isEdge(hit["edge"]);
   }
 
   static isPanStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
     if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data)) return false;
-    return event.data["shiftKey"] === false && hitKindIs({ hit: hitField(event.data), kind: "empty" });
+    const hit = event.data["hit"];
+    return event.data["shiftKey"] === false && hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_EMPTY;
   }
 
   static isDragFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#nodesDraggable) return false;
-    return pointerSampleFieldsPresent(event.data)
-      && pointerMovedPastClickData(event.data)
-      && hitKindIs({ hit: hitField(event.data), kind: "node" });
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data) || !pointerMovedPastClickData(event.data)) {
+      return false;
+    }
+    const hit = event.data["hit"];
+    return hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_NODE && isNode(hit["node"]);
   }
 
   static isPanFromClick(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof FlowGraph) || !instance.#panOnDrag) return false;
-    return pointerSampleFieldsPresent(event.data)
-      && pointerMovedPastClickData(event.data)
-      && !(instance.#nodesDraggable && hitKindIs({ hit: hitField(event.data), kind: "node" }));
+    if (!pointerSampleFieldsPresent(event.data) || !hsm.isRecord(event.data) || !pointerMovedPastClickData(event.data)) {
+      return false;
+    }
+    const hit = event.data["hit"];
+    const nodeDrag = hsm.isRecord(hit) && hit["kind"] === POINTER_HIT_NODE && isNode(hit["node"]);
+    return !(instance.#nodesDraggable && nodeDrag);
   }
 
   static beginConnect(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1270,7 +1319,7 @@ function isPointerEventType(value: unknown): value is PointerSampleData["eventTy
 }
 
 function isHandleKind(value: unknown): value is HandleKind {
-  return value === "source" || value === "target";
+  return value === HANDLE_KIND_SOURCE || value === HANDLE_KIND_TARGET;
 }
 
 function isHandlePosition(value: unknown): value is HandlePosition {
@@ -1336,20 +1385,6 @@ function hitOf(value: unknown): PointerHit | null {
     };
   }
   return null;
-}
-
-function hitField(data: unknown): unknown {
-  return hsm.isRecord(data) ? data["hit"] : undefined;
-}
-
-function hitKindIs(args: { hit: unknown; kind: PointerHit["kind"] }): boolean {
-  return hsm.isRecord(args.hit) && args.hit["kind"] === args.kind;
-}
-
-function handleHitIs(args: { hit: unknown; handleKind: HandleKind }): boolean {
-  if (!hsm.isRecord(args.hit) || args.hit["kind"] !== "handle") return false;
-  if (args.hit["handleKind"] !== args.handleKind || !isNode(args.hit["node"])) return false;
-  return isHandlePosition(args.hit["position"]);
 }
 
 function pointerSampleFieldsPresent(data: unknown): boolean {
