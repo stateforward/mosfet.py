@@ -619,7 +619,8 @@ describe("flow-graph", () => {
     }));
     await flush();
     assert.match(graph.state(), /\/pan$/);
-    assert.equal(graph.nodes.length, 1);
+    const admittedNodeCount = 1;
+    assert.equal(graph.nodes.length, admittedNodeCount);
     assert.equal(graph.nodes[0]?.id, "a");
     assert.deepEqual(rejected, ["invalid"]);
     graph.remove();
@@ -644,7 +645,8 @@ describe("flow-graph", () => {
       data: { nodes: [{ id: "cycle", position: { x: 0, y: 0 }, data: cyclic }] },
     }));
     await flush();
-    assert.equal(graph.nodes.length, 1);
+    const admittedNodeCount = 1;
+    assert.equal(graph.nodes.length, admittedNodeCount);
     assert.equal(graph.nodes[0]?.id, "a");
     assert.deepEqual(rejected, ["invalid"]);
     graph.remove();
