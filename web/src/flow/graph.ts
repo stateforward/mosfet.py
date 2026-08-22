@@ -280,6 +280,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   readonly #viewport: HTMLDivElement;
   readonly #world: HTMLDivElement;
   readonly #edgeLayer: SVGSVGElement;
+  readonly #edgeList: HTMLDivElement;
   readonly #nodeLayer: HTMLDivElement;
   readonly #connectionLine: SVGPathElement;
   readonly #selectionBox: HTMLDivElement;
@@ -326,7 +327,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.#selectionBox.hidden = true;
     this.#world.append(this.#edgeLayer, this.#nodeLayer);
     this.#viewport.append(this.#world, this.#selectionBox);
-    this.#root.append(this.#viewport, document.createElement("slot"));
+    this.#edgeList = document.createElement("div");
+    this.#edgeList.className = "edge-list";
+    this.#edgeList.setAttribute("role", "group");
+    this.#edgeList.setAttribute("aria-label", "Edges");
+    this.#edgeList.addEventListener("click", this.#onEdgeListClick);
+    this.#root.append(this.#viewport, this.#edgeList, document.createElement("slot"));
   }
 
   get nodes(): readonly Node[] {
@@ -1416,7 +1422,52 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }
     const minimap = this.querySelector("flow-minimap");
     minimap?.draw(this.#nodes);
+    this.#syncEdgeList();
   }
+
+  #syncEdgeList(): void {
+    this.#edgeList.replaceChildren();
+    for (const edge of this.#edges) {
+      const eventName = edge.data?.["eventName"];
+      const name = typeof eventName === "string" && eventName.length > 0
+        ? eventName
+        : typeof edge.label === "string" && edge.label.length > 0
+          ? edge.label
+          : edge.id;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = name;
+      button.dataset["edgeId"] = edge.id;
+      this.#edgeList.append(button);
+    }
+  }
+
+  readonly #onEdgeListClick = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof HTMLButtonElement)) return;
+    const id = target.dataset["edgeId"];
+    if (id === undefined) return;
+    const edge = this.#edges.find((item) => item.id === id);
+    if (edge === undefined) return;
+    const clicked = copiedEdgeValue(edge);
+    if (clicked === null) return;
+    this.#send({
+      machine: this.#selection,
+      event: hsm.typedEvent({
+        event: Selection.clickEvent,
+        data: { id: clicked.id, kind: "edge", additive: false },
+      }),
+    });
+    this.dispatchEvent(new CustomEvent<EdgeClickDetail>("flow-edge-click", {
+      detail: {
+        edge: clicked,
+        originalEvent: { pointerId: 0, clientX: 0, clientY: 0, type: "pointerup" },
+      },
+      bubbles: true,
+      composed: true,
+      cancelable: false,
+    }));
+  };
 
   #metrics(): { width: number; height: number; bounds: ViewportBounds; origin: { x: number; y: number } } | null {
     if (this.#viewport.clientWidth <= 0 || this.#viewport.clientHeight <= 0) return null;

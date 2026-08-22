@@ -17,6 +17,8 @@ export class FlowMinimap extends HTMLElement {
     applyStyles(root, minimapStyles);
     this.#canvas = document.createElement("canvas");
     this.#canvas.part.add("canvas");
+    this.#canvas.setAttribute("role", "img");
+    this.#canvas.setAttribute("aria-label", "Graph minimap");
     root.append(this.#canvas);
   }
 

@@ -9,6 +9,7 @@ import { BotOtelSource, registerBotOtelSource } from "../src/elements/bot-otel-s
 import { FlowGraph } from "../src/flow/index.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { streamSource } from "../src/otel/source.ts";
+import { getAllByRole, getByRole } from "./by-role.ts";
 
 registerFlowElements();
 registerBotOtelSource();
@@ -228,6 +229,49 @@ describe("bot-dashboard inspector focus", () => {
     await host.dispatch("dashboard.graph.focus", { machineName });
     assert.deepEqual(names, [machineName]);
     graph.dispatch = original;
+    host.remove();
+  });
+});
+
+describe("bot-dashboard agent accessibility", () => {
+  test("operable controls and live statuses have stable role and name at construction", () => {
+    const host = document.createElement("bot-dashboard");
+    assert.ok(getByRole(host, "combobox", "Observed machine") instanceof HTMLElement);
+    const fitButtons = getAllByRole(host, "button", "Fit");
+    assert.ok(fitButtons.length > 0);
+    assert.ok(fitButtons.every((button) => button instanceof HTMLElement));
+    assert.ok(getByRole(host, "button", "Reset") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Send") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Replay") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Previous replay event") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Next replay event") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Live") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "Play replay") instanceof HTMLElement);
+    assert.ok(getByRole(host, "slider", "Replay position") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Viewport zoom") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Replay status") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Status") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Current state") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Last event") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Observes") instanceof HTMLElement);
+    assert.ok(getByRole(host, "status", "Command result") instanceof HTMLElement);
+    assert.ok(getByRole(host, "group", "Members") instanceof HTMLElement);
+    assert.ok(getByRole(host, "textbox", "Event name") instanceof HTMLElement);
+    assert.ok(getByRole(host, "textbox", "Event JSON data") instanceof HTMLElement);
+    const picker = getByRole(host, "combobox", "Observed machine");
+    assert.ok(picker instanceof HTMLElement);
+    assert.equal(picker.getAttribute("id"), "observed-machine");
+    const label = host.querySelector('label[for="observed-machine"]');
+    assert.ok(label instanceof HTMLElement);
+    assert.equal(label.getAttribute("for"), "observed-machine");
+  });
+
+  test("members and visibility are named for role queries after a snapshot", async () => {
+    const host = await bootDashboard();
+    await host.dispatch("dashboard.model.published", publishedModel("/Phone"));
+    assert.ok(getByRole(host, "group", "Members") instanceof HTMLElement);
+    assert.ok(getByRole(host, "button", "/Phone") instanceof HTMLButtonElement);
+    assert.ok(getByRole(host, "checkbox", "Show /Phone graph") instanceof HTMLInputElement);
     host.remove();
   });
 });

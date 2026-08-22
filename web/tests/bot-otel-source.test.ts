@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { BotOtelSource, registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
+import { getByRole } from "./by-role.ts";
 
 registerBotOtelSource();
 
@@ -55,9 +56,13 @@ describe("bot-otel-source", () => {
     document.body.append(host);
     await waitFor(() => host.snapshot().phase === "live");
     assert.equal(host.snapshot().errorMessage, null);
+    const live = getByRole(host, "button", "Collector status: live");
+    assert.ok(live instanceof HTMLButtonElement);
+    assert.ok(getByRole(host, "status", "Collector error") instanceof HTMLElement);
     await host.dispatch("source.connect.requested", { origin: "not-a-url" });
     await waitFor(() => host.snapshot().phase === "error");
     assert.ok((host.snapshot().errorMessage ?? "").length > 0);
+    assert.ok(getByRole(host, "button", "Collector status: error") instanceof HTMLButtonElement);
     host.remove();
   });
 

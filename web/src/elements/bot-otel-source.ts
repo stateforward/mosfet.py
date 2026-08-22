@@ -96,6 +96,7 @@ export class BotOtelSource extends OtelSource {
     this.#error.part.add("status");
     this.#error.setAttribute("data-testid", "collector-status");
     this.#error.setAttribute("role", "status");
+    this.#error.setAttribute("aria-label", "Collector error");
     this.#error.setAttribute("aria-live", "polite");
     this.#root.append(this.#badge, this.#error);
   }

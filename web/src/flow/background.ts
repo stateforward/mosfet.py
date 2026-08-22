@@ -11,6 +11,7 @@ export class FlowBackground extends HTMLElement {
 
   constructor() {
     super();
+    this.setAttribute("aria-hidden", "true");
     applyStyles(this.attachShadow({ mode: "open" }), backgroundStyles);
   }
 

@@ -18,6 +18,7 @@ import {
   type Node,
   type PointerSampleData,
 } from "../src/flow/types.ts";
+import { getByRole } from "./by-role.ts";
 
 registerFlowElements();
 
@@ -1128,8 +1129,7 @@ describe("flow-graph", () => {
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const node = graph.querySelector("flow-node");
     assert.ok(node instanceof HTMLElement);
-    const controlPart = '[part="control"]';
-    const control = node.shadowRoot?.querySelector(controlPart);
+    const control = getByRole(graph, "button", "A");
     assert.ok(control instanceof HTMLButtonElement);
     assert.equal(node.getAttribute("role"), null);
     assert.equal(control.getAttribute("aria-label"), "A");
@@ -2372,8 +2372,7 @@ describe("flow-controls", () => {
       }
     });
     document.body.append(controls);
-    const controlPart = `[part="${zoomIn}"]`;
-    const button = controls.shadowRoot?.querySelector(controlPart);
+    const button = getByRole(controls, "button", "zoom in");
     assert.ok(button instanceof HTMLButtonElement);
     const clickBubbles = true;
     const clickComposed = true;
@@ -2384,5 +2383,50 @@ describe("flow-controls", () => {
       assertPublicCustomEvent(event);
     }
     controls.remove();
+  });
+});
+
+describe("flow-graph agent accessibility", () => {
+  test("named edge buttons emit flow-edge-click", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const eventName = "phone.ring";
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 },
+      { id: "b", position: { x: 200, y: 0 }, data: { label: "B" }, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "a-b", source: "a", target: "b", data: { eventName } }];
+    await waitUntil(() => {
+      try {
+        getByRole(graph, "button", eventName);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(getByRole(graph, "group", "Edges") instanceof HTMLElement);
+    const edge = getByRole(graph, "button", eventName);
+    assert.ok(edge instanceof HTMLButtonElement);
+    const clicks: Event[] = [];
+    graph.addEventListener("flow-edge-click", (event) => clicks.push(event));
+    const clickBubbles = true;
+    const clickComposed = true;
+    const oneClick = 1;
+    edge.dispatchEvent(new Event("click", { bubbles: clickBubbles, composed: clickComposed }));
+    await flush();
+    assert.equal(clicks.length, oneClick);
+    const click = clicks[0];
+    assert.ok(click instanceof CustomEvent);
+    assertPublicCustomEvent(click);
+    assert.ok(hsm.isRecord(click.detail) && hsm.isRecord(click.detail["edge"]));
+    assert.equal(click.detail["edge"]["id"], "a-b");
+    graph.remove();
+  });
+
+  test("background is decorative", () => {
+    const background = document.createElement("flow-background");
+    document.body.append(background);
+    assert.equal(background.getAttribute("aria-hidden"), "true");
+    background.remove();
   });
 });

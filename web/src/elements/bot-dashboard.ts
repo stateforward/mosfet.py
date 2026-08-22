@@ -715,6 +715,8 @@ export class BotDashboard extends Dashboard {
     this.#source = document.createElement("bot-otel-source");
     this.#picker = document.createElement("select");
     this.#picker.setAttribute("aria-label", "Observed machine");
+    this.#picker.id = "observed-machine";
+    this.#picker.setAttribute("id", "observed-machine");
     this.#picker.dataset["event"] = "dashboard.machine.selected";
     const fit = document.createElement("button");
     fit.type = "button";
@@ -726,6 +728,8 @@ export class BotDashboard extends Dashboard {
     this.#zoom = document.createElement("span");
     this.#zoom.className = "zoom";
     this.#zoom.textContent = "100%";
+    this.#zoom.setAttribute("role", "status");
+    this.#zoom.setAttribute("aria-label", "Viewport zoom");
     mark({ element: this.#zoom, hook: "zoom" });
     const reset = document.createElement("button");
     reset.type = "button";
@@ -734,6 +738,7 @@ export class BotDashboard extends Dashboard {
     reset.textContent = "Reset";
     const pickerLabel = document.createElement("label");
     pickerLabel.className = "machine-picker";
+    pickerLabel.setAttribute("for", "observed-machine");
     pickerLabel.textContent = "Focus";
     pickerLabel.append(this.#picker);
     const topbarTools = document.createElement("div");
@@ -754,9 +759,13 @@ export class BotDashboard extends Dashboard {
     const statusBlock = document.createElement("div");
     const statusLabel = document.createElement("p");
     statusLabel.className = "section-label";
+    statusLabel.id = "inspector-status-label";
+    statusLabel.setAttribute("id", "inspector-status-label");
     statusLabel.textContent = "Status";
     this.#inspectorStatus = document.createElement("p");
     this.#inspectorStatus.className = "inspector-status";
+    this.#inspectorStatus.setAttribute("role", "status");
+    this.#inspectorStatus.setAttribute("aria-labelledby", "inspector-status-label");
     mark({ element: this.#inspectorStatus, hook: "inspector-status" });
     statusBlock.append(statusLabel, this.#inspectorStatus);
 
@@ -765,12 +774,16 @@ export class BotDashboard extends Dashboard {
     machineHeading.className = "rail-heading";
     const machineLabel = document.createElement("h2");
     machineLabel.className = "rail-title";
+    machineLabel.id = "members-heading";
+    machineLabel.setAttribute("id", "members-heading");
     machineLabel.textContent = "Members";
     this.#memberCount = document.createElement("span");
     this.#memberCount.className = "rail-count";
     machineHeading.append(machineLabel, this.#memberCount);
     this.#machines = document.createElement("div");
     this.#machines.className = "machine-list";
+    this.#machines.setAttribute("role", "group");
+    this.#machines.setAttribute("aria-labelledby", "members-heading");
     mark({ element: this.#machines, hook: "machine-list" });
     const memberActions = document.createElement("div");
     memberActions.className = "member-actions";
@@ -790,6 +803,8 @@ export class BotDashboard extends Dashboard {
     pathHead.className = "now-head";
     const pathLabel = document.createElement("p");
     pathLabel.className = "section-label";
+    pathLabel.id = "current-state-label";
+    pathLabel.setAttribute("id", "current-state-label");
     pathLabel.textContent = "Current state";
     this.#nowChip = document.createElement("span");
     this.#nowChip.className = "now-chip";
@@ -799,24 +814,34 @@ export class BotDashboard extends Dashboard {
     pathHead.append(pathLabel, this.#nowChip);
     this.#path = document.createElement("p");
     this.#path.className = "path";
+    this.#path.setAttribute("role", "status");
+    this.#path.setAttribute("aria-labelledby", "current-state-label");
     mark({ element: this.#path, hook: "current-path" });
     this.#pathBlock.append(pathHead, this.#path);
 
     const eventBlock = document.createElement("div");
     const eventLabel = document.createElement("p");
     eventLabel.className = "section-label";
+    eventLabel.id = "last-event-label";
+    eventLabel.setAttribute("id", "last-event-label");
     eventLabel.textContent = "Last event";
     this.#lastEvent = document.createElement("p");
     this.#lastEvent.className = "last-event";
+    this.#lastEvent.setAttribute("role", "status");
+    this.#lastEvent.setAttribute("aria-labelledby", "last-event-label");
     mark({ element: this.#lastEvent, hook: "last-event" });
     eventBlock.append(eventLabel, this.#lastEvent);
 
     const observeBlock = document.createElement("div");
     const observeLabel = document.createElement("p");
     observeLabel.className = "section-label";
+    observeLabel.id = "observes-label";
+    observeLabel.setAttribute("id", "observes-label");
     observeLabel.textContent = "Observes";
     this.#observes = document.createElement("p");
     this.#observes.className = "observes";
+    this.#observes.setAttribute("role", "status");
+    this.#observes.setAttribute("aria-labelledby", "observes-label");
     mark({ element: this.#observes, hook: "observe-count" });
     observeBlock.append(observeLabel, this.#observes);
 
@@ -849,6 +874,8 @@ export class BotDashboard extends Dashboard {
     mark({ element: send, hook: "send-event" });
     this.#commandResult = document.createElement("p");
     this.#commandResult.className = "command-result";
+    this.#commandResult.setAttribute("role", "status");
+    this.#commandResult.setAttribute("aria-label", "Command result");
     mark({ element: this.#commandResult, hook: "command-result" });
     commandBlock.append(commandLabel, nameLabel, dataLabel, send, this.#commandResult);
 
@@ -903,6 +930,7 @@ export class BotDashboard extends Dashboard {
     this.#replayToggle.className = "tool";
     this.#replayToggle.dataset["event"] = "dashboard.replay.play";
     this.#replayToggle.textContent = "Play";
+    this.#replayToggle.setAttribute("aria-label", "Play replay");
     this.#replayToggle.setAttribute("data-testid", "replay-toggle");
     this.#replayNext = document.createElement("button");
     this.#replayNext.type = "button";
@@ -919,6 +947,8 @@ export class BotDashboard extends Dashboard {
     this.#replayLive.setAttribute("data-testid", "replay-live");
     this.#replayStatus = document.createElement("span");
     this.#replayStatus.className = "replay-status";
+    this.#replayStatus.setAttribute("role", "status");
+    this.#replayStatus.setAttribute("aria-label", "Replay status");
     this.#replayStatus.setAttribute("aria-live", "polite");
     this.#replayStatus.setAttribute("data-testid", "replay-status");
     this.#replayRange = document.createElement("input");
@@ -1093,7 +1123,11 @@ export class BotDashboard extends Dashboard {
       select.setAttribute("aria-current", machine.name === selectedMachine ? "true" : "false");
       const name = document.createElement("span");
       name.className = "machine-name";
+      const nameId = `member-name-${encodeURIComponent(machine.name)}`;
+      name.id = nameId;
+      name.setAttribute("id", nameId);
       name.textContent = machine.name;
+      select.setAttribute("aria-labelledby", nameId);
       const component = document.createElement("span");
       component.className = "machine-component";
       component.textContent = machine.componentName;

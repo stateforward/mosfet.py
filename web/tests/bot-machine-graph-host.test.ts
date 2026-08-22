@@ -7,6 +7,7 @@ import { BotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
 import { FlowGraph } from "../src/flow/index.ts";
+import { getByRole } from "./by-role.ts";
 
 registerFlowElements();
 registerBotMachineGraph();
@@ -89,6 +90,16 @@ describe("bot-machine-graph flow host", () => {
     assert.equal(flow.state(), "");
     assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
     assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
+  });
+
+  test("Machine graph name is on the inner frame, not a duplicate host", () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    assert.equal(host.getAttribute("role"), "presentation");
+    const frame = getByRole(host, "group", "Machine graph");
+    assert.ok(frame instanceof FlowGraph);
+    assert.equal(frame.getAttribute("aria-label"), "Machine graph");
+    host.remove();
   });
 
   test("unstarted fit and focusMachine emit host-drop unstarted", async () => {

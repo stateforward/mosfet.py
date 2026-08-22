@@ -131,6 +131,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     replaceStyles(this.#root, `:host { display: block; width: 100%; height: 100%; min-height: 16rem; }`);
+    this.setAttribute("role", "presentation");
     this.#flow = document.createElement("flow-graph");
     this.#flow.adoptStyles(graphStyles);
     this.#flow.style.width = "100%";
