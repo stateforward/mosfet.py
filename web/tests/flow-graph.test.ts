@@ -343,10 +343,17 @@ describe("flow-graph", () => {
     }));
     assert.match(graph.state(), /\/drag$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
-    // No drag_move sample feeds the Dragger: no node move in the same turn.
+    // The drag-start sample arrives before drag_start, so the Dragger ignores
+    // it: no node move in the same turn.
     assert.equal(graph.nodes[0]?.position.x, nodeX);
     nodeEl.dispatchEvent(new PointerEvent("pointermove", {
       clientX: 80, clientY: 10, pointerId: 1, bubbles: true, composed: true,
+    }));
+    // The first sample while dragging establishes the dedupe baseline.
+    await flush();
+    assert.equal(graph.nodes[0]?.position.x, nodeX);
+    nodeEl.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 110, clientY: 20, pointerId: 1, bubbles: true, composed: true,
     }));
     await waitUntil(() => graph.nodes[0]?.position.x !== nodeX);
     nodeEl.dispatchEvent(new PointerEvent("pointerup", {
@@ -357,7 +364,7 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
-  test("drag_start polls on the 16ms frame and produces drag_moved without drag_move samples", async () => {
+  test("pointer samples drive drag_moved per sample without a timer poll", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
     graph.nodesDraggable = true;
@@ -366,8 +373,6 @@ describe("flow-graph", () => {
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof HTMLElement);
-    const frameMs = 16;
-    const cadenceFloorMs = 10;
     const noMove = 0;
     nodeEl.dispatchEvent(new PointerEvent("pointerdown", {
       clientX: 10, clientY: 10, pointerId: 1, bubbles: true, composed: true,
@@ -377,26 +382,48 @@ describe("flow-graph", () => {
       clientX: 50, clientY: 10, pointerId: 1, bubbles: true, composed: true,
     }));
     assert.match(graph.state(), /\/drag$/);
-    const enteredDragAt = Date.now();
-    // No drag_move event ingress: a held pointer does not move the node yet.
+    // The drag-start sample arrives before drag_start, so the Dragger ignores
+    // it: a held pointer does not move the node yet.
     assert.equal(graph.nodes[0]?.position.x, noMove);
     assert.equal(graph.nodes[0]?.position.y, noMove);
+    // The first sample while dragging establishes the dedupe baseline.
+    nodeEl.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 80, clientY: 10, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    assert.equal(graph.nodes[0]?.position.x, noMove);
+    assert.equal(graph.nodes[0]?.position.y, noMove);
+    // Each later sample past the epsilon moves the node per sample: no 16ms
+    // frame floor and no wall-clock wait between the sample and the move.
     nodeEl.dispatchEvent(new PointerEvent("pointermove", {
       clientX: 90, clientY: 30, pointerId: 1, bubbles: true, composed: true,
     }));
     await waitUntil(() => graph.nodes[0]?.position.x !== noMove || graph.nodes[0]?.position.y !== noMove);
-    assert.ok(Date.now() - enteredDragAt >= cadenceFloorMs, "move arrives on the frame cadence, not per sample");
     assert.equal(graph.nodes[0]?.position.x, 40);
     assert.equal(graph.nodes[0]?.position.y, 20);
+    // A sub-epsilon sample is deduped and does not move the node.
+    nodeEl.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 90.005, clientY: 30, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await flush();
+    assert.equal(graph.nodes[0]?.position.x, 40);
+    assert.equal(graph.nodes[0]?.position.y, 20);
+    // The next past-epsilon sample moves the node again per sample.
+    nodeEl.dispatchEvent(new PointerEvent("pointermove", {
+      clientX: 95, clientY: 30, pointerId: 1, bubbles: true, composed: true,
+    }));
+    await waitUntil(() => graph.nodes[0]?.position.x === 45 && graph.nodes[0]?.position.y === 20);
+    assert.equal(graph.nodes[0]?.position.x, 45);
+    assert.equal(graph.nodes[0]?.position.y, 20);
     nodeEl.dispatchEvent(new PointerEvent("pointerup", {
-      clientX: 90, clientY: 30, pointerId: 1, bubbles: true, composed: true,
+      clientX: 95, clientY: 30, pointerId: 1, bubbles: true, composed: true,
     }));
     await waitUntil(() => /\/idle$/.test(graph.state()));
     const settled = { x: graph.nodes[0]?.position.x, y: graph.nodes[0]?.position.y };
     nodeEl.dispatchEvent(new PointerEvent("pointermove", {
       clientX: 120, clientY: 40, pointerId: 1, bubbles: true, composed: true,
     }));
-    await new Promise<void>((resolve) => { globalThis.setTimeout(resolve, frameMs * 3); });
+    await flush();
     assert.deepEqual({ x: graph.nodes[0]?.position.x, y: graph.nodes[0]?.position.y }, settled);
     graph.remove();
   });

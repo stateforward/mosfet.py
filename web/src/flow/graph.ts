@@ -295,7 +295,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #selection: ReturnType<typeof startSelection> | null = null;
   #connection: ReturnType<typeof startConnection> | null = null;
   #view: Viewport = { x: 0, y: 0, zoom: 1 };
-  #lastPointerClient: XYPosition = { x: 0, y: 0 };
   #selectedNodeIds: ReadonlySet<string> = new Set();
   #selectedEdgeIds: ReadonlySet<string> = new Set();
   #box: SelectionBox | null = null;
@@ -1193,7 +1192,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         this.#world.style.transform = `translate(${String(viewport.x)}px, ${String(viewport.y)}px) scale(${String(viewport.zoom)})`;
       },
     });
-    this.#dragger = startDragger({ ctx, getPosition: () => this.#worldPoint(this.#lastPointerClient) });
+    this.#dragger = startDragger({ ctx });
     this.#focuser = startFocuser({ ctx });
     this.#selection = startSelection({ ctx });
     this.#connection = startConnection({ ctx });
@@ -1210,14 +1209,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     };
     const onPointerMove = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
-      const client = { x: event.clientX, y: event.clientY };
-      this.#lastPointerClient = client;
-      const sample = this.#sampleFrom(event, "pointermove", origin ?? client);
-      // Pan motion goes straight to the Panner in the same turn: the Panner's
-      // own state decides whether this pointer is panning (ignored while
-      // fixed), and no host dispatch hop or timer sits in between. The host
-      // pointer model still receives the sample for click/box/connect flow.
+      const sample = this.#sampleFrom(event, "pointermove", origin ?? { x: event.clientX, y: event.clientY });
+      // Pan and drag motion go straight to their machines in the same turn: the
+      // Panner's own state decides whether this pointer is panning (ignored
+      // while fixed), and the Dragger's decides whether it moves (ignored
+      // while idle), so no host dispatch hop or timer sits in between. The
+      // host pointer model still receives the sample for click/box/connect flow.
       this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
+      this.#send({ machine: this.#dragger, event: hsm.typedEvent({ event: Dragger.dragSampleEvent, data: { world: sample.world } }) });
       this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
     };
     const onPointerUp = (event: Event): void => {
