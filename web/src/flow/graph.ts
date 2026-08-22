@@ -74,6 +74,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   static readonly setViewportEvent = { name: "set_viewport", kind: hsm.Kinds.Event } as const;
   static readonly setNodesEvent = { name: "nodes_set", kind: hsm.Kinds.Event } as const;
   static readonly setEdgesEvent = { name: "edges_set", kind: hsm.Kinds.Event } as const;
+  static readonly rejectNodesEvent = { name: "nodes_rejected", kind: hsm.Kinds.Event } as const;
+  static readonly rejectEdgesEvent = { name: "edges_rejected", kind: hsm.Kinds.Event } as const;
   static readonly setPolicyEvent = { name: "policy_set", kind: hsm.Kinds.Event } as const;
   static readonly focusNodeEvent = { name: "focus_node", kind: hsm.Kinds.Event } as const;
   static readonly focusViewportEvent = { name: "focus_viewport", kind: hsm.Kinds.Event } as const;
@@ -207,6 +209,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.defer(FlowGraph.focusMachineEvent.name),
       hsm.defer(FlowGraph.setNodesEvent.name),
       hsm.defer(FlowGraph.setEdgesEvent.name),
+      hsm.defer(FlowGraph.rejectNodesEvent.name),
+      hsm.defer(FlowGraph.rejectEdgesEvent.name),
       hsm.defer(FlowGraph.setPolicyEvent.name),
       hsm.transition(hsm.on(FlowGraph.attachEvent.name), hsm.target("../connected")),
     ),
@@ -230,13 +234,13 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         hsm.guard(FlowGraph.nodesAdmissible),
         hsm.effect(FlowGraph.applyAdmittedNodes),
       ),
-      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.rejectNodes)),
+      hsm.transition(hsm.on(FlowGraph.rejectNodesEvent.name), hsm.effect(FlowGraph.rejectNodes)),
       hsm.transition(
         hsm.on(FlowGraph.setEdgesEvent.name),
         hsm.guard(FlowGraph.edgesAdmissible),
         hsm.effect(FlowGraph.applyAdmittedEdges),
       ),
-      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
+      hsm.transition(hsm.on(FlowGraph.rejectEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
       hsm.transition(hsm.on(FlowGraph.setPolicyEvent.name), hsm.effect(FlowGraph.applySetPolicy)),
       hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
       hsm.transition(hsm.on(Panner.panningEvent.name), hsm.effect(FlowGraph.applyPanning)),
@@ -260,6 +264,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.defer(FlowGraph.attachEvent.name),
       hsm.defer(FlowGraph.setNodesEvent.name),
       hsm.defer(FlowGraph.setEdgesEvent.name),
+      hsm.defer(FlowGraph.rejectNodesEvent.name),
+      hsm.defer(FlowGraph.rejectEdgesEvent.name),
       hsm.defer(FlowGraph.setPolicyEvent.name),
       hsm.activity(FlowGraph.stopActors),
       hsm.transition(
@@ -293,8 +299,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
   #panOnDrag = true;
-  #nodesWrite: readonly unknown[] | undefined;
-  #edgesWrite: readonly unknown[] | undefined;
+  #nodesWrite: StagedNodeWrite | undefined;
+  #edgesWrite: StagedEdgeWrite | undefined;
   #unlisten: (() => void) | null = null;
 
   constructor() {
@@ -332,13 +338,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Inputs: caller `value`. Copied with `copyNode` of owned nested
    * `position`/`data` at write time; later mutation of the caller array or
    * nested fields does not change staged or admitted nodes.
-   * Omitted, null, non-record, cyclic, or over-deep `data` stays invalid and
-   * is not admitted as `{}`. `copyNode` `{ ok: false }` stages an isolated
-   * invalid write of the same length so admit rejects the whole payload.
-   * Before connect this is a write buffer replayed from `connectedCallback`
-   * after `start`; that staging is pre-start local state, not a dropped
-   * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
-   * with the copy. After stop, including while `stop()` is in flight, this
+   * Omitted, null, non-record, cyclic, or over-deep `data`, or a non-finite
+   * `position`, is a typed copy failure. That failure is staged as
+   * `nodes_rejected` with `AdmitRejectedDetail`; it is not rewritten as a
+   * poison `nodes_set` payload. Before connect this is a write buffer replayed
+   * from `connectedCallback` after `start`; that staging is pre-start local
+   * state, not a dropped dispatch, and emits no host-drop. After start, a
+   * successful copy dispatches `nodes_set` and a failed copy dispatches
+   * `nodes_rejected`. After stop, including while `stop()` is in flight, this
    * setter emits `host-drop` with reason `"stopped"` and does not dispatch or
    * retain `value` (the write buffer is unchanged; a later `start` from
    * `connectedCallback` replays the last staged write, not the dropped one).
@@ -358,7 +365,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const nodes = stagedNodeWrite(value);
     this.#nodesWrite = nodes;
     if (!hsm.hostWasStarted(this)) return;
-    this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes } }));
+    this.#dispatchNodesWrite(nodes);
   }
 
   get edges(): readonly Edge[] {
@@ -370,15 +377,16 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    *
    * Inputs: caller `value`. Copied with `copyEdge` at write time; later
    * mutation of the caller array does not change staged or admitted edges.
-   * Cyclic, over-deep, or non-record `data` stays invalid (`copyEdge`
-   * `{ ok: false }` stages an isolated invalid write of the same length).
-   * Before connect this is a write buffer replayed from `connectedCallback`
-   * after `start`; that staging is pre-start local state, not a dropped
-   * dispatch, and emits no host-drop. After start, `set_edges` is dispatched
-   * with the copy. After stop, including while `stop()` is in flight, this
-   * setter emits `host-drop` with reason `"stopped"` and does not dispatch or
-   * retain `value` (the write buffer is unchanged; a later `start` from
-   * `connectedCallback` replays the last staged write, not the dropped one).
+   * Cyclic, over-deep, or non-record `data` is a typed copy failure. That
+   * failure is staged as `edges_rejected` with `AdmitRejectedDetail`; it is
+   * not rewritten as a poison `edges_set` payload. Before connect this is a
+   * write buffer replayed from `connectedCallback` after `start`; that staging
+   * is pre-start local state, not a dropped dispatch, and emits no host-drop.
+   * After start, a successful copy dispatches `edges_set` and a failed copy
+   * dispatches `edges_rejected`. After stop, including while `stop()` is in
+   * flight, this setter emits `host-drop` with reason `"stopped"` and does not
+   * dispatch or retain `value` (the write buffer is unchanged; a later `start`
+   * from `connectedCallback` replays the last staged write, not the dropped one).
    * Outputs: getter returns copies of admitted edges.
    * Ownership: this host owns the copy. Lifetime: until the next staged edges
    * write. Stopped writes do not replace the buffer. Concurrency: runtime-safe.
@@ -395,7 +403,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const edges = stagedEdgeWrite(value);
     this.#edgesWrite = edges;
     if (!hsm.hostWasStarted(this)) return;
-    this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges } }));
+    this.#dispatchEdgesWrite(edges);
   }
 
   get nodesDraggable(): boolean {
@@ -589,12 +597,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start({ instance: this, model: FlowGraph.model });
-    if (this.#nodesWrite !== undefined) {
-      this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: this.#nodesWrite } }));
-    }
-    if (this.#edgesWrite !== undefined) {
-      this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: this.#edgesWrite } }));
-    }
+    if (this.#nodesWrite !== undefined) this.#dispatchNodesWrite(this.#nodesWrite);
+    if (this.#edgesWrite !== undefined) this.#dispatchEdgesWrite(this.#edgesWrite);
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }
 
@@ -607,6 +611,22 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   #live(event: hsm.DispatchEvent): void {
     void this.dispatch(event).catch(hsm.catchFailure(this));
+  }
+
+  #dispatchNodesWrite(staged: StagedNodeWrite): void {
+    if (staged.ok) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: staged.nodes } }));
+      return;
+    }
+    this.#live(hsm.typedEvent({ event: FlowGraph.rejectNodesEvent, data: staged.rejected }));
+  }
+
+  #dispatchEdgesWrite(staged: StagedEdgeWrite): void {
+    if (staged.ok) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: staged.edges } }));
+      return;
+    }
+    this.#live(hsm.typedEvent({ event: FlowGraph.rejectEdgesEvent, data: staged.rejected }));
   }
 
   #dropStopped(args: { operation: string }): void {
@@ -964,8 +984,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static rejectNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
-    instance.#emitRejected(nodesRejectDetail(event.data["nodes"]));
+    if (!(instance instanceof FlowGraph) || !isAdmitRejectedDetail(event.data)) return;
+    instance.#emitRejected(event.data);
   }
 
   static applyAdmittedEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -977,8 +997,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static rejectEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
-    instance.#emitRejected(edgesRejectDetail(event.data["edges"]));
+    if (!(instance instanceof FlowGraph) || !isAdmitRejectedDetail(event.data)) return;
+    instance.#emitRejected(event.data);
   }
 
   static applySetPolicy(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1817,30 +1837,50 @@ function copiedEdgeList(edges: readonly Edge[]): Edge[] {
   return copied;
 }
 
-function stagedNodeWrite(value: readonly Node[]): readonly unknown[] {
+type StagedNodeWrite =
+  | { readonly ok: true; readonly nodes: readonly Node[] }
+  | { readonly ok: false; readonly rejected: AdmitRejectedDetail };
+
+type StagedEdgeWrite =
+  | { readonly ok: true; readonly edges: readonly Edge[] }
+  | { readonly ok: false; readonly rejected: AdmitRejectedDetail };
+
+function isAdmitRejectedDetail(value: unknown): value is AdmitRejectedDetail {
+  if (!hsm.isRecord(value) || typeof value["nodeCount"] !== "number" || typeof value["edgeCount"] !== "number") {
+    return false;
+  }
+  const reason = value["reason"];
+  return reason === "too_many_nodes" || reason === "too_many_edges" || reason === "invalid";
+}
+
+function stagedNodeWrite(value: readonly Node[]): StagedNodeWrite {
+  if (!nodesAreAdmissible(value)) {
+    return { ok: false, rejected: nodesRejectDetail(value) };
+  }
   const nodes: Node[] = [];
   for (const node of value) {
     const copied = copyNode(node);
-    if (!copied.ok) {
-      const invalidCoordinate = Number.NaN;
-      return value.map((item) => ({ id: item.id, position: { x: invalidCoordinate, y: invalidCoordinate } }));
+    if (!copied.ok || !isNode(copied.value)) {
+      return { ok: false, rejected: nodesRejectDetail(value) };
     }
     nodes.push(copied.value);
   }
-  return nodes;
+  return { ok: true, nodes };
 }
 
-function stagedEdgeWrite(value: readonly Edge[]): readonly unknown[] {
+function stagedEdgeWrite(value: readonly Edge[]): StagedEdgeWrite {
+  if (!edgesAreAdmissible(value)) {
+    return { ok: false, rejected: edgesRejectDetail(value) };
+  }
   const edges: Edge[] = [];
-  const invalidData = null;
   for (const edge of value) {
     const copied = copyEdge(edge);
-    if (!copied.ok) {
-      return value.map((item) => ({ id: item.id, source: item.source, target: item.target, data: invalidData }));
+    if (!copied.ok || !isEdge(copied.value)) {
+      return { ok: false, rejected: edgesRejectDetail(value) };
     }
     edges.push(copied.value);
   }
-  return edges;
+  return { ok: true, edges };
 }
 
 export function registerFlowGraph(): void {
