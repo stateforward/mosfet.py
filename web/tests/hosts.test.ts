@@ -1160,11 +1160,13 @@ describe("companion-style HSM controllers", () => {
 
   test("replay live without payload uses dashboard-owned source", async () => {
     let connects = 0;
+    const urls: string[] = [];
     const firstConnect = 1;
     const secondConnect = 2;
     const dashboard = bootDashboard({
-      connectStream: () => {
+      connectStream: (url) => {
         connects += 1;
+        urls.push(url);
         return { close(): void { return; } };
       },
     });
@@ -1178,6 +1180,83 @@ describe("companion-style HSM controllers", () => {
     assert.equal(after.replay.active, replayInactive);
     assert.match(after.statePath, /\/viewing$/);
     await waitFor(() => connects === secondConnect);
+    const collectorPath = "/v1/traces/stream";
+    assert.equal(urls[1], collectorPath);
+    await stopDashboard(dashboard);
+  });
+
+  test("replay live with source and no origin does not fill instance origin", async () => {
+    let connects = 0;
+    const firstConnect = 1;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    dashboard.origin = "http://localhost";
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(connects, firstConnect);
+    await dashboard.dispatch("dashboard.replay.enter");
+    const after = await dashboard.dispatch("dashboard.replay.live", { source: streamSource() });
+    assert.equal(after.phase, "error");
+    assert.match(after.errorMessage ?? "", /collector url is not allowed/);
+    assert.equal(connects, firstConnect);
+    await stopDashboard(dashboard);
+  });
+
+  test("replay live with origin and no source does not fill owned source", async () => {
+    let connects = 0;
+    const firstConnect = 1;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(connects, firstConnect);
+    await dashboard.dispatch("dashboard.replay.enter");
+    const after = await dashboard.dispatch("dashboard.replay.live", { origin: "http://example.com" });
+    assert.equal(after.phase, "error");
+    assert.match(after.errorMessage ?? "", /no otel stream selected/);
+    assert.equal(connects, firstConnect);
+    await stopDashboard(dashboard);
+  });
+
+  test("liveConnectData matches stamped origin and source pairing", async () => {
+    const dashboard = bootDashboard({
+      connectStream: () => ({ close(): void { return; } }),
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    const owned = dashboard.ownedSourceConnect();
+    const ownedAllowed = true;
+    assert.equal(owned.urlAllowed, ownedAllowed);
+    assert.equal(owned.origin, dashboard.origin);
+    assert.equal(owned.source?.kind, dashboard.snapshot().source?.kind);
+    assert.equal(owned.source?.url, dashboard.snapshot().source?.url);
+    const liveEvent = {
+      name: "dashboard.replay.live",
+      kind: hsm.Kinds.Event,
+      data: owned,
+    };
+    assert.deepEqual(dashboard.liveConnectData(liveEvent), owned);
+    const sourceOnly = {
+      name: "dashboard.replay.live",
+      kind: hsm.Kinds.Event,
+      data: { source: streamSource() },
+    };
+    assert.equal(dashboard.liveConnectData(sourceOnly), null);
+    const originStamp = sourceConnectFrom({ origin: "http://example.com" });
+    const originOnly = {
+      name: "dashboard.replay.live",
+      kind: hsm.Kinds.Event,
+      data: originStamp,
+    };
+    const originRead = dashboard.liveConnectData(originOnly);
+    assert.equal(originRead?.origin, originStamp.origin);
+    assert.equal(originRead?.urlAllowed, originStamp.urlAllowed);
+    assert.equal(originRead?.source, undefined);
     await stopDashboard(dashboard);
   });
 

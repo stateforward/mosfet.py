@@ -1353,6 +1353,10 @@ export class BotDashboard extends Dashboard {
       }
       return;
     }
+    if (eventName === "dashboard.replay.live") {
+      void this.dispatch(eventName, this.ownedSourceConnect()).catch(catchFailure(this));
+      return;
+    }
     void this.dispatch(eventName).catch(catchFailure(this));
   };
 }

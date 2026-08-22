@@ -493,19 +493,20 @@ function hasPlayableReplay(_ctx: hsm.Context, instance: hsm.Instance, _event: hs
   return controllerOf(instance)?.hasPlayableReplay() === true;
 }
 
-function streamUrlAllowed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-  const connect = controllerOf(instance)?.liveConnectData(event) ?? null;
-  if (connect === null) return false;
-  const source = connect.source;
-  return source !== undefined && source.kind === "stream" && connect.urlAllowed === true;
+function streamUrlAllowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  return hsm.isRecord(event.data)
+    && event.data["urlAllowed"] === true
+    && isOtelSource(event.data["source"]);
 }
 
-function streamUrlDisallowed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-  const connect = controllerOf(instance)?.liveConnectData(event) ?? null;
-  if (connect === null) return false;
-  const source = connect.source;
-  if (source === undefined || source.kind !== "stream") return false;
-  return connect.urlAllowed !== true;
+function streamUrlDisallowed(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+  return hsm.isRecord(event.data)
+    && event.data["urlAllowed"] === false
+    && isOtelSource(event.data["source"]);
+}
+
+function isConnectIngress(data: unknown): boolean {
+  return isSourceConnectPayload(data) || (hsm.isRecord(data) && isOtelSource(data["source"]));
 }
 
 function failNoStream(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -936,9 +937,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Admit Event-path and controller payloads. Only SourceConnect-shaped data
-   * (`origin` string or `urlAllowed` boolean) is restamped through
-   * `sourceConnectFrom`; other payloads keep their fields.
+   * Admit Event-path and controller payloads. Connect-shaped data (`origin`
+   * string, `urlAllowed` boolean, or `source`) is restamped through
+   * `sourceConnectFrom` so choice guards read `urlAllowed` and never construct
+   * URL objects. A payload-less `dashboard.replay.live` is stamped from this
+   * dashboard's owned `#source` and `origin`, not from `snapshot()`.
    */
   override dispatch(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot>;
   override dispatch(event: hsm.Event): hsm.Completion;
@@ -949,25 +952,62 @@ export class Dashboard extends hsm.from(HTMLElement) {
         if (!hsm.isEvent(data)) {
           throw new TypeError("dispatch(ctx, event) requires an Event");
         }
-        return super.dispatch(eventOrContext, eventWithSourceConnect(data));
+        return super.dispatch(eventOrContext, this.#admitEvent(data));
       }
       if (!hsm.isEvent(eventOrContext)) {
         throw new TypeError("dispatch(event) requires an Event");
       }
-      return super.dispatch(eventWithSourceConnect(eventOrContext));
+      return super.dispatch(this.#admitEvent(eventOrContext));
     }
-    return this.#dispatchController(eventOrContext, data);
+    return this.#dispatchController({ eventName: eventOrContext, data });
   }
 
-  async #dispatchController(eventName: DashboardEventName, data?: unknown): Promise<DashboardSnapshot> {
-    const admitted = isSourceConnectPayload(data) ? sourceConnectFrom(data) : data;
+  async #dispatchController(args: { eventName: DashboardEventName; data?: unknown }): Promise<DashboardSnapshot> {
+    const admitted = this.#admitControllerData(args);
     await super.dispatch(
       admitted === undefined
-        ? hsm.typedEvent({ event: dashboardCommands[eventName] })
-        : hsm.typedEvent({ event: dashboardCommands[eventName], data: admitted }),
+        ? hsm.typedEvent({ event: dashboardCommands[args.eventName] })
+        : hsm.typedEvent({ event: dashboardCommands[args.eventName], data: admitted }),
     );
     this.#emit();
     return this.snapshot();
+  }
+
+  #admitControllerData(args: { eventName: DashboardEventName; data?: unknown }): unknown {
+    const data = args.data;
+    if (isConnectIngress(data)) return sourceConnectFrom(data);
+    if (args.eventName === "dashboard.replay.live" && data === undefined) {
+      return this.ownedSourceConnect();
+    }
+    return data;
+  }
+
+  #admitEvent(event: hsm.Event): hsm.Event {
+    if (isConnectIngress(event.data)) {
+      return { ...event, data: sourceConnectFrom(event.data) };
+    }
+    if (event.data === undefined && event.name === dashboardCommands["dashboard.replay.live"].name) {
+      return { ...event, data: this.ownedSourceConnect() };
+    }
+    return eventWithSourceConnect(event);
+  }
+
+  /**
+   * Stamp stream connect data from this dashboard's owned `#source` and
+   * `origin`.
+   *
+   * Inputs: none. Uses owned `#source` (omitted when null) and `origin`.
+   * Outputs: `SourceConnectData` with recomputed `urlAllowed`. Missing source
+   * yields a stamp without `source`; missing or invalid origin yields
+   * `urlAllowed: false`. Ownership: this dashboard owns `#source`; the returned
+   * record is a new connect payload. Lifetime: one dispatch admission.
+   * Concurrency: runtime-safe. Classification: runtime-safe.
+   */
+  ownedSourceConnect(): SourceConnectData {
+    return sourceConnectFrom({
+      origin: this.origin,
+      ...(this.#source !== null ? { source: this.#source } : {}),
+    });
   }
 
   attachCommand(): void {
@@ -984,30 +1024,29 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Stamp stream connect data from the triggering event, or from Dashboard-owned
-   * `#source` and `origin` when the event has no source payload.
+   * Read stamped stream connect data from the entering event.
    *
-   * Inputs: the entering `dashboard.source.selected` / `dashboard.replay.live`
-   * event. An event that already carries `source` is restamped from that payload
-   * only — instance `origin` is not filled in. A trigger with no source uses
-   * this dashboard's owned `#source` and `origin`. Outputs: `SourceConnectData`
-   * with recomputed `urlAllowed`, or null when neither the event nor this
-   * dashboard has a source. Ownership: this dashboard owns `#source`; the
-   * returned record is a new connect payload. Lifetime: one choice/activity
-   * evaluation. Concurrency: runtime-safe. Failure modes: missing source
-   * returns null; missing or invalid origin yields `urlAllowed: false`.
-   * Classification: runtime-safe.
+   * Inputs: an event whose producer already stamped `SourceConnectData`
+   * (`urlAllowed` boolean and `origin` string). Does not fill instance
+   * `#source` or `origin`, does not call `sourceConnectFrom` or `collectorUrl`,
+   * and does not recompute `urlAllowed`. Outputs: the stamped pairing, or null
+   * when the event is not a complete connect stamp. Ownership: returned record
+   * aliases the event `source` object when present. Lifetime: one
+   * choice/activity evaluation. Concurrency: runtime-safe. Failure modes:
+   * missing `urlAllowed` or `origin` returns null. Classification: runtime-safe.
    */
   liveConnectData(event: hsm.Event): SourceConnectData | null {
-    const eventSource = sourceFromEvent(event);
-    const eventOrigin = stringField({ event, key: "origin" });
-    if (eventSource !== null) {
-      const origin = eventOrigin ?? "";
-      return sourceConnectFrom({ source: eventSource, origin });
+    if (!hsm.isRecord(event.data) || typeof event.data["urlAllowed"] !== "boolean" || typeof event.data["origin"] !== "string") {
+      return null;
     }
-    if (this.#source === null) return null;
-    const origin = eventOrigin ?? this.origin;
-    return sourceConnectFrom({ source: this.#source, origin });
+    const url = event.data["url"];
+    const source = event.data["source"];
+    return {
+      urlAllowed: event.data["urlAllowed"],
+      origin: event.data["origin"],
+      ...(typeof url === "string" ? { url } : {}),
+      ...(isOtelSource(source) ? { source } : {}),
+    };
   }
 
   forwardCommand(event: hsm.Event): void {
@@ -1228,39 +1267,31 @@ export class Dashboard extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Viewing activity: connect the stream named on the entering event.
+   * Viewing activity: connect the stream already admitted by `sourceCheck`.
    *
    * Inputs: activity `ctx` and the entering `dashboard.source.selected` /
-   * `dashboard.replay.live` event. `source` and `origin` come from that
-   * event when present, otherwise from this dashboard's owned `#source` and
-   * `origin` via `liveConnectData`.
+   * `dashboard.replay.live` event. `source`, `origin`, and `urlAllowed` come
+   * from that stamped payload. `sourceCheck` already selected viewing, so this
+   * activity does not dispatch `dashboard.load.failed` for missing source or
+   * disallowed URL.
    * Outputs: `dashboard.load.completed` / `dashboard.model.published` products
-   * and `dashboard.load.failed` for stream errors. Leaving viewing (replay.enter,
-   * reset, detach, new source) cancels the stream by exiting this activity.
-   * Late callbacks after that exit dispatch `dashboard.stream.dropped` on live;
-   * they do not apply products or `load.failed`.
+   * and `dashboard.load.failed` for later stream errors. Leaving viewing
+   * (replay.enter, reset, detach, new source) cancels the stream by exiting
+   * this activity. Late callbacks after that exit dispatch
+   * `dashboard.stream.dropped` on live; they do not apply products or
+   * `load.failed`.
    * Ownership: this dashboard owns the subscription and closes it on activity
    * exit. Lifetime: one viewing activity. Concurrency: one stream per viewing;
    * overlapping viewing is prevented by topology. Classification: external-system.
    */
   async streamSource(args: { ctx: hsm.Context; event: hsm.Event }): Promise<void> {
     const connect = this.liveConnectData(args.event);
-    const source = connect?.source ?? null;
-    const origin = connect?.origin ?? null;
-    if (source === null || source.kind !== "stream" || origin === null || origin.length === 0) {
-      await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.load.failed"],
-        data: { message: "no otel stream selected" },
-      })).catch(hsm.catchFailure(this));
-      return;
+    if (connect === null || connect.urlAllowed !== true || connect.source === undefined) {
+      throw new TypeError("viewing entered without stamped stream connect");
     }
-    const url = collectorUrl({ requested: source.url, origin });
+    const url = collectorUrl({ requested: connect.source.url, origin: connect.origin });
     if (url === null) {
-      await this.dispatch(hsm.typedEvent({
-        event: dashboardCompletions["dashboard.load.failed"],
-        data: { message: "collector url is not allowed" },
-      })).catch(hsm.catchFailure(this));
-      return;
+      throw new TypeError("stamped urlAllowed is true but collector url is null");
     }
     const ctx = args.ctx;
     let subscription: { close(): void } | null = null;
