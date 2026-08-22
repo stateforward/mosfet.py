@@ -47,6 +47,18 @@ export class FlowControls extends HTMLElement {
 
 const TEST_ID_ATTR = "data-testid";
 
+/**
+ * Stable accessible names for flow viewport controls.
+ * `fit` is namespaced "Fit flow view" so it cannot collide case-insensitively
+ * with the dashboard's "Fit environment map" button, which fits the
+ * environment map canvas in the same host tree.
+ */
+const ACCESSIBLE_NAME: Record<FlowControlDetail["action"], string> = {
+  "zoom-in": "zoom in",
+  "zoom-out": "zoom out",
+  fit: "Fit flow view",
+};
+
 function controlButton(args: { label: string; action: FlowControlDetail["action"] }): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -54,7 +66,7 @@ function controlButton(args: { label: string; action: FlowControlDetail["action"
   button.dataset["action"] = args.action;
   button.part.add(args.action);
   button.setAttribute(TEST_ID_ATTR, args.action);
-  button.setAttribute("aria-label", args.action.replace("-", " "));
+  button.setAttribute("aria-label", ACCESSIBLE_NAME[args.action]);
   return button;
 }
 

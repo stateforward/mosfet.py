@@ -2372,17 +2372,37 @@ describe("flow-controls", () => {
       }
     });
     document.body.append(controls);
-    const button = getByRole(controls, "button", "zoom in");
-    assert.ok(button instanceof HTMLButtonElement);
+    const zoomInButton = getByRole(controls, "button", "zoom in");
+    assert.ok(zoomInButton instanceof HTMLButtonElement);
+    // The fit control keeps a distinct stable name that cannot collide with
+    // the dashboard's "Fit environment map" button case-insensitively.
+    assert.ok(getByRole(controls, "button", "Fit flow view") instanceof HTMLButtonElement);
+    assert.ok(getByRole(controls, "button", "zoom out") instanceof HTMLButtonElement);
     const clickBubbles = true;
     const clickComposed = true;
-    button.dispatchEvent(new Event("click", { bubbles: clickBubbles, composed: clickComposed }));
+    zoomInButton.dispatchEvent(new Event("click", { bubbles: clickBubbles, composed: clickComposed }));
     assert.equal(actions.length, oneAction);
     assert.equal(actions[0], zoomIn);
     for (const event of events) {
       assertPublicCustomEvent(event);
     }
     controls.remove();
+  });
+});
+
+describe("flow-node accessible names", () => {
+  test("node buttons without a label fall back to the node id for the accessible name", () => {
+    const nodeEl = document.createElement("flow-node");
+    document.body.append(nodeEl);
+    const unlabeled: Node = { id: "initial:/Phone:entry", position: { x: 0, y: 0 }, data: { label: "" }, width: 24, height: 24 };
+    nodeEl.node = unlabeled;
+    const button = nodeEl.shadowRoot?.querySelector("button");
+    assert.ok(button instanceof HTMLButtonElement);
+    assert.equal(button.getAttribute("aria-label"), unlabeled.id);
+    const labeled: Node = { id: "labeled", position: { x: 0, y: 0 }, data: { label: "A" }, width: 40, height: 20 };
+    nodeEl.node = labeled;
+    assert.equal(button.getAttribute("aria-label"), "A");
+    nodeEl.remove();
   });
 });
 

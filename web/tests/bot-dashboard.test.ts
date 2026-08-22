@@ -237,9 +237,16 @@ describe("bot-dashboard agent accessibility", () => {
   test("operable controls and live statuses have stable role and name at construction", () => {
     const host = document.createElement("bot-dashboard");
     assert.ok(getByRole(host, "combobox", "Observed machine") instanceof HTMLElement);
-    const fitButtons = getAllByRole(host, "button", "Fit");
-    assert.ok(fitButtons.length > 0);
-    assert.ok(fitButtons.every((button) => button instanceof HTMLElement));
+    // The dashboard Fit button and the nested flow-controls fit button must
+    // keep distinct stable names: each resolves to exactly one button, and no
+    // case-insensitive "fit" name remains in the host tree.
+    const fit = getByRole(host, "button", "Fit environment map");
+    assert.ok(fit instanceof HTMLElement);
+    const flowFit = getByRole(host, "button", "Fit flow view");
+    assert.ok(flowFit instanceof HTMLElement);
+    const bareFitMatches = getAllByRole(host, "button", "fit");
+    const noBareFit = 0;
+    assert.equal(bareFitMatches.length, noBareFit);
     assert.ok(getByRole(host, "button", "Reset") instanceof HTMLElement);
     assert.ok(getByRole(host, "button", "Send") instanceof HTMLElement);
     assert.ok(getByRole(host, "button", "Replay") instanceof HTMLElement);

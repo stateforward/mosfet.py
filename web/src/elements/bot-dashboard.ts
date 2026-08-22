@@ -722,6 +722,7 @@ export class BotDashboard extends Dashboard {
     fit.type = "button";
     fit.className = "tool";
     fit.textContent = "Fit";
+    fit.setAttribute("aria-label", "Fit environment map");
     fit.addEventListener("click", () => {
       this.#graph.fit();
     });

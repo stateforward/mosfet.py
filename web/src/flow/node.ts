@@ -99,7 +99,10 @@ export class FlowNode extends HTMLElement {
     if (typeof machineName === "string") this.dataset["machineName"] = machineName;
     const label = node.data["label"];
     this.#label.textContent = typeof label === "string" ? label : node.id;
-    this.#button.setAttribute("aria-label", this.#label.textContent);
+    // Empty labels (machine-graph initial nodes) keep an empty visible badge
+    // but still expose a stable accessible name from the node id.
+    const accessible = this.#label.textContent;
+    this.#button.setAttribute("aria-label", accessible.length > 0 ? accessible : node.id);
   }
 }
 
