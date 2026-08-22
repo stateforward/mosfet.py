@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 
 import * as hsm from "../src/hsm.ts";
 import { FlowGraph } from "../src/flow/graph.ts";
+import { FlowEdge } from "../src/flow/edge.ts";
 import { FlowNode } from "../src/flow/node.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
@@ -11,8 +12,10 @@ import {
   FIT_PADDING_RATIO,
   MAX_FLOW_EDGES,
   MAX_FLOW_NODES,
+  MAX_JSON_DEPTH,
   MAX_ZOOM,
   MIN_ZOOM,
+  type Node,
   type PointerSampleData,
 } from "../src/flow/types.ts";
 
@@ -1771,7 +1774,8 @@ describe("flow-graph", () => {
     document.body.append(graph);
     await flush();
     assert.equal(graph.nodes.length, noNodes);
-    assert.equal(graph.nodes.some((node) => node.id === repairedId), false);
+    const droppedWriteAbsent = false;
+    assert.equal(graph.nodes.some((node) => node.id === repairedId), droppedWriteAbsent);
     graph.remove();
     const nanWidthPosition = { x: 4, y: 5 };
     const nanWidthData = { label: "nan-width" };
@@ -1782,7 +1786,7 @@ describe("flow-graph", () => {
     document.body.append(again);
     await flush();
     assert.equal(again.nodes.length, noNodes);
-    assert.equal(again.nodes.some((node) => node.id === nanWidthId), false);
+    assert.equal(again.nodes.some((node) => node.id === nanWidthId), droppedWriteAbsent);
     again.remove();
   });
 
@@ -1792,16 +1796,167 @@ describe("flow-graph", () => {
     const originX = 0;
     const mutatedX = 999;
     const originalLabel = "A";
+    const originLeft = `${originX}px`;
     graph.nodes = [{ id: "a", position: { x: originX, y: 0 }, data: { label: originalLabel }, width: 80, height: 40 }];
     await waitUntil(() => graph.querySelector("flow-node") !== null);
     const element = graph.querySelector("flow-node");
     assert.ok(element instanceof FlowNode);
-    const painted = element.node as { position: { x: number }; data: { label?: unknown } } | null;
+    const painted = element.node as { position: { x: number }; data: Record<string, unknown> } | null;
     assert.ok(painted !== null);
     painted.position.x = mutatedX;
-    painted.data.label = "mutated";
+    painted.data["label"] = "mutated";
     assert.equal(graph.nodes[0]?.position.x, originX);
     assert.equal(graph.nodes[0]?.data["label"], originalLabel);
+    assert.equal(element.node?.position.x, originX);
+    assert.equal(element.node?.data["label"], originalLabel);
+    assert.equal(element.style.left, originLeft);
+    const badge = element.shadowRoot?.querySelector('[part="badge"]');
+    assert.equal(badge?.textContent, originalLabel);
+    graph.remove();
+  });
+
+  test("flow-edge getter copies nested data", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originalLabel = "e";
+    const mutatedLabel = "mutated";
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "a-b", source: "a", target: "b", data: { label: originalLabel } }];
+    await waitUntil(() => graph.querySelector("flow-edge") !== null);
+    const element = graph.querySelector("flow-edge");
+    assert.ok(element instanceof FlowEdge);
+    const painted = element.edge;
+    assert.ok(painted !== null);
+    assert.ok(painted.data !== undefined);
+    painted.data["label"] = mutatedLabel;
+    assert.equal(graph.edges[0]?.data?.["label"], originalLabel);
+    assert.equal(element.edge?.data?.["label"], originalLabel);
+    graph.remove();
+  });
+
+  test("mutating caller nested node fields after a valid set does not change admitted nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    const originX = 0;
+    const originalLabel = "A";
+    const mutatedX = 999;
+    const position = { x: originX, y: 0 };
+    const data = { label: originalLabel };
+    const admitted = 1;
+    graph.nodes = [{ id: "a", position, data, width: 80, height: 40 }];
+    position.x = mutatedX;
+    data.label = "mutated";
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes.length === admitted);
+    assert.equal(graph.nodes[0]?.position.x, originX);
+    assert.equal(graph.nodes[0]?.data["label"], originalLabel);
+    graph.remove();
+  });
+
+  test("omitted or non-record node data is not admitted as empty data", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const noNodes = 0;
+    const droppedWriteAbsent = false;
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    const omittedId = "omitted";
+    const nullId = "null-data";
+    const arrayId = "array-data";
+    graph.nodes = [{ id: omittedId, position: { x: 0, y: 0 } } as Node];
+    graph.nodes = [{ id: nullId, position: { x: 0, y: 0 }, data: null } as unknown as Node];
+    graph.nodes = [{ id: arrayId, position: { x: 0, y: 0 }, data: [] } as unknown as Node];
+    await flush();
+    assert.equal(graph.nodes.length, noNodes);
+    assert.equal(graph.nodes.some((node) => node.id === omittedId), droppedWriteAbsent);
+    assert.equal(graph.nodes.some((node) => node.id === nullId), droppedWriteAbsent);
+    assert.equal(graph.nodes.some((node) => node.id === arrayId), droppedWriteAbsent);
+    assert.deepEqual(rejected, ["invalid", "invalid", "invalid"]);
+    graph.remove();
+  });
+
+  test("cyclic nested node data does not throw and is not admitted", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const noNodes = 0;
+    const droppedWriteAbsent = false;
+    const cyclicId = "cycle";
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    const data: Record<string, unknown> = { label: "cycle" };
+    data["self"] = data;
+    graph.nodes = [{ id: cyclicId, position: { x: 0, y: 0 }, data }];
+    await flush();
+    assert.equal(graph.nodes.length, noNodes);
+    assert.equal(graph.nodes.some((node) => node.id === cyclicId), droppedWriteAbsent);
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
+  test("over-deep nested node data does not throw and is not admitted", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const noNodes = 0;
+    const droppedWriteAbsent = false;
+    const deepId = "deep";
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    let nested: Record<string, unknown> = { label: "deep" };
+    const overDepth = MAX_JSON_DEPTH + 1;
+    for (let depth = 0; depth < overDepth; depth += 1) {
+      nested = { child: nested };
+    }
+    graph.nodes = [{ id: deepId, position: { x: 0, y: 0 }, data: nested }];
+    await flush();
+    assert.equal(graph.nodes.length, noNodes);
+    assert.equal(graph.nodes.some((node) => node.id === deepId), droppedWriteAbsent);
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
+  test("fitView and zoomIn during in-flight stop emit host-drop stopped and do not change viewport", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const stopped = "stopped";
+    const atLeastOneDrop = 1;
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 }];
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    const prior = graph.getViewport();
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    const stopping = graph.stop();
+    graph.fitView();
+    graph.zoomIn();
+    graph.zoomOut();
+    graph.setViewport({ x: 9, y: 9, zoom: 2 });
+    graph.focusTarget({
+      kind: "viewport",
+      bounds: { left: 0, right: 1, top: 0, bottom: 1 },
+    });
+    await flush();
+    assert.deepEqual(graph.getViewport(), prior);
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    await stopping;
+    assert.deepEqual(graph.getViewport(), prior);
     graph.remove();
   });
 

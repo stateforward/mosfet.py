@@ -189,33 +189,82 @@ export type AdmitRejectedDetail = {
 
 export const DEFAULT_NODE_WIDTH = 150;
 export const DEFAULT_NODE_HEIGHT = 40;
+/** Maximum object/array nesting `copyJson` will copy. Deeper or cyclic values fail the copy. */
+export const MAX_JSON_DEPTH = 32;
 
-export function copyJson(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(copyJson);
+type CopyJsonResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+
+function isCopiedRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function copyJsonResult(value: unknown, stack: object[], depth: number): CopyJsonResult {
+  if (value === null || typeof value !== "object") return { ok: true, value };
+  if (depth >= MAX_JSON_DEPTH) return { ok: false };
+  if (stack.includes(value)) return { ok: false };
+  stack.push(value);
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    for (const entry of value) {
+      const copied = copyJsonResult(entry, stack, depth + 1);
+      if (!copied.ok) {
+        stack.pop();
+        return copied;
+      }
+      items.push(copied.value);
+    }
+    stack.pop();
+    return { ok: true, value: items };
+  }
   const record = value as Record<string, unknown>;
   const copy: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(record)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
-    copy[key] = copyJson(entry);
+    const copied = copyJsonResult(entry, stack, depth + 1);
+    if (!copied.ok) {
+      stack.pop();
+      return copied;
+    }
+    copy[key] = copied.value;
   }
-  return copy;
+  stack.pop();
+  return { ok: true, value: copy };
+}
+
+/**
+ * Deep-copy JSON-like `value`, skipping `__proto__` / `constructor` / `prototype` keys.
+ *
+ * Inputs: unknown nested objects and arrays. Outputs: a new tree of the same
+ * shape, or `undefined` when nesting exceeds `MAX_JSON_DEPTH` or a cycle is
+ * found. Ownership: the caller owns the result; `value` is not retained.
+ * Lifetime: one call. Concurrency: synchronous. Failure modes: cyclic or
+ * over-deep values return `undefined` and do not throw. Classification: runtime-safe.
+ */
+export function copyJson(value: unknown): unknown {
+  const copied = copyJsonResult(value, [], 0);
+  return copied.ok ? copied.value : undefined;
 }
 
 export function copyNode(node: Node): Node {
-  const data = copyJson(node.data);
-  return {
-    ...node,
-    position: { x: node.position.x, y: node.position.y },
-    data: data !== null && typeof data === "object" && !Array.isArray(data)
-      ? data as Record<string, unknown>
-      : {},
-  };
+  const rawPosition: unknown = node.position;
+  const position = isCopiedRecord(rawPosition)
+    ? {
+      x: typeof rawPosition["x"] === "number" ? rawPosition["x"] : Number.NaN,
+      y: typeof rawPosition["y"] === "number" ? rawPosition["y"] : Number.NaN,
+    }
+    : { x: Number.NaN, y: Number.NaN };
+  const copied = copyJsonResult(node.data, [], 0);
+  if (!copied.ok || !isCopiedRecord(copied.value)) {
+    return { ...node, position, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
+  }
+  return { ...node, position, data: copied.value };
 }
 
 export function copyEdge(edge: Edge): Edge {
   if (edge.data === undefined) return { ...edge };
-  const data = copyJson(edge.data);
-  if (data === null || typeof data !== "object" || Array.isArray(data)) return { ...edge };
-  return { ...edge, data: data as Record<string, unknown> };
+  const copied = copyJsonResult(edge.data, [], 0);
+  if (!copied.ok || !isCopiedRecord(copied.value)) {
+    return { ...edge, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
+  }
+  return { ...edge, data: copied.value };
 }

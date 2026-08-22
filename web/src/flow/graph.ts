@@ -332,6 +332,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * Inputs: caller `value`. Copied with `snapshotNode` (`copyNode` of owned
    * nested `position`/`data`) at write time; later mutation of the caller
    * array or nested fields does not change staged or admitted nodes.
+   * Omitted, null, non-record, cyclic, or over-deep `data` stays invalid and
+   * is not admitted as `{}`.
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
@@ -444,85 +446,107 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   /**
    * Dispatch `fit_view`.
    *
-   * Inputs: none. Outputs: void; this method always dispatches and does not
-   * report whether a fit ran.
+   * Inputs: none. Outputs: void; does not report whether a fit ran.
    * Ownership: this host owns the dispatch; Panner applies the fit.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: none. Classification: runtime-safe.
    */
   fitView(): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.fitViewEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.fitViewEvent }));
   }
 
   /**
    * Dispatch `fit_bounds` with `bounds`.
    *
-   * Inputs: `bounds` is the world-space rectangle to fit. Outputs: void; this
-   * method always dispatches and does not report whether a fit ran.
+   * Inputs: `bounds` is the world-space rectangle to fit. Outputs: void; does
+   * not report whether a fit ran.
    * Ownership: this host owns the dispatch; Panner applies the fit.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: world coordinates in `bounds`. Classification: runtime-safe.
    */
   fitBounds(bounds: ViewportBounds): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.fitBoundsEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.fitBoundsEvent, data: { bounds } }));
   }
 
   /**
    * Dispatch `zoom_in`.
    *
-   * Inputs: none. Outputs: void; this method always dispatches and does not
-   * report the resulting zoom.
+   * Inputs: none. Outputs: void; does not report the resulting zoom.
    * Ownership: this host owns the dispatch; Panner applies the zoom.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: none. Classification: runtime-safe.
    */
   zoomIn(): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.zoomInEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.zoomInEvent }));
   }
 
   /**
    * Dispatch `zoom_out`.
    *
-   * Inputs: none. Outputs: void; this method always dispatches and does not
-   * report the resulting zoom.
+   * Inputs: none. Outputs: void; does not report the resulting zoom.
    * Ownership: this host owns the dispatch; Panner applies the zoom.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: none. Classification: runtime-safe.
    */
   zoomOut(): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.zoomOutEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.zoomOutEvent }));
   }
 
   /**
    * Dispatch `set_viewport` with `viewport`.
    *
-   * Inputs: `viewport` is `{ x, y, zoom }`. Outputs: void; this method always
-   * dispatches and does not report whether the viewport changed.
+   * Inputs: `viewport` is `{ x, y, zoom }`. Outputs: void; does not report
+   * whether the viewport changed.
    * Ownership: this host owns the dispatch; Panner applies the viewport.
-   * Lifetime: unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * Lifetime: unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; the viewport is unchanged.
    * Units: pan in pixels, zoom as a scale factor. Classification: runtime-safe.
    */
   setViewport(viewport: Viewport): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.setViewportEvent.name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.setViewportEvent, data: viewport }));
   }
 
@@ -541,14 +565,19 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    * `nodeId` or `nodePath` resolve to a painted node. Machine and viewport
    * kinds do not DOM-focus a descendant or set `aria-activedescendant`.
    * Ownership: this graph owns Focuser/Panner dispatch. Lifetime: one focus
-   * request; unstarted or stopped hosts surface host-drop through
-   * `catchFailure(this)`.
+   * request; unstarted hosts surface host-drop through `catchFailure(this)`.
+   * After stop, including while `stop()` is in flight, this method emits
+   * `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: runtime-safe on the graph dispatch thread.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; missing bounds or missing node are no-ops.
    * Classification: runtime-safe.
    */
   focusTarget(target: FocusTarget): void {
+    if (hsm.hostWasStopped(this)) {
+      this.#dropStopped({ operation: FlowGraph.focusEvents[target.kind].name });
+      return;
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.focusEvents[target.kind], data: target }));
   }
 
@@ -1398,7 +1427,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       const eventName = target.closest<SVGPathElement>(".edge-hit")?.dataset["eventName"];
       if (eventName === undefined) continue;
       const edge = this.#edges.find((item) => item.data?.["eventName"] === eventName || item.id === eventName);
-      if (edge !== undefined) return { kind: "edge", edge };
+      if (edge !== undefined) return { kind: "edge", edge: copyEdge(edge) };
     }
     return { kind: "empty" };
   }
@@ -1466,24 +1495,20 @@ function isNode(value: unknown): value is Node {
   return true;
 }
 
+/** Write-path copy of nested position/data. Invalid data is kept invalid, not `{}`. */
 function snapshotNode(node: Node): Node {
-  const rawPosition: unknown = node.position;
-  const rawData: unknown = node.data;
-  const position = hsm.isRecord(rawPosition)
-    ? {
-      x: typeof rawPosition["x"] === "number" ? rawPosition["x"] : Number.NaN,
-      y: typeof rawPosition["y"] === "number" ? rawPosition["y"] : Number.NaN,
-    }
-    : { x: Number.NaN, y: Number.NaN };
-  const data = hsm.isRecord(rawData) ? rawData : {};
-  return copyNode({ ...node, position, data });
+  return copyNode(node);
 }
 
 function isEdge(value: unknown): value is Edge {
-  return hsm.isRecord(value)
-    && typeof value["id"] === "string"
-    && typeof value["source"] === "string"
-    && typeof value["target"] === "string";
+  if (!hsm.isRecord(value)
+    || typeof value["id"] !== "string"
+    || typeof value["source"] !== "string"
+    || typeof value["target"] !== "string") {
+    return false;
+  }
+  if (value["data"] !== undefined && !hsm.isRecord(value["data"])) return false;
+  return true;
 }
 
 function pointOf(value: unknown): XYPosition | null {
@@ -1725,7 +1750,11 @@ function admitNodes(value: unknown): { nodes: Node[]; rejected: AdmitRejectedDet
     if (!isNode(item)) {
       return { nodes: [], rejected: { reason: "invalid", nodeCount: value.length, edgeCount: 0 } };
     }
-    nodes.push(copyNode(item));
+    const copied = copyNode(item);
+    if (!isNode(copied)) {
+      return { nodes: [], rejected: { reason: "invalid", nodeCount: value.length, edgeCount: 0 } };
+    }
+    nodes.push(copied);
   }
   return { nodes, rejected: null };
 }
@@ -1742,7 +1771,11 @@ function admitEdges(value: unknown): { edges: Edge[]; rejected: AdmitRejectedDet
     if (!isEdge(item)) {
       return { edges: [], rejected: { reason: "invalid", nodeCount: 0, edgeCount: value.length } };
     }
-    edges.push(copyEdge(item));
+    const copied = copyEdge(item);
+    if (!isEdge(copied)) {
+      return { edges: [], rejected: { reason: "invalid", nodeCount: 0, edgeCount: value.length } };
+    }
+    edges.push(copied);
   }
   return { edges, rejected: null };
 }
