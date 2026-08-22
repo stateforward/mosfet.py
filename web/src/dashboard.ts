@@ -135,27 +135,21 @@ const EVENT_NAME_NOT_ALLOWED = "event_name is not an allowed command";
 export function commandEventNameLegal(name: string): boolean {
   if (name.length === 0 || name.length > COMMAND_NAME_MAX) return false;
   const first = name.charCodeAt(COMMAND_NAME_FIRST_INDEX);
-  if (!isCommandNameLetter({ code: first })) return false;
+  if (!((first >= LETTER_A && first <= LETTER_Z) || (first >= LETTER_a && first <= LETTER_z))) return false;
   for (let index = 1; index < name.length; index += 1) {
-    if (!isCommandNameChar({ code: name.charCodeAt(index) })) return false;
+    const code = name.charCodeAt(index);
+    if ((code >= LETTER_A && code <= LETTER_Z) || (code >= LETTER_a && code <= LETTER_z)) continue;
+    if (code >= DIGIT_0 && code <= DIGIT_9) continue;
+    if (code === CHAR_UNDERSCORE || code === CHAR_DOT || code === CHAR_COLON || code === CHAR_SLASH || code === CHAR_DASH) {
+      continue;
+    }
+    return false;
   }
   return true;
 }
 
 function commandNameFailureDetail(name: string): string {
   return name.length === 0 ? EVENT_NAME_REQUIRED : EVENT_NAME_NOT_ALLOWED;
-}
-
-function isCommandNameLetter(args: { code: number }): boolean {
-  const code = args.code;
-  return (code >= LETTER_A && code <= LETTER_Z) || (code >= LETTER_a && code <= LETTER_z);
-}
-
-function isCommandNameChar(args: { code: number }): boolean {
-  const code = args.code;
-  if (isCommandNameLetter({ code })) return true;
-  if (code >= DIGIT_0 && code <= DIGIT_9) return true;
-  return code === CHAR_UNDERSCORE || code === CHAR_DOT || code === CHAR_COLON || code === CHAR_SLASH || code === CHAR_DASH;
 }
 
 function controllerOf(instance: hsm.Instance): Dashboard | null {
