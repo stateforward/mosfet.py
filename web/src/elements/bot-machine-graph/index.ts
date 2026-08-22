@@ -146,9 +146,24 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     return copyGraphs(this.#held);
   }
 
+  /**
+   * Stage a copy of `value` and admit it when this host is started.
+   *
+   * Inputs: caller `value`. The outer array is copied at write time. Before
+   * connect this is a write buffer replayed from `connectedCallback` after
+   * `start`; that staging is pre-start local state, not a dropped dispatch,
+   * and emits no host-drop. After start, `graphs_admit` is dispatched. After
+   * stop, dispatch host-drops. Does not call `start`.
+   * Outputs: getter returns copies of admitted graphs.
+   * Ownership: this host owns the staged array. Lifetime: until the next
+   * graphs write or stop. Concurrency: runtime-safe.
+   * Failure modes: unstarted staging is not a failure.
+   * Classification: runtime-safe.
+   */
   set graphs(value: readonly MachineGraph[]) {
     const graphs = [...value];
     this.#graphsWrite = graphs;
+    if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs } satisfies GraphsAdmitData }));
   }
 
@@ -196,7 +211,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    if (!hsm.hostWasStarted(this)) return;
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 

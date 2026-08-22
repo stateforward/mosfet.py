@@ -91,6 +91,68 @@ describe("bot-machine-graph flow host", () => {
     assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
   });
 
+  test("unstarted fit and focusMachine emit host-drop unstarted", async () => {
+    const host = document.createElement("bot-machine-graph");
+    const atLeastOneDrop = 1;
+    const unstarted = "unstarted";
+    const publicEventCancelable = false;
+    const publicEventBubbles = true;
+    const publicEventComposed = true;
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({
+          cancelable: event.cancelable,
+          bubbles: event.bubbles,
+          composed: event.composed,
+          reason: event.detail["reason"],
+        });
+      }
+    });
+    host.fit();
+    host.focusMachine("/Phone");
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(host.state(), "");
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+      assert.equal(drop.reason, unstarted);
+    }
+    host.remove();
+  });
+
+  test("fit after stop emits host-drop stopped", async () => {
+    const host = document.createElement("bot-machine-graph");
+    document.body.append(host);
+    await waitUntil(() => host.state().includes("/connected"));
+    const atLeastOneDrop = 1;
+    const stopped = "stopped";
+    const drops: Array<{ reason: string }> = [];
+    host.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    await host.stop();
+    host.fit();
+    host.focusMachine("/Phone");
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(host.state(), "");
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    host.remove();
+  });
+
   test("nested connect admits nodesDraggable false after the child starts", async () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);

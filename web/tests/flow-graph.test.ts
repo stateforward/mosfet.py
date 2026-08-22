@@ -699,6 +699,59 @@ describe("flow-graph", () => {
     assert.equal(graph.panOnDrag, policyOff);
   });
 
+  test("unstarted fitView and focusTarget emit host-drop unstarted", async () => {
+    const graph = document.createElement("flow-graph");
+    const atLeastOneDrop = 1;
+    const unstarted = "unstarted";
+    const drops: Array<{ cancelable: boolean; bubbles: boolean; composed: boolean; reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({
+          cancelable: event.cancelable,
+          bubbles: event.bubbles,
+          composed: event.composed,
+          reason: event.detail["reason"],
+        });
+      }
+    });
+    graph.fitView();
+    graph.focusTarget({
+      kind: "viewport",
+      bounds: { left: 0, right: 1, top: 0, bottom: 1 },
+    });
+    await flush();
+    assert.equal(graph.state(), "");
+    assert.ok(drops.length >= atLeastOneDrop);
+    for (const drop of drops) {
+      assert.equal(drop.cancelable, publicEventCancelable);
+      assert.equal(drop.bubbles, publicEventBubbles);
+      assert.equal(drop.composed, publicEventComposed);
+      assert.equal(drop.reason, unstarted);
+    }
+    graph.remove();
+  });
+
+  test("fitView after stop emits host-drop stopped", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
+    const atLeastOneDrop = 1;
+    const stopped = "stopped";
+    const drops: Array<{ reason: string }> = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        drops.push({ reason: event.detail["reason"] });
+      }
+    });
+    await graph.stop();
+    graph.fitView();
+    await flush();
+    assert.equal(graph.state(), "");
+    assert.ok(drops.length >= atLeastOneDrop);
+    assert.ok(drops.some((drop) => drop.reason === stopped));
+    graph.remove();
+  });
+
   test("nodes write before connect applies after the child starts", async () => {
     const graph = document.createElement("flow-graph");
     const noNodes = 0;

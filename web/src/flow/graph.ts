@@ -326,8 +326,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return this.#nodes.map(copyNode);
   }
 
+  /**
+   * Stage `value` and admit it when this host is started.
+   *
+   * Inputs: caller `value`. Before connect this is a write buffer replayed
+   * from `connectedCallback` after `start`; that staging is pre-start local
+   * state, not a dropped dispatch, and emits no host-drop. After start,
+   * `set_nodes` is dispatched. After stop, dispatch host-drops.
+   * Outputs: getter returns copies of admitted nodes.
+   * Ownership: this host retains `value` until the next nodes write.
+   * Lifetime: until the next nodes write or stop.
+   * Concurrency: runtime-safe. Failure modes: admit reject emits
+   * `flow-admit-rejected`; unstarted staging is not a failure.
+   * Classification: runtime-safe.
+   */
   set nodes(value: readonly Node[]) {
     this.#nodesWrite = value;
+    if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
   }
 
@@ -335,8 +350,23 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return this.#edges.map(copyEdge);
   }
 
+  /**
+   * Stage `value` and admit it when this host is started.
+   *
+   * Inputs: caller `value`. Before connect this is a write buffer replayed
+   * from `connectedCallback` after `start`; that staging is pre-start local
+   * state, not a dropped dispatch, and emits no host-drop. After start,
+   * `set_edges` is dispatched. After stop, dispatch host-drops.
+   * Outputs: getter returns copies of admitted edges.
+   * Ownership: this host retains `value` until the next edges write.
+   * Lifetime: until the next edges write or stop.
+   * Concurrency: runtime-safe. Failure modes: admit reject emits
+   * `flow-admit-rejected`; unstarted staging is not a failure.
+   * Classification: runtime-safe.
+   */
   set edges(value: readonly Edge[]) {
     this.#edgesWrite = value;
+    if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
   }
 
@@ -344,6 +374,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return this.#nodesDraggable;
   }
 
+  /**
+   * Store `nodesDraggable` on this host. Before start this is pre-start local
+   * state, not a dropped dispatch: pointer guards read the field, and no
+   * `policy_set` event is sent. After start, `policy_set` is dispatched.
+   * After stop, dispatch host-drops. Does not call `start`.
+   */
   set nodesDraggable(value: boolean) {
     this.#nodesDraggable = value;
     if (!hsm.hostWasStarted(this)) return;
@@ -354,6 +390,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return this.#panOnDrag;
   }
 
+  /**
+   * Store `panOnDrag` on this host. Before start this is pre-start local
+   * state, not a dropped dispatch: pointer guards read the field, and no
+   * `policy_set` event is sent. After start, `policy_set` is dispatched.
+   * After stop, dispatch host-drops. Does not call `start`.
+   */
   set panOnDrag(value: boolean) {
     this.#panOnDrag = value;
     if (!hsm.hostWasStarted(this)) return;
@@ -429,7 +471,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    if (!hsm.hostWasStarted(this)) return;
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 
