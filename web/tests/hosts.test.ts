@@ -511,6 +511,52 @@ describe("companion-style HSM controllers", () => {
     assert.deepEqual(unhandled, []);
   });
 
+  test("Dashboard Event-path dispatch rejects non-Events", async () => {
+    const dashboard = bootDashboard();
+    const eventPathMessage = "dispatch(event) requires an Event";
+    const ctxPathMessage = "dispatch(ctx, event) requires an Event";
+    const notEvent = { name: "dashboard.reset" };
+    assert.throws(
+      () => {
+        void dashboard.dispatch(notEvent as hsm.Event);
+      },
+      (error: unknown) => error instanceof TypeError && error.message === eventPathMessage,
+    );
+    assert.throws(
+      () => {
+        void dashboard.dispatch(dashboard.context(), notEvent as hsm.Event);
+      },
+      (error: unknown) => error instanceof TypeError && error.message === ctxPathMessage,
+    );
+    const snapshot = await dashboard.dispatch("dashboard.reset");
+    assert.equal(typeof snapshot.statePath, "string");
+    await dashboard.dispatch(hsm.typedEvent({ event: { name: "dashboard.reset", kind: hsm.Kinds.Event } }));
+    await dashboard.stop();
+  });
+
+  test("OtelSource Event-path dispatch rejects non-Events", async () => {
+    const source = bootSource();
+    const eventPathMessage = "dispatch(event) requires an Event";
+    const ctxPathMessage = "dispatch(ctx, event) requires an Event";
+    const notEvent = { name: "source.attach" };
+    assert.throws(
+      () => {
+        void source.dispatch(notEvent as hsm.Event);
+      },
+      (error: unknown) => error instanceof TypeError && error.message === eventPathMessage,
+    );
+    assert.throws(
+      () => {
+        void source.dispatch(source.context(), notEvent as hsm.Event);
+      },
+      (error: unknown) => error instanceof TypeError && error.message === ctxPathMessage,
+    );
+    const snapshot = await source.dispatch("source.attach");
+    assert.equal(typeof snapshot.statePath, "string");
+    await source.dispatch(hsm.typedEvent({ event: { name: "source.attach", kind: hsm.Kinds.Event } }));
+    await source.stop();
+  });
+
   test("source and dashboard dispatch-stop races suppress expected shutdown failures", async () => {
     const source = bootSource();
     const dashboard = bootDashboard();
