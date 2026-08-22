@@ -71,6 +71,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
         hsm.guard(BotMachineGraph.machineFocusable),
         hsm.effect(BotMachineGraph.applyFocus),
       ),
+      hsm.transition(
+        hsm.on(BotMachineGraph.focusEvent.name),
+        hsm.effect(BotMachineGraph.ignoreFocus),
+      ),
       hsm.transition(hsm.on(BotMachineGraph.fitEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
@@ -204,16 +208,16 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
    *
    * Inputs: `machineName` is the machine path to focus. Outputs: void; does
    * not report whether a machine exists.
-   * Ownership: this host owns the dispatch; the inner graph applies or no-ops
-   * in `applyFocus`. Lifetime: safe after `connectedCallback`/`start`;
-   * unstarted hosts surface host-drop through `catchFailure(this)`. After
-   * stop, including while `stop()` is in flight, this method emits `host-drop`
-   * with reason `"stopped"` and does not dispatch.
+   * Ownership: this host owns the dispatch; `machineFocusable` applies or the
+   * unguarded ignore keeps the current state. Lifetime: safe after
+   * `connectedCallback`/`start`; unstarted hosts surface host-drop through
+   * `catchFailure(this)`. After stop, including while `stop()` is in flight,
+   * this method emits `host-drop` with reason `"stopped"` and does not dispatch.
    * Concurrency: `#live` queues overlapping calls as HSM events.
    * Failure modes: unstarted and stopped hosts emit `host-drop` with reason
    * `"unstarted"` or `"stopped"`; a missing machine or a held machine without
-   * painted fit bounds is ignored by the unguarded `focus_machine` fallback
-   * (no `fitBounds`, `data-node-count` unchanged).
+   * painted fit bounds takes the unguarded `focus_machine` ignore (no
+   * `fitBounds`, `data-node-count` unchanged).
    * Callers observe `data-node-count` and viewport/`fitBounds` effects rather
    * than a boolean return.
    * Classification: runtime-safe.
@@ -327,6 +331,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(instance.#held)));
   }
 
+  static ignoreFocus(_ctx: hsm.Context, _instance: hsm.Instance, _event: hsm.Event): void {
+    return;
+  }
+
   static machineFocusable(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
     if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return false;
     const machineName = event.data["machineName"];
@@ -335,9 +343,13 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   static applyFocus(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof BotMachineGraph) || !hsm.isRecord(event.data)) return;
+    if (!(instance instanceof BotMachineGraph)) {
+      throw new TypeError("focus_machine taken without graph");
+    }
+    if (!hsm.isRecord(event.data) || typeof event.data["machineName"] !== "string") {
+      throw new TypeError("focus_machine taken without machineName");
+    }
     const machineName = event.data["machineName"];
-    if (typeof machineName !== "string") return;
     const model = instance.#model ?? flowModelFromGraphs(instance.#held);
     const bounds = focusBoundsForMachine({ graphs: instance.#held, machineName, model });
     if (bounds === null) {
