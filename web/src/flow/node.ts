@@ -35,7 +35,8 @@ export class FlowNode extends HTMLElement {
    * copy; mutating `position` or `data` on the result does not change stored
    * paint state or derived DOM. Lifetime: until the next `node` set.
    * Concurrency: runtime-safe. Failure modes: `copyNode` `{ ok: false }`
-   * (cyclic, over-deep, or non-record `data`) returns null and does not throw.
+   * (invalid position, cyclic, over-deep, or non-record `data`) returns null
+   * and does not throw.
    * Classification: runtime-safe.
    */
   get node(): Node | null {
@@ -51,8 +52,8 @@ export class FlowNode extends HTMLElement {
    * element owns the stored copy. Later mutation of the caller or of a getter
    * result does not change stored paint state. Lifetime: until the next set.
    * Concurrency: runtime-safe. Failure modes: `copyNode` `{ ok: false }`
-   * (cyclic, over-deep, or non-record `data`) leaves stored paint unchanged,
-   * does not call `#sync` with invalid data, and does not throw.
+   * (invalid position, cyclic, over-deep, or non-record `data`) leaves stored
+   * paint unchanged, does not call `#sync` with invalid data, and does not throw.
    * Classification: runtime-safe.
    */
   set node(value: Node | null) {

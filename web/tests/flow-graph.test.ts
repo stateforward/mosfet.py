@@ -1856,6 +1856,34 @@ describe("flow-graph", () => {
     assert.notEqual(unset.style.left, rejectedLeft);
   });
 
+  test("flow-node non-finite position does not throw and does not paint", () => {
+    const element = document.createElement("flow-node");
+    const originX = 0;
+    const originalLabel = "A";
+    const invalidCoordinate = Number.NaN;
+    const infiniteCoordinate = Number.POSITIVE_INFINITY;
+    const valid: Node = {
+      id: "a",
+      position: { x: originX, y: 0 },
+      data: { label: originalLabel },
+      width: 80,
+      height: 40,
+    };
+    element.node = valid;
+    assert.equal(element.style.left, `${originX}px`);
+    element.node = { id: "nan", position: { x: invalidCoordinate, y: 0 }, data: { label: "nan" } };
+    assert.equal(element.node?.id, valid.id);
+    assert.equal(element.style.left, `${originX}px`);
+    element.node = { id: "inf", position: { x: 0, y: infiniteCoordinate }, data: { label: "inf" } };
+    assert.equal(element.node?.id, valid.id);
+    assert.equal(element.style.left, `${originX}px`);
+    const unset = document.createElement("flow-node");
+    const rejectedLeft = "0px";
+    unset.node = { id: "nan", position: { x: invalidCoordinate, y: 0 }, data: {} };
+    assert.equal(unset.node, null);
+    assert.notEqual(unset.style.left, rejectedLeft);
+  });
+
   test("flow-edge cyclic data does not throw and leaves stored paint unchanged", () => {
     const element = document.createElement("flow-edge");
     const originalLabel = "e";

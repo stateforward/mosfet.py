@@ -202,6 +202,10 @@ function isCopiedRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 function copyJsonResult(args: { value: unknown; stack: object[]; depth: number }): CopyJsonResult {
   const { value, stack, depth } = args;
   if (value === null || typeof value !== "object") return { ok: true, value };
@@ -240,38 +244,35 @@ function copyJsonResult(args: { value: unknown; stack: object[]; depth: number }
 /**
  * Deep-copy JSON-like `value`, skipping `__proto__` / `constructor` / `prototype` keys.
  *
- * Inputs: unknown nested objects and arrays. Outputs: a new tree of the same
- * shape, or `undefined` when nesting exceeds `MAX_JSON_DEPTH` or a cycle is
- * found. Ownership: the caller owns the result; `value` is not retained.
- * Lifetime: one call. Concurrency: synchronous. Failure modes: cyclic or
- * over-deep values return `undefined` and do not throw. Classification: runtime-safe.
+ * Inputs: unknown nested objects and arrays. Outputs: `{ ok: true, value }`
+ * with a new tree of the same shape, including `{ ok: true, value: undefined }`
+ * when `value` is undefined. Ownership: the caller owns `value` on success;
+ * the input is not retained. Lifetime: one call. Concurrency: synchronous.
+ * Failure modes: cyclic or over-deep values return `{ ok: false }` and do not
+ * throw. Classification: runtime-safe.
  */
-export function copyJson(value: unknown): unknown {
+export function copyJson(value: unknown): CopyResult<unknown> {
   const initialStack: object[] = [];
-  const copied = copyJsonResult({ value, stack: initialStack, depth: initialJsonDepth });
-  return copied.ok ? copied.value : undefined;
+  return copyJsonResult({ value, stack: initialStack, depth: initialJsonDepth });
 }
 
 /**
  * Copy `node` with owned `position` and JSON `data`.
  *
  * Inputs: a Node-shaped record. Outputs: `{ ok: true, value }` with copied
- * `position` and `data`, or `{ ok: false }` when `data` is omitted, null, a
- * non-record, cyclic, or nested deeper than `MAX_JSON_DEPTH`. `position` that
- * is not a record is copied as `{ x: NaN, y: NaN }` on success so later
- * `isNode` can reject it; it is not forged as a valid paint record.
+ * finite `position` and record `data`, or `{ ok: false }` when `position` is
+ * missing, not a record, or has non-finite `x`/`y`, or when `data` is omitted,
+ * null, a non-record, cyclic, or nested deeper than `MAX_JSON_DEPTH`.
  * Ownership: the caller owns `value`; `node` is not retained. Lifetime: one
  * call. Concurrency: synchronous. Failure modes: `{ ok: false }` and does not
  * throw. Classification: runtime-safe.
  */
 export function copyNode(node: Node): CopyResult<Node> {
   const rawPosition: unknown = node.position;
-  const position = isCopiedRecord(rawPosition)
-    ? {
-      x: typeof rawPosition["x"] === "number" ? rawPosition["x"] : Number.NaN,
-      y: typeof rawPosition["y"] === "number" ? rawPosition["y"] : Number.NaN,
-    }
-    : { x: Number.NaN, y: Number.NaN };
+  if (!isCopiedRecord(rawPosition) || !isFiniteNumber(rawPosition["x"]) || !isFiniteNumber(rawPosition["y"])) {
+    return { ok: false };
+  }
+  const position = { x: rawPosition["x"], y: rawPosition["y"] };
   const initialStack: object[] = [];
   const copied = copyJsonResult({ value: node.data, stack: initialStack, depth: initialJsonDepth });
   if (!copied.ok || !isCopiedRecord(copied.value)) return { ok: false };
