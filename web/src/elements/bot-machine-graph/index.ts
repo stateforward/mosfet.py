@@ -120,6 +120,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   #graph: Graph | null = null;
   #model: FlowGraphModel | null = null;
   #held: readonly MachineGraph[] = [];
+  #graphsWrite: readonly MachineGraph[] | undefined;
   #focusableNames: ReadonlySet<string> = new Set();
   #resizeObserver: ResizeObserver | null = null;
 
@@ -146,7 +147,9 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   set graphs(value: readonly MachineGraph[]) {
-    this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: [...value] } satisfies GraphsAdmitData }));
+    const graphs = [...value];
+    this.#graphsWrite = graphs;
+    this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs } satisfies GraphsAdmitData }));
   }
 
   fit(): void {
@@ -175,6 +178,13 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   connectedCallback(): void {
     hsm.start(this, BotMachineGraph.model);
+    hsm.start(this.context(), this.#flow, FlowGraph.model);
+    if (this.#graphsWrite !== undefined) {
+      this.#live(hsm.typedEvent({
+        event: BotMachineGraph.graphsEvent,
+        data: { graphs: this.#graphsWrite } satisfies GraphsAdmitData,
+      }));
+    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.attachEvent }));
   }
 
@@ -186,7 +196,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    hsm.ensureStarted(this, BotMachineGraph.model);
+    if (!hsm.hostWasStarted(this)) return;
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 

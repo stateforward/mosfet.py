@@ -82,6 +82,15 @@ describe("bot-machine-graph flow host", () => {
     assert.equal(host.state(), "");
   });
 
+  test("constructor does not start the nested flow-graph", () => {
+    const host = document.createElement("bot-machine-graph");
+    const flow = flowFrame(host);
+    assert.equal(host.state(), "");
+    assert.equal(flow.state(), "");
+    assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
+    assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
+  });
+
   test("nested connect admits nodesDraggable false after the child starts", async () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
@@ -97,15 +106,17 @@ describe("bot-machine-graph flow host", () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
     await waitUntil(() => host.state().includes("/connected"));
+    const flow = flowFrame(host);
     const actors = ownedActors(host);
-    const graphCount = 1;
-    assert.equal(actors.length, graphCount);
-    const graph = actors[0];
+    const graph = actors.find((actor) => !(actor instanceof FlowGraph));
     assert.ok(graph !== undefined);
+    assert.ok(actors.some((actor) => actor instanceof FlowGraph));
     assert.notEqual(graph.state(), "");
+    assert.notEqual(flow.state(), "");
     await host.stop();
     assert.equal(host.state(), "");
     assert.equal(graph.state(), "");
+    assert.equal(flow.state(), "");
     host.remove();
   });
 

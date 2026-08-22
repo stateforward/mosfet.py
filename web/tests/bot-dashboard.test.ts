@@ -5,7 +5,8 @@ import { describe, test } from "node:test";
 import * as hsm from "../src/hsm.ts";
 import { BotDashboard, registerBotDashboard } from "../src/elements/bot-dashboard.ts";
 import { BotMachineGraph, registerBotMachineGraph } from "../src/elements/bot-machine-graph/index.ts";
-import { registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
+import { BotOtelSource, registerBotOtelSource } from "../src/elements/bot-otel-source.ts";
+import { FlowGraph } from "../src/flow/index.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
 import { streamSource } from "../src/otel/source.ts";
 
@@ -49,7 +50,45 @@ async function bootDashboard(): Promise<BotDashboard> {
   return host;
 }
 
+const FRAME_PART = '[part="frame"]';
+
 describe("bot-dashboard inspector focus", () => {
+  test("constructor does not start nested hosts", () => {
+    const host = document.createElement("bot-dashboard");
+    assert.ok(host instanceof BotDashboard);
+    assert.equal(host.state(), "");
+    const source = host.shadowRoot?.querySelector("bot-otel-source");
+    const graph = host.shadowRoot?.querySelector("bot-machine-graph");
+    assert.ok(source instanceof BotOtelSource);
+    assert.ok(graph instanceof BotMachineGraph);
+    const flow = graph.shadowRoot?.querySelector(FRAME_PART);
+    assert.ok(flow instanceof FlowGraph);
+    assert.equal(source.state(), "");
+    assert.equal(graph.state(), "");
+    assert.equal(flow.state(), "");
+  });
+
+  test("Host.stop stops nested otel source, machine graph, and flow-graph", async () => {
+    const host = document.createElement("bot-dashboard");
+    assert.ok(host instanceof BotDashboard);
+    host.connectStream = () => ({ close(): void { return; } });
+    document.body.append(host);
+    await waitFor(() => host.snapshot().statePath.includes("/connected"));
+    const source = host.shadowRoot?.querySelector("bot-otel-source");
+    const graph = host.shadowRoot?.querySelector("bot-machine-graph");
+    assert.ok(source instanceof BotOtelSource);
+    assert.ok(graph instanceof BotMachineGraph);
+    const flow = graph.shadowRoot?.querySelector(FRAME_PART);
+    assert.ok(flow instanceof FlowGraph);
+    await waitFor(() => source.state() !== "" && graph.state() !== "" && flow.state() !== "");
+    await host.stop();
+    assert.equal(host.state(), "");
+    assert.equal(source.state(), "");
+    assert.equal(graph.state(), "");
+    assert.equal(flow.state(), "");
+    host.remove();
+  });
+
   test("picker focus survives a snapshot rebuild", async () => {
     const host = await bootDashboard();
     await host.dispatch("dashboard.model.published", publishedModel("/Phone"));

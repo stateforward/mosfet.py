@@ -97,7 +97,9 @@ type MixinRest = any[];
 type HostConstructor<T = object> = new (...args: MixinRest) => T;
 
 /**
- * Mixin: subclass stays a custom element; call `start(this, model)` after `super()`.
+ * Mixin: subclass stays a custom element; call `start(this, model)` from
+ * `connectedCallback` or `boot` after the element exists. Do not start from
+ * the constructor after `super()`.
  *
  * CORE-EXC-001: copies `Instance.prototype` method descriptors because
  * `@stateforward/hsm.ts` does not export a custom-element mixin. Isolated to
@@ -200,18 +202,44 @@ export function start<I extends object, M>(
 /**
  * Bind and enter `model` only when `instance` has never started.
  *
- * Inputs: host `instance` and its `define()` model. Outputs: the host.
- * After `stop`, this is a no-op so later dispatches stay host-drop
- * `"stopped"`; `boot` / `connectedCallback` call `start` to re-bind.
+ * Inputs: named `{ instance, model }` — the host and its `define()` model.
+ * Outputs: the host. After `stop`, this is a no-op so later dispatches stay
+ * host-drop `"stopped"`; `boot` / `connectedCallback` call `start` to re-bind.
  * Ownership: same bind tokens as `start`. Lifetime: one first-start.
  * Concurrency: runtime-safe. Failure modes: none beyond `start`.
  * Classification: initialization-only.
  */
-export function ensureStarted<I extends object, M>(instance: I, model: M): I & Host {
-  if ((instance as BoundHost)[WAS_STARTED] === true) {
-    return instance as I & Host;
+export function ensureStarted<I extends object, M>(args: { instance: I; model: M }): I & Host {
+  if ((args.instance as BoundHost)[WAS_STARTED] === true) {
+    return args.instance as I & Host;
   }
-  return start(instance, model);
+  return start(args.instance, args.model);
+}
+
+/**
+ * True when this module has called `start` on `host`, including after `stop`.
+ *
+ * Inputs: a host object. Outputs: `true` after the first `start`, still `true`
+ * after `stop` so later drops classify `"stopped"` rather than `"unstarted"`.
+ * `false` if `start` has never run. Ownership: does not retain `host`.
+ * Lifetime: bind tokens this module owns. Concurrency: synchronous.
+ * Failure modes: none. Classification: runtime-safe.
+ */
+export function hostWasStarted(host: object): boolean {
+  return (host as BoundHost)[WAS_STARTED] === true;
+}
+
+/**
+ * True when `value` is an HSM Event record (`name` string and `kind` number).
+ *
+ * Inputs: unknown ingress. Outputs: a type predicate for `Event`.
+ * Does not read `event.target` or treat a string name as dispatch.
+ * Ownership: does not retain `value`. Concurrency: synchronous.
+ * Failure modes: non-records and missing `name`/`kind` are false.
+ * Classification: runtime-safe.
+ */
+export function isEvent(value: unknown): value is library.Event {
+  return isRecord(value) && typeof value["name"] === "string" && typeof value["kind"] === "number";
 }
 
 /**
@@ -224,7 +252,13 @@ export function ensureStarted<I extends object, M>(instance: I, model: M): I & H
  *
  * Owned nested machines (`context().Value(Keys.Owner) === machine`) are
  * `stop`'d before the owner. Library `Instance.stop` cancels the owner
- * context and does not stop `Keys.Instances` children.
+ * context and does not stop `Keys.Instances` children. Nested custom-element
+ * hosts started with `start(owner.context(), host, model)` are in that set.
+ *
+ * If a nested owned `stop` rejects, that rejection propagates. Sibling stops
+ * already started keep running (`Promise.all` does not cancel them). The owner
+ * still unbinds in `finally` on that rejection, so later dispatch is a
+ * host-drop `"stopped"`.
  */
 export async function stop(machine: object): Promise<void> {
   const bound = machine as BoundHost;

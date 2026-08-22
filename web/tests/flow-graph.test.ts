@@ -689,6 +689,16 @@ describe("flow-graph", () => {
     assert.equal(graph.state(), "");
   });
 
+  test("policy setter before connect does not start the host", () => {
+    const graph = document.createElement("flow-graph");
+    const policyOff = false;
+    graph.nodesDraggable = policyOff;
+    graph.panOnDrag = policyOff;
+    assert.equal(graph.state(), "");
+    assert.equal(graph.nodesDraggable, policyOff);
+    assert.equal(graph.panOnDrag, policyOff);
+  });
+
   test("nodes write before connect applies after the child starts", async () => {
     const graph = document.createElement("flow-graph");
     const noNodes = 0;
@@ -701,7 +711,7 @@ describe("flow-graph", () => {
     await flush();
     assert.equal(graph.nodes.length, noNodes);
     assert.equal(drops.length, noNodes);
-    assert.match(graph.state(), /\/disconnected$/);
+    assert.equal(graph.state(), "");
     document.body.append(graph);
     await waitUntil(() => graph.nodes.length === admitted);
     assert.equal(graph.nodes[0]?.id, "a");

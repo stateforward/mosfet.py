@@ -178,6 +178,7 @@ export function isOtelSourceEventName(value: string): value is OtelSourceEventNa
 }
 
 export class OtelSource extends hsm.from(HTMLElement) {
+  static readonly model = otelSourceModel;
   #source: StreamSource | null = null;
   #errorMessage: string | null = null;
   onSnapshot: ((snapshot: OtelSourceSnapshot) => void) | null = null;
@@ -188,7 +189,7 @@ export class OtelSource extends hsm.from(HTMLElement) {
   }
 
   boot(): void {
-    hsm.start(this, otelSourceModel);
+    hsm.start(this, OtelSource.model);
   }
 
   /**
@@ -250,9 +251,16 @@ export class OtelSource extends hsm.from(HTMLElement) {
   override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
   override dispatch(eventOrContext: OtelSourceEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<OtelSourceSnapshot> {
     if (typeof eventOrContext !== "string") {
-      return eventOrContext instanceof hsm.Context
-        ? super.dispatch(eventOrContext, eventWithSourceConnect(data as hsm.Event))
-        : super.dispatch(eventWithSourceConnect(eventOrContext));
+      if (eventOrContext instanceof hsm.Context) {
+        if (!hsm.isEvent(data)) {
+          throw new TypeError("dispatch(ctx, event) requires an Event");
+        }
+        return super.dispatch(eventOrContext, eventWithSourceConnect(data));
+      }
+      if (!hsm.isEvent(eventOrContext)) {
+        throw new TypeError("dispatch(event) requires an Event");
+      }
+      return super.dispatch(eventWithSourceConnect(eventOrContext));
     }
     return this.#dispatchController(eventOrContext, data);
   }

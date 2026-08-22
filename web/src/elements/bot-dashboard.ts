@@ -3,7 +3,8 @@ import {
   isDashboardEventName,
   type DashboardSnapshot,
 } from "../dashboard.ts";
-import { catchFailure, typedEvent } from "../hsm.ts";
+import { catchFailure, start, typedEvent } from "../hsm.ts";
+import { OtelSource } from "../otel-source.ts";
 import {
   environmentWorkspaceGraphs,
   environmentRootGraphs,
@@ -985,6 +986,12 @@ export class BotDashboard extends Dashboard {
     button.dataset["dashboardAction"] = action;
     mark({ element: button, hook: action });
     return button;
+  }
+
+  override boot(): void {
+    super.boot();
+    start(this.context(), this.#source, OtelSource.model);
+    start(this.context(), this.#graph, BotMachineGraph.model);
   }
 
   connectedCallback(): void {

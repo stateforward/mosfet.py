@@ -293,6 +293,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
   #panOnDrag = true;
+  #nodesWrite: readonly Node[] | undefined;
+  #edgesWrite: readonly Edge[] | undefined;
   #unlisten: (() => void) | null = null;
 
   constructor() {
@@ -325,6 +327,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodes(value: readonly Node[]) {
+    this.#nodesWrite = value;
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
   }
 
@@ -333,6 +336,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set edges(value: readonly Edge[]) {
+    this.#edgesWrite = value;
     this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
   }
 
@@ -342,6 +346,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set nodesDraggable(value: boolean) {
     this.#nodesDraggable = value;
+    if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
   }
 
@@ -351,6 +356,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set panOnDrag(value: boolean) {
     this.#panOnDrag = value;
+    if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
   }
 
@@ -406,6 +412,12 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start(this, FlowGraph.model);
+    if (this.#nodesWrite !== undefined) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: this.#nodesWrite } }));
+    }
+    if (this.#edgesWrite !== undefined) {
+      this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: this.#edgesWrite } }));
+    }
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }
 
@@ -417,7 +429,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   #live(event: hsm.DispatchEvent): void {
-    hsm.ensureStarted(this, FlowGraph.model);
+    if (!hsm.hostWasStarted(this)) return;
     void this.dispatch(event).catch(hsm.catchFailure(this));
   }
 
