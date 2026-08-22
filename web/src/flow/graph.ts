@@ -229,17 +229,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(FlowGraph.zoomOutEvent.name), hsm.effect(FlowGraph.applyZoomOut)),
       hsm.transition(hsm.on(FlowGraph.setViewportEvent.name), hsm.effect(FlowGraph.applySetViewport)),
       hsm.transition(hsm.on(FlowGraph.wheelEvent.name), hsm.effect(FlowGraph.applyWheel)),
-      hsm.transition(
-        hsm.on(FlowGraph.setNodesEvent.name),
-        hsm.guard(FlowGraph.nodesAdmissible),
-        hsm.effect(FlowGraph.applyAdmittedNodes),
-      ),
+      hsm.transition(hsm.on(FlowGraph.setNodesEvent.name), hsm.effect(FlowGraph.applyAdmittedNodes)),
       hsm.transition(hsm.on(FlowGraph.rejectNodesEvent.name), hsm.effect(FlowGraph.rejectNodes)),
-      hsm.transition(
-        hsm.on(FlowGraph.setEdgesEvent.name),
-        hsm.guard(FlowGraph.edgesAdmissible),
-        hsm.effect(FlowGraph.applyAdmittedEdges),
-      ),
+      hsm.transition(hsm.on(FlowGraph.setEdgesEvent.name), hsm.effect(FlowGraph.applyAdmittedEdges)),
       hsm.transition(hsm.on(FlowGraph.rejectEdgesEvent.name), hsm.effect(FlowGraph.rejectEdges)),
       hsm.transition(hsm.on(FlowGraph.setPolicyEvent.name), hsm.effect(FlowGraph.applySetPolicy)),
       hsm.transition(hsm.on(Panner.transformEvent.name), hsm.effect(FlowGraph.rememberViewport)),
@@ -960,14 +952,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const point = pointOf(event.data["point"]);
     if (typeof deltaY !== "number" || point === null) return;
     instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.zoomEvent, data: { deltaY, point } }) });
-  }
-
-  static nodesAdmissible(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return hsm.isRecord(event.data) && nodesAreAdmissible(event.data["nodes"]);
-  }
-
-  static edgesAdmissible(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-    return hsm.isRecord(event.data) && edgesAreAdmissible(event.data["edges"]);
   }
 
   static paintNow(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
