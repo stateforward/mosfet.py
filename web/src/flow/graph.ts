@@ -960,9 +960,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static applyAdmittedNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
-    const admitted = admitNodes(event.data["nodes"]);
-    if (admitted.rejected !== null) return;
+    if (!(instance instanceof FlowGraph)) return;
+    const admitted = admitNodes(hsm.isRecord(event.data) ? event.data["nodes"] : undefined);
+    if (admitted.rejected !== null) {
+      void instance.dispatch(hsm.typedEvent({
+        event: FlowGraph.rejectNodesEvent,
+        data: admitted.rejected,
+      })).catch(hsm.catchFailure(instance));
+      return;
+    }
     instance.#nodes = admitted.nodes;
     instance.#dirty();
   }
@@ -973,9 +979,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   static applyAdmittedEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
-    const admitted = admitEdges(event.data["edges"]);
-    if (admitted.rejected !== null) return;
+    if (!(instance instanceof FlowGraph)) return;
+    const admitted = admitEdges(hsm.isRecord(event.data) ? event.data["edges"] : undefined);
+    if (admitted.rejected !== null) {
+      void instance.dispatch(hsm.typedEvent({
+        event: FlowGraph.rejectEdgesEvent,
+        data: admitted.rejected,
+      })).catch(hsm.catchFailure(instance));
+      return;
+    }
     instance.#edges = admitted.edges;
     instance.#dirty();
   }

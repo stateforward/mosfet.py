@@ -569,6 +569,54 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("poison nodes_set after copy success emits reject and keeps admitted nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const valid = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [valid];
+    await waitUntil(() => graph.nodes.length === 1);
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.setNodesEvent,
+      data: { nodes: [{ id: "bad" }] },
+    }));
+    await flush();
+    assert.equal(graph.nodes.length, 1);
+    assert.equal(graph.nodes[0]?.id, "a");
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
+  test("poison edges_set after copy success emits reject and keeps admitted edges", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const node = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    const valid = { id: "e", source: "a", target: "a" };
+    graph.nodes = [node];
+    graph.edges = [valid];
+    await waitUntil(() => graph.edges.length === 1);
+    const rejected: string[] = [];
+    graph.addEventListener("flow-admit-rejected", (event: Event) => {
+      if (event instanceof CustomEvent && hsm.isRecord(event.detail) && typeof event.detail["reason"] === "string") {
+        rejected.push(event.detail["reason"]);
+      }
+    });
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.setEdgesEvent,
+      data: { edges: [{ id: "bad" }] },
+    }));
+    await flush();
+    assert.equal(graph.edges.length, 1);
+    assert.equal(graph.edges[0]?.id, "e");
+    assert.deepEqual(rejected, ["invalid"]);
+    graph.remove();
+  });
+
   test("PointerEvent pan and box run on the defined element", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);
