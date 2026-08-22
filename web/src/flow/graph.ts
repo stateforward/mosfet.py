@@ -1,7 +1,6 @@
 import * as hsm from "../hsm.ts";
 import { applyStyles, replaceStyles } from "../elements/styles.ts";
 
-import { coalesceLatest, timeoutScheduler } from "./coalesce.ts";
 import { Connection, startConnection, type ConnectionDraft } from "./connection.ts";
 import { Dragger, startDragger } from "./dragger.ts";
 import { FlowEdge } from "./edge.ts";
@@ -153,7 +152,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     ),
     hsm.state(
       "pan",
-      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.movePan)),
       hsm.transition(hsm.on(FlowGraph.pointerDownEvent.name), hsm.effect(FlowGraph.beginPan)),
       hsm.transition(
         hsm.on(FlowGraph.pointerUpEvent.name),
@@ -163,7 +161,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     ),
     hsm.state(
       "drag",
-      hsm.transition(hsm.on(FlowGraph.pointerSampleEvent.name), hsm.effect(FlowGraph.moveDrag)),
       hsm.transition(
         hsm.on(FlowGraph.pointerUpEvent.name),
         hsm.target("../idle"),
@@ -297,6 +294,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #selection: ReturnType<typeof startSelection> | null = null;
   #connection: ReturnType<typeof startConnection> | null = null;
   #view: Viewport = { x: 0, y: 0, zoom: 1 };
+  #lastPointerClient: XYPosition = { x: 0, y: 0 };
   #selectedNodeIds: ReadonlySet<string> = new Set();
   #selectedEdgeIds: ReadonlySet<string> = new Set();
   #box: SelectionBox | null = null;
@@ -781,25 +779,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     } }) });
   }
 
-  static movePan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph)) return;
-    const sample = pointerOf(event.data);
-    if (sample === null) return;
-    instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
-  }
-
   static endPan(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample === null) return;
     instance.#send({ machine: instance.#panner, event: hsm.typedEvent({ event: Panner.panEndEvent, data: { pointerId: sample.pointerId } }) });
-  }
-
-  static moveDrag(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof FlowGraph)) return;
-    const sample = pointerOf(event.data);
-    if (sample === null) return;
-    instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragMoveEvent, data: { position: sample.world } }) });
   }
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -1039,8 +1023,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const viewport = viewportOf(event.data);
     if (viewport === null) return;
     instance.#view = viewport;
-    instance.#world.style.transformOrigin = "0 0";
-    instance.#world.style.transform = `translate(${String(viewport.x)}px, ${String(viewport.y)}px) scale(${String(viewport.zoom)})`;
     instance.dispatchEvent(new CustomEvent<ViewportChangeDetail>("flow-viewport-change", {
       detail: { viewport },
       bubbles: true,
@@ -1198,8 +1180,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #startActors(): void {
     const ctx = this.context();
     this.#renderer = startRenderer({ ctx });
-    this.#panner = startPanner({ ctx });
-    this.#dragger = startDragger({ ctx });
+    this.#panner = startPanner({
+      ctx,
+      paintWorld: (viewport) => {
+        this.#world.style.transformOrigin = "0 0";
+        this.#world.style.transform = `translate(${String(viewport.x)}px, ${String(viewport.y)}px) scale(${String(viewport.zoom)})`;
+      },
+    });
+    this.#dragger = startDragger({ ctx, getPosition: () => this.#worldPoint(this.#lastPointerClient) });
     this.#focuser = startFocuser({ ctx });
     this.#selection = startSelection({ ctx });
     this.#connection = startConnection({ ctx });
@@ -1207,12 +1195,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   #listen(): void {
     let origin: { x: number; y: number } | null = null;
-    const samples = coalesceLatest<PointerSampleData>({
-      scheduler: timeoutScheduler(),
-      emit: (sample) => {
-        this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
-      },
-    });
     const onPointerDown = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
       if (event.button !== 0 && event.pointerType === "mouse") return;
@@ -1222,7 +1204,15 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     };
     const onPointerMove = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
-      samples.push(this.#sampleFrom(event, "pointermove", origin ?? { x: event.clientX, y: event.clientY }));
+      const client = { x: event.clientX, y: event.clientY };
+      this.#lastPointerClient = client;
+      const sample = this.#sampleFrom(event, "pointermove", origin ?? client);
+      // Pan motion goes straight to the Panner in the same turn: the Panner's
+      // own state decides whether this pointer is panning (ignored while
+      // fixed), and no host dispatch hop or timer sits in between. The host
+      // pointer model still receives the sample for click/box/connect flow.
+      this.#send({ machine: this.#panner, event: hsm.typedEvent({ event: Panner.cursorMoveEvent, data: { pointerId: sample.pointerId, point: sample.viewport } }) });
+      this.#live(hsm.typedEvent({ event: FlowGraph.pointerSampleEvent, data: sample }));
     };
     const onPointerUp = (event: Event): void => {
       if (!(event instanceof PointerEvent)) return;
@@ -1320,7 +1310,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.removeEventListener("click", onActivateClick);
       this.removeEventListener("keydown", onKey);
       this.removeEventListener("flow-control", onControl);
-      samples.dispose();
     };
   }
 

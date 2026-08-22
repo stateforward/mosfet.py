@@ -28,6 +28,20 @@ export type FitData = {
 };
 export type ViewportData = Viewport;
 
+/**
+ * Synchronous world-transform writer injected at `startPanner`.
+ * The Panner paints the world element here, in the same turn as the cursor
+ * or viewport event that changed the transform. `transform_changed` remains
+ * owner bookkeeping only; it is never the path the DOM transform takes.
+ * Inputs: the new `{ x, y, zoom }` viewport. Outputs: the injected world
+ * element style update. Ownership: the Panner calls it; the host supplies
+ * it. Lifetime: the Panner's lifetime. Concurrency: synchronous. Failure
+ * modes: a writer that throws propagates from the Panner effect. Units: pan
+ * in CSS pixels, zoom as a scale factor. Classification: external-system
+ * (DOM paint).
+ */
+export type WorldTransformWriter = (viewport: Viewport) => void;
+
 const MIN_PINCH_DISTANCE = 1;
 const ZOOM_STEP = 0.0015;
 
@@ -85,12 +99,14 @@ export class Panner extends hsm.Instance {
 
   scale = 1;
   pan: ViewportPoint = { x: 0, y: 0 };
+  readonly paintWorld: WorldTransformWriter | null;
   #pointers = new Map<number, ViewportPoint>();
   #dragStart: { pointerId: number; point: ViewportPoint; pan: ViewportPoint } | null = null;
   #pinchStart: { distance: number; scale: number } | null = null;
 
-  constructor() {
+  constructor(paintWorld?: WorldTransformWriter) {
     super();
+    this.paintWorld = paintWorld ?? null;
   }
 
   get transform(): ViewportTransform {
@@ -266,6 +282,7 @@ export class Panner extends hsm.Instance {
   #setTransform(args: { scale: number; pan: ViewportPoint }): void {
     this.scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, args.scale));
     this.pan = { ...args.pan };
+    this.paintWorld?.(this.viewport);
     void hsm.notifyOwner({
       instance: this,
       event: hsm.typedEvent({ event: Panner.transformEvent, data: this.viewport }),
@@ -283,7 +300,10 @@ export class Panner extends hsm.Instance {
 /**
  * Start a Panner under `ctx`.
  *
- * Inputs: `ctx` — owner context used as the HSM parent environment.
+ * Inputs: `ctx` — owner context used as the HSM parent environment;
+ * `paintWorld` — the synchronous world-transform writer the Panner calls in
+ * every transform-changing effect (cursor move, zoom, fit, viewport set)
+ * before `transform_changed` notifies the owner for bookkeeping.
  * Outputs: a started Panner in `/Panner/ready/fixed` with identity transform.
  * Ownership: caller owns the returned actor and must `hsm.stop` it.
  * Lifetime: until `hsm.stop` or owner context cancel.
@@ -294,8 +314,9 @@ export class Panner extends hsm.Instance {
  */
 export function startPanner(args: {
   ctx: hsm.Context;
+  paintWorld: WorldTransformWriter;
 }): Panner {
-  return hsm.start({ ctx: args.ctx, instance: new Panner(), model: Panner.model });
+  return hsm.start({ ctx: args.ctx, instance: new Panner(args.paintWorld), model: Panner.model });
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
