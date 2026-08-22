@@ -20,10 +20,13 @@ export type OtelSourceEventName = keyof typeof sourceCommands;
  * Typed URL-bearing ingress for source connect / dashboard stream selection.
  *
  * Inputs: producer `origin`, optional `url` and `source`. `urlAllowed` is
- * computed here from `collectorUrl` and is never trusted from the caller.
+ * computed here from the URL a connect activity will open (`source.url` when
+ * `source` is present, otherwise `url`) and is never trusted from the caller.
+ * A present `url` that disagrees with `source.url` is `urlAllowed: false`.
  * Outputs: the payload guards and activities read. Ownership: returned record
  * is owned by the dispatch. Lifetime: one admission. Concurrency: synchronous.
- * Failure modes: missing/invalid origin or URL yields `urlAllowed: false`.
+ * Failure modes: missing/invalid origin or URL, or split `url` vs `source.url`,
+ * yields `urlAllowed: false`.
  * Classification: runtime-safe.
  */
 export type SourceConnectData = {
@@ -313,10 +316,17 @@ export class OtelSource extends hsm.from(HTMLElement) {
       await fail("collector origin is missing");
       return;
     }
-    const requested = admitted.url ?? admitted.source?.url;
+    const opened = streamConnectUrl({
+      ...(admitted.url !== undefined ? { url: admitted.url } : {}),
+      ...(admitted.source !== undefined ? { source: admitted.source } : {}),
+    });
+    if (opened.disagreed) {
+      await fail("collector url is not allowed");
+      return;
+    }
     const url = collectorUrl({
       origin: admitted.origin,
-      ...(requested !== undefined ? { requested } : {}),
+      ...(opened.requested !== undefined ? { requested: opened.requested } : {}),
     });
     if (url === null) {
       await fail("collector url is not allowed");
@@ -350,25 +360,53 @@ export function collectorUrl(args: { readonly requested?: string; readonly origi
 }
 
 /**
+ * Choose the URL a stream connect will open.
+ *
+ * Inputs: optional payload `url` and optional `source`. When `source` is
+ * present, `source.url` is the open URL; `url` is a sibling field, not an
+ * override. Outputs: `requested` is `source.url` when source is present,
+ * otherwise `url`. `disagreed` is true when both strings are present and not
+ * equal. Ownership: does not retain inputs. Purity: no I/O. Concurrency:
+ * runtime-safe. Failure modes: none; disagreement is a boolean, not a throw.
+ * Classification: runtime-safe.
+ */
+function streamConnectUrl(args: {
+  readonly url?: string;
+  readonly source?: StreamSource;
+}): { readonly requested: string | undefined; readonly disagreed: boolean } {
+  const sourceUrl = args.source?.url;
+  const url = args.url;
+  return {
+    requested: sourceUrl !== undefined ? sourceUrl : url,
+    disagreed: url !== undefined && sourceUrl !== undefined && url !== sourceUrl,
+  };
+}
+
+/**
  * Build typed URL-bearing ingress so choice guards compare `urlAllowed` and
  * never construct `URL` objects.
  *
  * Inputs: the command payload (`origin`, optional `url` or `source.url`).
- * Caller-supplied `urlAllowed` is ignored and recomputed. Outputs:
- * `SourceConnectData`. Ownership: returns a new record; does not retain the
- * input. Lifetime: consumed by the following dispatch. Concurrency:
- * synchronous. Failure modes: missing/invalid origin or URL yields
- * `urlAllowed: false`. Classification: runtime-safe.
+ * Caller-supplied `urlAllowed` is ignored and recomputed from the URL
+ * `streamConnectUrl` will open (`source.url` when `source` is present).
+ * Outputs: `SourceConnectData`. Ownership: returns a new record; does not
+ * retain the input. Lifetime: consumed by the following dispatch. Concurrency:
+ * synchronous. Failure modes: missing/invalid origin or URL, or `url` that
+ * disagrees with `source.url`, yields `urlAllowed: false`. Classification:
+ * runtime-safe.
  */
 export function sourceConnectFrom(data: unknown): SourceConnectData {
   const record = hsm.isRecord(data) ? data : {};
   const origin = typeof record["origin"] === "string" ? record["origin"] : "";
   const url = typeof record["url"] === "string" ? record["url"] : undefined;
   const source = isOtelSource(record["source"]) ? record["source"] : undefined;
-  const requested = url ?? source?.url;
-  const urlAllowed = origin.length > 0 && collectorUrl({
+  const opened = streamConnectUrl({
+    ...(url !== undefined ? { url } : {}),
+    ...(source !== undefined ? { source } : {}),
+  });
+  const urlAllowed = !opened.disagreed && origin.length > 0 && collectorUrl({
     origin,
-    ...(requested !== undefined ? { requested } : {}),
+    ...(opened.requested !== undefined ? { requested: opened.requested } : {}),
   }) !== null;
   return {
     urlAllowed,

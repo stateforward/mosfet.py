@@ -1271,9 +1271,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
    *
    * Inputs: activity `ctx` and the entering `dashboard.source.selected` /
    * `dashboard.replay.live` event. `source`, `origin`, and `urlAllowed` come
-   * from that stamped payload. `sourceCheck` already selected viewing, so this
-   * activity does not dispatch `dashboard.load.failed` for missing source or
-   * disallowed URL.
+   * from that stamped payload. `urlAllowed` was computed from `source.url`,
+   * which is the same string this activity passes to `connectStream`.
+   * `sourceCheck` already selected viewing, so this activity does not dispatch
+   * `dashboard.load.failed` for missing source or disallowed URL.
    * Outputs: `dashboard.load.completed` / `dashboard.model.published` products
    * and `dashboard.load.failed` for later stream errors. Leaving viewing
    * (replay.enter, reset, detach, new source) cancels the stream by exiting

@@ -1028,6 +1028,93 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
+  test("sourceConnectFrom stamps urlAllowed from source.url and rejects split url fields", () => {
+    const origin = "http://localhost";
+    const allowed = "/v1/traces/stream";
+    const disallowed = "https://evil.example/sse";
+    const notAllowed = false;
+    const allowedStamp = true;
+    const splitDisallowedSource = sourceConnectFrom({
+      origin,
+      url: allowed,
+      source: { kind: "stream", url: disallowed, label: "evil" },
+    });
+    assert.equal(splitDisallowedSource.urlAllowed, notAllowed);
+    assert.equal(splitDisallowedSource.url, allowed);
+    assert.equal(splitDisallowedSource.source?.url, disallowed);
+    const splitDisallowedUrl = sourceConnectFrom({
+      origin,
+      url: disallowed,
+      source: { kind: "stream", url: allowed, label: "ok" },
+    });
+    assert.equal(splitDisallowedUrl.urlAllowed, notAllowed);
+    const splitSamePathDifferentString = sourceConnectFrom({
+      origin,
+      url: allowed,
+      source: { kind: "stream", url: `${origin}${allowed}`, label: "ok" },
+    });
+    assert.equal(splitSamePathDifferentString.urlAllowed, notAllowed);
+    const matched = sourceConnectFrom({
+      origin,
+      url: allowed,
+      source: { kind: "stream", url: allowed, label: "ok" },
+    });
+    assert.equal(matched.urlAllowed, allowedStamp);
+    const sourceOnly = sourceConnectFrom({
+      origin,
+      source: { kind: "stream", url: allowed, label: "ok" },
+    });
+    assert.equal(sourceOnly.urlAllowed, allowedStamp);
+    const urlOnly = sourceConnectFrom({ origin, url: allowed });
+    assert.equal(urlOnly.urlAllowed, allowedStamp);
+  });
+
+  test("allowed url with disallowed source.url fails closed before viewing", async () => {
+    const opened: string[] = [];
+    const dashboard = bootDashboard({
+      connectStream: (url) => {
+        opened.push(url);
+        return { close(): void { return; } };
+      },
+    });
+    dashboard.origin = "http://localhost";
+    const viewing = "viewing";
+    await dashboard.dispatch("dashboard.source.selected", {
+      origin: "http://localhost",
+      url: "/v1/traces/stream",
+      source: { kind: "stream", url: "https://evil.example/sse", label: "evil" },
+    });
+    await waitFor(() => dashboard.snapshot().phase === "error");
+    assert.equal(dashboard.snapshot().phase, "error");
+    assert.equal(dashboard.snapshot().statePath.includes(viewing), false);
+    assert.deepEqual(opened, []);
+    assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
+    await stopDashboard(dashboard);
+  });
+
+  test("disallowed url with allowed source.url fails closed before viewing", async () => {
+    const opened: string[] = [];
+    const dashboard = bootDashboard({
+      connectStream: (url) => {
+        opened.push(url);
+        return { close(): void { return; } };
+      },
+    });
+    dashboard.origin = "http://localhost";
+    const viewing = "viewing";
+    await dashboard.dispatch("dashboard.source.selected", {
+      origin: "http://localhost",
+      url: "https://evil.example/sse",
+      source: streamSource(),
+    });
+    await waitFor(() => dashboard.snapshot().phase === "error");
+    assert.equal(dashboard.snapshot().phase, "error");
+    assert.equal(dashboard.snapshot().statePath.includes(viewing), false);
+    assert.deepEqual(opened, []);
+    assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
+    await stopDashboard(dashboard);
+  });
+
   test("typed dashboard.command.send posts through the modeled event", async () => {
     const posted: string[] = [];
     const kinds: unknown[] = [];
