@@ -47,6 +47,9 @@ const NESTED_NODES_DRAGGABLE = false;
 const NESTED_PAN_ON_DRAG = true;
 const FLOW_GRAPH_CONNECTED = true;
 const FRAME_PART_SELECTOR = '[part="frame"]';
+const YIELD_MS = 0;
+const CONNECT_WAIT_MS = 2000;
+const DROP_NONE = 0;
 
 test("flow-handle registers, attaches, and reflects kind and position", async ({ page }) => {
   await page.goto("/");
@@ -304,6 +307,8 @@ test("bot-machine-graph nested connect leaves flow-graph nodes not draggable", a
 
   const result = await page.evaluate(async (args: {
     framePartSelector: string;
+    connectWaitMs: number;
+    yieldMs: number;
   }) => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
@@ -313,11 +318,11 @@ test("bot-machine-graph nested connect leaves flow-graph nodes not draggable", a
       isConnected?: boolean;
       state?: () => string;
     } | null;
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + args.connectWaitMs;
     let state = typeof flow?.state === "function" ? flow.state() : "";
     while (Date.now() < deadline && !/connected|pointer/.test(state)) {
       await new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, 0);
+        globalThis.setTimeout(resolve, args.yieldMs);
       });
       state = typeof flow?.state === "function" ? flow.state() : "";
     }
@@ -329,7 +334,7 @@ test("bot-machine-graph nested connect leaves flow-graph nodes not draggable", a
     };
     host.remove();
     return snapshot;
-  }, { framePartSelector: FRAME_PART_SELECTOR });
+  }, { framePartSelector: FRAME_PART_SELECTOR, connectWaitMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
 
   expect(result.connected).toBe(FLOW_GRAPH_CONNECTED);
   expect(result.state).toMatch(/connected|pointer/);
@@ -345,6 +350,8 @@ test("bot-machine-graph graphs before append keep nested fit", async ({ page }) 
   });
   const result = await page.evaluate(async (args: {
     framePartSelector: string;
+    connectWaitMs: number;
+    yieldMs: number;
   }) => {
     const host = document.createElement("bot-machine-graph") as HTMLElement & {
       graphs: readonly unknown[];
@@ -371,11 +378,11 @@ test("bot-machine-graph graphs before append keep nested fit", async ({ page }) 
       edges: [],
     }];
     document.body.append(host);
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + args.connectWaitMs;
     let flowState = typeof flow?.state === "function" ? flow.state() : "";
     while (Date.now() < deadline && !/connected|pointer/.test(flowState)) {
       await new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, 0);
+        globalThis.setTimeout(resolve, args.yieldMs);
       });
       flowState = typeof flow?.state === "function" ? flow.state() : "";
     }
@@ -387,12 +394,12 @@ test("bot-machine-graph graphs before append keep nested fit", async ({ page }) 
     };
     host.remove();
     return snapshot;
-  }, { framePartSelector: FRAME_PART_SELECTOR });
+  }, { framePartSelector: FRAME_PART_SELECTOR, connectWaitMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
 
   expect(result.connected).toBe(FLOW_GRAPH_CONNECTED);
   expect(result.flowState).toMatch(/connected|pointer/);
   expect(result.nodeCount).toBe("2");
-  expect(result.drops).toBe(0);
+  expect(result.drops).toBe(DROP_NONE);
 });
 
 test("in-document bot-dashboard upgrade starts nested flow-graph", async ({ page }) => {
@@ -404,6 +411,8 @@ test("in-document bot-dashboard upgrade starts nested flow-graph", async ({ page
   });
   const result = await page.evaluate(async (args: {
     framePartSelector: string;
+    connectWaitMs: number;
+    yieldMs: number;
   }) => {
     const dash = document.querySelector("bot-dashboard");
     const graph = dash?.shadowRoot?.querySelector('[data-testid="canvas"]');
@@ -411,11 +420,11 @@ test("in-document bot-dashboard upgrade starts nested flow-graph", async ({ page
       isConnected?: boolean;
       state?: () => string;
     } | null;
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + args.connectWaitMs;
     let state = typeof flow?.state === "function" ? flow.state() : "";
     while (Date.now() < deadline && !/connected|pointer/.test(state)) {
       await new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, 0);
+        globalThis.setTimeout(resolve, args.yieldMs);
       });
       state = typeof flow?.state === "function" ? flow.state() : "";
     }
@@ -424,7 +433,7 @@ test("in-document bot-dashboard upgrade starts nested flow-graph", async ({ page
       connected: flow?.isConnected === true,
       state,
     };
-  }, { framePartSelector: FRAME_PART_SELECTOR });
+  }, { framePartSelector: FRAME_PART_SELECTOR, connectWaitMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
 
   expect(result.upgraded).toBe(ELEMENT_DEFINED);
   expect(result.connected).toBe(FLOW_GRAPH_CONNECTED);
