@@ -293,9 +293,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
   #panOnDrag = true;
-  #started = false;
-  #pendingNodes: readonly Node[] | undefined;
-  #pendingEdges: readonly Edge[] | undefined;
   #unlisten: (() => void) | null = null;
 
   constructor() {
@@ -321,6 +318,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.#world.append(this.#edgeLayer, this.#nodeLayer);
     this.#viewport.append(this.#world, this.#selectionBox);
     this.#root.append(this.#viewport, document.createElement("slot"));
+    hsm.start(this, FlowGraph.model);
   }
 
   get nodes(): readonly Node[] {
@@ -328,10 +326,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set nodes(value: readonly Node[]) {
-    if (!this.#started) {
-      this.#pendingNodes = value;
-      return;
-    }
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
   }
 
@@ -340,10 +334,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   set edges(value: readonly Edge[]) {
-    if (!this.#started) {
-      this.#pendingEdges = value;
-      return;
-    }
     this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
   }
 
@@ -353,7 +343,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set nodesDraggable(value: boolean) {
     this.#nodesDraggable = value;
-    if (!this.#started) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { nodesDraggable: value } }));
   }
 
@@ -363,7 +352,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   set panOnDrag(value: boolean) {
     this.#panOnDrag = value;
-    if (!this.#started) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setPolicyEvent, data: { panOnDrag: value } }));
   }
 
@@ -419,7 +407,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!this.hasAttribute("role")) this.setAttribute("role", GRAPH_ROLE);
     if (!this.hasAttribute("aria-label")) this.setAttribute("aria-label", "Machine graph");
     hsm.start(this, FlowGraph.model);
-    this.#started = true;
     this.#live(hsm.typedEvent({ event: FlowGraph.attachEvent }));
   }
 
@@ -456,23 +443,6 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     instance.#startActors();
     instance.#listen();
-    instance.#live(hsm.typedEvent({
-      event: FlowGraph.setPolicyEvent,
-      data: {
-        nodesDraggable: instance.#nodesDraggable,
-        panOnDrag: instance.#panOnDrag,
-      },
-    }));
-    const pendingNodes = instance.#pendingNodes;
-    instance.#pendingNodes = undefined;
-    if (pendingNodes !== undefined) {
-      instance.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: pendingNodes } }));
-    }
-    const pendingEdges = instance.#pendingEdges;
-    instance.#pendingEdges = undefined;
-    if (pendingEdges !== undefined) {
-      instance.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: pendingEdges } }));
-    }
     instance.#send({ machine: instance.#renderer, event: hsm.typedEvent({ event: Renderer.markDirtyEvent }) });
   }
 

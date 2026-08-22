@@ -122,8 +122,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   #held: readonly MachineGraph[] = [];
   #focusableNames: ReadonlySet<string> = new Set();
   #resizeObserver: ResizeObserver | null = null;
-  #started = false;
-  #pendingGraphs: readonly MachineGraph[] | undefined;
 
   constructor() {
     super();
@@ -141,6 +139,7 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     this.#flow.nodesDraggable = NESTED_NODES_DRAGGABLE;
     this.#flow.panOnDrag = NESTED_PAN_ON_DRAG;
     this.#root.append(this.#flow);
+    hsm.start(this, BotMachineGraph.model);
   }
 
   get graphs(): readonly MachineGraph[] {
@@ -148,10 +147,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   set graphs(value: readonly MachineGraph[]) {
-    if (!this.#started) {
-      this.#pendingGraphs = [...value];
-      return;
-    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.graphsEvent, data: { graphs: [...value] } satisfies GraphsAdmitData }));
   }
 
@@ -181,15 +176,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
 
   connectedCallback(): void {
     hsm.start(this, BotMachineGraph.model);
-    this.#started = true;
-    const pendingGraphs = this.#pendingGraphs;
-    this.#pendingGraphs = undefined;
-    if (pendingGraphs !== undefined) {
-      this.#live(hsm.typedEvent({
-        event: BotMachineGraph.graphsEvent,
-        data: { graphs: pendingGraphs } satisfies GraphsAdmitData,
-      }));
-    }
     this.#live(hsm.typedEvent({ event: BotMachineGraph.attachEvent }));
   }
 

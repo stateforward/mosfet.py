@@ -693,6 +693,8 @@ export class BotDashboard extends Dashboard {
 
   constructor() {
     super();
+    const origin = this.ownerDocument?.defaultView?.location.origin;
+    this.origin = typeof origin === "string" && origin.length > 0 ? origin : "http://localhost";
     this.#root = this.attachShadow({ mode: "open" });
     applyStyles(this.#root, cssText);
 

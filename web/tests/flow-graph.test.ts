@@ -682,10 +682,34 @@ describe("flow-graph", () => {
     await flush();
     assert.equal(graph.nodes.length, noNodes);
     assert.equal(drops.length, noNodes);
+    assert.match(graph.state(), /\/disconnected$/);
     document.body.append(graph);
     await waitUntil(() => graph.nodes.length === admitted);
     assert.equal(graph.nodes[0]?.id, "a");
     assert.equal(drops.length, noNodes);
+    graph.remove();
+  });
+
+  test("edges write before connect applies after the child starts", async () => {
+    const graph = document.createElement("flow-graph");
+    const noEdges = 0;
+    const admitted = 1;
+    const drops: Event[] = [];
+    graph.addEventListener("host-drop", (event: Event) => {
+      drops.push(event);
+    });
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "a-b", source: "a", target: "b" }];
+    await flush();
+    assert.equal(graph.edges.length, noEdges);
+    assert.equal(drops.length, noEdges);
+    document.body.append(graph);
+    await waitUntil(() => graph.edges.length === admitted);
+    assert.equal(graph.edges[0]?.id, "a-b");
+    assert.equal(drops.length, noEdges);
     graph.remove();
   });
 

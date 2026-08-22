@@ -67,12 +67,38 @@ describe("bot-machine-graph flow host", () => {
     const host = document.createElement("bot-machine-graph");
     document.body.append(host);
     const flow = flowFrame(host);
-    await waitUntil(() => flow.isConnected && flow.state() !== "");
-    assert.notEqual(flow.state(), "");
+    await waitUntil(() => flow.isConnected && /connected|pointer/.test(flow.state()));
     assert.match(flow.state(), /connected|pointer/);
     assert.equal(flow.nodesDraggable, NESTED_NODES_DRAGGABLE);
     assert.equal(flow.panOnDrag, NESTED_PAN_ON_DRAG);
     host.remove();
+  });
+
+  test("graphs write before append applies after nested connect without dropping fit", async () => {
+    const host = document.createElement("bot-machine-graph");
+    const flow = flowFrame(host);
+    const spy = spyFitView(flow);
+    const drops: Event[] = [];
+    flow.addEventListener("host-drop", (event: Event) => {
+      drops.push(event);
+    });
+    try {
+      const graphs = [graphFor("/Phone")];
+      const noNodes = 0;
+      const nodeCount = graphs.reduce((count, graph) => count + graph.nodes.length, noNodes);
+      host.graphs = graphs;
+      assert.equal(host.getAttribute("data-node-count"), null);
+      document.body.append(host);
+      const readyState = "/ready";
+      await waitUntil(() => host.getAttribute("data-node-count") === String(nodeCount) && host.state().endsWith(readyState));
+      await waitUntil(() => /connected|pointer/.test(flow.state()));
+      const oneFit = 1;
+      assert.equal(spy.count(), oneFit);
+      assert.equal(drops.length, noNodes);
+      host.remove();
+    } finally {
+      spy.restore();
+    }
   });
 
   test("admits graphs and focuses a machine on a defined element", async () => {
