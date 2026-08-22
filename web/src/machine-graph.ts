@@ -69,8 +69,7 @@ export class Graph extends hsm.Instance {
     if (!(instance instanceof Graph)) return;
     const graphs = graphsFromEvent(event);
     if (graphs === null || graphs.length === 0) {
-      instance.#graphs = [];
-      return;
+      throw new TypeError("drawing entered without admitted graphs");
     }
     instance.#graphs = copyGraphs(graphs);
   }
@@ -81,7 +80,7 @@ export class Graph extends hsm.Instance {
   }
 
   static notifyDrawn(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-    if (!(instance instanceof Graph) || instance.#graphs.length === 0) return;
+    if (!(instance instanceof Graph)) return;
     void hsm.notifyOwner({
       instance,
       event: hsm.typedEvent({ event: Graph.drawnEvent, data: { graphs: copyGraphs(instance.#graphs) } }),

@@ -210,6 +210,33 @@ describe("companion-style HSM controllers", () => {
     await hsm.stop(graph);
   });
 
+  test("drawing entry always notifies graph.drawn", async () => {
+    const graph = startAdmittedGraph();
+    const signals = countGraphSignals(graph);
+    const drawing = await admitGraphs(graph, [graphFor("/Demo")]);
+    assert.equal(drawing.phase, "drawing");
+    assert.equal(drawing.graphs.length, 1);
+    assert.equal(signals.draws.length, 1);
+    assert.deepEqual(signals.draws[0], ["/Demo"]);
+    Graph.notifyDrawn(graph.context(), graph, hsm.typedEvent({ event: Graph.setEvent }));
+    await waitFor(() => signals.draws.length === 2);
+    assert.equal(signals.draws.length, 2);
+    assert.deepEqual(signals.draws[1], ["/Demo"]);
+    const empty = startAdmittedGraph();
+    const emptySignals = countGraphSignals(empty);
+    Graph.notifyDrawn(empty.context(), empty, hsm.typedEvent({ event: Graph.setEvent }));
+    await waitFor(() => emptySignals.draws.length === 1);
+    assert.equal(emptySignals.draws.length, 1);
+    assert.deepEqual(emptySignals.draws[0], []);
+    assert.throws(
+      () => Graph.remember(empty.context(), empty, hsm.typedEvent({ event: Graph.setEvent, data: { graphs: "invalid" } })),
+      TypeError,
+    );
+    assert.equal(empty.snapshot().graphs.length, 0);
+    await hsm.stop(graph);
+    await hsm.stop(empty);
+  });
+
   test("panner writes transform synchronously and stays off the graph model", async () => {
     const panner = hsm.start({ instance: new Panner(), model: Panner.model });
     const graph = startAdmittedGraph();
