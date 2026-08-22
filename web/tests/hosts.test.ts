@@ -1158,6 +1158,29 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
+  test("replay live without payload uses dashboard-owned source", async () => {
+    let connects = 0;
+    const firstConnect = 1;
+    const secondConnect = 2;
+    const dashboard = bootDashboard({
+      connectStream: () => {
+        connects += 1;
+        return { close(): void { return; } };
+      },
+    });
+    await dashboard.dispatch("dashboard.source.selected", streamView());
+    assert.equal(dashboard.snapshot().phase, "live");
+    assert.equal(connects, firstConnect);
+    await dashboard.dispatch("dashboard.replay.enter");
+    const after = await dashboard.dispatch("dashboard.replay.live");
+    assert.equal(after.phase, "live");
+    const replayInactive = false;
+    assert.equal(after.replay.active, replayInactive);
+    assert.match(after.statePath, /\/viewing$/);
+    await waitFor(() => connects === secondConnect);
+    await stopDashboard(dashboard);
+  });
+
   test("postCommandHttp maps abort to canceled", async () => {
     const originalFetch = globalThis.fetch;
     let fetched = false;
