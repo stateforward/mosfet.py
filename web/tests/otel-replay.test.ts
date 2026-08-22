@@ -16,23 +16,12 @@ const fixturePath = path.join(
   "fixtures",
   "hsm-observe-spans.otlp.json",
 );
-const YIELD_MS = 0;
 const HOST_STOPPED = "stopped";
 const STARTED_RUNTIME_ERROR = new Error("dispatch requires a started HSM");
 
-async function waitUntilUnbound(host: object): Promise<void> {
-  for (let i = 0; i < 50; i += 1) {
-    if (hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host })?.reason === HOST_STOPPED) return;
-    await new Promise<void>((resolve) => {
-      globalThis.setTimeout(resolve, YIELD_MS);
-    });
-  }
-  throw new Error("timed out waiting for dashboard unbind");
-}
-
 async function stopDashboard(dashboard: Dashboard): Promise<void> {
-  void dashboard.stop();
-  await waitUntilUnbound(dashboard);
+  await dashboard.stop();
+  assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
 }
 
 function fixtureSpans() {

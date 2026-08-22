@@ -62,13 +62,9 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   throw new Error("timed out waiting for dashboard stream update");
 }
 
-async function waitUntilUnbound(host: object): Promise<void> {
-  await waitFor(() => hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host })?.reason === HOST_STOPPED);
-}
-
 async function stopDashboard(dashboard: Dashboard): Promise<void> {
-  void dashboard.stop();
-  await waitUntilUnbound(dashboard);
+  await dashboard.stop();
+  assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
 }
 
 function streamView(source = streamSource(), origin = "http://localhost"): {
@@ -763,48 +759,30 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
-  test("dashboard stop detaches through host.stopped before unbind", async () => {
+  test("dashboard stop unbinds like Host.stop", async () => {
     const dashboard = bootDashboard();
-    const names: string[] = [];
-    const inner = dashboard.dispatch.bind(dashboard);
-    dashboard.dispatch = ((eventOrCtx: hsm.Event | hsm.Context | string, maybeEvent?: unknown) => {
-      const event = typeof eventOrCtx === "string"
-        ? undefined
-        : eventOrCtx instanceof hsm.Context
-          ? maybeEvent as hsm.Event | undefined
-          : eventOrCtx;
-      if (event !== undefined && typeof event.name === "string") names.push(event.name);
-      return inner(eventOrCtx as never, maybeEvent as never);
-    }) as Dashboard["dispatch"];
-    await stopDashboard(dashboard);
-    const detach = "dashboard.host.detach";
-    const stopped = "dashboard.host.stopped";
-    assert.ok(names.includes(detach));
-    assert.ok(names.includes(stopped));
-    assert.ok(names.indexOf(detach) < names.indexOf(stopped));
+    await dashboard.stop();
+    assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
+    assert.equal(dashboard.state(), "");
   });
 
   test("overlapping dashboard stop both complete without hanging", async () => {
     const dashboard = bootDashboard();
-    const names: string[] = [];
-    const inner = dashboard.dispatch.bind(dashboard);
-    dashboard.dispatch = ((eventOrCtx: hsm.Event | hsm.Context | string, maybeEvent?: unknown) => {
-      const event = typeof eventOrCtx === "string"
-        ? undefined
-        : eventOrCtx instanceof hsm.Context
-          ? maybeEvent as hsm.Event | undefined
-          : eventOrCtx;
-      if (event !== undefined && typeof event.name === "string") names.push(event.name);
-      return inner(eventOrCtx as never, maybeEvent as never);
-    }) as Dashboard["dispatch"];
-    void dashboard.stop();
-    void dashboard.stop();
-    await waitUntilUnbound(dashboard);
-    const detach = "dashboard.host.detach";
-    const stoppedEvent = "dashboard.host.stopped";
-    assert.ok(names.includes(detach));
-    assert.ok(names.includes(stoppedEvent));
+    const first = dashboard.stop();
+    const second = dashboard.stop();
+    await Promise.all([first, second]);
     assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
+    assert.equal(dashboard.state(), "");
+  });
+
+  test("requestDetach stops command then stays bound", async () => {
+    const dashboard = bootDashboard();
+    dashboard.requestDetach();
+    await waitFor(() => dashboard.state().endsWith("/disconnected"));
+    assert.notEqual(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
+    dashboard.requestAttach();
+    await waitFor(() => dashboard.state().includes("/session"));
+    await stopDashboard(dashboard);
   });
 
   test("command event-name charset rejects empty, whitespace, overlong, and non-letter start", async () => {
