@@ -327,23 +327,25 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Stage `value` and admit it when this host is started.
+   * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. Before connect this is a write buffer replayed
-   * from `connectedCallback` after `start`; that staging is pre-start local
-   * state, not a dropped dispatch, and emits no host-drop. After start,
-   * `set_nodes` is dispatched. After stop, dispatch host-drops.
+   * Inputs: caller `value`. Copied with `copyNode` at write time; later
+   * mutation of the caller array does not change staged or admitted nodes.
+   * Before connect this is a write buffer replayed from `connectedCallback`
+   * after `start`; that staging is pre-start local state, not a dropped
+   * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
+   * with the copy. After stop, dispatch host-drops.
    * Outputs: getter returns copies of admitted nodes.
-   * Ownership: this host retains `value` until the next nodes write.
-   * Lifetime: until the next nodes write or stop.
-   * Concurrency: runtime-safe. Failure modes: admit reject emits
+   * Ownership: this host owns the copy. Lifetime: until the next nodes write
+   * or stop. Concurrency: runtime-safe. Failure modes: admit reject emits
    * `flow-admit-rejected`; unstarted staging is not a failure.
    * Classification: runtime-safe.
    */
   set nodes(value: readonly Node[]) {
-    this.#nodesWrite = value;
+    const nodes = value.map((node) => (hsm.isRecord(node.position) ? copyNode(node) : { ...node }));
+    this.#nodesWrite = nodes;
     if (!hsm.hostWasStarted(this)) return;
-    this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes: value } }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes } }));
   }
 
   get edges(): readonly Edge[] {
@@ -351,23 +353,25 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   /**
-   * Stage `value` and admit it when this host is started.
+   * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. Before connect this is a write buffer replayed
-   * from `connectedCallback` after `start`; that staging is pre-start local
-   * state, not a dropped dispatch, and emits no host-drop. After start,
-   * `set_edges` is dispatched. After stop, dispatch host-drops.
+   * Inputs: caller `value`. Copied with `copyEdge` at write time; later
+   * mutation of the caller array does not change staged or admitted edges.
+   * Before connect this is a write buffer replayed from `connectedCallback`
+   * after `start`; that staging is pre-start local state, not a dropped
+   * dispatch, and emits no host-drop. After start, `set_edges` is dispatched
+   * with the copy. After stop, dispatch host-drops.
    * Outputs: getter returns copies of admitted edges.
-   * Ownership: this host retains `value` until the next edges write.
-   * Lifetime: until the next edges write or stop.
-   * Concurrency: runtime-safe. Failure modes: admit reject emits
+   * Ownership: this host owns the copy. Lifetime: until the next edges write
+   * or stop. Concurrency: runtime-safe. Failure modes: admit reject emits
    * `flow-admit-rejected`; unstarted staging is not a failure.
    * Classification: runtime-safe.
    */
   set edges(value: readonly Edge[]) {
-    this.#edgesWrite = value;
+    const edges = value.map(copyEdge);
+    this.#edgesWrite = edges;
     if (!hsm.hostWasStarted(this)) return;
-    this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges: value } }));
+    this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges } }));
   }
 
   get nodesDraggable(): boolean {

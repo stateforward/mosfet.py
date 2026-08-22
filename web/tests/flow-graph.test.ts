@@ -772,6 +772,38 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("mutating the caller nodes array after set does not change admitted nodes", async () => {
+    const graph = document.createElement("flow-graph");
+    const admitted = 1;
+    const nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    graph.nodes = nodes;
+    nodes.push({ id: "b", position: { x: 1, y: 1 }, data: { label: "B" }, width: 80, height: 40 });
+    nodes.splice(0, admitted);
+    document.body.append(graph);
+    await waitUntil(() => graph.nodes.length === admitted);
+    assert.equal(graph.nodes.length, admitted);
+    assert.equal(graph.nodes[0]?.id, "a");
+    graph.remove();
+  });
+
+  test("mutating the caller edges array after set does not change admitted edges", async () => {
+    const graph = document.createElement("flow-graph");
+    const admitted = 1;
+    graph.nodes = [
+      { id: "a", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    const edges = [{ id: "a-b", source: "a", target: "b" }];
+    graph.edges = edges;
+    edges.push({ id: "extra", source: "a", target: "b" });
+    edges.splice(0, admitted);
+    document.body.append(graph);
+    await waitUntil(() => graph.edges.length === admitted);
+    assert.equal(graph.edges.length, admitted);
+    assert.equal(graph.edges[0]?.id, "a-b");
+    graph.remove();
+  });
+
   test("edges write before connect applies after the child starts", async () => {
     const graph = document.createElement("flow-graph");
     const noEdges = 0;
