@@ -935,9 +935,16 @@ export class Dashboard extends hsm.from(HTMLElement) {
   override dispatch(ctx: hsm.Context, event: hsm.Event): hsm.Completion;
   override dispatch(eventOrContext: DashboardEventName | hsm.Event | hsm.Context, data?: unknown): hsm.Completion | Promise<DashboardSnapshot> {
     if (typeof eventOrContext !== "string") {
-      return eventOrContext instanceof hsm.Context
-        ? super.dispatch(eventOrContext, eventWithSourceConnect(data as hsm.Event))
-        : super.dispatch(eventWithSourceConnect(eventOrContext));
+      if (eventOrContext instanceof hsm.Context) {
+        if (!hsm.isEvent(data)) {
+          throw new TypeError("dispatch(ctx, event) requires an Event");
+        }
+        return super.dispatch(eventOrContext, eventWithSourceConnect(data));
+      }
+      if (!hsm.isEvent(eventOrContext)) {
+        throw new TypeError("dispatch(event) requires an Event");
+      }
+      return super.dispatch(eventWithSourceConnect(eventOrContext));
     }
     return this.#dispatchController(eventOrContext, data);
   }
