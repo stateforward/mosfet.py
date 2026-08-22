@@ -34,10 +34,14 @@ export class FlowNode extends HTMLElement {
    * Ownership: this element owns the stored copy. The getter returns a new
    * copy; mutating `position` or `data` on the result does not change stored
    * paint state or derived DOM. Lifetime: until the next `node` set.
-   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   * Concurrency: runtime-safe. Failure modes: `copyNode` `{ ok: false }`
+   * (cyclic, over-deep, or non-record `data`) returns null and does not throw.
+   * Classification: runtime-safe.
    */
   get node(): Node | null {
-    return this.#node === null ? null : copyNode(this.#node);
+    if (this.#node === null) return null;
+    const copied = copyNode(this.#node);
+    return copied.ok ? copied.value : null;
   }
 
   /**
@@ -46,10 +50,20 @@ export class FlowNode extends HTMLElement {
    * Inputs: `value` is copied with `copyNode` at write time. Ownership: this
    * element owns the stored copy. Later mutation of the caller or of a getter
    * result does not change stored paint state. Lifetime: until the next set.
-   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   * Concurrency: runtime-safe. Failure modes: `copyNode` `{ ok: false }`
+   * (cyclic, over-deep, or non-record `data`) leaves stored paint unchanged,
+   * does not call `#sync` with invalid data, and does not throw.
+   * Classification: runtime-safe.
    */
   set node(value: Node | null) {
-    this.#node = value === null ? null : copyNode(value);
+    if (value === null) {
+      this.#node = null;
+      this.#sync();
+      return;
+    }
+    const copied = copyNode(value);
+    if (!copied.ok) return;
+    this.#node = copied.value;
     this.#sync();
   }
 

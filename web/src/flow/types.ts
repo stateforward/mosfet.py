@@ -192,7 +192,9 @@ export const DEFAULT_NODE_HEIGHT = 40;
 /** Maximum object/array nesting `copyJson` will copy. Deeper or cyclic values fail the copy. */
 export const MAX_JSON_DEPTH = 32;
 
-type CopyJsonResult = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+export type CopyResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false };
+
+type CopyJsonResult = CopyResult<unknown>;
 
 const initialJsonDepth = 0;
 
@@ -250,7 +252,19 @@ export function copyJson(value: unknown): unknown {
   return copied.ok ? copied.value : undefined;
 }
 
-export function copyNode(node: Node): Node {
+/**
+ * Copy `node` with owned `position` and JSON `data`.
+ *
+ * Inputs: a Node-shaped record. Outputs: `{ ok: true, value }` with copied
+ * `position` and `data`, or `{ ok: false }` when `data` is omitted, null, a
+ * non-record, cyclic, or nested deeper than `MAX_JSON_DEPTH`. `position` that
+ * is not a record is copied as `{ x: NaN, y: NaN }` on success so later
+ * `isNode` can reject it; it is not forged as a valid paint record.
+ * Ownership: the caller owns `value`; `node` is not retained. Lifetime: one
+ * call. Concurrency: synchronous. Failure modes: `{ ok: false }` and does not
+ * throw. Classification: runtime-safe.
+ */
+export function copyNode(node: Node): CopyResult<Node> {
   const rawPosition: unknown = node.position;
   const position = isCopiedRecord(rawPosition)
     ? {
@@ -260,18 +274,24 @@ export function copyNode(node: Node): Node {
     : { x: Number.NaN, y: Number.NaN };
   const initialStack: object[] = [];
   const copied = copyJsonResult({ value: node.data, stack: initialStack, depth: initialJsonDepth });
-  if (!copied.ok || !isCopiedRecord(copied.value)) {
-    return { ...node, position, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
-  }
-  return { ...node, position, data: copied.value };
+  if (!copied.ok || !isCopiedRecord(copied.value)) return { ok: false };
+  return { ok: true, value: { ...node, position, data: copied.value } };
 }
 
-export function copyEdge(edge: Edge): Edge {
-  if (edge.data === undefined) return { ...edge };
+/**
+ * Copy `edge` with owned JSON `data` when present.
+ *
+ * Inputs: an Edge-shaped record. Outputs: `{ ok: true, value }` with copied
+ * `data`, or `{ ok: true, value }` without `data` when it was omitted, or
+ * `{ ok: false }` when `data` is null, a non-record, cyclic, or nested deeper
+ * than `MAX_JSON_DEPTH`. Ownership: the caller owns `value`; `edge` is not
+ * retained. Lifetime: one call. Concurrency: synchronous. Failure modes:
+ * `{ ok: false }` and does not throw. Classification: runtime-safe.
+ */
+export function copyEdge(edge: Edge): CopyResult<Edge> {
+  if (edge.data === undefined) return { ok: true, value: { ...edge } };
   const initialStack: object[] = [];
   const copied = copyJsonResult({ value: edge.data, stack: initialStack, depth: initialJsonDepth });
-  if (!copied.ok || !isCopiedRecord(copied.value)) {
-    return { ...edge, data: (copied.ok ? copied.value : null) as Record<string, unknown> };
-  }
-  return { ...edge, data: copied.value };
+  if (!copied.ok || !isCopiedRecord(copied.value)) return { ok: false };
+  return { ok: true, value: { ...edge, data: copied.value } };
 }

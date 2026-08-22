@@ -20,9 +20,11 @@ export {
   getViewportForBounds,
   getNodesBounds,
 } from "./path.ts";
+export { copyJson, copyNode, copyEdge } from "./types.ts";
 export type {
   Node,
   Edge,
+  CopyResult,
   Viewport,
   XYPosition,
   HandlePosition,

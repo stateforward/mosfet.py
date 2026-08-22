@@ -33,10 +33,14 @@ export class FlowEdge extends HTMLElement {
    * Ownership: this element owns the stored copy. The getter returns a new
    * copy; mutating nested `data` on the result does not change stored paint
    * state. Lifetime: until the next `edge` set. Concurrency: runtime-safe.
-   * Failure modes: none. Classification: runtime-safe.
+   * Failure modes: `copyEdge` `{ ok: false }` (cyclic, over-deep, or
+   * non-record `data`) returns null and does not throw.
+   * Classification: runtime-safe.
    */
   get edge(): Edge | null {
-    return this.#edge === null ? null : copyEdge(this.#edge);
+    if (this.#edge === null) return null;
+    const copied = copyEdge(this.#edge);
+    return copied.ok ? copied.value : null;
   }
 
   /**
@@ -45,10 +49,18 @@ export class FlowEdge extends HTMLElement {
    * Inputs: `value` is copied with `copyEdge` at write time. Ownership: this
    * element owns the stored copy. Later mutation of the caller or of a getter
    * result does not change stored paint state. Lifetime: until the next set.
-   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   * Concurrency: runtime-safe. Failure modes: `copyEdge` `{ ok: false }`
+   * (cyclic, over-deep, or non-record `data`) leaves stored paint unchanged
+   * and does not throw. Classification: runtime-safe.
    */
   set edge(value: Edge | null) {
-    this.#edge = value === null ? null : copyEdge(value);
+    if (value === null) {
+      this.#edge = null;
+      return;
+    }
+    const copied = copyEdge(value);
+    if (!copied.ok) return;
+    this.#edge = copied.value;
   }
 
   connectedCallback(): void {

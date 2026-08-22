@@ -1790,6 +1790,88 @@ describe("flow-graph", () => {
     again.remove();
   });
 
+  test("mutating FlowGraph.nodes and edges getter nested fields does not change host state", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const originX = 0;
+    const originalLabel = "A";
+    const originalEdgeLabel = "e";
+    const mutatedX = 999;
+    const mutatedLabel = "mutated";
+    const admittedNodes = 2;
+    const admittedEdges = 1;
+    graph.nodes = [
+      { id: "a", position: { x: originX, y: 0 }, data: { label: originalLabel }, width: 80, height: 40 },
+      { id: "b", position: { x: 80, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "a-b", source: "a", target: "b", data: { label: originalEdgeLabel } }];
+    await waitUntil(() => graph.nodes.length === admittedNodes && graph.edges.length === admittedEdges);
+    const first = graph.nodes[0];
+    assert.ok(first !== undefined);
+    const nodePosition = first.position as { x: number };
+    nodePosition.x = mutatedX;
+    first.data["label"] = mutatedLabel;
+    const edge = graph.edges[0];
+    assert.ok(edge !== undefined);
+    assert.ok(edge.data !== undefined);
+    edge.data["label"] = mutatedLabel;
+    assert.equal(graph.nodes[0]?.position.x, originX);
+    assert.equal(graph.nodes[0]?.data["label"], originalLabel);
+    assert.equal(graph.edges[0]?.data?.["label"], originalEdgeLabel);
+    graph.remove();
+  });
+
+  test("flow-node cyclic and over-deep data does not throw and does not paint", () => {
+    const element = document.createElement("flow-node");
+    const originX = 0;
+    const originalLabel = "A";
+    const valid: Node = {
+      id: "a",
+      position: { x: originX, y: 0 },
+      data: { label: originalLabel },
+      width: 80,
+      height: 40,
+    };
+    element.node = valid;
+    assert.equal(element.node?.id, valid.id);
+    assert.equal(element.style.left, `${originX}px`);
+    const cyclicData: Record<string, unknown> = { label: "cycle", className: "boom" };
+    cyclicData["self"] = cyclicData;
+    element.node = { id: "cycle", position: { x: 9, y: 9 }, data: cyclicData };
+    assert.equal(element.node?.id, valid.id);
+    assert.equal(element.node?.data["label"], originalLabel);
+    assert.equal(element.style.left, `${originX}px`);
+    let nested: Record<string, unknown> = { label: "deep" };
+    const overDepth = MAX_JSON_DEPTH + 1;
+    for (let depth = 0; depth < overDepth; depth += 1) {
+      nested = { child: nested };
+    }
+    element.node = { id: "deep", position: { x: 9, y: 9 }, data: nested };
+    assert.equal(element.node?.id, valid.id);
+    assert.equal(element.style.left, `${originX}px`);
+    const unset = document.createElement("flow-node");
+    const rejectedLeft = "0px";
+    unset.node = { id: "cycle", position: { x: 0, y: 0 }, data: cyclicData };
+    assert.equal(unset.node, null);
+    assert.notEqual(unset.style.left, rejectedLeft);
+  });
+
+  test("flow-edge cyclic data does not throw and leaves stored paint unchanged", () => {
+    const element = document.createElement("flow-edge");
+    const originalLabel = "e";
+    const valid = { id: "a-b", source: "a", target: "b", data: { label: originalLabel } };
+    element.edge = valid;
+    assert.equal(element.edge?.id, valid.id);
+    const cyclicData: Record<string, unknown> = { label: "cycle" };
+    cyclicData["self"] = cyclicData;
+    element.edge = { id: "cycle", source: "a", target: "b", data: cyclicData };
+    assert.equal(element.edge?.id, valid.id);
+    assert.equal(element.edge?.data?.["label"], originalLabel);
+    const unset = document.createElement("flow-edge");
+    unset.edge = { id: "cycle", source: "a", target: "b", data: cyclicData };
+    assert.equal(unset.edge, null);
+  });
+
   test("flow-node paint does not alias graph node nested fields", async () => {
     const graph = document.createElement("flow-graph");
     document.body.append(graph);

@@ -293,8 +293,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #box: SelectionBox | null = null;
   #nodesDraggable = true;
   #panOnDrag = true;
-  #nodesWrite: readonly Node[] | undefined;
-  #edgesWrite: readonly Edge[] | undefined;
+  #nodesWrite: readonly unknown[] | undefined;
+  #edgesWrite: readonly unknown[] | undefined;
   #unlisten: (() => void) | null = null;
 
   constructor() {
@@ -323,17 +323,18 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   }
 
   get nodes(): readonly Node[] {
-    return this.#nodes.map(copyNode);
+    return copiedNodeList(this.#nodes);
   }
 
   /**
    * Stage a copy of `value` and admit it when this host is started.
    *
-   * Inputs: caller `value`. Copied with `snapshotNode` (`copyNode` of owned
-   * nested `position`/`data`) at write time; later mutation of the caller
-   * array or nested fields does not change staged or admitted nodes.
+   * Inputs: caller `value`. Copied with `copyNode` of owned nested
+   * `position`/`data` at write time; later mutation of the caller array or
+   * nested fields does not change staged or admitted nodes.
    * Omitted, null, non-record, cyclic, or over-deep `data` stays invalid and
-   * is not admitted as `{}`.
+   * is not admitted as `{}`. `copyNode` `{ ok: false }` stages an isolated
+   * invalid write of the same length so admit rejects the whole payload.
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_nodes` is dispatched
@@ -354,14 +355,14 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.#dropStopped({ operation: FlowGraph.setNodesEvent.name });
       return;
     }
-    const nodes = value.map(snapshotNode);
+    const nodes = stagedNodeWrite(value);
     this.#nodesWrite = nodes;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setNodesEvent, data: { nodes } }));
   }
 
   get edges(): readonly Edge[] {
-    return this.#edges.map(copyEdge);
+    return copiedEdgeList(this.#edges);
   }
 
   /**
@@ -369,6 +370,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    *
    * Inputs: caller `value`. Copied with `copyEdge` at write time; later
    * mutation of the caller array does not change staged or admitted edges.
+   * Cyclic, over-deep, or non-record `data` stays invalid (`copyEdge`
+   * `{ ok: false }` stages an isolated invalid write of the same length).
    * Before connect this is a write buffer replayed from `connectedCallback`
    * after `start`; that staging is pre-start local state, not a dropped
    * dispatch, and emits no host-drop. After start, `set_edges` is dispatched
@@ -389,7 +392,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.#dropStopped({ operation: FlowGraph.setEdgesEvent.name });
       return;
     }
-    const edges = value.map(copyEdge);
+    const edges = stagedEdgeWrite(value);
     this.#edgesWrite = edges;
     if (!hsm.hostWasStarted(this)) return;
     this.#live(hsm.typedEvent({ event: FlowGraph.setEdgesEvent, data: { edges } }));
@@ -826,8 +829,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       kind: "node",
       additive: sample.metaKey || sample.ctrlKey,
     } }) });
+    const clicked = copiedNodeValue(sample.hit.node);
+    if (clicked === null) return;
     instance.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
-      detail: { node: copyNode(sample.hit.node), originalEvent: sample.originalEvent },
+      detail: { node: clicked, originalEvent: sample.originalEvent },
       bubbles: EVENT_BUBBLES,
       composed: EVENT_COMPOSED,
       cancelable: false,
@@ -882,8 +887,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       kind: "edge",
       additive: sample.metaKey || sample.ctrlKey,
     } }) });
+    const clicked = copiedEdgeValue(sample.hit.edge);
+    if (clicked === null) return;
     instance.dispatchEvent(new CustomEvent<EdgeClickDetail>("flow-edge-click", {
-      detail: { edge: copyEdge(sample.hit.edge), originalEvent: sample.originalEvent },
+      detail: { edge: clicked, originalEvent: sample.originalEvent },
       bubbles: true,
       composed: true,
       cancelable: false,
@@ -1025,8 +1032,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#box = boxOf(event.data["box"]);
     instance.dispatchEvent(new CustomEvent<SelectionChangeDetail>("flow-selection-change", {
       detail: {
-        nodes: instance.#nodes.filter((node) => instance.#selectedNodeIds.has(node.id)).map(copyNode),
-        edges: instance.#edges.filter((edge) => instance.#selectedEdgeIds.has(edge.id)).map(copyEdge),
+        nodes: copiedNodeList(instance.#nodes.filter((node) => instance.#selectedNodeIds.has(node.id))),
+        edges: copiedEdgeList(instance.#edges.filter((edge) => instance.#selectedEdgeIds.has(edge.id))),
       },
       bubbles: true,
       composed: true,
@@ -1116,8 +1123,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       kind: "node",
       additive: EXCLUSIVE_SELECT,
     } }) });
+    const clicked = copiedNodeValue(node);
+    if (clicked === null) return;
     this.dispatchEvent(new CustomEvent<NodeClickDetail>("flow-node-click", {
-      detail: { node: copyNode(node), originalEvent: args.origin },
+      detail: { node: clicked, originalEvent: args.origin },
       bubbles: EVENT_BUBBLES,
       composed: EVENT_COMPOSED,
       cancelable: false,
@@ -1328,7 +1337,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
         this.#nodeLayer.append(element);
         this.#nodeElements.set(node.id, element);
       }
-      element.node = copyNode({ ...node, selected: this.#selectedNodeIds.has(node.id) });
+      const painted = copiedNodeValue({ ...node, selected: this.#selectedNodeIds.has(node.id) });
+      if (painted !== null) element.node = painted;
     }
     for (const [id, element] of this.#nodeElements) {
       if (seenNodes.has(id)) continue;
@@ -1348,7 +1358,8 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       element.mount(this.#edgeLayer);
       const source = byId.get(edge.source);
       const target = byId.get(edge.target);
-      element.edge = copyEdge({ ...edge, selected: this.#selectedEdgeIds.has(edge.id) });
+      const painted = copiedEdgeValue({ ...edge, selected: this.#selectedEdgeIds.has(edge.id) });
+      if (painted !== null) element.edge = painted;
       if (source !== undefined && target !== undefined) element.paint(source, target);
     }
     for (const [id, element] of this.#edgeElements) {
@@ -1427,7 +1438,10 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       const eventName = target.closest<SVGPathElement>(".edge-hit")?.dataset["eventName"];
       if (eventName === undefined) continue;
       const edge = this.#edges.find((item) => item.data?.["eventName"] === eventName || item.id === eventName);
-      if (edge !== undefined) return { kind: "edge", edge: copyEdge(edge) };
+      if (edge !== undefined) {
+        const copied = copiedEdgeValue(edge);
+        if (copied !== null) return { kind: "edge", edge: copied };
+      }
     }
     return { kind: "empty" };
   }
@@ -1493,11 +1507,6 @@ function isNode(value: unknown): value is Node {
   if (value["width"] !== undefined && !isFiniteNumber(value["width"])) return false;
   if (value["height"] !== undefined && !isFiniteNumber(value["height"])) return false;
   return true;
-}
-
-/** Write-path copy of nested position/data. Invalid data is kept invalid, not `{}`. */
-function snapshotNode(node: Node): Node {
-  return copyNode(node);
 }
 
 function isEdge(value: unknown): value is Edge {
@@ -1751,10 +1760,10 @@ function admitNodes(value: unknown): { nodes: Node[]; rejected: AdmitRejectedDet
       return { nodes: [], rejected: { reason: "invalid", nodeCount: value.length, edgeCount: 0 } };
     }
     const copied = copyNode(item);
-    if (!isNode(copied)) {
+    if (!copied.ok || !isNode(copied.value)) {
       return { nodes: [], rejected: { reason: "invalid", nodeCount: value.length, edgeCount: 0 } };
     }
-    nodes.push(copied);
+    nodes.push(copied.value);
   }
   return { nodes, rejected: null };
 }
@@ -1772,12 +1781,66 @@ function admitEdges(value: unknown): { edges: Edge[]; rejected: AdmitRejectedDet
       return { edges: [], rejected: { reason: "invalid", nodeCount: 0, edgeCount: value.length } };
     }
     const copied = copyEdge(item);
-    if (!isEdge(copied)) {
+    if (!copied.ok || !isEdge(copied.value)) {
       return { edges: [], rejected: { reason: "invalid", nodeCount: 0, edgeCount: value.length } };
     }
-    edges.push(copied);
+    edges.push(copied.value);
   }
   return { edges, rejected: null };
+}
+
+function copiedNodeValue(node: Node): Node | null {
+  const copied = copyNode(node);
+  return copied.ok ? copied.value : null;
+}
+
+function copiedEdgeValue(edge: Edge): Edge | null {
+  const copied = copyEdge(edge);
+  return copied.ok ? copied.value : null;
+}
+
+function copiedNodeList(nodes: readonly Node[]): Node[] {
+  const copied: Node[] = [];
+  for (const node of nodes) {
+    const value = copiedNodeValue(node);
+    if (value !== null) copied.push(value);
+  }
+  return copied;
+}
+
+function copiedEdgeList(edges: readonly Edge[]): Edge[] {
+  const copied: Edge[] = [];
+  for (const edge of edges) {
+    const value = copiedEdgeValue(edge);
+    if (value !== null) copied.push(value);
+  }
+  return copied;
+}
+
+function stagedNodeWrite(value: readonly Node[]): readonly unknown[] {
+  const nodes: Node[] = [];
+  for (const node of value) {
+    const copied = copyNode(node);
+    if (!copied.ok) {
+      const invalidCoordinate = Number.NaN;
+      return value.map((item) => ({ id: item.id, position: { x: invalidCoordinate, y: invalidCoordinate } }));
+    }
+    nodes.push(copied.value);
+  }
+  return nodes;
+}
+
+function stagedEdgeWrite(value: readonly Edge[]): readonly unknown[] {
+  const edges: Edge[] = [];
+  const invalidData = null;
+  for (const edge of value) {
+    const copied = copyEdge(edge);
+    if (!copied.ok) {
+      return value.map((item) => ({ id: item.id, source: item.source, target: item.target, data: invalidData }));
+    }
+    edges.push(copied.value);
+  }
+  return edges;
 }
 
 export function registerFlowGraph(): void {
