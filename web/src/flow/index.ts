@@ -7,7 +7,7 @@ export { FlowBackground } from "./background.ts";
 export { FlowControls } from "./controls.ts";
 export { FlowMinimap } from "./minimap.ts";
 export { FlowNodeResizer } from "./node-resizer.ts";
-export { FlowNodeResizeControl } from "./resize-control.ts";
+export { FlowNodeResizeControl, isResizeDirection, RESIZE_DIRECTIONS } from "./resize-control.ts";
 export { Renderer, startRenderer } from "./renderer.ts";
 export { Panner, startPanner } from "./panner.ts";
 export { Dragger, startDragger } from "./dragger.ts";
@@ -23,7 +23,7 @@ export {
   getViewportForBounds,
   getNodesBounds,
 } from "./path.ts";
-export { copyJson, copyNode, copyEdge } from "./types.ts";
+export { copyJson, copyNode, copyEdge, resizeOffered } from "./types.ts";
 export type {
   Node,
   Edge,

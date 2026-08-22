@@ -1,6 +1,13 @@
 import * as hsm from "../hsm.ts";
 
-import type { ResizeBounds, ResizeConstraints, ResizeDirection } from "./types.ts";
+import { isResizeDirection } from "./resize-control.ts";
+import {
+  MIN_RESIZE_HEIGHT,
+  MIN_RESIZE_WIDTH,
+  type ResizeBounds,
+  type ResizeConstraints,
+  type ResizeDirection,
+} from "./types.ts";
 
 export type ResizeStartData = {
   readonly nodeId: string;
@@ -52,7 +59,11 @@ export class Resizer extends hsm.Instance {
   #direction: ResizeDirection = "se";
   #origin: ResizeBounds = { x: 0, y: 0, width: 0, height: 0 };
   #pointer: { x: number; y: number } = { x: 0, y: 0 };
-  #constraints: ResizeConstraints = { minWidth: 10, minHeight: 10, keepAspectRatio: false };
+  #constraints: ResizeConstraints = {
+    minWidth: MIN_RESIZE_WIDTH,
+    minHeight: MIN_RESIZE_HEIGHT,
+    keepAspectRatio: false,
+  };
   #last: { x: number; y: number } | null = null;
   #current: ResizeBounds = { x: 0, y: 0, width: 0, height: 0 };
 
@@ -76,7 +87,8 @@ export class Resizer extends hsm.Instance {
 
   static applySample(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Resizer) || instance.#nodeId === null) return;
-    const world = pointOf((event.data as { world?: unknown } | null)?.world);
+    if (!hsm.isRecord(event.data)) return;
+    const world = pointOf(event.data["world"]);
     if (world === null) return;
     const last = instance.#last;
     if (last === null) {
@@ -131,6 +143,16 @@ export function startResizer(args: { ctx: hsm.Context }): Resizer {
   return hsm.start({ ctx: args.ctx, instance: new Resizer(), model: Resizer.model });
 }
 
+/**
+ * Compute the next node box for one resize sample.
+ *
+ * Inputs: finite `origin` box, a `ResizeDirection`, pointer delta, and
+ * `constraints` with `minWidth`/`minHeight` > 0 and optional max. Outputs: a
+ * new box whose opposite edge stays fixed. Ownership: caller owns the result.
+ * Lifetime: one call. Concurrency: synchronous. Failure modes: non-finite
+ * inputs are not validated here; callers must pass parsed start data.
+ * Units: world coordinates. Classification: runtime-safe.
+ */
 export function resizedBounds(args: {
   origin: ResizeBounds;
   direction: ResizeDirection;
@@ -162,14 +184,22 @@ export function resizedBounds(args: {
       width = height * ratio;
     }
   }
-  width = clampSize(width, constraints.minWidth, constraints.maxWidth);
-  height = clampSize(height, constraints.minHeight, constraints.maxHeight);
+  width = clampSize({ value: width, min: constraints.minWidth, max: constraints.maxWidth });
+  height = clampSize({ value: height, min: constraints.minHeight, max: constraints.maxHeight });
   if (constraints.keepAspectRatio && origin.height > 0) {
     const ratio = origin.width / origin.height;
     if ((moveE || moveW) && !(moveN || moveS)) {
-      height = clampSize(width / ratio, constraints.minHeight, constraints.maxHeight);
+      height = clampSize({
+        value: width / ratio,
+        min: constraints.minHeight,
+        max: constraints.maxHeight,
+      });
     } else if ((moveN || moveS) && !(moveE || moveW)) {
-      width = clampSize(height * ratio, constraints.minWidth, constraints.maxWidth);
+      width = clampSize({
+        value: height * ratio,
+        min: constraints.minWidth,
+        max: constraints.maxWidth,
+      });
     }
   }
   return {
@@ -180,9 +210,9 @@ export function resizedBounds(args: {
   };
 }
 
-function clampSize(value: number, min: number, max: number | undefined): number {
-  const next = Math.max(min, value);
-  return max === undefined ? next : Math.min(max, next);
+function clampSize(args: { value: number; min: number; max: number | undefined }): number {
+  const next = Math.max(args.min, args.value);
+  return args.max === undefined ? next : Math.min(args.max, next);
 }
 
 function pointOf(value: unknown): { x: number; y: number } | null {
@@ -203,7 +233,7 @@ function resizeStartOf(value: unknown): ResizeStartData | null {
   const minWidth = value["minWidth"];
   const minHeight = value["minHeight"];
   if (typeof nodeId !== "string" || origin === null || pointer === null) return null;
-  if (!isDirection(direction)) return null;
+  if (!isResizeDirection(direction)) return null;
   if (typeof minWidth !== "number" || !Number.isFinite(minWidth)) return null;
   if (typeof minHeight !== "number" || !Number.isFinite(minHeight)) return null;
   const maxWidth = value["maxWidth"];
@@ -238,7 +268,3 @@ function boundsOf(value: unknown): ResizeBounds | null {
   return { x, y, width, height };
 }
 
-function isDirection(value: unknown): value is ResizeDirection {
-  return value === "n" || value === "s" || value === "e" || value === "w"
-    || value === "ne" || value === "nw" || value === "se" || value === "sw";
-}

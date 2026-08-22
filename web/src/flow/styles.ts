@@ -124,6 +124,10 @@ export const nodeResizerStyles = `
   pointer-events: none;
   z-index: 6;
 }
+:host([hidden]) {
+  display: none;
+  pointer-events: none;
+}
 `;
 
 export const resizeControlStyles = `
@@ -135,6 +139,15 @@ export const resizeControlStyles = `
   background: #2dd4bf;
   border: 1px solid #0b0d12;
   z-index: 7;
+}
+button {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: inherit;
 }
 :host([direction="n"]), :host([direction="s"]) {
   left: 8px;

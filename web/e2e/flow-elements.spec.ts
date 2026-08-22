@@ -143,6 +143,66 @@ test("flow-handle registers, attaches, and reflects kind and position", async ({
   expect(result.detached).toBe(ELEMENT_DETACHED);
 });
 
+test("flow-node-resizer registers, reflects visible, and names a control", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(async () => {
+    await customElements.whenDefined("flow-node-resizer");
+    await customElements.whenDefined("flow-node-resize-control");
+  });
+  const defined = await page.evaluate(() => {
+    return customElements.get("flow-node-resizer") !== undefined
+      && customElements.get("flow-node-resize-control") !== undefined;
+  });
+  expect(defined).toBe(ELEMENT_DEFINED);
+
+  const result = await page.evaluate(() => {
+    const node = document.createElement("flow-node");
+    const resizer = document.createElement("flow-node-resizer") as HTMLElement & {
+      visible: boolean | undefined;
+      direction?: string;
+    };
+    node.append(resizer);
+    document.body.append(node);
+    const connected = resizer.isConnected;
+    const defaults = {
+      visible: resizer.visible,
+      visibleAttr: resizer.getAttribute("visible"),
+      minWidth: resizer.getAttribute("min-width"),
+    };
+    resizer.visible = true;
+    const forcedTrue = {
+      visible: resizer.visible,
+      visibleAttr: resizer.getAttribute("visible"),
+    };
+    resizer.setAttribute("visible", "false");
+    const forcedFalse = {
+      visible: resizer.visible,
+      visibleAttr: resizer.getAttribute("visible"),
+    };
+    const control = resizer.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    const button = control?.shadowRoot?.querySelector("button");
+    const label = button?.getAttribute("aria-label") ?? "";
+    resizer.remove();
+    node.remove();
+    return {
+      connected,
+      defaults,
+      forcedTrue,
+      forcedFalse,
+      detached: resizer.isConnected,
+      label,
+    };
+  });
+
+  expect(result.connected).toBe(ELEMENT_CONNECTED);
+  expect(result.defaults.visible).toBeUndefined();
+  expect(result.defaults.visibleAttr).toBeNull();
+  expect(result.forcedTrue).toEqual({ visible: true, visibleAttr: "true" });
+  expect(result.forcedFalse).toEqual({ visible: false, visibleAttr: "false" });
+  expect(result.label).toBe("Resize southeast");
+  expect(result.detached).toBe(ELEMENT_DETACHED);
+});
+
 test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(async () => {

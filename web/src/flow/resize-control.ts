@@ -6,11 +6,31 @@ import type { ResizeDirection } from "./types.ts";
 const ELEMENT_NAME = "flow-node-resize-control";
 const DIRECTION_ATTR = "direction";
 const DEFAULT_DIRECTION: ResizeDirection = "se";
+const BUTTON_TYPE = "button";
 
-const DIRECTIONS: readonly ResizeDirection[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
+export const RESIZE_DIRECTIONS: readonly ResizeDirection[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
 
+const DIRECTION_NAME: Record<ResizeDirection, string> = {
+  n: "north",
+  s: "south",
+  e: "east",
+  w: "west",
+  ne: "northeast",
+  nw: "northwest",
+  se: "southeast",
+  sw: "southwest",
+};
+
+/**
+ * True when `value` is one of the eight `ResizeDirection` literals.
+ *
+ * Inputs: unknown. Outputs: a type predicate. Ownership: none retained.
+ * Lifetime: one call. Concurrency: synchronous. Failure modes: non-matching
+ * values return false. Units: none. Classification: runtime-safe.
+ */
 export function isResizeDirection(value: unknown): value is ResizeDirection {
-  return typeof value === "string" && DIRECTIONS.includes(value as ResizeDirection);
+  return value === "n" || value === "s" || value === "e" || value === "w"
+    || value === "ne" || value === "nw" || value === "se" || value === "sw";
 }
 
 function coerceDirection(value: string | null): ResizeDirection {
@@ -36,9 +56,17 @@ export class FlowNodeResizeControl extends HTMLElement {
     return [DIRECTION_ATTR];
   }
 
+  readonly #button: HTMLButtonElement;
+
   constructor() {
     super();
-    applyStyles(this.attachShadow({ mode: "open" }), resizeControlStyles);
+    const root = this.attachShadow({ mode: "open" });
+    applyStyles(root, resizeControlStyles);
+    this.#button = document.createElement("button");
+    this.#button.type = BUTTON_TYPE;
+    this.#button.part.add("control");
+    root.append(this.#button);
+    this.#syncLabel();
   }
 
   get direction(): ResizeDirection {
@@ -51,12 +79,18 @@ export class FlowNodeResizeControl extends HTMLElement {
 
   connectedCallback(): void {
     if (this.getAttribute(DIRECTION_ATTR) === null) this.setAttribute(DIRECTION_ATTR, DEFAULT_DIRECTION);
+    this.#syncLabel();
   }
 
   attributeChangedCallback(name: string, _previous: string | null, value: string | null): void {
     if (name !== DIRECTION_ATTR) return;
     const next = coerceDirection(value);
     if (this.getAttribute(DIRECTION_ATTR) !== next) this.setAttribute(DIRECTION_ATTR, next);
+    this.#syncLabel();
+  }
+
+  #syncLabel(): void {
+    this.#button.setAttribute("aria-label", `Resize ${DIRECTION_NAME[this.direction]}`);
   }
 }
 

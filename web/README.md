@@ -86,7 +86,10 @@ custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,
 - `Renderer` (`clean` / `dirty` / `rendering`) coalesces paints
 - `Panner` (`fixed` / `panning`) writes CSS `translate+scale` synchronously
 - `Dragger` (`idle` / `dragging`) samples node drag per pointermove
-- `Resizer` (`idle` / `resizing`) samples node resize per pointermove
+- `Resizer` (`idle` / `resizing`) samples node resize per pointermove.
+  `nodesResizable` defaults true. Selected nodes show eight named resize
+  controls (`n`/`s`/`e`/`w`/`ne`/`nw`/`se`/`sw`). Observe-only events:
+  `flow-node-resize-start`, `flow-node-resize`, `flow-node-resize-end`.
 - `Focuser` (`unfocused` / `focused`)
 - `Selection` (`none` / `picking` / `box`)
 - `Connection` (`idle` / `connecting`)

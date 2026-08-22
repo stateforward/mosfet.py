@@ -161,7 +161,29 @@ export type ResizeHit = {
   readonly kind: "resize";
   readonly node: Node;
   readonly direction: ResizeDirection;
+  readonly minWidth: number;
+  readonly minHeight: number;
+  readonly keepAspectRatio: boolean;
+  readonly maxWidth?: number;
+  readonly maxHeight?: number;
 };
+
+/**
+ * Single offer predicate for resize chrome, hit-test, and start.
+ * Canonical policy is `FlowGraph.nodesResizable`. `visible` is an author
+ * override on `flow-node-resizer` (`true` force-show, `false` force-hide,
+ * `undefined` auto). Auto offers only when policy is on and the node is selected.
+ */
+export function resizeOffered(args: {
+  readonly policy: boolean;
+  readonly selected: boolean;
+  readonly visible: boolean | undefined;
+}): boolean {
+  if (!args.policy) return false;
+  if (args.visible === false) return false;
+  if (args.visible === true) return true;
+  return args.selected;
+}
 
 export type NodeHit = { readonly kind: "node"; readonly node: Node };
 export type EdgeHit = { readonly kind: "edge"; readonly edge: Edge };

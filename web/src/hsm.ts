@@ -117,7 +117,9 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  * paint / render_canceled
  * / ErrorEvent; FlowGraph nodes/edges admit and reject; node_activate_click /
  * node_activate_key / flow-node-click click origin; Panner transform_changed
- * / panning_changed; Focuser focus_changed; dashboard.graph.focus.
+ * / panning_changed; Focuser focus_changed; Resizer resize_moved /
+ * resize_finished; flow-node-resize-start / flow-node-resize /
+ * flow-node-resize-end; dashboard.graph.focus.
  * Risk tests: web/tests/from.test.ts, web/tests/hosts.test.ts,
  * web/tests/flow-renderer.test.ts, web/tests/flow-graph.test.ts,
  * web/tests/bot-dashboard.test.ts, web/tests/otel-replay.test.ts.

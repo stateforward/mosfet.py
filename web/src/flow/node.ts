@@ -1,7 +1,14 @@
 import { applyStyles } from "../elements/styles.ts";
 
 import { FlowNodeResizer } from "./node-resizer.ts";
-import { copyNode, DEFAULT_NODE_HEIGHT, DEFAULT_NODE_WIDTH, type Node, type ResizeConstraints } from "./types.ts";
+import {
+  copyNode,
+  DEFAULT_NODE_HEIGHT,
+  DEFAULT_NODE_WIDTH,
+  resizeOffered,
+  type Node,
+  type ResizeConstraints,
+} from "./types.ts";
 import { nodeStyles } from "./styles.ts";
 
 const ELEMENT_NAME = "flow-node";
@@ -28,9 +35,18 @@ export class FlowNode extends HTMLElement {
     this.#label.setAttribute("data-testid", "node-badge");
     this.#button.append(this.#label);
     this.#resizer = document.createElement("flow-node-resizer");
+    this.#resizer.addEventListener("flow-resizer-change", this.#onResizerChange);
     this.#root.append(document.createElement("slot"), this.#button, this.#resizer);
   }
 
+  /**
+   * Reflected `FlowGraph.nodesResizable` policy for this node.
+   *
+   * Inputs: boolean policy. Outputs: the stored policy used by `resizeOffered`
+   * with `selected` and `flow-node-resizer.visible`. Ownership: this host owns
+   * the field; the graph writes it on paint. Lifetime: until the next set.
+   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   */
   get resizable(): boolean {
     return this.#resizable;
   }
@@ -40,6 +56,14 @@ export class FlowNode extends HTMLElement {
     this.#syncResizer();
   }
 
+  /**
+   * Constraints from the hosted `flow-node-resizer`.
+   *
+   * Inputs: none. Outputs: a new `ResizeConstraints` record. Ownership: caller
+   * owns the result. Lifetime: one call. Concurrency: runtime-safe.
+   * Failure modes: illegal attributes already coerced on the resizer.
+   * Classification: runtime-safe.
+   */
   resizeConstraints(): ResizeConstraints {
     return this.#resizer.constraints();
   }
@@ -93,9 +117,16 @@ export class FlowNode extends HTMLElement {
     this.#button.focus(options);
   }
 
+  readonly #onResizerChange = (): void => {
+    this.#syncResizer();
+  };
+
   #sync(): void {
     const node = this.#node;
-    if (node === null) return;
+    if (node === null) {
+      this.#syncResizer();
+      return;
+    }
     this.id = node.id;
     const width = node.width ?? DEFAULT_NODE_WIDTH;
     const height = node.height ?? DEFAULT_NODE_HEIGHT;
@@ -124,16 +155,13 @@ export class FlowNode extends HTMLElement {
   }
 
   #syncResizer(): void {
-    const forced = this.#resizer.visible;
-    if (forced === true) {
-      this.#resizer.hidden = false;
-      return;
-    }
-    if (forced === false) {
-      this.#resizer.hidden = true;
-      return;
-    }
-    this.#resizer.hidden = !(this.#resizable && this.#node?.selected === true);
+    const offered = resizeOffered({
+      policy: this.#resizable,
+      selected: this.#node?.selected === true,
+      visible: this.#resizer.visible,
+    });
+    this.#resizer.hidden = !offered;
+    this.#resizer.setAttribute("aria-hidden", offered ? "false" : "true");
   }
 }
 

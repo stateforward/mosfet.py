@@ -1,11 +1,11 @@
 import { applyStyles } from "../elements/styles.ts";
 
+import { RESIZE_DIRECTIONS } from "./resize-control.ts";
 import { nodeResizerStyles } from "./styles.ts";
 import {
   MIN_RESIZE_HEIGHT,
   MIN_RESIZE_WIDTH,
   type ResizeConstraints,
-  type ResizeDirection,
 } from "./types.ts";
 
 const ELEMENT_NAME = "flow-node-resizer";
@@ -15,12 +15,11 @@ const MAX_WIDTH_ATTR = "max-width";
 const MAX_HEIGHT_ATTR = "max-height";
 const ASPECT_ATTR = "keep-aspect-ratio";
 const VISIBLE_ATTR = "visible";
-const DIRECTIONS: readonly ResizeDirection[] = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
 
-function positiveNumber(value: string | null, fallback: number): number {
-  if (value === null || value.length === 0) return fallback;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function positiveNumber(args: { value: string | null; fallback: number }): number {
+  if (args.value === null || args.value.length === 0) return args.fallback;
+  const parsed = Number(args.value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : args.fallback;
 }
 
 function optionalPositiveNumber(value: string | null): number | undefined {
@@ -30,14 +29,14 @@ function optionalPositiveNumber(value: string | null): number | undefined {
 }
 
 /**
- * Node resize chrome: four edge lines and four corner controls.
+ * Node resize chrome: eight `flow-node-resize-control` children.
  *
  * Inputs: primitive attributes `min-width`, `min-height`, `max-width`,
- * `max-height`, `keep-aspect-ratio`, `visible`. Outputs: eight
- * `flow-node-resize-control` children and `constraints()`. Ownership: this
- * element owns its controls. Lifetime: construct until disconnect.
- * Concurrency: runtime-safe. Failure modes: illegal numeric attributes
- * coerce to documented defaults. Classification: runtime-safe.
+ * `max-height`, `keep-aspect-ratio`, `visible`. Outputs: eight controls and
+ * `constraints()`. `visible` is `true` / `false` / absent (auto). Ownership:
+ * this element owns its controls. Lifetime: construct until disconnect.
+ * Concurrency: runtime-safe. Failure modes: illegal numeric attributes coerce
+ * to documented defaults or are removed. Classification: runtime-safe.
  */
 export class FlowNodeResizer extends HTMLElement {
   static get observedAttributes(): string[] {
@@ -48,7 +47,7 @@ export class FlowNodeResizer extends HTMLElement {
     super();
     const root = this.attachShadow({ mode: "open" });
     applyStyles(root, nodeResizerStyles);
-    for (const direction of DIRECTIONS) {
+    for (const direction of RESIZE_DIRECTIONS) {
       const control = document.createElement("flow-node-resize-control");
       control.direction = direction;
       control.part.add("control", direction);
@@ -57,7 +56,7 @@ export class FlowNodeResizer extends HTMLElement {
   }
 
   get minWidth(): number {
-    return positiveNumber(this.getAttribute(MIN_WIDTH_ATTR), MIN_RESIZE_WIDTH);
+    return positiveNumber({ value: this.getAttribute(MIN_WIDTH_ATTR), fallback: MIN_RESIZE_WIDTH });
   }
 
   set minWidth(value: number) {
@@ -65,7 +64,7 @@ export class FlowNodeResizer extends HTMLElement {
   }
 
   get minHeight(): number {
-    return positiveNumber(this.getAttribute(MIN_HEIGHT_ATTR), MIN_RESIZE_HEIGHT);
+    return positiveNumber({ value: this.getAttribute(MIN_HEIGHT_ATTR), fallback: MIN_RESIZE_HEIGHT });
   }
 
   set minHeight(value: number) {
@@ -100,8 +99,8 @@ export class FlowNodeResizer extends HTMLElement {
   }
 
   /**
-   * Forced visibility when the `visible` attribute is present.
-   * `true` / `false` force show/hide; `undefined` lets the host node decide.
+   * Author override of chrome offer. `true` / `false` force show/hide;
+   * `undefined` (attribute absent) lets the host derive from policy+selected.
    */
   get visible(): boolean | undefined {
     const value = this.getAttribute(VISIBLE_ATTR);
@@ -127,18 +126,45 @@ export class FlowNodeResizer extends HTMLElement {
   connectedCallback(): void {
     if (this.getAttribute(MIN_WIDTH_ATTR) === null) this.setAttribute(MIN_WIDTH_ATTR, String(MIN_RESIZE_WIDTH));
     if (this.getAttribute(MIN_HEIGHT_ATTR) === null) this.setAttribute(MIN_HEIGHT_ATTR, String(MIN_RESIZE_HEIGHT));
+    this.#normalizeVisible();
+    this.#notifyChange();
   }
 
   attributeChangedCallback(name: string, _previous: string | null, value: string | null): void {
     if (name === MIN_WIDTH_ATTR) {
-      const next = String(positiveNumber(value, MIN_RESIZE_WIDTH));
+      const next = String(positiveNumber({ value, fallback: MIN_RESIZE_WIDTH }));
       if (this.getAttribute(MIN_WIDTH_ATTR) !== next) this.setAttribute(MIN_WIDTH_ATTR, next);
       return;
     }
     if (name === MIN_HEIGHT_ATTR) {
-      const next = String(positiveNumber(value, MIN_RESIZE_HEIGHT));
+      const next = String(positiveNumber({ value, fallback: MIN_RESIZE_HEIGHT }));
       if (this.getAttribute(MIN_HEIGHT_ATTR) !== next) this.setAttribute(MIN_HEIGHT_ATTR, next);
+      return;
     }
+    if (name === MAX_WIDTH_ATTR || name === MAX_HEIGHT_ATTR) {
+      if (value === null) {
+        this.#notifyChange();
+        return;
+      }
+      if (optionalPositiveNumber(value) === undefined) this.removeAttribute(name);
+      this.#notifyChange();
+      return;
+    }
+    if (name === VISIBLE_ATTR) {
+      this.#normalizeVisible();
+      this.#notifyChange();
+    }
+  }
+
+  #normalizeVisible(): void {
+    const value = this.getAttribute(VISIBLE_ATTR);
+    if (value === null) return;
+    const next = value === "false" ? "false" : "true";
+    if (value !== next) this.setAttribute(VISIBLE_ATTR, next);
+  }
+
+  #notifyChange(): void {
+    this.dispatchEvent(new Event("flow-resizer-change"));
   }
 }
 
