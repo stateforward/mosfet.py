@@ -1271,8 +1271,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
    *
    * Inputs: activity `ctx` and the entering `dashboard.source.selected` /
    * `dashboard.replay.live` event. `source`, `origin`, and `urlAllowed` come
-   * from that stamped payload. `urlAllowed` was computed from `source.url`,
-   * which is the same string this activity passes to `connectStream`.
+   * from that stamped payload. `urlAllowed` is
+   * `collectorUrl({ requested: source.url, origin }) !== null`. This activity
+   * opens that same `collectorUrl` result with `connectStream`, not raw
+   * `source.url`.
    * `sourceCheck` already selected viewing, so this activity does not dispatch
    * `dashboard.load.failed` for missing source or disallowed URL.
    * Outputs: `dashboard.load.completed` / `dashboard.model.published` products
