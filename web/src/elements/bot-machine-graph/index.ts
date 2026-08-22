@@ -71,7 +71,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
         hsm.guard(BotMachineGraph.machineFocusable),
         hsm.effect(BotMachineGraph.applyFocus),
       ),
-      hsm.transition(hsm.on(BotMachineGraph.focusEvent.name), hsm.effect(BotMachineGraph.ignoreFocus)),
       hsm.transition(hsm.on(BotMachineGraph.fitEvent.name), hsm.effect(BotMachineGraph.applyFit)),
       hsm.transition(hsm.on(BotMachineGraph.nodeClickEvent.name), hsm.effect(BotMachineGraph.applyNodeClick)),
       hsm.transition(hsm.on(BotMachineGraph.resizeEvent.name), hsm.effect(BotMachineGraph.applyFit)),
@@ -326,10 +325,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     instance.#flow.nodes = [];
     instance.#flow.edges = [];
     instance.setAttribute(NODE_COUNT_ATTR, String(graphNodeCount(instance.#held)));
-  }
-
-  static ignoreFocus(_ctx: hsm.Context, _instance: hsm.Instance, _event: hsm.Event): void {
-    return;
   }
 
   static machineFocusable(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
