@@ -27,10 +27,27 @@ export class FlowNode extends HTMLElement {
     this.#root.append(document.createElement("slot"), this.#button);
   }
 
+  /**
+   * Snapshot of the painted node, or null when none is set.
+   *
+   * Inputs: none. Outputs: `copyNode` of the host-owned paint record, or null.
+   * Ownership: this element owns the stored copy. The getter returns a new
+   * copy; mutating `position` or `data` on the result does not change stored
+   * paint state or derived DOM. Lifetime: until the next `node` set.
+   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   */
   get node(): Node | null {
-    return this.#node;
+    return this.#node === null ? null : copyNode(this.#node);
   }
 
+  /**
+   * Store a copy of `value` as paint source state and sync derived DOM.
+   *
+   * Inputs: `value` is copied with `copyNode` at write time. Ownership: this
+   * element owns the stored copy. Later mutation of the caller or of a getter
+   * result does not change stored paint state. Lifetime: until the next set.
+   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   */
   set node(value: Node | null) {
     this.#node = value === null ? null : copyNode(value);
     this.#sync();

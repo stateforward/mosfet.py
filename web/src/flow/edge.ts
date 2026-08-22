@@ -26,10 +26,27 @@ export class FlowEdge extends HTMLElement {
     this.label.setAttribute("part", "label");
   }
 
+  /**
+   * Snapshot of the painted edge, or null when none is set.
+   *
+   * Inputs: none. Outputs: `copyEdge` of the host-owned paint record, or null.
+   * Ownership: this element owns the stored copy. The getter returns a new
+   * copy; mutating nested `data` on the result does not change stored paint
+   * state. Lifetime: until the next `edge` set. Concurrency: runtime-safe.
+   * Failure modes: none. Classification: runtime-safe.
+   */
   get edge(): Edge | null {
-    return this.#edge;
+    return this.#edge === null ? null : copyEdge(this.#edge);
   }
 
+  /**
+   * Store a copy of `value` as paint source state.
+   *
+   * Inputs: `value` is copied with `copyEdge` at write time. Ownership: this
+   * element owns the stored copy. Later mutation of the caller or of a getter
+   * result does not change stored paint state. Lifetime: until the next set.
+   * Concurrency: runtime-safe. Failure modes: none. Classification: runtime-safe.
+   */
   set edge(value: Edge | null) {
     this.#edge = value === null ? null : copyEdge(value);
   }
