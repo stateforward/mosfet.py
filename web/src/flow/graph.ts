@@ -1338,7 +1338,10 @@ function isPointerHit(value: unknown): value is PointerHit {
   if (kind === POINTER_HIT_NODE) return isNode(value["node"]);
   if (kind === POINTER_HIT_EDGE) return isEdge(value["edge"]);
   if (kind === POINTER_HIT_HANDLE) {
-    return isNode(value["node"]) && isHandleKind(value["handleKind"]) && isHandlePosition(value["position"]);
+    return isNode(value["node"])
+      && isHandleKind(value["handleKind"])
+      && isHandlePosition(value["position"])
+      && (!("id" in value) || typeof value["id"] === "string");
   }
   return false;
 }

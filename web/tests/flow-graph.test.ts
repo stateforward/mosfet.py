@@ -1534,6 +1534,27 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("handle hit with non-string id does not enter connect", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const source = { id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 };
+    graph.nodes = [source];
+    const numericHandleId = 7;
+    const invalidHit = {
+      kind: "handle",
+      node: source,
+      handleKind: "source",
+      position: "right",
+      id: numericHandleId,
+    };
+    await graph.dispatch(hsm.typedEvent({
+      event: FlowGraph.pointerDownEvent,
+      data: { ...pointerData(), hit: invalidHit },
+    }));
+    assert.doesNotMatch(graph.state(), /\/connect$/);
+    graph.remove();
+  });
+
   test("meta or ctrl node click is additive and copies the clicked node", async () => {
     const nodeWidth = 80;
     const nodeHeight = 40;
