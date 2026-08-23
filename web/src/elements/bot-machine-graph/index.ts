@@ -131,7 +131,6 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
     super();
     this.#root = this.attachShadow({ mode: "open" });
     replaceStyles(this.#root, `:host { display: block; width: 100%; height: 100%; min-height: 16rem; }`);
-    this.setAttribute("role", "presentation");
     this.#flow = document.createElement("flow-graph");
     this.#flow.adoptStyles(graphStyles);
     this.#flow.style.width = "100%";
@@ -232,6 +231,10 @@ export class BotMachineGraph extends hsm.from(HTMLElement) {
   }
 
   connectedCallback(): void {
+    // `role` is set on connect, never in the constructor: a constructor that
+    // sets attributes makes real browsers refuse to upgrade
+    // `document.createElement` results.
+    if (this.getAttribute("role") === null) this.setAttribute("role", "presentation");
     hsm.start({ instance: this, model: BotMachineGraph.model });
     hsm.start({ ctx: this.context(), instance: this.#flow, model: FlowGraph.model });
     if (this.#graphsWrite !== undefined) {

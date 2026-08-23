@@ -22,13 +22,17 @@ export type ResizeStartData = {
 };
 
 export type ResizeSampleData = { readonly world: { readonly x: number; readonly y: number } };
+export type ResizeKeyStepData = { readonly key: string };
 export type ResizeMovedData = { readonly nodeId: string } & ResizeBounds;
 
 const RESIZE_MOVE_EPSILON = 0.01;
+/** Documented keyboard step: 1 world px of edge travel per keypress. */
+const KEYBOARD_RESIZE_STEP = 1;
 
 export class Resizer extends hsm.Instance {
   static readonly resizeStartEvent = { name: "resize_start", kind: hsm.Kinds.Event } as const;
   static readonly resizeSampleEvent = { name: "resize_sample", kind: hsm.Kinds.Event } as const;
+  static readonly resizeKeyStepEvent = { name: "resize_key_step", kind: hsm.Kinds.Event } as const;
   static readonly resizeEndEvent = { name: "resize_end", kind: hsm.Kinds.Event } as const;
   static readonly movedEvent = { name: "resize_moved", kind: hsm.Kinds.Event } as const;
   static readonly finishedEvent = { name: "resize_finished", kind: hsm.Kinds.Event } as const;
@@ -47,6 +51,7 @@ export class Resizer extends hsm.Instance {
     hsm.state(
       "resizing",
       hsm.transition(hsm.on(Resizer.resizeSampleEvent.name), hsm.effect(Resizer.applySample)),
+      hsm.transition(hsm.on(Resizer.resizeKeyStepEvent.name), hsm.effect(Resizer.applyKeyStep)),
       hsm.transition(
         hsm.on(Resizer.resizeEndEvent.name),
         hsm.target("../idle"),
@@ -66,6 +71,8 @@ export class Resizer extends hsm.Instance {
   };
   #last: { x: number; y: number } | null = null;
   #current: ResizeBounds = { x: 0, y: 0, width: 0, height: 0 };
+  #keyDx: number = 0;
+  #keyDy: number = 0;
 
   static startResize(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     const data = resizeStartOf(event.data);
@@ -83,6 +90,8 @@ export class Resizer extends hsm.Instance {
     };
     instance.#last = null;
     instance.#current = data.origin;
+    instance.#keyDx = 0;
+    instance.#keyDy = 0;
   }
 
   static applySample(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -112,6 +121,67 @@ export class Resizer extends hsm.Instance {
     }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
   }
 
+  /**
+   * One typed keyboard step while `resizing`.
+   *
+   * Contract: each keypress moves the resized edge(s) by 1 world px in the
+   * arrow's direction (ArrowRight grows an east edge or shrinks a west edge,
+   * ArrowDown grows a south edge or shrinks a north edge, and symmetrically
+   * for the other two). The cumulative delta is re-applied through the shared
+   * `resizedBounds` clamp logic, so min/max and aspect constraints apply
+   * exactly as they do for pointer samples. The owner is notified with
+   * `resize_moved` (bounds already clamped) and nothing else; no timers and
+   * no element reads live on this path.
+   *
+   * Inputs: `resize_key_step` with `data.key` one of the four arrow keys.
+   * Outputs: `resize_moved` to the owner when the step changed the box.
+   * Ownership: the instance owns the accumulated key deltas. Lifetime: one
+   * step. Concurrency: steps are serialized by the machine. Failure modes:
+   * unknown keys or keys orthogonal to the direction are no-ops.
+   * Classification: runtime-safe.
+   */
+  static applyKeyStep(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof Resizer) || instance.#nodeId === null) return;
+    if (!hsm.isRecord(event.data)) return;
+    const key = event.data["key"];
+    if (typeof key !== "string") return;
+    const direction = instance.#direction;
+    // The arrow key moves the resized edge in the arrow's direction:
+    // `dx`/`dy` are the edge's right/down travel, so the key-to-delta mapping
+    // is the same on every axis; `resizedBounds` flips the delta itself for
+    // west/north edges (fixed east/south), exactly as it does for pointers.
+    const movesHorizontally = direction === "e" || direction === "w"
+      || direction === "ne" || direction === "nw" || direction === "se" || direction === "sw";
+    const movesVertically = direction === "n" || direction === "s"
+      || direction === "ne" || direction === "nw" || direction === "se" || direction === "sw";
+    let dx = 0;
+    let dy = 0;
+    if (movesHorizontally) {
+      if (key === "ArrowRight") dx = KEYBOARD_RESIZE_STEP;
+      else if (key === "ArrowLeft") dx = -KEYBOARD_RESIZE_STEP;
+    }
+    if (movesVertically) {
+      if (key === "ArrowDown") dy = KEYBOARD_RESIZE_STEP;
+      else if (key === "ArrowUp") dy = -KEYBOARD_RESIZE_STEP;
+    }
+    if (dx === 0 && dy === 0) return;
+    instance.#keyDx += dx;
+    instance.#keyDy += dy;
+    const bounds = resizedBounds({
+      origin: instance.#origin,
+      direction: instance.#direction,
+      dx: instance.#keyDx,
+      dy: instance.#keyDy,
+      constraints: instance.#constraints,
+    });
+    instance.#current = bounds;
+    const nodeId = instance.#nodeId;
+    void hsm.notifyOwner({
+      instance,
+      event: hsm.typedEvent({ event: Resizer.movedEvent, data: { nodeId, ...bounds } }),
+    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
+  }
+
   static endResize(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof Resizer)) return;
     const nodeId = instance.#nodeId;
@@ -130,11 +200,14 @@ export class Resizer extends hsm.Instance {
  * Start a Resizer under `ctx`.
  *
  * Inputs: `ctx` — owner context used as the HSM parent environment. Pointer
- * samples arrive as `resize_sample` events carrying the world point.
+ * samples arrive as `resize_sample` events carrying the world point; keyboard
+ * steps arrive as `resize_key_step` events carrying one arrow key (each step
+ * moves the edge by 1 world px through the shared clamp logic).
  * Outputs: a started Resizer in `/Resizer/idle`.
  * Ownership: caller owns the returned actor and must `hsm.stop` it.
  * Lifetime: until `hsm.stop` or owner context cancel.
- * Concurrency: one resize at a time; samples are serialized by the machine.
+ * Concurrency: one resize at a time; samples and key steps are serialized by
+ * the machine.
  * Failure modes: malformed start or sample payloads are ignored; samples
  * with non-finite world coordinates are skipped.
  * Units: positions and sizes in world coordinates. Classification: runtime-safe.

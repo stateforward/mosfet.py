@@ -41,6 +41,8 @@ import {
   type PointerSampleData,
   resizeOffered,
   type ResizeBounds,
+  type ResizeDirection,
+  type ResizeHit,
   type XYPosition,
   type SelectionChangeDetail,
   type Viewport,
@@ -53,6 +55,7 @@ const ELEMENT_NAME = "flow-graph";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ENTER_KEY = "Enter";
 const SPACE_KEY = " ";
+const ESCAPE_KEY = "Escape";
 const EXCLUSIVE_SELECT = false;
 const EVENT_BUBBLES = true;
 const EVENT_COMPOSED = true;
@@ -322,6 +325,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #selectedNodeIds: ReadonlySet<string> = new Set();
   #selectedEdgeIds: ReadonlySet<string> = new Set();
   #box: SelectionBox | null = null;
+  #keyboardResize: { nodeId: string; direction: ResizeDirection } | null = null;
   #nodesDraggable = true;
   #nodesResizable = true;
   #panOnDrag = true;
@@ -820,7 +824,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       ...(sample.hit.maxWidth !== undefined ? { maxWidth: sample.hit.maxWidth } : {}),
       ...(sample.hit.maxHeight !== undefined ? { maxHeight: sample.hit.maxHeight } : {}),
     } }) });
-    instance.#emitNodeResize("flow-node-resize-start", node, origin);
+    instance.#emitNodeResize({ name: "flow-node-resize-start", node, bounds: origin });
     instance.#dirty();
   }
 
@@ -1195,7 +1199,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       : node);
     const node = instance.#nodes.find((item) => item.id === bounds.nodeId);
     if (node === undefined) return;
-    instance.#emitNodeResize("flow-node-resize", node, bounds);
+    instance.#emitNodeResize({ name: "flow-node-resize", node, bounds });
     instance.#dirty();
   }
 
@@ -1203,12 +1207,17 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph) || hsm.hostWasStopped(instance)) return;
     const bounds = resizeMovedOf(event.data);
     if (bounds === null) return;
+    // A finished resize always came from a channel that will not resume; clear
+    // a stale keyboard channel on this node (e.g. a pointer gesture ended a
+    // keyboard-started resize) so the next Enter starts a fresh resize.
+    const keyboard = instance.#keyboardResize;
+    if (keyboard !== null && keyboard.nodeId === bounds.nodeId) instance.#keyboardResize = null;
     instance.#nodes = instance.#nodes.map((node) => node.id === bounds.nodeId
       ? { ...node, position: { x: bounds.x, y: bounds.y }, width: bounds.width, height: bounds.height }
       : node);
     const node = instance.#nodes.find((item) => item.id === bounds.nodeId);
     if (node === undefined) return;
-    instance.#emitNodeResize("flow-node-resize-end", node, bounds);
+    instance.#emitNodeResize({ name: "flow-node-resize-end", node, bounds });
     instance.#dirty();
   }
 
@@ -1294,6 +1303,73 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }));
   }
 
+  /**
+   * Keyboard resize channel for the eight resize controls.
+   *
+   * Contract: Enter or Space on a control that passes `resizeOffered` starts
+   * a resize in that direction with origin equal to the node's current
+   * bounds (typed `resize_start` into the Resizer, plus
+   * `flow-node-resize-start`); ArrowUp/ArrowDown/ArrowLeft/ArrowRight send
+   * one typed `resize_key_step` per keypress (the Resizer steps 1px in world
+   * units per step through the shared `resizedBounds` min/max/aspect
+   * clamping); Escape or a second Enter ends the resize (typed
+   * `resize_end`, which applies the final bounds and emits
+   * `flow-node-resize-end`). One keyboard resize at a time; keys on a
+   * different node or direction are ignored while one is active.
+   *
+   * Inputs: `key` of a `keydown` whose composed path hit a resize control.
+   * Outputs: typed events into the Resizer; `flow-node-resize-start` on
+   * start. Ownership: the graph tracks `#keyboardResize`; the Resizer owns
+   * the bounds math. Lifetime: until the matching end or a finished resize
+   * for that node. Concurrency: one at a time. Failure modes: stopped hosts
+   * are no-ops. Classification: runtime-safe.
+   */
+  #applyResizeKey(args: { key: string; hit: ResizeHit }): boolean {
+    if (hsm.hostWasStopped(this)) return false;
+    const node = args.hit.node;
+    const active = this.#keyboardResize;
+    const keyboardActive = active !== null && active.nodeId === node.id && active.direction === args.hit.direction;
+    const resizer = this.#resizer;
+    if (resizer === null) return false;
+    if (args.key === ENTER_KEY || args.key === SPACE_KEY) {
+      if (keyboardActive) {
+        this.#keyboardResize = null;
+        this.#send({ machine: resizer, event: hsm.typedEvent({ event: Resizer.resizeEndEvent }) });
+        return true;
+      }
+      if (active !== null) return false;
+      const width = node.width ?? DEFAULT_NODE_WIDTH;
+      const height = node.height ?? DEFAULT_NODE_HEIGHT;
+      const origin = { x: node.position.x, y: node.position.y, width, height };
+      this.#keyboardResize = { nodeId: node.id, direction: args.hit.direction };
+      this.#send({ machine: resizer, event: hsm.typedEvent({ event: Resizer.resizeStartEvent, data: {
+        nodeId: node.id,
+        direction: args.hit.direction,
+        origin,
+        pointer: { x: 0, y: 0 },
+        minWidth: args.hit.minWidth,
+        minHeight: args.hit.minHeight,
+        keepAspectRatio: args.hit.keepAspectRatio,
+        ...(args.hit.maxWidth !== undefined ? { maxWidth: args.hit.maxWidth } : {}),
+        ...(args.hit.maxHeight !== undefined ? { maxHeight: args.hit.maxHeight } : {}),
+      } }) });
+      this.#emitNodeResize({ name: "flow-node-resize-start", node, bounds: origin });
+      this.#dirty();
+      return true;
+    }
+    if (!keyboardActive) return false;
+    if (args.key === ESCAPE_KEY) {
+      this.#keyboardResize = null;
+      this.#send({ machine: resizer, event: hsm.typedEvent({ event: Resizer.resizeEndEvent }) });
+      return true;
+    }
+    if (args.key === "ArrowUp" || args.key === "ArrowDown" || args.key === "ArrowLeft" || args.key === "ArrowRight") {
+      this.#send({ machine: resizer, event: hsm.typedEvent({ event: Resizer.resizeKeyStepEvent, data: { key: args.key } }) });
+      return true;
+    }
+    return false;
+  }
+
   #childActors(): object[] {
     const actors: object[] = [];
     for (const actor of [
@@ -1377,18 +1453,37 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       if (detail !== KEYBOARD_CLICK_DETAIL) return;
       const node = this.#flowNodeFromEvent(event);
       if (node === null || node.node === null) return;
-      let fromButton = false;
-      for (const target of event.composedPath()) {
-        if (target instanceof HTMLButtonElement) {
-          fromButton = true;
+      const path = event.composedPath();
+      let buttonIndex = -1;
+      for (let i = 0; i < path.length; i += 1) {
+        if (path[i] instanceof HTMLButtonElement) {
+          buttonIndex = i;
           break;
         }
       }
-      if (!fromButton) return;
+      if (buttonIndex === -1) return;
+      // Enter/Space on a resize control is that control's keyboard resize
+      // activation, never node activation: a button inside a
+      // `flow-node-resize-control` does not trigger `node_activate_click`.
+      for (let i = buttonIndex + 1; i < path.length; i += 1) {
+        const target = path[i];
+        if (target instanceof HTMLElement && target.localName === "flow-node-resize-control") return;
+      }
       this.#live(hsm.typedEvent({
         event: FlowGraph.activateClickEvent,
         data: { nodeId: node.node.id },
       }));
+    };
+    // Keyboard resize channel: the control button is the focus target, so a
+    // `keydown` arriving here on a resize-hit path is typed directly into the
+    // Resizer (start / key_step / end). No polling and no element-field reads
+    // beyond the same event-path hit resolution used for pointers.
+    const onResizeKey = (event: Event): void => {
+      if (!(event instanceof KeyboardEvent)) return;
+      const hit = this.#hitFromEvent(event);
+      if (hit.kind !== POINTER_HIT_RESIZE) return;
+      const handled = this.#applyResizeKey({ key: event.key, hit });
+      if (handled) event.preventDefault();
     };
     const onKey = (event: Event): void => {
       if (!(event instanceof KeyboardEvent)) return;
@@ -1434,6 +1529,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.addEventListener("wheel", onWheel, { passive: false });
     this.addEventListener("click", onActivateClick);
     this.addEventListener("keydown", onKey);
+    this.addEventListener("keydown", onResizeKey);
     this.addEventListener("flow-control", onControl);
     this.#unlisten = () => {
       this.removeEventListener("pointerdown", onPointerDown);
@@ -1443,6 +1539,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.removeEventListener("wheel", onWheel);
       this.removeEventListener("click", onActivateClick);
       this.removeEventListener("keydown", onKey);
+      this.removeEventListener("keydown", onResizeKey);
       this.removeEventListener("flow-control", onControl);
     };
   }
@@ -1632,8 +1729,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
-  #emitNodeResize(name: "flow-node-resize-start" | "flow-node-resize" | "flow-node-resize-end", node: Node, bounds: ResizeBounds): void {
+  #emitNodeResize(args: { name: "flow-node-resize-start" | "flow-node-resize" | "flow-node-resize-end"; node: Node; bounds: ResizeBounds }): void {
     if (hsm.hostWasStopped(this)) return;
+    const { name, node, bounds } = args;
     const copied = copiedNodeValue({
       ...node,
       position: { x: bounds.x, y: bounds.y },

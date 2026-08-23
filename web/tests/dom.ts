@@ -467,6 +467,28 @@ class FakePointerEvent extends FakeEvent {
   }
 }
 
+class FakeMouseEvent extends FakeEvent {
+  readonly detail: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly button: number;
+  constructor(type: string, init: {
+    detail?: number;
+    clientX?: number;
+    clientY?: number;
+    button?: number;
+    bubbles?: boolean;
+    composed?: boolean;
+    cancelable?: boolean;
+  } = {}) {
+    super(type, init);
+    this.detail = init.detail ?? 0;
+    this.clientX = init.clientX ?? 0;
+    this.clientY = init.clientY ?? 0;
+    this.button = init.button ?? 0;
+  }
+}
+
 class FakeWheelEvent extends FakeEvent {
   readonly clientX: number;
   readonly clientY: number;
@@ -506,6 +528,7 @@ if (typeof (globalThis as { HTMLElement?: unknown }).HTMLElement === "undefined"
     Event: FakeEvent,
     PointerEvent: FakePointerEvent,
     WheelEvent: FakeWheelEvent,
+    MouseEvent: FakeMouseEvent,
     KeyboardEvent: FakeKeyboardEvent,
     getComputedStyle: (element: { style?: { getPropertyValue?: (name: string) => string } }): { getPropertyValue(name: string): string } => ({
       getPropertyValue(name: string): string {

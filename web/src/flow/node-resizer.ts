@@ -37,6 +37,16 @@ function optionalPositiveNumber(value: string | null): number | undefined {
  * this element owns its controls. Lifetime: construct until disconnect.
  * Concurrency: runtime-safe. Failure modes: illegal numeric attributes coerce
  * to documented defaults or are removed. Classification: runtime-safe.
+ *
+ * Keyboard contract: each of the eight controls is a focusable native button
+ * labeled `Resize <direction>`. With a control's button focused, Enter or
+ * Space starts a resize in that direction from the node's current bounds,
+ * the arrow keys step-resize by 1px in world units per keypress (min/max and
+ * aspect constraints apply through the shared clamp logic), and Escape or a
+ * second Enter ends the resize, applying the bounds and emitting
+ * `flow-node-resize-end`. All progression is typed events into the Resizer
+ * machine; no timers are involved. See `flow-node-resize-control` for the
+ * per-key mapping.
  */
 export class FlowNodeResizer extends HTMLElement {
   static get observedAttributes(): string[] {

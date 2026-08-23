@@ -149,6 +149,10 @@ button {
   background: transparent;
   cursor: inherit;
 }
+button:focus-visible {
+  outline: 2px solid #e8eaef;
+  outline-offset: 2px;
+}
 :host([direction="n"]), :host([direction="s"]) {
   left: 8px;
   right: 8px;

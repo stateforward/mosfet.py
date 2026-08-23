@@ -56,10 +56,25 @@ function offeredResizer(nodeEl: FlowNode): FlowNodeResizer {
   return resizer;
 }
 
-function controlOf(resizer: FlowNodeResizer, direction: string): HTMLElement {
-  const control = resizer.shadowRoot?.querySelector(`flow-node-resize-control[direction="${direction}"]`);
+function controlOf(args: { resizer: FlowNodeResizer; direction: string }): HTMLElement {
+  const control = args.resizer.shadowRoot?.querySelector(`flow-node-resize-control[direction="${args.direction}"]`);
   assert.ok(control instanceof HTMLElement);
   return control;
+}
+
+function keyDownOn(target: Element, key: string): void {
+  target.dispatchEvent(new KeyboardEvent("keydown", {
+    key,
+    bubbles: POINTER_BUBBLES,
+    composed: POINTER_COMPOSED,
+    cancelable: true,
+  }));
+}
+
+function controlButtonOf(control: HTMLElement): HTMLButtonElement {
+  const button = control.shadowRoot?.querySelector("button");
+  assert.ok(button instanceof HTMLButtonElement);
+  return button;
 }
 
 const YIELD_MS = 0;
@@ -2461,7 +2476,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const se = controlOf(offeredResizer(nodeEl), "se");
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     const clientX = 80;
     const clientY = 40;
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX, clientY })));
@@ -2483,7 +2498,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const se = controlOf(offeredResizer(nodeEl), "se");
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     assert.match(graph.state(), /\/resize$/);
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
@@ -2510,7 +2525,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const nw = controlOf(offeredResizer(nodeEl), "nw");
+    const nw = controlOf({ resizer: offeredResizer(nodeEl), direction: "nw" });
     nw.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 40, clientY: 20 })));
     nw.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 30, clientY: 10 })));
     await flush();
@@ -2536,7 +2551,7 @@ describe("flow-graph", () => {
     const resizer = offeredResizer(nodeEl);
     resizer.setAttribute("min-width", "50");
     resizer.setAttribute("min-height", "30");
-    const se = controlOf(resizer, "se");
+    const se = controlOf({ resizer, direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 70, clientY: 30 })));
     await flush();
@@ -2558,7 +2573,7 @@ describe("flow-graph", () => {
     const resizer = offeredResizer(nodeEl);
     resizer.setAttribute("max-width", "100");
     resizer.setAttribute("max-height", "55");
-    const se = controlOf(resizer, "se");
+    const se = controlOf({ resizer, direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 90, clientY: 50 })));
     await flush();
@@ -2581,7 +2596,7 @@ describe("flow-graph", () => {
     await selectFirstNode(nodeEl);
     const resizer = offeredResizer(nodeEl);
     resizer.setAttribute("keep-aspect-ratio", "");
-    const se = controlOf(resizer, "se");
+    const se = controlOf({ resizer, direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 90, clientY: 40 })));
     await flush();
@@ -2631,7 +2646,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const se = controlOf(offeredResizer(nodeEl), "se");
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
     await flush();
@@ -2668,7 +2683,7 @@ describe("flow-graph", () => {
       const nodeEl = graph.querySelector("flow-node");
       assert.ok(nodeEl instanceof FlowNode);
       await selectFirstNode(nodeEl);
-      const control = controlOf(offeredResizer(nodeEl), item.direction);
+      const control = controlOf({ resizer: offeredResizer(nodeEl), direction: item.direction });
       control.dispatchEvent(new PointerEvent("pointerdown", pointerInit({
         clientX: item.clientX,
         clientY: item.clientY,
@@ -2718,7 +2733,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const se = controlOf(offeredResizer(nodeEl), "se");
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
     await flush();
@@ -2765,7 +2780,7 @@ describe("flow-graph", () => {
     const nodeEl = graph.querySelector("flow-node");
     assert.ok(nodeEl instanceof FlowNode);
     await selectFirstNode(nodeEl);
-    const se = controlOf(offeredResizer(nodeEl), "se");
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
     const stopping = graph.stop();
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
@@ -2774,6 +2789,162 @@ describe("flow-graph", () => {
     await stopping;
     assert.equal(graph.nodes[0]?.width, 80);
     assert.equal(seen.length, 0);
+    graph.remove();
+  });
+
+  test("keyboard Enter starts an se resize, arrow keys step 1px, Escape ends and applies", async () => {
+    const originWidth = 80;
+    const originHeight = 40;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: originHeight }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const seen: Array<{ name: string; width: number; height: number }> = [];
+    for (const name of ["flow-node-resize-start", "flow-node-resize", "flow-node-resize-end"] as const) {
+      graph.addEventListener(name, (event: Event) => {
+        assert.ok(event instanceof CustomEvent);
+        const detail = event.detail as { width: number; height: number };
+        seen.push({ name, width: detail.width, height: detail.height });
+      });
+    }
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    const button = controlButtonOf(se);
+    keyDownOn(button, "Enter");
+    await flush();
+    const start = seen.find((item) => item.name === "flow-node-resize-start");
+    assert.ok(start !== undefined);
+    assert.equal(start.width, originWidth);
+    assert.equal(start.height, originHeight);
+    keyDownOn(button, "ArrowRight");
+    keyDownOn(button, "ArrowRight");
+    keyDownOn(button, "ArrowDown");
+    await waitUntil(() => graph.nodes[0]?.width === originWidth + 2 && graph.nodes[0]?.height === originHeight + 1);
+    assert.equal(graph.nodes[0]?.width, originWidth + 2);
+    assert.equal(graph.nodes[0]?.height, originHeight + 1);
+    assert.ok(seen.some((item) => item.name === "flow-node-resize"));
+    keyDownOn(button, "Escape");
+    await waitUntil(() => seen.some((item) => item.name === "flow-node-resize-end"));
+    const end = seen.filter((item) => item.name === "flow-node-resize-end");
+    assert.equal(end.length, 1);
+    const ended = end[0];
+    assert.ok(ended !== undefined);
+    assert.equal(ended.width, originWidth + 2);
+    assert.equal(ended.height, originHeight + 1);
+    assert.equal(graph.nodes[0]?.width, originWidth + 2);
+    assert.equal(graph.nodes[0]?.height, originHeight + 1);
+    assert.equal(graph.nodes[0]?.position.x, 0);
+    graph.remove();
+  });
+
+  test("second Enter on a resize control ends the keyboard resize", async () => {
+    const originWidth = 80;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const ends: number[] = [];
+    graph.addEventListener("flow-node-resize-end", (event: Event) => {
+      assert.ok(event instanceof CustomEvent);
+      ends.push((event.detail as { width: number }).width);
+    });
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    const button = controlButtonOf(se);
+    keyDownOn(button, " ");
+    await flush();
+    keyDownOn(button, "ArrowRight");
+    await waitUntil(() => graph.nodes[0]?.width === originWidth + 1);
+    keyDownOn(button, "Enter");
+    await waitUntil(() => ends.length === 1);
+    assert.equal(ends[0], originWidth + 1);
+    assert.equal(graph.nodes[0]?.width, originWidth + 1);
+    graph.remove();
+  });
+
+  test("keyboard step on w moves the west edge and clamps at min-width", async () => {
+    const originX = 40;
+    const originWidth = 80;
+    const minWidth = 78;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: originX, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const resizer = offeredResizer(nodeEl);
+    resizer.setAttribute("min-width", String(minWidth));
+    const w = controlOf({ resizer, direction: "w" });
+    const button = controlButtonOf(w);
+    keyDownOn(button, "Enter");
+    await flush();
+    const east = originX + originWidth;
+    // Three rightward steps of 1px: width 80 → 78 (clamped at min-width);
+    // the east edge stays fixed at 120.
+    const steps = 3;
+    for (let i = 0; i < steps; i += 1) {
+      keyDownOn(button, "ArrowRight");
+    }
+    await waitUntil(() => graph.nodes[0]?.width === minWidth);
+    const node = graph.nodes[0];
+    assert.ok(node !== undefined);
+    assert.equal(node.width, minWidth);
+    assert.equal(node.position.x + (node.width ?? 0), east);
+    graph.remove();
+  });
+
+  test("click on a resize control button does not emit flow-node-click or activate", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const clicks: Event[] = [];
+    graph.addEventListener("flow-node-click", (event) => clicks.push(event));
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    const button = controlButtonOf(se);
+    button.dispatchEvent(new MouseEvent("click", {
+      bubbles: POINTER_BUBBLES,
+      composed: POINTER_COMPOSED,
+      cancelable: true,
+      detail: 0,
+    }));
+    await flush();
+    assert.equal(clicks.length, 0);
+    graph.remove();
+  });
+
+  test("detail-0 click on the node's own button still activates the node", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    const clicks: Event[] = [];
+    graph.addEventListener("flow-node-click", (event) => clicks.push(event));
+    const nodeButton = nodeEl.shadowRoot?.querySelector("button");
+    assert.ok(nodeButton instanceof HTMLButtonElement);
+    nodeButton.dispatchEvent(new MouseEvent("click", {
+      bubbles: POINTER_BUBBLES,
+      composed: POINTER_COMPOSED,
+      cancelable: true,
+      detail: 0,
+    }));
+    await waitUntil(() => clicks.length === 1);
+    const click = clicks[0];
+    assert.ok(click instanceof CustomEvent);
+    const detail = click.detail as { node: { id: string } };
+    assert.equal(detail.node.id, "a");
+    await waitUntil(() => nodeEl.node?.selected === true);
+    assert.ok(nodeEl.node?.selected === true);
     graph.remove();
   });
 });

@@ -86,10 +86,19 @@ custom elements (`flow-graph`, `flow-node`, `flow-edge`, `flow-handle`,
 - `Renderer` (`clean` / `dirty` / `rendering`) coalesces paints
 - `Panner` (`fixed` / `panning`) writes CSS `translate+scale` synchronously
 - `Dragger` (`idle` / `dragging`) samples node drag per pointermove
-- `Resizer` (`idle` / `resizing`) samples node resize per pointermove.
-  `nodesResizable` defaults true. Selected nodes show eight named resize
-  controls (`n`/`s`/`e`/`w`/`ne`/`nw`/`se`/`sw`). Observe-only events:
+- `Resizer` (`idle` / `resizing`) samples node resize per pointermove and
+  accepts typed `resize_key_step` events for keyboard resizing. `nodesResizable`
+  defaults true. Selected nodes show eight named resize controls (`n`/`s`/
+  `e`/`w`/`ne`/`nw`/`se`/`sw`). Observe-only events:
   `flow-node-resize-start`, `flow-node-resize`, `flow-node-resize-end`.
+  Keyboard contract: each control's inner button is focusable and labeled
+  `Resize <direction>`. Enter or Space on a control starts a resize in that
+  direction (origin = the node's current bounds); ArrowUp/ArrowDown/
+  ArrowLeft/ArrowRight step-resize by 1px in world units per keypress (the
+  shared min/max/aspect clamp logic applies); Escape or a second Enter ends
+  the resize, applying the bounds and emitting `flow-node-resize-end`. Every
+  step is a typed event into the Resizer machine (no timers), and a click
+  originating from a control button never activates the node.
 - `Focuser` (`unfocused` / `focused`)
 - `Selection` (`none` / `picking` / `box`)
 - `Connection` (`idle` / `connecting`)

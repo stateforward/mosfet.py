@@ -15,6 +15,42 @@ type FlowBackgroundHost = HTMLElement & {
   variant: "dots" | "lines";
 };
 
+type FlowNodeHost = HTMLElement & {
+  node: unknown;
+  resizable: boolean;
+};
+
+type FlowGraphNodeView = { width: number; height: number } & Record<string, unknown>;
+
+type FlowGraphHost = HTMLElement & {
+  nodes: FlowGraphNodeView[];
+};
+
+type ResizeProbe = {
+  starts: Array<{ width: number; height: number }>;
+  ends: Array<{ width: number; height: number }>;
+  clicks: number;
+};
+
+const RESIZE_PROBE_ID = "resizer-graph-probe";
+const RESIZE_LABELS: ReadonlyArray<{ direction: string; label: string }> = [
+  { direction: "n", label: "Resize north" },
+  { direction: "s", label: "Resize south" },
+  { direction: "e", label: "Resize east" },
+  { direction: "w", label: "Resize west" },
+  { direction: "ne", label: "Resize northeast" },
+  { direction: "nw", label: "Resize northwest" },
+  { direction: "se", label: "Resize southeast" },
+  { direction: "sw", label: "Resize southwest" },
+];
+const RESIZE_DIRECTION_COUNT = 8;
+const RESIZE_ORIGIN_WIDTH = 80;
+const RESIZE_ORIGIN_HEIGHT = 40;
+const RESIZE_KEYBOARD_STEPS = 2;
+const RESIZE_KEYBOARD_STEP_PX = 1;
+const RESIZE_KEYBOARD_WIDTH = RESIZE_ORIGIN_WIDTH + RESIZE_KEYBOARD_STEPS * RESIZE_KEYBOARD_STEP_PX;
+const NO_NODE_CLICKS = 0;
+
 const ELEMENT_DEFINED = true;
 const ELEMENT_CONNECTED = true;
 const ELEMENT_DETACHED = false;
@@ -201,6 +237,150 @@ test("flow-node-resizer registers, reflects visible, and names a control", async
   expect(result.forcedFalse).toEqual({ visible: false, visibleAttr: "false" });
   expect(result.label).toBe("Resize southeast");
   expect(result.detached).toBe(ELEMENT_DETACHED);
+});
+
+test("flow-node-resize-control offers eight labeled handles, hides when not offered, and resizes by keyboard", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(async () => {
+    await customElements.whenDefined("flow-graph");
+    await customElements.whenDefined("flow-node");
+    await customElements.whenDefined("flow-node-resizer");
+    await customElements.whenDefined("flow-node-resize-control");
+  });
+  const defined = await page.evaluate(() => {
+    return customElements.get("flow-graph") !== undefined
+      && customElements.get("flow-node") !== undefined
+      && customElements.get("flow-node-resizer") !== undefined
+      && customElements.get("flow-node-resize-control") !== undefined;
+  });
+  expect(defined).toBe(ELEMENT_DEFINED);
+
+  // Eight labeled handles on an offered resizer; the resizer hides when the
+  // policy is off (resizable=false) and when the author forces visible=false.
+  const offered = await page.evaluate((labels) => {
+    const makeNode = () => ({
+      id: "a",
+      position: { x: 0, y: 0 },
+      data: { label: "A" },
+      width: 80,
+      height: 40,
+      selected: true,
+    });
+    const inspect = (node: FlowNodeHost) => {
+      const resizer = node.shadowRoot?.querySelector("flow-node-resizer") as HTMLElement | null | undefined;
+      return {
+        resizer: resizer ?? null,
+        labels: labels.map(({ direction }) => {
+          const control = resizer?.shadowRoot?.querySelector(`flow-node-resize-control[direction="${direction}"]`);
+          const button = control?.shadowRoot?.querySelector("button");
+          return { direction, label: button?.getAttribute("aria-label") ?? "" };
+        }),
+        hidden: resizer?.hidden ?? null,
+        display: resizer instanceof HTMLElement ? getComputedStyle(resizer).display : null,
+      };
+    };
+    const node = document.createElement("flow-node") as FlowNodeHost;
+    node.node = makeNode();
+    document.body.append(node);
+    const autoOffered = inspect(node);
+    node.resizable = false;
+    const policyOff = inspect(node);
+    node.remove();
+    const node2 = document.createElement("flow-node") as FlowNodeHost;
+    node2.node = makeNode();
+    document.body.append(node2);
+    node2.shadowRoot?.querySelector("flow-node-resizer")?.setAttribute("visible", "false");
+    const visibleFalse = inspect(node2);
+    node2.remove();
+    return { autoOffered, policyOff, visibleFalse };
+  }, RESIZE_LABELS);
+
+  expect(offered.autoOffered.labels).toEqual(RESIZE_LABELS);
+  expect(offered.autoOffered.hidden).toBe(false);
+  expect(offered.policyOff.labels.length).toBe(RESIZE_DIRECTION_COUNT);
+  expect(offered.policyOff.hidden).toBe(true);
+  expect(offered.policyOff.display).toBe("none");
+  expect(offered.visibleFalse.hidden).toBe(true);
+  expect(offered.visibleFalse.display).toBe("none");
+
+  // Keyboard resize on a live graph: Enter starts, arrows step, Escape ends.
+  await page.evaluate((probeId) => {
+    const graph = document.createElement("flow-graph") as FlowGraphHost;
+    graph.id = probeId;
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    const probe: ResizeProbe = { starts: [], ends: [], clicks: 0 };
+    (globalThis as typeof globalThis & { __flowResizeProbe?: ResizeProbe }).__flowResizeProbe = probe;
+    graph.addEventListener("flow-node-resize-start", (event: Event) => {
+      const detail = (event as CustomEvent<{ width: number; height: number }>).detail;
+      probe.starts.push({ width: detail.width, height: detail.height });
+    });
+    graph.addEventListener("flow-node-resize-end", (event: Event) => {
+      const detail = (event as CustomEvent<{ width: number; height: number }>).detail;
+      probe.ends.push({ width: detail.width, height: detail.height });
+    });
+    graph.addEventListener("flow-node-click", () => {
+      probe.clicks += 1;
+    });
+    document.body.append(graph);
+  }, RESIZE_PROBE_ID);
+
+  const selected = await page.evaluate(async (args: { probeId: string; waitMs: number; yieldMs: number }) => {
+    const graph = document.getElementById(args.probeId);
+    const node = graph?.shadowRoot?.querySelector("flow-node");
+    const button = node?.shadowRoot?.querySelector("button");
+    if (!(button instanceof HTMLElement)) return false;
+    button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true, button: 0 }));
+    button.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, composed: true, button: 0 }));
+    const deadline = Date.now() + args.waitMs;
+    while (Date.now() < deadline) {
+      const resizer = node?.shadowRoot?.querySelector("flow-node-resizer");
+      if (resizer instanceof HTMLElement && !resizer.hidden) return true;
+      await new Promise<void>((resolve) => { globalThis.setTimeout(resolve, args.yieldMs); });
+    }
+    return false;
+  }, { probeId: RESIZE_PROBE_ID, waitMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
+  expect(selected).toBe(ELEMENT_CONNECTED);
+
+  const focused = await page.evaluate(async (probeId) => {
+    const graph = document.getElementById(probeId);
+    const node = graph?.shadowRoot?.querySelector("flow-node");
+    const control = node?.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    const button = control?.shadowRoot?.querySelector("button");
+    if (!(button instanceof HTMLElement)) return false;
+    button.focus();
+    return document.activeElement === button;
+  }, RESIZE_PROBE_ID);
+  expect(focused).toBe(ELEMENT_CONNECTED);
+
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Escape");
+  const result = await page.evaluate(async (args: { probeId: string; deadlineMs: number; yieldMs: number }) => {
+    const probe = (globalThis as typeof globalThis & { __flowResizeProbe?: ResizeProbe }).__flowResizeProbe;
+    const graph = document.getElementById(args.probeId) as FlowGraphHost | null;
+    const deadline = Date.now() + args.deadlineMs;
+    while (probe !== undefined && Date.now() < deadline && probe.ends.length === 0) {
+      await new Promise<void>((resolve) => { globalThis.setTimeout(resolve, args.yieldMs); });
+    }
+    return {
+      starts: probe?.starts ?? [],
+      ends: probe?.ends ?? [],
+      clicks: probe?.clicks ?? 0,
+      nodeWidth: graph?.nodes[0]?.width,
+      nodeHeight: graph?.nodes[0]?.height,
+    };
+  }, { probeId: RESIZE_PROBE_ID, deadlineMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
+
+  expect(result.starts).toEqual([{ width: RESIZE_ORIGIN_WIDTH, height: RESIZE_ORIGIN_HEIGHT }]);
+  expect(result.ends).toEqual([{ width: RESIZE_KEYBOARD_WIDTH, height: RESIZE_ORIGIN_HEIGHT }]);
+  expect(result.clicks).toBe(NO_NODE_CLICKS);
+  expect(result.nodeWidth).toBe(RESIZE_KEYBOARD_WIDTH);
+  expect(result.nodeHeight).toBe(RESIZE_ORIGIN_HEIGHT);
+  await page.evaluate((probeId) => {
+    document.getElementById(probeId)?.remove();
+    delete (globalThis as typeof globalThis & { __flowResizeProbe?: ResizeProbe }).__flowResizeProbe;
+  }, RESIZE_PROBE_ID);
 });
 
 test("flow-minimap registers, slots into flow-graph, and draws with fillStyle", async ({ page }) => {

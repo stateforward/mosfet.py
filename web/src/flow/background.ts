@@ -11,8 +11,16 @@ export class FlowBackground extends HTMLElement {
 
   constructor() {
     super();
-    this.setAttribute("aria-hidden", "true");
     applyStyles(this.attachShadow({ mode: "open" }), backgroundStyles);
+  }
+
+  /**
+   * Decorative chrome: `aria-hidden` is set on connect, never in the
+   * constructor (a constructor that sets attributes makes real browsers
+   * refuse to upgrade `document.createElement` results).
+   */
+  connectedCallback(): void {
+    if (this.getAttribute("aria-hidden") === null) this.setAttribute("aria-hidden", "true");
   }
 
   get variant(): "dots" | "lines" {

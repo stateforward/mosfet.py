@@ -46,10 +46,23 @@ function coerceDirection(value: string | null): ResizeDirection {
  * and `removeAttribute` back to that default so the property, attribute, and
  * CSS `:host([direction=se])` cannot desync.
  *
- * Inputs: `direction` attribute or property. Outputs: reflected attribute and
- * `direction`. Ownership: the element owns its attributes. Lifetime: connect
- * until disconnect. Concurrency: runtime-safe. Failure modes: invalid values
- * coerce to `"se"`. Classification: runtime-safe.
+ * Keyboard contract: the inner `<button>` is focusable and labeled
+ * `Resize <direction>`. `flow-graph` listens for `keydown` whose composed
+ * path hits this control: Enter or Space starts a keyboard resize in this
+ * direction (origin = the node's current bounds, typed `resize_start` into
+ * the Resizer), ArrowUp/ArrowDown/ArrowLeft/ArrowRight each step the edge by
+ * 1px in world units through the Resizer's shared min/max/aspect clamp
+ * logic (one typed `resize_key_step` per keypress), and Escape or a second
+ * Enter ends the resize (typed `resize_end`, which applies the bounds and
+ * emits `flow-node-resize-end`). Enter/Space never activate the node: a
+ * click originating from this control's button is excluded from node
+ * activation. The button carries a `:focus-visible` outline.
+ *
+ * Inputs: `direction` attribute or property. Outputs: reflected attribute,
+ * `direction`, and the focusable labeled button. Ownership: the element owns
+ * its attributes. Lifetime: connect until disconnect. Concurrency:
+ * runtime-safe. Failure modes: invalid values coerce to `"se"`.
+ * Classification: runtime-safe.
  */
 export class FlowNodeResizeControl extends HTMLElement {
   static get observedAttributes(): string[] {
