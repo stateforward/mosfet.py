@@ -3,8 +3,8 @@
 // reference registry's cache/version/bundle/nudge pipeline into an HSM pass
 // protocol: one route pass per accepted sync, one `routed` notification per
 // pass, deferred syncs serializing behind the ack. The obstacle snapshot,
-// version hash, route cache, and live-set stamp are PRIVATE instance state --
-// peers coordinate only through the typed sync/routed events.
+// containment map, version hash, route cache, and live-set stamp are PRIVATE
+// instance state -- peers coordinate only through the typed sync/routed events.
 //
 // Documented deviations from the reference registry:
 // - No viewport cull or tick liveness: the live edge set is exactly the sync's
@@ -18,6 +18,13 @@
 // - Bundled members take their strand as pts and skip the nudge pass (the
 //   reference skips comb-managed geometry for the same reason); their cached
 //   raw entries stay untouched.
+// - Machine shells are rooms, not furniture: a rect that transitively contains
+//   either edge endpoint (via the synced parentId chains) is excluded from
+//   that edge's obstacle set -- its interior lanes must stay open or the
+//   uniform blanket tax cancels in the A* comparison and wires run straight
+//   through intermediate sibling states. Siblings, unrelated machines' shells,
+//   and distant states remain obstacles. Endpoint rects are excluded the same
+//   way: endpoints are pins, not obstacles (matching the registry).
 
 import * as hsm from "../../hsm.ts";
 
@@ -37,6 +44,13 @@ export type NodeRectData = {
   readonly width: number;
   /** Node rect height in px. */
   readonly height: number;
+  /**
+   * Id of the compound/machine-shell node whose interior visually contains
+   * this rect, when one exists. Ancestor chains built from these stamps tell
+   * the router which containers are rooms (their interior lanes stay open)
+   * rather than furniture for a given edge.
+   */
+  readonly parentId?: string;
 };
 
 export type CableEdgeData = {
@@ -50,7 +64,11 @@ export type CableEdgeData = {
 
 /** Payload of `Routes.syncEvent`. */
 export type SyncData = {
-  /** Every visible node rect; forms the obstacle snapshot. */
+  /**
+   * Every visible node rect; forms the obstacle snapshot. `parentId` stamps
+   * containment so the pass can tell enclosing containers (rooms) from
+   * siblings and foreign shells (furniture) per edge.
+   */
   readonly nodes: readonly NodeRectData[];
   /** Every cable edge to route between known nodes. */
   readonly edges: readonly CableEdgeData[];
@@ -138,7 +156,8 @@ export class Routes extends hsm.Instance {
     ),
   );
 
-  #obstacles: Rect[] = [];
+  #snapshot: readonly NodeRectData[] = [];
+  #parentOf = new Map<string, string>();
   #version = 0;
   #lastHash = "";
   #cache = new Map<string, { readonly raw: readonly XYPosition[]; readonly version: number }>();
@@ -196,7 +215,7 @@ export class Routes extends hsm.Instance {
         sourceRect,
         targetRect,
         ends,
-        pts: this.#cachedOrRouted(edge.id, ends),
+        pts: this.#cachedOrRouted(edge, ends),
         bundled: false,
       });
     }
@@ -214,7 +233,7 @@ export class Routes extends hsm.Instance {
       nudged.map((entry) => entry.edge.id).sort().join(";") + `#v${this.#version.toString()}`;
     if (stamp !== this.#lastLiveStamp) {
       this.#lastLiveStamp = stamp;
-      nudgePass(shaped, this.#obstacles);
+      nudgePass(shaped, rectsOf(this.#snapshot));
       for (const [i, entry] of nudged.entries()) {
         const worked = shaped[i];
         if (worked !== undefined) entry.pts = worked.pts;
@@ -227,21 +246,57 @@ export class Routes extends hsm.Instance {
 
   #snapshotObstacles(nodes: readonly NodeRectData[]): void {
     let hash = "";
-    const rects: Rect[] = [];
     for (const node of nodes) {
-      rects.push({ x: node.x, y: node.y, width: node.width, height: node.height });
-      hash += `${node.id}|${node.x | 0}|${node.y | 0}|${node.width | 0}|${node.height | 0};`;
+      hash += `${node.id}|${node.x | 0}|${node.y | 0}|${node.width | 0}|${node.height | 0}|${node.parentId ?? ""};`;
     }
     if (hash === this.#lastHash) return;
     this.#lastHash = hash;
-    this.#obstacles = rects;
+    this.#snapshot = nodes;
+    const parentOf = new Map<string, string>();
+    for (const node of nodes) {
+      if (node.parentId !== undefined) parentOf.set(node.id, node.parentId);
+    }
+    this.#parentOf = parentOf;
     this.#version += 1;
     if (this.#cache.size > CACHE_LIMIT) this.#cache.clear();
   }
 
-  #cachedOrRouted(edgeId: string, ends: CableEnds): readonly XYPosition[] {
+  /**
+   * Transitive ancestor ids of `id` per the latest sync's containment stamps,
+   * nearest first. Missing parents terminate the walk; a visited set makes a
+   * malformed cycle terminate too.
+   */
+  #ancestorChain(id: string): readonly string[] {
+    const chain: string[] = [];
+    const visited = new Set<string>([id]);
+    let current = this.#parentOf.get(id);
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current);
+      chain.push(current);
+      current = this.#parentOf.get(current);
+    }
+    return chain;
+  }
+
+  /**
+   * Obstacle rects for one edge: every snapshot rect EXCEPT the two endpoint
+   * rects and any rect on either endpoint's transitive ancestor chain.
+   * Containers of an endpoint are rooms -- the wire legitimately crosses their
+   * interior; everything else (siblings, foreign shells, distant states) stays
+   * furniture. Endpoints themselves are pins, not obstacles, matching the
+   * reference registry and the bundle template.
+   */
+  #edgeObstacles(sourceId: string, targetId: string): Rect[] {
+    const excluded = new Set<string>([sourceId, targetId]);
+    for (const ancestor of [...this.#ancestorChain(sourceId), ...this.#ancestorChain(targetId)]) {
+      excluded.add(ancestor);
+    }
+    return rectsOf(this.#snapshot.filter((node) => !excluded.has(node.id)));
+  }
+
+  #cachedOrRouted(edge: CableEdgeData, ends: CableEnds): readonly XYPosition[] {
     const key =
-      `${edgeId}|${ends.start.x}|${ends.start.y}|${ends.end.x}|${ends.end.y}` +
+      `${edge.id}|${ends.start.x}|${ends.start.y}|${ends.end.x}|${ends.end.y}` +
       `|${ends.startDir}>${ends.endDir}`;
     const hit = this.#cache.get(key);
     if (hit !== undefined && hit.version === this.#version) return hit.raw;
@@ -250,7 +305,7 @@ export class Routes extends hsm.Instance {
       end: ends.end,
       startDir: ends.startDir,
       endDir: ends.endDir,
-      obstacles: this.#obstacles,
+      obstacles: this.#edgeObstacles(edge.source, edge.target),
       clearance: CLEARANCE,
       stubStart: STUB,
       stubEnd: STUB,
@@ -305,17 +360,14 @@ export class Routes extends hsm.Instance {
     const end = centerOf(median.targetRect);
     // The spine legitimately runs through its own pair's clearance halos: a
     // center-to-center wire priced against its own endpoints' inflation reads
-    // the straight run through everything as cheaper than any wrap. The rest
-    // of the graph stays obstructing; a coincident duplicate rect is excluded
-    // with the pair, which costs nothing geometrically (its inflated box
-    // coincides with the excluded one).
-    const obstacles = this.#obstacles.filter(
-      (rect) => !sameRect(rect, median.sourceRect) && !sameRect(rect, median.targetRect),
-    );
+    // the straight run through everything as cheaper than any wrap. The pair's
+    // exclusion is the same room-vs-furniture union as any edge -- endpoint ids
+    // plus both ancestor chains -- so a shared container never blankets the
+    // spine either; unrelated rects stay obstructing.
     const routed = route({
       start,
       end,
-      obstacles,
+      obstacles: this.#edgeObstacles(median.edge.source, median.edge.target),
       clearance: CLEARANCE + halfRibbon,
       stubStart: STUB + halfRibbon,
       stubEnd: STUB + halfRibbon,
@@ -338,8 +390,9 @@ export class Routes extends hsm.Instance {
  * sync restores them.
  * Outputs: a started Routes in `/Routes/idle`.
  * Ownership: caller owns the returned actor and must `hsm.stop` it. The
- * obstacle snapshot, version hash, route cache, and live-set stamp are private
- * instance state; peers coordinate only through the typed sync/routed events.
+ * obstacle snapshot, containment map, version hash, route cache, and live-set
+ * stamp are private instance state; peers coordinate only through the typed
+ * sync/routed events.
  * Lifetime: until `hsm.stop` or owner context cancel.
  * Concurrency: one route pass at a time. Syncs dispatched while a pass runs
  * are deferred and processed after its ack, so passes serialize one-to-one
@@ -408,8 +461,8 @@ function pairKeyOf(edge: CableEdgeData): string {
     : `${edge.target}~${edge.source}`;
 }
 
-function sameRect(a: Rect, b: Rect): boolean {
-  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+function rectsOf(nodes: readonly NodeRectData[]): Rect[] {
+  return nodes.map((node) => ({ x: node.x, y: node.y, width: node.width, height: node.height }));
 }
 
 function centerOf(rect: Rect): XYPosition {
@@ -453,10 +506,23 @@ function nodeRectsOf(value: unknown): readonly NodeRectData[] | null {
     const y = finiteNumberOf(item["y"]);
     const width = finiteNumberOf(item["width"]);
     const height = finiteNumberOf(item["height"]);
-    if (typeof id !== "string" || x === null || y === null || width === null || height === null) {
+    // Containment is optional; when present it must be a node id string.
+    const parentId = item["parentId"];
+    if (
+      typeof id !== "string" ||
+      x === null ||
+      y === null ||
+      width === null ||
+      height === null ||
+      (parentId !== undefined && typeof parentId !== "string")
+    ) {
       return null;
     }
-    nodes.push({ id, x, y, width, height });
+    nodes.push(
+      parentId === undefined
+        ? { id, x, y, width, height }
+        : { id, x, y, width, height, parentId },
+    );
   }
   return nodes;
 }

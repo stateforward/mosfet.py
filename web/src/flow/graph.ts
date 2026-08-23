@@ -1502,11 +1502,13 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   /**
    * Send a `sync` snapshot of the admitted graph to the Routes actor.
    *
-   * Inputs: current `#nodes` (rects with width/height defaults), cable-typed
-   * `#edges`, and the active drag, if any. During a node drag
-   * `draggingNodeIds` carries exactly the dragged id so its edges drop out of
-   * the routed map and paint falls back until the post-drag sync restores
-   * them. Ownership: the actor owns routing state; this host only snapshots.
+   * Inputs: current `#nodes` (rects with width/height defaults and their
+   * containment stamp), cable-typed `#edges`, and the active drag, if any.
+   * During a node drag `draggingNodeIds` carries exactly the dragged id so its
+   * edges drop out of the routed map and paint falls back until the post-drag
+   * sync restores them. The `parentId` stamp lets the pass tell enclosing
+   * containers (rooms) from sibling/foreign rects (furniture) per edge.
+   * Ownership: the actor owns routing state; this host only snapshots.
    * Lifetime: one dispatch per call. Concurrency: no-op before actors start;
    * syncs sent mid-pass are deferred behind the pass ack by Routes' topology.
    * Failure modes: unstarted/stopped actor drops are surfaced through
@@ -1521,6 +1523,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       y: node.position.y,
       width: node.width ?? DEFAULT_NODE_WIDTH,
       height: node.height ?? DEFAULT_NODE_HEIGHT,
+      ...(node.parentId === undefined ? {} : { parentId: node.parentId }),
     }));
     const edges = this.#edges.flatMap((edge) => edge.type === "cable"
       ? [{ id: edge.id, source: edge.source, target: edge.target }]

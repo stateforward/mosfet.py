@@ -20,12 +20,13 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 
 const pt = (x: number, y: number): XYPosition => ({ x, y });
 const box = (x: number, y: number, width: number, height: number): Rect => ({ x, y, width, height });
-const nodeRect = (id: string, rect: Rect): NodeRectData => ({
+const nodeRect = (id: string, rect: Rect, parentId?: string): NodeRectData => ({
   id,
   x: rect.x,
   y: rect.y,
   width: rect.width,
   height: rect.height,
+  ...(parentId === undefined ? {} : { parentId }),
 });
 const edgeOf = (id: string, source: string, target: string): CableEdgeData => ({ id, source, target });
 
@@ -42,6 +43,53 @@ const NODES: readonly NodeRectData[] = [
 
 function syncOf(edges: readonly CableEdgeData[], dragging: readonly string[]): SyncData {
   return { nodes: NODES, edges, draggingNodeIds: dragging };
+}
+
+// Transitive containment: outer ⊃ shell ⊃ {a, blocker, b}. For the a→b edge
+// BOTH container rects are rooms (their interior lanes stay open) while the
+// sibling blocker stays furniture -- before ancestor exclusion the blanket
+// rects taxed every interior lane uniformly and the wire ran straight through
+// the blocker.
+const OUTER = box(-120, -120, 1440, 1040);
+const SHELL = box(0, 0, 1000, 800);
+const NESTED_A = box(80, 380, 80, 40);
+const SIBLING_BLOCKER = box(460, 300, 60, 360);
+const NESTED_B = box(840, 380, 80, 40);
+
+const NESTED_NODES: readonly NodeRectData[] = [
+  nodeRect("outer", OUTER),
+  nodeRect("shell", SHELL, "outer"),
+  nodeRect("a", NESTED_A, "shell"),
+  nodeRect("blocker", SIBLING_BLOCKER, "shell"),
+  nodeRect("b", NESTED_B, "shell"),
+];
+
+function nestedSync(edges: readonly CableEdgeData[]): SyncData {
+  return { nodes: NESTED_NODES, edges, draggingNodeIds: [] };
+}
+
+// Cross-container edge x∈s1 → y∈s2: each shell is a room along its own
+// descendants' chains, so the route enters s2 to reach y -- but the unrelated
+// machine shell m between the two machines and the sibling blocker d inside s2
+// are furniture for this edge either way.
+const SHELL_ONE = box(0, 0, 400, 400);
+const CROSS_X = box(60, 180, 80, 40);
+const FOREIGN_SHELL = box(500, -350, 200, 1100);
+const SHELL_TWO = box(800, 0, 400, 400);
+const INNER_BLOCKER = box(880, 100, 50, 250);
+const CROSS_Y = box(1060, 180, 80, 40);
+
+const CROSS_NODES: readonly NodeRectData[] = [
+  nodeRect("s1", SHELL_ONE),
+  nodeRect("x", CROSS_X, "s1"),
+  nodeRect("m", FOREIGN_SHELL),
+  nodeRect("s2", SHELL_TWO),
+  nodeRect("d", INNER_BLOCKER, "s2"),
+  nodeRect("y", CROSS_Y, "s2"),
+];
+
+function crossSync(edges: readonly CableEdgeData[]): SyncData {
+  return { nodes: CROSS_NODES, edges, draggingNodeIds: [] };
 }
 
 type Fixture = {
@@ -106,12 +154,33 @@ function startFixture(): Fixture {
   };
 }
 
-/** No waypoint may sit strictly inside the wall inflated by the router's hard margin. */
-function assertAvoidsWall(pts: readonly XYPosition[]): void {
-  const hard = { x0: WALL.x - 4, y0: WALL.y - 4, x1: WALL.x + WALL.width + 4, y1: WALL.y + WALL.height + 4 };
+/** No waypoint may sit strictly inside `wall` inflated by the router's hard margin. */
+function assertAvoidsWall(pts: readonly XYPosition[], wall: Rect = WALL): void {
+  const hard = { x0: wall.x - 4, y0: wall.y - 4, x1: wall.x + wall.width + 4, y1: wall.y + wall.height + 4 };
   for (const p of pts) {
     const inside = p.x > hard.x0 && p.x < hard.x1 && p.y > hard.y0 && p.y < hard.y1;
     assert.ok(!inside, `waypoint ${JSON.stringify(p)} entered the wall`);
+  }
+}
+
+/** No orthogonal SEGMENT may cross `rect` inflated by the router's hard margin. */
+function assertSegmentsAvoid(pts: readonly XYPosition[], rect: Rect): void {
+  const left = rect.x - 4;
+  const right = rect.x + rect.width + 4;
+  const top = rect.y - 4;
+  const bottom = rect.y + rect.height + 4;
+  for (let index = 1; index < pts.length; index += 1) {
+    const start = pts[index - 1];
+    const end = pts[index];
+    assert.ok(start !== undefined && end !== undefined);
+    assert.ok(
+      start.x === end.x || start.y === end.y,
+      `segment ${JSON.stringify(start)}->${JSON.stringify(end)} is not orthogonal`,
+    );
+    const crosses = start.x === end.x
+      ? start.x > left && start.x < right && Math.max(start.y, end.y) > top && Math.min(start.y, end.y) < bottom
+      : start.y > top && start.y < bottom && Math.max(start.x, end.x) > left && Math.min(start.x, end.x) < right;
+    assert.ok(!crosses, `segment crosses ${JSON.stringify(rect)} at ${JSON.stringify([start, end])}`);
   }
 }
 
@@ -205,6 +274,8 @@ describe("Routes", () => {
       { nodes: "nope", edges: [], draggingNodeIds: [] },
       { nodes: [], edges: [], draggingNodeIds: "nope" },
       { nodes: [{ id: "a", x: Number.NaN, y: 0, width: 10, height: 10 }], edges: [], draggingNodeIds: [] },
+      { nodes: [{ id: "a", x: 0, y: 0, width: 10, height: 10, parentId: 7 }], edges: [], draggingNodeIds: [] },
+      { nodes: [{ id: "a", x: 0, y: 0, width: 10, height: 10, parentId: null }], edges: [], draggingNodeIds: [] },
       { nodes: [{ x: 0, y: 0, width: 10, height: 10 }], edges: [], draggingNodeIds: [] },
       { nodes: [], edges: [{ id: "e", source: "a" }], draggingNodeIds: [] },
       { nodes: [], edges: [null], draggingNodeIds: [] },
@@ -241,6 +312,55 @@ describe("Routes", () => {
     await waitFor(() => true);
     assert.match(fix.machine.state(), /\/idle$/);
     assert.equal(fix.routed.length, 0);
+    await hsm.stop(fix.machine);
+  });
+
+  test("routes around an intermediate sibling inside nested shells (containers are rooms)", async () => {
+    const fix = startFixture();
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: nestedSync([edgeOf("e1", "a", "b")]) }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const e1 = routes["e1"];
+    assert.ok(e1 !== undefined && e1.length >= 4, `expected a detour polyline, got ${JSON.stringify(e1)}`);
+    assert.deepEqual(e1[0], pt(160, 400)); // a's right-border anchor
+    assert.deepEqual(e1[e1.length - 1], pt(840, 400)); // b's left-border anchor
+    // The sibling blocker is furniture even though both ancestor containers
+    // are in the snapshot: the wire prices its way around it.
+    assertSegmentsAvoid(e1, SIBLING_BLOCKER);
+    assert.ok(
+      e1.some((p) => p.y < 290 || p.y > 670),
+      `route never left the blocker band: ${JSON.stringify(e1)}`,
+    );
+    await hsm.stop(fix.machine);
+  });
+
+  test("cross-container edges keep foreign shells as obstacles but enter the target's room", async () => {
+    const fix = startFixture();
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: crossSync([edgeOf("e1", "x", "y")]) }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const e1 = routes["e1"];
+    assert.ok(e1 !== undefined && e1.length >= 4, `expected a detour polyline, got ${JSON.stringify(e1)}`);
+    assert.deepEqual(e1[0], pt(140, 200)); // x's right-border anchor
+    assert.deepEqual(e1[e1.length - 1], pt(1060, 200)); // y's left-border anchor
+    // The unrelated machine shell m is on neither endpoint's ancestor chain,
+    // so it still bites; the wire leaves m's band to get across.
+    assertAvoidsWall(e1, FOREIGN_SHELL);
+    assert.ok(
+      e1.some((p) => Math.abs(p.y) > 350),
+      `route never left the foreign shell band: ${JSON.stringify(e1)}`,
+    );
+    // s2 IS an ancestor of y: the route legitimately enters its interior --
+    // and the sibling blocker d inside s2 is still furniture to dodge.
+    assert.ok(
+      e1.some((p) => p.x > 946 && p.y > 4 && p.y < 396),
+      `route never entered s2's interior: ${JSON.stringify(e1)}`,
+    );
+    assertSegmentsAvoid(e1, INNER_BLOCKER);
     await hsm.stop(fix.machine);
   });
 
