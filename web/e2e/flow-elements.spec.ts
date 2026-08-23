@@ -341,14 +341,31 @@ test("flow-node-resize-control offers eight labeled handles, hides when not offe
   }, { probeId: RESIZE_PROBE_ID, waitMs: CONNECT_WAIT_MS, yieldMs: YIELD_MS });
   expect(selected).toBe(ELEMENT_CONNECTED);
 
-  const focused = await page.evaluate(async (probeId) => {
+  // The selection pointerup above is itself a node click; zero the counter so
+  // the assertion below proves the keyboard resize phase adds none.
+  await page.evaluate(() => {
+    const probe = (globalThis as typeof globalThis & { __flowResizeProbe?: ResizeProbe }).__flowResizeProbe;
+    if (probe !== undefined) probe.clicks = 0;
+  });
+
+  const focused = await page.evaluate((probeId) => {
     const graph = document.getElementById(probeId);
     const node = graph?.shadowRoot?.querySelector("flow-node");
-    const control = node?.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
+    // The controls live one shadow level deeper: node shadow -> resizer host
+    // -> resizer shadow -> control host -> control shadow -> button.
+    const resizer = node?.shadowRoot?.querySelector("flow-node-resizer");
+    const control = resizer?.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
     const button = control?.shadowRoot?.querySelector("button");
-    if (!(button instanceof HTMLElement)) return false;
+    if (!(graph instanceof HTMLElement) || !(node instanceof HTMLElement) || !(resizer instanceof HTMLElement) || !(control instanceof HTMLElement) || !(button instanceof HTMLButtonElement)) return false;
     button.focus();
-    return document.activeElement === button;
+    // The button sits in nested shadow roots, so `document.activeElement`
+    // reports only the outermost document-level host; verify the real focus
+    // target by walking each `ShadowRoot.activeElement` down to the button.
+    return document.activeElement === graph
+      && graph.shadowRoot?.activeElement === node
+      && node.shadowRoot?.activeElement === resizer
+      && resizer.shadowRoot?.activeElement === control
+      && control.shadowRoot?.activeElement === button;
   }, RESIZE_PROBE_ID);
   expect(focused).toBe(ELEMENT_CONNECTED);
 
