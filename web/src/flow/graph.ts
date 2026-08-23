@@ -12,6 +12,7 @@ import { isResizeDirection } from "./resize-control.ts";
 import { Resizer, startResizer } from "./resizer.ts";
 import { edgePath, getNodesBounds } from "./path.ts";
 import { Renderer, startRenderer } from "./renderer.ts";
+import { Routes, startRoutes } from "./pathing/routes.ts";
 import { Selection, startSelection, type SelectionBox } from "./selection.ts";
 import { graphStyles } from "./styles.ts";
 import {
@@ -275,6 +276,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       hsm.transition(hsm.on(Dragger.movedEvent.name), hsm.effect(FlowGraph.applyNodeMoved)),
       hsm.transition(hsm.on(Resizer.movedEvent.name), hsm.effect(FlowGraph.applyNodeResized)),
       hsm.transition(hsm.on(Resizer.finishedEvent.name), hsm.effect(FlowGraph.applyResizeFinished)),
+      hsm.transition(hsm.on(Routes.routedEvent.name), hsm.effect(FlowGraph.applyRoutedRoutes)),
       hsm.transition(hsm.on(Connection.draftEvent.name), hsm.effect(FlowGraph.paintDraft)),
       hsm.transition(hsm.on(Connection.finishedEvent.name), hsm.effect(FlowGraph.acceptConnect)),
       hsm.transition(hsm.on(Renderer.paintEvent.name), hsm.effect(FlowGraph.paintNow)),
@@ -321,6 +323,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
   #focuser: ReturnType<typeof startFocuser> | null = null;
   #selection: ReturnType<typeof startSelection> | null = null;
   #connection: ReturnType<typeof startConnection> | null = null;
+  #routes: ReturnType<typeof startRoutes> | null = null;
+  #routePoints: Record<string, readonly XYPosition[]> = {};
+  #draggedNodeId: string | null = null;
   #view: Viewport = { x: 0, y: 0, zoom: 1 };
   #selectedNodeIds: ReadonlySet<string> = new Set();
   #selectedEdgeIds: ReadonlySet<string> = new Set();
@@ -736,6 +741,9 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     instance.#focuser = null;
     instance.#selection = null;
     instance.#connection = null;
+    instance.#routes = null;
+    instance.#routePoints = {};
+    instance.#draggedNodeId = null;
   }
 
   static isResizeStart(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
@@ -826,6 +834,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     } }) });
     instance.#emitNodeResize({ name: "flow-node-resize-start", node, bounds: origin });
     instance.#dirty();
+    instance.#syncRoutes();
   }
 
   static moveResize(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -871,6 +880,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (!(instance instanceof FlowGraph)) return;
     const sample = pointerOf(event.data);
     if (sample?.hit.kind !== "node") return;
+    instance.#draggedNodeId = sample.hit.node.id;
     instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragStartEvent, data: {
       nodeId: sample.hit.node.id,
       offset: {
@@ -889,7 +899,11 @@ export class FlowGraph extends hsm.from(HTMLElement) {
 
   static endDrag(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
     if (!(instance instanceof FlowGraph)) return;
+    instance.#draggedNodeId = null;
     instance.#send({ machine: instance.#dragger, event: hsm.typedEvent({ event: Dragger.dragEndEvent }) });
+    // Post-drag sync with draggingNodeIds=[] restores the dragged-edge routes
+    // the during-drag syncs omitted.
+    instance.#syncRoutes();
   }
 
   static endResize(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
@@ -1077,6 +1091,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }
     instance.#nodes = admitted.nodes;
     instance.#dirty();
+    instance.#syncRoutes();
   }
 
   static rejectSetNodes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1106,6 +1121,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     }
     instance.#edges = admitted.edges;
     instance.#dirty();
+    instance.#syncRoutes();
   }
 
   static rejectSetEdges(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1188,6 +1204,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (typeof nodeId !== "string" || position === null) return;
     instance.#nodes = instance.#nodes.map((node) => node.id === nodeId ? { ...node, position } : node);
     instance.#dirty();
+    instance.#syncRoutes();
   }
 
   static applyNodeResized(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1201,6 +1218,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     if (node === undefined) return;
     instance.#emitNodeResize({ name: "flow-node-resize", node, bounds });
     instance.#dirty();
+    instance.#syncRoutes();
   }
 
   static applyResizeFinished(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -1218,6 +1236,31 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     const node = instance.#nodes.find((item) => item.id === bounds.nodeId);
     if (node === undefined) return;
     instance.#emitNodeResize({ name: "flow-node-resize-end", node, bounds });
+    instance.#dirty();
+    instance.#syncRoutes();
+  }
+
+  /**
+   * Store a routed waypoint map and schedule a repaint.
+   *
+   * Inputs: a `routed` notification from the Routes actor carrying
+   * `RoutedData.routes` (edge id -> world-space waypoints; dragged-endpoint
+   * edges are absent). Completing this effect resolves Routes' awaited owner
+   * notification -- that resolution is the route-pass ack back to the machine,
+   * mirroring how `paintNow` acks `Renderer.paintEvent`.
+   * Outputs: `#routePoints` replaced and one repaint marked dirty.
+   * Ownership: the graph owns its stored map copy; the actor owns routing.
+   * Lifetime: until the next routed map or actor stop.
+   * Concurrency: runtime-safe on the graph dispatch thread; syncs sent while a
+   * route pass runs are deferred behind its ack by the actor's topology.
+   * Failure modes: malformed payloads leave stored routes unchanged.
+   * Classification: runtime-safe.
+   */
+  static applyRoutedRoutes(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
+    if (!(instance instanceof FlowGraph) || !hsm.isRecord(event.data)) return;
+    const routes = routedRoutesOf(event.data["routes"]);
+    if (routes === null) return;
+    instance.#routePoints = routes;
     instance.#dirty();
   }
 
@@ -1401,6 +1444,49 @@ export class FlowGraph extends hsm.from(HTMLElement) {
     this.#focuser = startFocuser({ ctx });
     this.#selection = startSelection({ ctx });
     this.#connection = startConnection({ ctx });
+    this.#routes = startRoutes({ ctx });
+    // One initial sync so already-admitted geometry routes before the first
+    // user interaction; later mutations re-sync at their own effects.
+    this.#syncRoutes();
+  }
+
+  /**
+   * Send a `sync` snapshot of the admitted graph to the Routes actor.
+   *
+   * Inputs: current `#nodes` (rects with width/height defaults), cable-typed
+   * `#edges`, and the active drag, if any. During a node drag
+   * `draggingNodeIds` carries exactly the dragged id so its edges drop out of
+   * the routed map and paint falls back until the post-drag sync restores
+   * them. Ownership: the actor owns routing state; this host only snapshots.
+   * Lifetime: one dispatch per call. Concurrency: no-op before actors start;
+   * syncs sent mid-pass are deferred behind the pass ack by Routes' topology.
+   * Failure modes: unstarted/stopped actor drops are surfaced through
+   * `catchFailure(this)` as for other child sends.
+   * Classification: runtime-safe.
+   */
+  #syncRoutes(): void {
+    if (this.#routes === null) return;
+    const nodes = this.#nodes.map((node) => ({
+      id: node.id,
+      x: node.position.x,
+      y: node.position.y,
+      width: node.width ?? DEFAULT_NODE_WIDTH,
+      height: node.height ?? DEFAULT_NODE_HEIGHT,
+    }));
+    const edges = this.#edges.flatMap((edge) => edge.type === "cable"
+      ? [{ id: edge.id, source: edge.source, target: edge.target }]
+      : []);
+    this.#send({
+      machine: this.#routes,
+      event: hsm.typedEvent({
+        event: Routes.syncEvent,
+        data: {
+          nodes,
+          edges,
+          draggingNodeIds: this.#draggedNodeId === null ? [] : [this.#draggedNodeId],
+        },
+      }),
+    });
   }
 
   #listen(): void {
@@ -1628,7 +1714,13 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       const target = byId.get(edge.target);
       const painted = copiedEdgeValue({ ...edge, selected: this.#selectedEdgeIds.has(edge.id) });
       if (painted !== null) element.edge = painted;
-      if (source !== undefined && target !== undefined) element.paint(source, target);
+      if (source === undefined || target === undefined) continue;
+      // Cable edges paint their routed polyline when a route exists; a miss
+      // (dragging endpoint, brand-new edge, stopped router) omits the third
+      // argument so FlowEdge paints its smoothstep fallback.
+      const routed = edge.type === "cable" ? this.#routePoints[edge.id] : undefined;
+      if (routed !== undefined) element.paint(source, target, routed);
+      else element.paint(source, target);
     }
     for (const [id, element] of this.#edgeElements) {
       if (seenEdges.has(id)) continue;
@@ -2085,6 +2177,32 @@ function boxOf(value: unknown): SelectionBox | null {
 
 function arrayOfStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/**
+ * Narrow a `RoutedData.routes` record.
+ *
+ * One malformed entry rejects the whole map, mirroring the Routes actor's own
+ * sync narrowing: callers ignore a null result instead of painting partial
+ * routes. Classification: runtime-safe.
+ */
+function routedRoutesOf(value: unknown): Record<string, readonly XYPosition[]> | null {
+  if (!hsm.isRecord(value)) return null;
+  const routes: Record<string, readonly XYPosition[]> = {};
+  for (const [id, pts] of Object.entries(value)) {
+    if (!isPointList(pts)) return null;
+    routes[id] = pts;
+  }
+  return routes;
+}
+
+function isPointList(value: unknown): value is readonly XYPosition[] {
+  if (!Array.isArray(value)) return false;
+  for (const point of value) {
+    if (!hsm.isRecord(point)) return false;
+    if (!isFiniteNumber(point["x"]) || !isFiniteNumber(point["y"])) return false;
+  }
+  return true;
 }
 
 function draftOf(value: unknown): ConnectionDraft | null {

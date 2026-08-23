@@ -15,6 +15,7 @@ export { Resizer, startResizer, resizedBounds } from "./resizer.ts";
 export { Focuser, startFocuser } from "./focuser.ts";
 export { Selection, startSelection } from "./selection.ts";
 export { Connection, startConnection } from "./connection.ts";
+export { Routes, startRoutes, cableEnds } from "./pathing/routes.ts";
 export {
   getBezierPath,
   getStraightPath,
@@ -23,7 +24,20 @@ export {
   getViewportForBounds,
   getNodesBounds,
 } from "./path.ts";
+export { offsetStrand, route } from "./pathing/router.ts";
+export { nudgePass } from "./pathing/nudge.ts";
+export { labelPoint, measure, pointAt, polylinePath } from "./pathing/trace.ts";
 export { copyJson, copyNode, copyEdge, resizeOffered } from "./types.ts";
+export type { OffsetStrandArgs, RouteArgs } from "./pathing/router.ts";
+export type { RouteEntry } from "./pathing/nudge.ts";
+export type {
+  CableEdgeData,
+  CableEnds,
+  NodeRectData,
+  RoutedData,
+  SyncData,
+} from "./pathing/routes.ts";
+export type { MeasuredPath, PathSample } from "./pathing/trace.ts";
 export type {
   Node,
   Edge,

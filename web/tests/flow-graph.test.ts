@@ -10,7 +10,7 @@ import { FlowNodeResizer } from "../src/flow/node-resizer.ts";
 import { RESIZE_DIRECTIONS } from "../src/flow/resize-control.ts";
 import { resizedBounds } from "../src/flow/resizer.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
-import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
+import { getBezierPath, getNodesBounds, getSmoothStepPath, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
   FIT_PADDING_RATIO,
   MAX_FLOW_EDGES,
@@ -22,6 +22,7 @@ import {
   type PointerSampleData,
 } from "../src/flow/types.ts";
 import { getByRole } from "./by-role.ts";
+import { labelPoint } from "../src/flow/pathing/trace.ts";
 
 registerFlowElements();
 
@@ -143,6 +144,53 @@ function pointerData(overrides: Partial<PointerSampleData> = {}): PointerSampleD
     },
     ...overrides,
   };
+}
+
+/**
+ * Painted `d` of the graph's first flow-edge path, or null before any paint.
+ */
+function edgePathDOf(graph: FlowGraph): string | null {
+  const element = graph.querySelector("flow-edge");
+  if (!(element instanceof FlowEdge)) return null;
+  return element.path.getAttribute("d");
+}
+
+/**
+ * Waypoints recovered from a `polylinePath` serialization.
+ *
+ * Interior corners survive as Q control points -- fillets only trim their
+ * surrounding L/Q endpoints -- so the recovered set equals the routed
+ * waypoint list. Returns an empty list while no polyline is painted.
+ */
+function cableWaypointsOf(d: string | null): Array<{ x: number; y: number }> {
+  const points: Array<{ x: number; y: number }> = [];
+  if (d === null || !d.startsWith("M")) return points;
+  const start = d.match(/^M(-?[0-9.]+),(-?[0-9.]+)/);
+  if (start === null) return points;
+  points.push({ x: Number(start[1]), y: Number(start[2]) });
+  for (const match of d.matchAll(/Q(-?[0-9.]+),(-?[0-9.]+)/g)) {
+    points.push({ x: Number(match[1]), y: Number(match[2]) });
+  }
+  const lineTos = [...d.matchAll(/L(-?[0-9.]+),(-?[0-9.]+)/g)];
+  const last = lineTos[lineTos.length - 1];
+  if (last !== undefined) points.push({ x: Number(last[1]), y: Number(last[2]) });
+  return points;
+}
+
+async function waitForCablePolyline(
+  graph: FlowGraph,
+  start: { x: number; y: number },
+): Promise<Array<{ x: number; y: number }>> {
+  for (let i = 0; i < 50; i += 1) {
+    const pts = cableWaypointsOf(edgePathDOf(graph));
+    // Gate on the routed border anchor: a painted smoothstep fallback also
+    // recovers >=4 points but starts at the node-bottom spline anchor.
+    if (pts.length >= 4 && pts[0]?.x === start.x && pts[0]?.y === start.y) return pts;
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+  }
+  throw new Error("timed out waiting for a routed cable polyline");
 }
 
 describe("flow-graph", () => {
@@ -2194,6 +2242,81 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("cable edges route around blockers, fall back to smoothstep during drags, and resume after drag_end", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    // Source and target face each other across a wall no straight corridor
+    // crosses; the routed polyline must leave the wall's band to reach around.
+    const wall = { x: 200, y: -300, width: 60, height: 600 };
+    const strictlyInsideWallPlus16 = (p: { x: number; y: number }): boolean =>
+      p.x > wall.x - 16 && p.x < wall.x + wall.width + 16
+      && p.y > wall.y - 16 && p.y < wall.y + wall.height + 16;
+    graph.nodes = [
+      { id: "src", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "wall", position: { x: wall.x, y: wall.y }, data: {}, width: wall.width, height: wall.height },
+      { id: "tgt", position: { x: 400, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "wire", source: "src", target: "tgt", type: "cable", label: "W" }];
+    await waitUntil(() => graph.querySelectorAll("flow-node").length === 3);
+    const edgeEl = graph.querySelector("flow-edge");
+    assert.ok(edgeEl instanceof FlowEdge);
+
+    const routed = await waitForCablePolyline(graph, { x: 80, y: 20 });
+    assert.ok(routed.length >= 4, `expected a multipoint route, got ${JSON.stringify(routed)}`);
+    assert.deepEqual(routed[0], { x: 80, y: 20 }); // source right-border anchor
+    for (const p of routed) {
+      assert.ok(!strictlyInsideWallPlus16(p), `waypoint ${JSON.stringify(p)} entered blocker+16`);
+    }
+    assert.ok(
+      routed.some((p) => Math.abs(p.y) > 305),
+      `route never left the wall band: ${JSON.stringify(routed)}`,
+    );
+    // The label sits at the longest-segment midpoint of the routed polyline,
+    // and the painted path carries the cable class token.
+    const expectedLabel = labelPoint(routed);
+    assert.equal(edgeEl.label.getAttribute("x"), String(expectedLabel.x));
+    assert.equal(edgeEl.label.getAttribute("y"), String(expectedLabel.y));
+    const routedClass = edgeEl.path.getAttribute("class") ?? "";
+    assert.match(routedClass, /(^| )cable( |$)/);
+
+    // Drag the target node: while it drags its edge drops out of the routed
+    // map and paint falls back to the smoothstep spline.
+    const tgtEl = Array.from(graph.querySelectorAll("flow-node"))
+      .find((el) => el instanceof FlowNode && el.node?.id === "tgt");
+    assert.ok(tgtEl instanceof FlowNode);
+    tgtEl.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 420, clientY: 20 })));
+    assert.match(graph.state(), /\/click$/);
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 460, clientY: 20 })));
+    assert.match(graph.state(), /\/drag$/);
+    // The first sample while dragging establishes the dedupe baseline...
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 500, clientY: 30 })));
+    await flush();
+    assert.equal(graph.nodes.find((node) => node.id === "tgt")?.position.x, 400);
+    // ...the next past-epsilon sample moves the node. The grab offset came
+    // from the entering-drag sample: (460,20) - (400,0) = (60,20), so the
+    // node lands at (540-60, 40-20) = (480, 20).
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 540, clientY: 40 })));
+    await waitUntil(() => graph.nodes.find((node) => node.id === "tgt")?.position.x === 480);
+    assert.equal(graph.nodes.find((node) => node.id === "tgt")?.position.y, 20);
+    // Node at (480, 20); the fallback spline runs bottom-center of src to
+    // top-center of the moved target.
+    const fallbackD = getSmoothStepPath({ sourceX: 40, sourceY: 40, targetX: 520, targetY: 20 })[0];
+    await waitUntil(() => edgePathDOf(graph) === fallbackD);
+    assert.equal(edgePathDOf(graph), fallbackD);
+
+    // drag_end clears draggingNodeIds; the post-drag sync restores a routed
+    // polyline for the moved geometry.
+    tgtEl.dispatchEvent(new PointerEvent("pointerup", pointerInit({ clientX: 540, clientY: 40 })));
+    await waitUntil(() => /\/idle$/.test(graph.state()));
+    const resumed = await waitForCablePolyline(graph, { x: 80, y: 20 });
+    assert.deepEqual(resumed[0], { x: 80, y: 20 });
+    assert.deepEqual(resumed[resumed.length - 1], { x: 480, y: 40 }); // moved target left-border anchor
+    for (const p of resumed) {
+      assert.ok(!strictlyInsideWallPlus16(p), `resumed waypoint ${JSON.stringify(p)} entered blocker+16`);
+    }
+    graph.remove();
+  });
+
   test("mutating caller nested node fields after a valid set does not change admitted nodes", async () => {
     const graph = document.createElement("flow-graph");
     const originX = 0;
@@ -2322,7 +2445,7 @@ describe("flow-graph", () => {
     document.body.append(graph);
     await waitUntil(() => /\/connected\//.test(graph.state()));
     const actors = ownedActors(graph);
-    const childCount = 7;
+    const childCount = 8;
     assert.equal(actors.length, childCount);
     for (const actor of actors) {
       assert.notEqual(actor.state(), "");

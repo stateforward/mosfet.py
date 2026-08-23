@@ -42,7 +42,7 @@ export type ResizeBounds = {
   readonly height: number;
 };
 
-export type EdgeType = "bezier" | "straight" | "step" | "smoothstep";
+export type EdgeType = "bezier" | "straight" | "step" | "smoothstep" | "cable";
 
 export type Node = {
   readonly id: string;

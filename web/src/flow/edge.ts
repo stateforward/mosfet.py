@@ -1,7 +1,8 @@
 import * as hsm from "../hsm.ts";
 
 import { edgePath } from "./path.ts";
-import { copyEdge, type Edge, type Node } from "./types.ts";
+import { labelPoint, polylinePath } from "./pathing/trace.ts";
+import { copyEdge, type Edge, type Node, type XYPosition } from "./types.ts";
 
 const ELEMENT_NAME = "flow-edge";
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -82,13 +83,29 @@ export class FlowEdge extends HTMLElement {
     parent.append(this.path, this.hit, this.label);
   }
 
-  paint(source: Node, target: Node): void {
+  /**
+   * Paint the stored edge between `source` and `target` node positions.
+   *
+   * Inputs: endpoint nodes; optional `routed` world-space waypoints. Path
+   * precedence: a string `data["d"]` wins; otherwise `routed` (two or more
+   * points) paints the filleted polyline with its label at the longest-segment
+   * midpoint and adds the `cable` class token; otherwise the edge type picks
+   * the path (`cable` without routed waypoints falls back to the smoothstep
+   * bottom-center-to-top-center spline). Ownership: this element owns only its
+   * DOM attributes; inputs are not retained. Lifetime: until the next paint.
+   * Concurrency: runtime-safe on the caller's thread. Failure modes: no stored
+   * edge is a no-op; malformed or missing `labelPosition` falls back to the
+   * source/target midpoint.
+   * Classification: runtime-safe.
+   */
+  paint(source: Node, target: Node, routed?: readonly XYPosition[]): void {
     const edge = this.#edge;
     if (edge === null) return;
     const custom = edge.data?.["d"];
     let d: string;
     let labelX: number;
     let labelY: number;
+    let routedUsed = false;
     if (typeof custom === "string") {
       d = custom;
       const label = edge.data?.["labelPosition"];
@@ -99,16 +116,32 @@ export class FlowEdge extends HTMLElement {
         labelX = (source.position.x + target.position.x) / 2;
         labelY = (source.position.y + target.position.y) / 2;
       }
+    } else if (routed !== undefined && routed.length >= 2) {
+      d = polylinePath(routed);
+      const label = labelPoint(routed);
+      labelX = label.x;
+      labelY = label.y;
+      routedUsed = true;
     } else {
       const sourceX = source.position.x + (source.width ?? 0) / 2;
       const sourceY = source.position.y + (source.height ?? 0);
       const targetX = target.position.x + (target.width ?? 0) / 2;
       const targetY = target.position.y;
-      [d, labelX, labelY] = edgePath(edge.type, { sourceX, sourceY, targetX, targetY });
+      [d, labelX, labelY] = edgePath(edge.type === "cable" ? "smoothstep" : edge.type, {
+        sourceX,
+        sourceY,
+        targetX,
+        targetY,
+      });
     }
     this.path.setAttribute("d", d);
     this.hit.setAttribute("d", d);
-    this.path.setAttribute("class", `edge-path ${edge.className ?? ""} ${edge.type ?? "bezier"}`);
+    const typeClass = edge.type ?? "bezier";
+    // The class list is written as one string so painted tokens read back
+    // identically from attributes in real DOM and fake-DOM tests alike.
+    const classes = ["edge-path", ...(edge.className ?? "").split(" "), typeClass];
+    if ((routedUsed || typeClass === "cable") && !classes.includes("cable")) classes.push("cable");
+    this.path.setAttribute("class", classes.filter((token) => token.length > 0).join(" "));
     if (edge.data?.["lastFired"] === true) this.path.classList.add("last-fired");
     else this.path.classList.remove("last-fired");
     if (edge.label !== undefined && edge.label.length > 0) {
