@@ -2248,7 +2248,9 @@ describe("flow-graph", () => {
     document.body.append(graph);
     // Source and target face each other across a wall no straight corridor
     // crosses; the routed polyline must leave the wall's band to reach around.
-    const wall = { x: 200, y: -300, width: 60, height: 600 };
+    // Short enough that wrapping stays clearly cheaper than any punch-through
+    // under the shadow-pad standoff (the reference routes with vPad>=8 on).
+    const wall = { x: 200, y: -140, width: 60, height: 380 };
     const strictlyInsideWallPlus16 = (p: { x: number; y: number }): boolean =>
       p.x > wall.x - 16 && p.x < wall.x + wall.width + 16
       && p.y > wall.y - 16 && p.y < wall.y + wall.height + 16;
@@ -2269,7 +2271,7 @@ describe("flow-graph", () => {
       assert.ok(!strictlyInsideWallPlus16(p), `waypoint ${JSON.stringify(p)} entered blocker+16`);
     }
     assert.ok(
-      routed.some((p) => Math.abs(p.y) > 305),
+      routed.some((p) => p.y < wall.y - 16 || p.y > wall.y + wall.height + 16),
       `route never left the wall band: ${JSON.stringify(routed)}`,
     );
     // The label sits at the longest-segment midpoint of the routed polyline,
@@ -2451,9 +2453,19 @@ describe("flow-graph", () => {
     for (const actor of actors) {
       assert.notEqual(actor.state(), "");
     }
+    // Detach must carry every actor -- including Routes -- into stopActors via
+    // #childActors(); a missing entry leaks one live router per attach/detach
+    // cycle even though Host.stop's owned-children teardown masks it here.
+    const routes = actors.find((actor) => actor.state().startsWith("/Routes"));
+    assert.ok(routes !== undefined, "Routes missing from graph-owned actors");
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    assert.equal(routes.state(), "", "detach must stop the Routes actor with the others");
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
     await graph.stop();
     assert.equal(graph.state(), "");
-    for (const actor of actors) {
+    for (const actor of ownedActors(graph)) {
       assert.equal(actor.state(), "");
     }
     graph.remove();

@@ -15,9 +15,20 @@
 //   the ribbon half-width (the reference reuses the median member's pin-to-pin
 //   route). Center-to-center keeps one template orientation-neutral for the
 //   unordered node pairs bundled here.
-// - Bundled members take their strand as pts and skip the nudge pass (the
-//   reference skips comb-managed geometry for the same reason); their cached
-//   raw entries stay untouched.
+// - No laneStub ladders: this port has no per-slot pin columns, so stubs stay at
+//   STUB everywhere. Same-side fan-out emerges from the nudge's same-pin sticking
+//   and anti-braid ordering instead, and deep stacks cap at MIN_STUB/corridor
+//   bounds exactly as they do in the reference's nudge.
+// - Members whose strand failed keep their independent raw and flow into the
+//   nudge pass. The reference excludes only comb-managed geometry from the nudge
+//   and relies on strand pitch exceeding the cluster threshold to leave ribbons
+//   alone; ours hard-excludes bundled entries instead -- stronger than pitch
+//   arithmetic alone, and intentional.
+// - Ghost retirement is intentionally dropped: each pass rebuilds routes from an
+//   authoritative sync snapshot, so there is no stale cache entry to retire.
+// - Drag suppression is finer-grained than the registry freeze: edges touching a
+//   dragged node are omitted from `routes` entirely rather than frozen at their
+//   last shape.
 // - Machine shells are rooms, not furniture: a rect that transitively contains
 //   either edge endpoint (via the synced parentId chains) is excluded from
 //   that edge's obstacle set -- its interior lanes must stay open or the
@@ -25,6 +36,12 @@
 //   through intermediate sibling states. Siblings, unrelated machines' shells,
 //   and distant states remain obstacles. Endpoint rects are excluded the same
 //   way: endpoints are pins, not obstacles (matching the registry).
+//
+// Latency bound: a single pass is O(edges * EXPANSION_CAP) synchronous A*
+// expansions inside one RTC step -- at the contract max of 2048 edges
+// (MAX_FLOW_EDGES) that is ~4x10^7 expansions; realistic dashboard graphs
+// finish in milliseconds. Chunked passes via the defer loop are the modeled
+// remedy if ever needed.
 
 import * as hsm from "../../hsm.ts";
 
@@ -102,9 +119,14 @@ export type CableEnds = {
 const CLEARANCE = 16;
 const STUB = 24;
 const FLAT_TOL = 3;
-// Ribbon strand pitch: neighbour strands sit 5px apart, the comb ribbon minimum
-// for 3px strokes (reference STUB_PITCH rationale).
-const RIBBON_PITCH = 5;
+// Ribbon strand pitch: the reference fans bundle strands at LANE=8
+// (registry.js reconcileBundles). The 5 that used to live here was STUB_PITCH --
+// the laneStub ladder pitch at a pin column, a mechanism this port does not model.
+const RIBBON_PITCH = 8;
+// Shadow standoff: horizontal lanes form this much further off obstacle
+// tops/bottoms than bare clearance so wires clear the drop shadow (the
+// reference always routes with vPad >= 8).
+const V_PAD = 8;
 const CACHE_LIMIT = 4096;
 
 /** One live edge's working state for a single route pass. */
@@ -176,9 +198,14 @@ export class Routes extends hsm.Instance {
   // The route pass itself is short synchronous work, so it runs as the entry
   // action (HSM-ACTIVITY-001) rather than an activity: the runtime proxies the
   // instance for activities, and private-field brand checks reject that proxy.
-  // The notification keeps the renderer's paint protocol -- a rejected `routed`
-  // dispatch re-enters this machine as ErrorEvent (to /failed) unless the
-  // machine context was canceled first.
+  // The notification is delivery-acknowledged, not a processed-ack: it
+  // settles at enqueue while either machine is mid-drain, so it never
+  // back-pressures the owner. Failure protocol: an owner-side rejection of the
+  // delivered `routed` surfaces after `routed` has already returned the
+  // machine to idle, where ErrorEvent matches no transition and is ignored;
+  // the deterministic /failed entries are synchronous failures of this pass,
+  // and production owner-rejection is host-stop cancellation, swallowed by
+  // the context().done guard below.
   static beginPass(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     if (!(instance instanceof Routes)) return;
     const data = syncDataOf(event.data);
@@ -245,10 +272,12 @@ export class Routes extends hsm.Instance {
   }
 
   #snapshotObstacles(nodes: readonly NodeRectData[]): void {
-    let hash = "";
-    for (const node of nodes) {
-      hash += `${node.id}|${node.x | 0}|${node.y | 0}|${node.width | 0}|${node.height | 0}|${node.parentId ?? ""};`;
-    }
+    // Id-sorted parts so a producer reordering the same node set keeps its hash
+    // (and therefore its cache and version) stable.
+    const hash = nodes
+      .map((node) => `${node.id}|${node.x | 0}|${node.y | 0}|${node.width | 0}|${node.height | 0}|${node.parentId ?? ""}`)
+      .sort()
+      .join(";");
     if (hash === this.#lastHash) return;
     this.#lastHash = hash;
     this.#snapshot = nodes;
@@ -300,6 +329,10 @@ export class Routes extends hsm.Instance {
       `|${ends.startDir}>${ends.endDir}`;
     const hit = this.#cache.get(key);
     if (hit !== undefined && hit.version === this.#version) return hit.raw;
+    // Facing endpoints closer than their combined stub depth: deep stubs overshoot
+    // the gap, the tips cross, and A* folds a self-crossing loop around them.
+    // Scale both stubs into the gap preserving their ratio (registry.js:379-396).
+    const stubs = squeezedStubs(ends.start, ends.end, ends.startDir, ends.endDir, STUB, STUB);
     const routed = route({
       start: ends.start,
       end: ends.end,
@@ -307,10 +340,9 @@ export class Routes extends hsm.Instance {
       endDir: ends.endDir,
       obstacles: this.#edgeObstacles(edge.source, edge.target),
       clearance: CLEARANCE,
-      stubStart: STUB,
-      stubEnd: STUB,
-      enforceStart: true,
-      enforceEnd: true,
+      stubStart: stubs.stubStart,
+      stubEnd: stubs.stubEnd,
+      vPad: V_PAD,
       flatTol: FLAT_TOL,
     });
     const raw = routed ?? twoBendPath(ends.start, ends.end);
@@ -328,6 +360,8 @@ export class Routes extends hsm.Instance {
     }
     for (const group of groups.values()) {
       if (group.length < 2) continue;
+      // Median selection stays in border-stack order: the middle entry along the
+      // pins' stacking provides the ribbon spine.
       const members = [...group].sort(
         (a, b) =>
           a.ends.start.y - b.ends.start.y ||
@@ -339,19 +373,49 @@ export class Routes extends hsm.Instance {
       const count = members.length;
       const halfRibbon = ((count - 1) * RIBBON_PITCH) / 2;
       const template = this.#bundleTemplate(median, halfRibbon);
-      for (const [rank, member] of members.entries()) {
+      // Rank members by their start projected onto the template's first
+      // mid-segment travel direction, and align the ladder's lateral sign to the
+      // pins' side of that run (registry.js:113-129): the furthest-along strand
+      // takes the lane nearest the pins' natural side. A border-stack sort cannot
+      // order mixed-direction ribbons -- reversed members sort by the wrong axis
+      // and their lanes cross.
+      let ranked = members;
+      let sideSign = 1;
+      if (template.length >= 4) {
+        const t1 = template[1];
+        const t2 = template[2];
+        if (t1 !== undefined && t2 !== undefined) {
+          const d1x = Math.sign(t2.x - t1.x);
+          const d1y = Math.sign(t2.y - t1.y);
+          const seg1Vert = d1x === 0;
+          const first = members[0]?.ends.start;
+          if (first !== undefined) {
+            const pinSide = Math.sign(
+              seg1Vert ? first.x - t1.x : first.y - t1.y,
+            );
+            const lnPerp = seg1Vert ? d1y : -d1x;
+            sideSign = pinSide === Math.sign(lnPerp) ? 1 : -1;
+          }
+          ranked = [...members]
+            .map((m) => ({ m, proj: m.ends.start.x * d1x + m.ends.start.y * d1y }))
+            .sort((a, b) => b.proj - a.proj || a.m.edge.id.localeCompare(b.m.edge.id))
+            .map(({ m }) => m);
+        }
+      }
+      ranked.forEach((member, rank) => {
         const strand = offsetStrand({
           template,
           start: member.ends.start,
           end: member.ends.end,
-          offset: (rank - (count - 1) / 2) * RIBBON_PITCH,
+          offset: ((count - 1) / 2 - rank) * RIBBON_PITCH * sideSign,
         });
-        // The whole bundle opts out of the nudge even when a single strand is
-        // degenerate: mixing nudged and ribbon-managed shapes would re-spread
-        // deliberate lanes.
+        // A failed strand (degenerate template) leaves the member on its own raw,
+        // nudge-eligible like any unbundled entry; marking it bundled anyway would
+        // weld permanently overlapping cables out of nudge's reach.
+        if (strand === null) return;
         member.bundled = true;
-        if (strand !== null) member.pts = strand;
-      }
+        member.pts = strand;
+      });
     }
   }
 
@@ -364,15 +428,15 @@ export class Routes extends hsm.Instance {
     // exclusion is the same room-vs-furniture union as any edge -- endpoint ids
     // plus both ancestor chains -- so a shared container never blankets the
     // spine either; unrelated rects stay obstructing.
+    const stubs = squeezedStubs(start, end, "right", "left", STUB + halfRibbon, STUB + halfRibbon);
     const routed = route({
       start,
       end,
       obstacles: this.#edgeObstacles(median.edge.source, median.edge.target),
       clearance: CLEARANCE + halfRibbon,
-      stubStart: STUB + halfRibbon,
-      stubEnd: STUB + halfRibbon,
-      enforceStart: true,
-      enforceEnd: true,
+      stubStart: stubs.stubStart,
+      stubEnd: stubs.stubEnd,
+      vPad: V_PAD,
       flatTol: FLAT_TOL,
     });
     return routed ?? twoBendPath(start, end);
@@ -394,14 +458,21 @@ export class Routes extends hsm.Instance {
  * stamp are private instance state; peers coordinate only through the typed
  * sync/routed events.
  * Lifetime: until `hsm.stop` or owner context cancel.
- * Concurrency: one route pass at a time. Syncs dispatched while a pass runs
- * are deferred and processed after its ack, so passes serialize one-to-one
- * with accepted syncs and never interleave.
+ * Concurrency: one route pass at a time, by topology rather than
+ * back-pressure: `routing` defers sync events and FIFO ordering runs the
+ * `routed` transition before deferred or later syncs, so passes serialize
+ * one-to-one with accepted syncs and never interleave. The owner notification
+ * is delivery-acknowledged -- it settles at enqueue while a drain is running
+ * -- and does not gate the next pass.
  * Failure modes: malformed sync payloads are ignored and the machine holds its
- * state. A rejected `routed` notification while the pass is still running
- * enters `/failed` via `ErrorEvent`; the next valid sync recovers through the
- * normal validation choice. A pass that somehow starts without a valid payload
- * throws and lands in `/failed` the same way, so the machine never wedges.
+ * state. Synchronous failures of the pass itself land `/failed` via
+ * `ErrorEvent`; the next valid sync recovers through the normal validation
+ * choice. An owner-side rejection of the delivered `routed` surfaces after
+ * `routed` has returned the machine to idle, where ErrorEvent matches no
+ * transition and is ignored; production owner-rejection is host-stop
+ * cancellation, swallowed by the notification's `context().done` guard. A pass
+ * that somehow starts without a valid payload throws and lands in `/failed`
+ * the same way, so the machine never wedges.
  * Units: rects, anchors, waypoints, and clearances in world pixels.
  * Classification: runtime-safe.
  */
@@ -452,6 +523,42 @@ export function cableEnds(sourceRect: Rect, targetRect: Rect): CableEnds {
 function twoBendPath(start: XYPosition, end: XYPosition): readonly XYPosition[] {
   const midX = (start.x + end.x) / 2;
   return [start, { x: midX, y: start.y }, { x: midX, y: end.y }, end];
+}
+
+/**
+ * Scale facing stubs into a short gap, preserving their ratio.
+ *
+ * Inputs: both pins in world px, their exit/entry faces, and the requested stub
+ * depths. Outputs: stub depths to route with -- unchanged unless the endpoints
+ * face each other along one axis closer than the combined stub depth, in which
+ * case both scale by `gap / (stubStart + stubEnd)` with a 1px floor (registry.js
+ * short-gap squeeze). Crossing stub tips hand A* a fold it loops around, so the
+ * tips must never meet mid-gap. Ownership: pure; Lifetime: one call;
+ * Concurrency: synchronous/pure; Failure modes: none; Units: world pixels.
+ * Classification: runtime-safe.
+ */
+function squeezedStubs(
+  start: XYPosition,
+  end: XYPosition,
+  startDir: HandlePosition,
+  endDir: HandlePosition,
+  stubStart: number,
+  stubEnd: number,
+): { stubStart: number; stubEnd: number } {
+  const svx = startDir === "right" ? 1 : startDir === "left" ? -1 : 0;
+  const svy = startDir === "bottom" ? 1 : startDir === "top" ? -1 : 0;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const facing =
+    (svx !== 0 && endDir === (svx > 0 ? "left" : "right") && dx * svx > 0 && dx * svx < stubStart + stubEnd) ||
+    (svy !== 0 && endDir === (svy > 0 ? "top" : "bottom") && dy * svy > 0 && dy * svy < stubStart + stubEnd);
+  if (!facing) return { stubStart, stubEnd };
+  const gap = svx !== 0 ? Math.abs(dx) : Math.abs(dy);
+  const k = gap / (stubStart + stubEnd);
+  return {
+    stubStart: Math.max(1, Math.floor(stubStart * k)),
+    stubEnd: Math.max(1, Math.floor(stubEnd * k)),
+  };
 }
 
 /** Unordered node-pair bundle key: both directions share one ribbon. */

@@ -1343,14 +1343,17 @@ export class FlowGraph extends hsm.from(HTMLElement) {
    *
    * Inputs: a `routed` notification from the Routes actor carrying
    * `RoutedData.routes` (edge id -> world-space waypoints; dragged-endpoint
-   * edges are absent). Completing this effect resolves Routes' awaited owner
-   * notification -- that resolution is the route-pass ack back to the machine,
-   * mirroring how `paintNow` acks `Renderer.paintEvent`.
+   * edges are absent). Completing this effect is delivery handling, not a
+   * processed-ack: the actor's owner notification settles when the event is
+   * delivered -- at enqueue while either machine is mid-drain -- so nothing
+   * here back-pressures the router into waiting on this effect.
    * Outputs: `#routePoints` replaced and one repaint marked dirty.
    * Ownership: the graph owns its stored map copy; the actor owns routing.
    * Lifetime: until the next routed map or actor stop.
-   * Concurrency: runtime-safe on the graph dispatch thread; syncs sent while a
-   * route pass runs are deferred behind its ack by the actor's topology.
+   * Concurrency: runtime-safe on the graph dispatch thread. Pass serialization
+   * comes from the actor's topology, not from awaiting this effect: `routing`
+   * defers sync events, and FIFO ordering runs the routed transition before
+   * deferred and later syncs.
    * Failure modes: malformed payloads leave stored routes unchanged.
    * Classification: runtime-safe.
    */
@@ -1472,6 +1475,7 @@ export class FlowGraph extends hsm.from(HTMLElement) {
       this.#focuser,
       this.#selection,
       this.#connection,
+      this.#routes,
     ]) {
       if (actor !== null) actors.push(actor);
     }

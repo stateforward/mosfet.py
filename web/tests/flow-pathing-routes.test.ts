@@ -31,8 +31,10 @@ const nodeRect = (id: string, rect: Rect, parentId?: string): NodeRectData => ({
 const edgeOf = (id: string, source: string, target: string): CableEdgeData => ({ id, source, target });
 
 // Source and target face each other across a wall no straight corridor crosses.
+// Short enough that wrapping stays clearly cheaper than any punch-through under
+// the shadow-pad standoff (the reference routes with vPad>=8 always on).
 const SRC = box(0, 0, 80, 40);
-const WALL = box(200, -300, 60, 600);
+const WALL = box(200, -140, 60, 380);
 const TGT = box(400, 0, 80, 40);
 
 const NODES: readonly NodeRectData[] = [
@@ -184,6 +186,86 @@ function assertSegmentsAvoid(pts: readonly XYPosition[], rect: Rect): void {
   }
 }
 
+// --- Polyline intersection helpers (pure geometry, mirrors the painter's view). ---
+
+type Seg = readonly [XYPosition, XYPosition];
+
+function ccw(a: XYPosition, b: XYPosition, c: XYPosition): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function onSegment(p: XYPosition, a: XYPosition, c: XYPosition): boolean {
+  return (
+    Math.min(a.x, c.x) <= p.x + 1e-9 &&
+    p.x <= Math.max(a.x, c.x) + 1e-9 &&
+    Math.min(a.y, c.y) <= p.y + 1e-9 &&
+    p.y <= Math.max(a.y, c.y) + 1e-9 &&
+    Math.abs(ccw(a, c, p)) < 1e-9
+  );
+}
+
+function segmentsIntersect(p1: XYPosition, p2: XYPosition, p3: XYPosition, p4: XYPosition): boolean {
+  const d1 = ccw(p3, p4, p1);
+  const d2 = ccw(p3, p4, p2);
+  const d3 = ccw(p1, p2, p3);
+  const d4 = ccw(p1, p2, p4);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return true;
+  }
+  if (Math.abs(d1) < 1e-9 && onSegment(p1, p3, p4)) return true;
+  if (Math.abs(d2) < 1e-9 && onSegment(p2, p3, p4)) return true;
+  if (Math.abs(d3) < 1e-9 && onSegment(p3, p1, p2)) return true;
+  if (Math.abs(d4) < 1e-9 && onSegment(p4, p1, p2)) return true;
+  return false;
+}
+
+/** Segments strictly between the two pin stubs: the routed mid-path. */
+function interiorSegments(pts: readonly XYPosition[]): Seg[] {
+  const out: Seg[] = [];
+  for (let k = 1; k < pts.length - 2; k += 1) {
+    const a = pts[k];
+    const b = pts[k + 1];
+    if (a === undefined || b === undefined) continue;
+    if (Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01) continue;
+    out.push([a, b]);
+  }
+  return out;
+}
+
+/** Intersections between two polylines' interior segments. */
+function interiorCrossCount(a: readonly XYPosition[], b: readonly XYPosition[]): number {
+  let count = 0;
+  for (const [p1, p2] of interiorSegments(a)) {
+    for (const [p3, p4] of interiorSegments(b)) {
+      if (segmentsIntersect(p1, p2, p3, p4)) count += 1;
+    }
+  }
+  return count;
+}
+
+/** Non-adjacent self-intersections across one polyline's full segment list. */
+function selfIntersectionCount(pts: readonly XYPosition[]): number {
+  const all: Seg[] = [];
+  for (let k = 0; k < pts.length - 1; k += 1) {
+    const a = pts[k];
+    const b = pts[k + 1];
+    if (a === undefined || b === undefined) continue;
+    if (Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01) continue;
+    all.push([a, b]);
+  }
+  let count = 0;
+  for (let i = 0; i < all.length; i += 1) {
+    for (let j = i + 2; j < all.length; j += 1) {
+      if (i === 0 && j === all.length - 1) continue;
+      const s1 = all[i];
+      const s2 = all[j];
+      if (s1 === undefined || s2 === undefined) continue;
+      if (segmentsIntersect(s1[0], s1[1], s2[0], s2[1])) count += 1;
+    }
+  }
+  return count;
+}
+
 describe("Routes", () => {
   test("emits an obstacle-avoiding multipoint route on sync and rests at idle after the ack", async () => {
     const fix = startFixture();
@@ -197,9 +279,10 @@ describe("Routes", () => {
     assert.deepEqual(e1[0], pt(80, 20)); // source right-border anchor
     assert.deepEqual(e1[e1.length - 1], pt(400, 20)); // target left-border anchor
     assertAvoidsWall(e1);
-    // Some bend must leave the wall's band: the wire went around, not through.
+    // Some bend must leave the wall's inflated band: the wire went around, not
+    // through.
     assert.ok(
-      e1.some((p) => Math.abs(p.y) > 305),
+      e1.some((p) => p.y < WALL.y - 16 || p.y > WALL.y + WALL.height + 16),
       `route never left the wall band: ${JSON.stringify(e1)}`,
     );
     await hsm.stop(fix.machine);
@@ -226,6 +309,40 @@ describe("Routes", () => {
     // follow-up consumed the SECOND sync, which dropped every edge.
     assert.deepEqual(followUp, {}, "follow-up pass must consume the SECOND sync, not replay the first");
     await hsm.stop(fix.machine);
+  });
+
+  test("stopping mid-held-ack cancels cleanly without unhandled rejection", async () => {
+    const fix = startFixture();
+    fix.holdAck();
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: syncOf([edgeOf("e1", "src", "tgt")], []) }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => /\/routing$/.test(fix.machine.state()));
+    assert.equal(fix.routed.length, 1);
+    // Queue a second sync behind the held ack, then cancel the machine while
+    // the notification is still outstanding.
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: syncOf([], []) }))
+      .catch(hsm.catchFailure());
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await hsm.stop(fix.machine);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    // Yield so any late rejection microtask would surface before judging.
+    await waitFor(() => true);
+    assert.deepEqual(unhandled, [], "cancellation must not surface an unhandled rejection");
+    assert.equal(fix.machine.state(), "", "stopped machine must report an empty state");
+    assert.equal(hsm.hostWasStopped(fix.machine), true);
+    assert.equal(fix.routed.length, 1, "no further pass may run after stop");
+    // Post-stop ingress classifies as a host drop instead of resurrecting a
+    // pass; the rejection is consumed here by the assertion itself.
+    await assert.rejects(() =>
+      fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: syncOf([edgeOf("e1", "src", "tgt")], []) }))
+    );
   });
 
   test("omits dragged-endpoint edges from routes and restores them post-drag", async () => {
@@ -381,6 +498,155 @@ describe("Routes", () => {
     assert.deepEqual(e2[0], pt(80, 20));
     assertAvoidsWall(e1);
     assertAvoidsWall(e2);
+    await hsm.stop(fix.machine);
+  });
+
+  // Two stacked source nodes wire to two stacked targets on the same side while a
+  // pair of furniture blocks sits between the stacks. With stub folds globally
+  // banned each cable shimmies onto its sibling's lanes (the upstream "adjacent
+  // crossing shimmy"); with folds allowed at node pins both cables nest cleanly.
+  const SHIMMY_S1 = box(0, 0, 80, 40);
+  const SHIMMY_S2 = box(0, 63, 80, 40);
+  const SHIMMY_T1 = box(228, 1, 80, 40);
+  const SHIMMY_T2 = box(228, 68, 80, 40);
+  const SHIMMY_NODES: readonly NodeRectData[] = [
+    nodeRect("s1", SHIMMY_S1),
+    nodeRect("s2", SHIMMY_S2),
+    nodeRect("t1", SHIMMY_T1),
+    nodeRect("t2", SHIMMY_T2),
+    nodeRect("b1", box(108, -116, 86, 88)),
+    nodeRect("b2", box(105, -12, 57, 134)),
+  ];
+
+  test("keeps parallel same-side cables between stacked nodes crossing-free", async () => {
+    const fix = startFixture();
+    const edges = [edgeOf("e1", "s1", "t1"), edgeOf("e2", "s2", "t2")];
+    const data: SyncData = { nodes: SHIMMY_NODES, edges, draggingNodeIds: [] };
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const e1 = routes["e1"];
+    const e2 = routes["e2"];
+    assert.ok(e1 !== undefined && e1.length >= 4, "parallel cable e1 missing");
+    assert.ok(e2 !== undefined && e2.length >= 4, "parallel cable e2 missing");
+    assert.equal(
+      interiorCrossCount(e1, e2),
+      0,
+      `same-side cables must not cross: ${JSON.stringify(e1)} vs ${JSON.stringify(e2)}`,
+    );
+    await hsm.stop(fix.machine);
+  });
+
+  test("stands horizontal lanes off obstacle tops by clearance plus the shadow pad", async () => {
+    const fix = startFixture();
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data: syncOf([edgeOf("e1", "src", "tgt")], []) }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const e1 = routes["e1"];
+    assert.ok(e1 !== undefined && e1.length >= 4, "expected a wrap-around polyline");
+    // The wrap lane is an inflated wall edge; the shadow pad widens the inflation so
+    // horizontal runs stand vPad further off the top/bottom than bare clearance.
+    for (const p of e1.slice(1, -1)) {
+      const d = Math.min(Math.abs(p.y - WALL.y), Math.abs(p.y - (WALL.y + WALL.height)));
+      assert.ok(
+        d >= 24 - 1,
+        `waypoint ${JSON.stringify(p)} rides ${d.toFixed(1)}px off the wall edge; want >= ${24 - 1}`,
+      );
+    }
+    await hsm.stop(fix.machine);
+  });
+
+  // Same-pair bundles whose median template degenerates (a straight aligned pair
+  // collapses to fewer than four usable points): every strand fails, so members
+  // keep their own raws instead of ribbon geometry. The painter contract is that
+  // each member still carries its full pin-to-pin polyline untouched.
+  const FLAT_S = box(0, 0, 80, 40);
+  const FLAT_T = box(400, 0, 80, 40);
+
+  test("keeps failed-strand bundle members on their own pin-to-pin raws", async () => {
+    const fix = startFixture();
+    const flatNodes: readonly NodeRectData[] = [nodeRect("s", FLAT_S), nodeRect("t", FLAT_T)];
+    const edges = [edgeOf("e1", "s", "t"), edgeOf("e2", "s", "t"), edgeOf("e3", "s", "t")];
+    const data: SyncData = { nodes: flatNodes, edges, draggingNodeIds: [] };
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    for (const id of ["e1", "e2", "e3"]) {
+      const pts: readonly XYPosition[] | undefined = routes[id];
+      assert.ok(pts !== undefined && pts.length >= 2, `member ${id} missing its polyline`);
+      assert.deepEqual(pts[0], pt(80, 20), `member ${id} must start on s's border anchor`);
+      assert.deepEqual(pts[pts.length - 1], pt(400, 20), `member ${id} must end on t's border anchor`);
+    }
+    await hsm.stop(fix.machine);
+  });
+
+  // A forward edge plus reverse edges between the same unordered node pair share
+  // one ribbon (pairKey normalizes direction). Their border anchors differ, so the
+  // ladder order must come from projecting member starts onto the template's first
+  // mid-segment travel direction -- a border-stack sort puts the forward member on
+  // the wrong side and its lane crosses the reversed strands.
+  const STAIR_A = box(17, 105, 78, 42);
+  const STAIR_B = box(487, 28, 60, 29);
+  const STAIR_NODES: readonly NodeRectData[] = [
+    nodeRect("a", STAIR_A),
+    nodeRect("b", STAIR_B),
+    nodeRect("w1", box(237, -57, 86, 88)),
+    nodeRect("w2", box(-23, -28, 22, 109)),
+  ];
+
+  test("ranks mixed-direction ribbon members by travel-direction projection without crossings", async () => {
+    const fix = startFixture();
+    const edges = [edgeOf("f1", "a", "b"), edgeOf("r1", "b", "a"), edgeOf("r2", "b", "a")];
+    const data: SyncData = { nodes: STAIR_NODES, edges, draggingNodeIds: [] };
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const f1 = routes["f1"];
+    const r1 = routes["r1"];
+    const r2 = routes["r2"];
+    for (const pts of [f1, r1, r2]) {
+      assert.ok(pts !== undefined && pts.length >= 4, "every ribbon member needs a routed polyline");
+    }
+    assert.ok(f1 !== undefined && r1 !== undefined && r2 !== undefined);
+    assert.equal(interiorCrossCount(f1, r1), 0, "f1 vs r1 lanes cross");
+    assert.equal(interiorCrossCount(f1, r2), 0, "f1 vs r2 lanes cross");
+    assert.equal(interiorCrossCount(r1, r2), 0, "r1 vs r2 lanes cross");
+    await hsm.stop(fix.machine);
+  });
+
+  // Facing anchors closer than the combined stub depth make the stub tips cross;
+  // unsqueezed, A* folds a loop around them (measured upstream: one self-crossing
+  // per link). Both stubs scale into the gap preserving their ratio.
+  const SHORT_GAP_NODES: readonly NodeRectData[] = [
+    nodeRect("s", box(0, 0, 80, 40)),
+    nodeRect("t", box(104, 0, 80, 40)),
+    nodeRect("block", box(84, -30, 12, 48)),
+  ];
+
+  test("squeezes facing stubs into short gaps so short-gap wires never self-intersect", async () => {
+    const fix = startFixture();
+    const edges = [edgeOf("e1", "s", "t")];
+    const data: SyncData = { nodes: SHORT_GAP_NODES, edges, draggingNodeIds: [] };
+    void fix.machine.dispatch(hsm.typedEvent({ event: Routes.syncEvent, data }))
+      .catch(hsm.catchFailure());
+    await waitFor(() => fix.routed.length >= 1 && /\/idle$/.test(fix.machine.state()));
+    const routes = fix.routed[0];
+    assert.ok(routes !== undefined);
+    const e1 = routes["e1"];
+    assert.ok(e1 !== undefined && e1.length >= 2, "short-gap cable missing");
+    assert.equal(
+      selfIntersectionCount(e1),
+      0,
+      `short-gap cable self-intersects: ${JSON.stringify(e1)}`,
+    );
     await hsm.stop(fix.machine);
   });
 });
