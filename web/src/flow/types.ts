@@ -168,6 +168,15 @@ export type ResizeHit = {
   readonly maxHeight?: number;
 };
 
+/** Active resize input channel. Pointer and keyboard cannot share one session. */
+export type ResizeChannel = "pointer" | "keyboard";
+
+/** Payload of `FlowGraph.resize_key`. `hit` is null for Escape with no control under the path. */
+export type ResizeKeyData = {
+  readonly key: string;
+  readonly hit: ResizeHit | null;
+};
+
 /**
  * Single offer predicate for resize chrome, hit-test, and start.
  * Canonical policy is `FlowGraph.nodesResizable`. `visible` is an author
