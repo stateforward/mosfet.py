@@ -14,9 +14,11 @@ import base64
 import collections.abc
 import dataclasses
 import datetime
+import gc
 import html
 import json
 import typing
+import weakref
 
 import hsm
 import pydantic
@@ -345,6 +347,84 @@ def test_processing_defines_base_operation_contract() -> None:
     assert processing.Processing.input_event is processing.InputEvent
     assert processing.Processing.output_event is processing.OutputEvent
     assert processing.Processing.model is not None
+
+
+def test_processing_operation_store_is_owner_scoped_and_retires_capabilities() -> None:
+    async def run() -> None:
+        ctx = shared_hsm_context()
+        owner_model = bot.define(
+            "OperationStoreOwner",
+            hsm.initial(hsm.target("idle")),
+            hsm.state("idle"),
+        )
+        owner = hsm.Instance()
+        other_owner = hsm.Instance()
+        await bot.started(ctx, owner, owner_model)
+        await bot.started(ctx, other_owner, owner_model)
+
+        first = await processing.start_operation(owner, "shared")
+        other = await processing.start_operation(other_owner, "shared")
+        try:
+            assert processing.active_operation(owner, "shared") is first
+            assert processing.active_operation(other_owner, "shared") is other
+            assert processing.matches_operation(owner, "shared", hsm.id(first))
+            assert not processing.matches_operation(owner, "shared", hsm.id(other))
+            assert processing.active_operation_id(owner) == "shared"
+
+            terminal = dataclasses.replace(
+                _MODELED_PROCESSING_COMPLETED_EVENT.with_data(object()),
+                id="shared",
+                source=hsm.id(owner),
+                target=hsm.id(owner),
+            )
+            assert processing.matches_private_terminal(owner, terminal, ("shared", hsm.id(first)))
+
+            second = await processing.start_operation(owner, "second")
+            assert processing.active_operation_id(owner) is None
+
+            processing.finish_operation(ctx, owner, "shared")
+            assert processing.active_operation(owner, "shared") is None
+            assert processing.active_operation(owner, "second") is second
+            assert processing.active_operation_id(owner) == "second"
+            assert not processing.matches_operation(owner, "shared", hsm.id(first))
+            assert not processing.matches_private_terminal(owner, terminal, ("shared", hsm.id(first)))
+
+            processing.finish_operations(ctx, owner)
+            assert processing.active_operation(owner, "second") is None
+            assert processing.active_operation_id(owner) is None
+            assert processing.active_operation(other_owner, "shared") is other
+        finally:
+            processing.finish_operations(ctx, owner)
+            processing.finish_operations(ctx, other_owner)
+
+    asyncio.run(run())
+
+
+def test_processing_operation_store_weak_value_drops_orphaned_operation() -> None:
+    async def run() -> None:
+        ctx = shared_hsm_context()
+        owner_model = bot.define(
+            "OrphanOperationStoreOwner",
+            hsm.initial(hsm.target("idle")),
+            hsm.state("idle"),
+        )
+        owner = hsm.Instance()
+        await bot.started(ctx, owner, owner_model)
+        orphan = await processing.start_operation(owner, "orphan")
+        orphan_ref = weakref.ref(orphan)
+        owner_ref = weakref.ref(owner)
+        await hsm.stop(orphan)
+        await hsm.stop(owner)
+        await asyncio.sleep(0)
+        del orphan
+        del owner
+        del owner_model
+        del ctx
+        gc.collect()
+        assert orphan_ref() is None
+        assert owner_ref() is None
+
+    asyncio.run(run())
 
 
 def test_processing_input_models_host_decision_input() -> None:
