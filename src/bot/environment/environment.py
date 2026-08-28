@@ -14,10 +14,6 @@ from . import snapshot
 from . import space
 
 
-def _instance_scope(instance: hsm.Instance) -> object | None:
-    return instance.context().value(hsm.Keys.Instances)
-
-
 class _Scope:
     """Context key carrying the Environment that published this context chain."""
 
@@ -150,12 +146,38 @@ class Environment(hsm.Context):
         have.
         """
 
-        if _instance_scope(perspective) is not self._instances:
+        if not self.contains(perspective):
             return None
         self_element = snapshot.render_self(perspective, self._instances.get, 1)
         if self_element is None:
             return None
         return snapshot.render_environment(self._id, self_element)
+
+    @property
+    def scope_path(self) -> str:
+        """The environment's own address: ``/env/<id>``.
+
+        Built from the environment's stable identity (``_id``), never from any actor inside
+        it, so the path says where this environment is without saying who is in it."""
+        return f"/env/{self._id}"
+
+    def contains(self, instance: hsm.Instance) -> bool:
+        """Whether ``instance`` runs in this environment's own addressing scope.
+
+        Map identity is the only honest test — a shared ancestor is not a shared scope — and an
+        unstarted instance has no scope to test, so it is ``False``. Callers that must tell
+        "not started yet" from "started elsewhere" check ``lifecycle.is_started`` first, the
+        way ``require_environment_scope`` does."""
+        return instance.context().value(hsm.Keys.Instances) is self._instances
+
+    def path_of(self, instance: hsm.Instance) -> str | None:
+        """``instance``'s path under this environment, or ``None`` when it is not a member.
+
+        Derived on demand, never stored: a stored path would outlive the instance it named and
+        address nothing — the same lie ``contains`` already refuses."""
+        if not self.contains(instance):
+            return None
+        return f"{self.scope_path}/{hsm.id(instance)}"
 
     def _reception(
         self,
@@ -245,6 +267,6 @@ def require_environment_scope(environment: Environment, instance: hsm.Instance, 
     # Only enforce while the machine is started; a stopped instance has no environment scope yet.
     if not lifecycle.is_started(instance):
         return
-    if _instance_scope(instance) is environment.value(hsm.Keys.Instances):
+    if environment.contains(instance):
         return
     raise RuntimeError(f"{participant} is already started in another environment.")

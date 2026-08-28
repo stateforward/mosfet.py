@@ -90,11 +90,11 @@ class AttachablePhoneService:
     target: hsm.Instance | None = None
 
     async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+        assert environment.contains(target)
         self.target = target
 
     async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+        assert environment.contains(target)
         if self.target is target:
             self.target = None
 

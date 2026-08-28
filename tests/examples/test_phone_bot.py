@@ -974,8 +974,8 @@ async def main() -> None:
         placement=bob_placement,
     )
 
-    assert alice.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
-    assert bob.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+    assert environment.contains(alice)
+    assert environment.contains(bob)
     assert alice in environment._participants.values()
     assert bob in environment._participants.values()
     assert environment._placements[alice] == alice_placement

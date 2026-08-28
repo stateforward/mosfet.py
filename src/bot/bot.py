@@ -1138,9 +1138,7 @@ class Bot(hsm.Instance, abc.ABC):
                     # Idempotent when already running under private scope; raise when the
                     # ability is already running under the environment instance map (would receive
                     # environment broadcasts directly).
-                    shares_environment_instances = ability.context().value(hsm.Keys.Instances) is environment.value(
-                        hsm.Keys.Instances
-                    )
+                    shares_environment_instances = environment.contains(ability)
                     if not _is_already_running_error(error) or shares_environment_instances:
                         raise
             await Bot._request_attachment(ctx, instance, event, kind="attach")

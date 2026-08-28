@@ -1011,7 +1011,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
         ) -> collections.abc.Awaitable[None]:
             nonlocal attach_calls, group_is_private
             attach_calls += 1
-            group_is_private = group.context().value(hsm.Keys.Instances) is not environment.value(hsm.Keys.Instances)
+            group_is_private = not environment.contains(group)
             return group_attach(group, ctx, event)
 
         def detach_group(
@@ -1056,7 +1056,7 @@ def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it()
         return (
             active_bot.state(),
             cognition_ability.state(),
-            cognition_ability.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances),
+            environment.contains(cognition_ability),
         )
 
     state, ability_state, ability_stayed_in_environment = asyncio.run(run())
@@ -4104,7 +4104,6 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
         environment = await start_bot_with_devices(active_bot)
         firmware = device_firmware(phone)
         assert firmware is not None
-        environment_scope = environment.value(hsm.Keys.Instances)
 
         microphone = phone_microphone(phone)
         speaker = phone_speaker(phone)
@@ -4113,10 +4112,10 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
             firmware.state(),
             microphone.state(),
             speaker.state(),
-            active_bot.context().value(hsm.Keys.Instances) is environment_scope,
-            phone.context().value(hsm.Keys.Instances) is environment_scope,
-            microphone.context().value(hsm.Keys.Instances) is environment_scope,
-            speaker.context().value(hsm.Keys.Instances) is environment_scope,
+            environment.contains(active_bot),
+            environment.contains(phone),
+            environment.contains(microphone),
+            environment.contains(speaker),
         )
 
     phone_state, firmware_state, microphone_state, speaker_state, agent_scope, phone_scope, mic_scope, speaker_scope = (

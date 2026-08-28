@@ -520,8 +520,7 @@ class PhoneFirmware(hsm.Instance):
         # in the same environment Instances map as ctx. Liveness and scope only — never state().
         if not lifecycle.is_started(instance._speaker):
             return False
-        speaker_context = instance._speaker.context()
-        return speaker_context.value(hsm.Keys.Instances) is Environment.from_context(ctx).value(hsm.Keys.Instances)
+        return Environment.from_context(ctx).contains(instance._speaker)
 
     @staticmethod
     def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:

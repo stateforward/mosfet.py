@@ -110,12 +110,7 @@ def _register(
     """Publish topology when known and mark the model live. Never raises."""
 
     try:
-        environment_root = (
-            owner is None
-            and ctx is not None
-            and instance.context().value(hsm.Keys.Instances)
-            is Environment.from_context(ctx).value(hsm.Keys.Instances)
-        )
+        environment_root = owner is None and ctx is not None and Environment.from_context(ctx).contains(instance)
         publish_clear_owner = clear_owner or environment_root
         topology_outcome = (
             publish(topology(model, owner=owner, clear_owner=publish_clear_owner))
