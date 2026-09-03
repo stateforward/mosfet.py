@@ -47,9 +47,32 @@ class CreateData(pydantic.BaseModel):
         description="Behavior create event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable PascalCase behavior / HSM model name to install.")
-    triggers: tuple[str, ...] = pydantic.Field(default=(), description="Optional trigger names.")
-    description: str | None = pydantic.Field(default=None, min_length=1)
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    triggers: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "External environment event names that may propose this behavior to fast intuition. "
+            "Installed on the inventory instance alongside the Starlark program's own triggers."
+        ),
+        examples=[["environment.sound"]],
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Human-readable summary of what the behavior does, shown in inventory and reflection. "
+            "The install keeps the caller-supplied description when present."
+        ),
+        examples=["Say hello when a knock sound arrives."],
+    )
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being installed now: the observed pattern across recent episodes "
+            "that justifies it. Recorded for reflection, never dispatched."
+        ),
+        examples=["Same knock→greeting pattern across recent episodes."],
+    )
     source: str | None = pydantic.Field(
         default=None,
         min_length=1,
@@ -89,9 +112,32 @@ class ChangeData(pydantic.BaseModel):
         description="Behavior change event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable name of the behavior to revise.")
-    triggers: tuple[str, ...] = pydantic.Field(default=(), description="Optional replacement triggers.")
-    description: str | None = pydantic.Field(default=None, min_length=1)
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    triggers: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Replacement external event names that may propose this behavior to fast intuition. "
+            "Installed on the inventory instance alongside the revised Starlark program."
+        ),
+        examples=[["environment.sound", "conversation.greeting.recognized"]],
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Revised human-readable summary of what the behavior does, shown in inventory and reflection. "
+            "The install keeps the caller-supplied description when present."
+        ),
+        examples=["Say hello when a knock sound arrives, after clearing focus."],
+    )
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being revised now: the observed gap or regression the revision fixes. "
+            "Recorded for reflection, never dispatched."
+        ),
+        examples=["Also clear focus before greeting."],
+    )
     source: str | None = pydantic.Field(
         default=None,
         min_length=1,
@@ -130,7 +176,15 @@ class BreakData(pydantic.BaseModel):
         description="Behavior break event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable name of the behavior to set status=BROKEN.")
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being retired: the observed harm or staleness. Becomes the inventory "
+            "status_reason so a later change can repair it."
+        ),
+        examples=["Greeted while the bot was already mid-conversation."],
+    )
 
 
 Data: typing.TypeAlias = typing.Annotated[

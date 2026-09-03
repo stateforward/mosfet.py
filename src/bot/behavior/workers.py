@@ -60,6 +60,24 @@ class CallbackWorkersSnapshot:
     stale_results: int
 
 
+_POOL_READY_STATES = frozenset(
+    {
+        "/BehaviorCallbackWorkers/ready/accepting",
+        "/BehaviorCallbackWorkers/ready/parked",
+    }
+)
+
+
+def _is_pool_ready_state(state: str) -> bool:
+    """Explicit ready predicate for pool snapshots (never for coordination).
+
+    Matches only the concrete ready substate paths, so a future state whose path merely
+    contains ``ready`` as a substring can never read as ready.
+    """
+
+    return state in _POOL_READY_STATES
+
+
 class SlotBudgets(pydantic.BaseModel):
     """Injected resource and lifecycle budgets for pooled callback workers.
 
@@ -595,7 +613,32 @@ class SlotIndexData(pydantic.BaseModel):
     index: int = pydantic.Field(description="Stable index of the slot within its pool.", examples=[0])
 
 
-_SlotSpawnedEvent = hsm.Event[None](name="bot.behavior.workers.slot.spawned")
+class _WorkerSignalData(pydantic.BaseModel):
+    """Typed empty signal for pooled-worker lifecycle transitions.
+
+    Slot spawn/kill/retire/shutdown/stop and pool warm/stop transitions carry no payload;
+    this type gives those signals a modeled schema instead of an untyped ``Event[None]``.
+    Delivery still matches on the event name, so the schema change is wire-compatible.
+
+    :examples:
+
+    >>> _WorkerSignalData()
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Empty lifecycle signal for pooled Starlark callback workers; carries no payload.",
+            "examples": [{}],
+        },
+    )
+
+
+_SlotSpawnedEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.spawned",
+    schema=_WorkerSignalData,
+)
 _SlotSpawnFailedEvent = hsm.Event[SlotEvaluationResultData](
     name="bot.behavior.workers.slot.spawn_failed",
     schema=SlotEvaluationResultData,
@@ -608,22 +651,43 @@ _SlotResultEvent = hsm.Event[SlotEvaluationResultData](
     name="bot.behavior.workers.slot.result",
     schema=SlotEvaluationResultData,
 )
-_SlotKilledEvent = hsm.Event[None](name="bot.behavior.workers.slot.killed")
-_SlotRetiredEvent = hsm.Event[None](name="bot.behavior.workers.slot.retired")
-_SlotShutdownCompleteEvent = hsm.Event[None](name="bot.behavior.workers.slot.shutdown_complete")
-_SlotStopRequestEvent = hsm.Event[None](name="bot.behavior.workers.slot.stop_request")
+_SlotKilledEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.killed",
+    schema=_WorkerSignalData,
+)
+_SlotRetiredEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.retired",
+    schema=_WorkerSignalData,
+)
+_SlotShutdownCompleteEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.shutdown_complete",
+    schema=_WorkerSignalData,
+)
+_SlotStopRequestEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.stop_request",
+    schema=_WorkerSignalData,
+)
 _SlotAvailableEvent = hsm.Event[SlotIndexData](
     name="bot.behavior.workers.slot.available",
     schema=SlotIndexData,
 )
-_SlotStoppedEvent = hsm.Event[None](name="bot.behavior.workers.slot.stopped")
+_SlotStoppedEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.slot.stopped",
+    schema=_WorkerSignalData,
+)
 
-_WarmedEvent = hsm.Event[None](name="bot.behavior.workers.warmed")
+_WarmedEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.warmed",
+    schema=_WorkerSignalData,
+)
 _WarmFailedEvent = hsm.Event[SlotEvaluationResultData](
     name="bot.behavior.workers.warm_failed",
     schema=SlotEvaluationResultData,
 )
-_StopRequestEvent = hsm.Event[None](name="bot.behavior.workers.stop_request")
+_StopRequestEvent = hsm.Event[_WorkerSignalData](
+    name="bot.behavior.workers.stop_request",
+    schema=_WorkerSignalData,
+)
 _PoolEvaluateRequestedEvent = hsm.Event[SlotEvaluationRequestData](
     name="bot.behavior.workers.evaluate.request",
     schema=SlotEvaluationRequestData,
@@ -822,7 +886,11 @@ class WorkerSlot(hsm.Instance):
         instance._active_operation = None
         await instance.dispatch(
             ctx,
-            dataclasses.replace(_SlotSpawnedEvent, source=hsm.id(instance), target=hsm.id(instance)),
+            dataclasses.replace(
+                _SlotSpawnedEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            ),
         )
 
     @staticmethod
@@ -968,7 +1036,12 @@ class WorkerSlot(hsm.Instance):
         instance._process = None
         instance._connection = None
         await instance.dispatch(
-            ctx, dataclasses.replace(_SlotKilledEvent, source=hsm.id(instance), target=hsm.id(instance))
+            ctx,
+            dataclasses.replace(
+                _SlotKilledEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            ),
         )
 
     @staticmethod
@@ -979,7 +1052,12 @@ class WorkerSlot(hsm.Instance):
         instance._connection = None
         instance._evaluations_done = 0
         await instance.dispatch(
-            ctx, dataclasses.replace(_SlotRetiredEvent, source=hsm.id(instance), target=hsm.id(instance))
+            ctx,
+            dataclasses.replace(
+                _SlotRetiredEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            ),
         )
 
     @staticmethod
@@ -990,7 +1068,11 @@ class WorkerSlot(hsm.Instance):
         instance._connection = None
         await instance.dispatch(
             ctx,
-            dataclasses.replace(_SlotShutdownCompleteEvent, source=hsm.id(instance), target=hsm.id(instance)),
+            dataclasses.replace(
+                _SlotShutdownCompleteEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            ),
         )
 
     @staticmethod
@@ -1008,7 +1090,11 @@ class WorkerSlot(hsm.Instance):
     def _notify_stopped(ctx: hsm.Context, instance: "WorkerSlot", event: hsm.Event[typing.Any]) -> None:
         _ = instance._owner.dispatch(
             ctx,
-            dataclasses.replace(_SlotStoppedEvent, source=hsm.id(instance), target=hsm.id(instance._owner)),
+            dataclasses.replace(
+                _SlotStoppedEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance._owner),
+            ),
         )
 
 
@@ -1181,7 +1267,7 @@ class CallbackWorkers(hsm.Instance):
         """Point-in-time operational observation of the pool (never for coordination)."""
 
         return CallbackWorkersSnapshot(
-            ready="/BehaviorCallbackWorkers/ready/" in self.state(),
+            ready=_is_pool_ready_state(self.state()),
             free_indices=tuple(sorted(self._free_indices)),
             settled_operations=self._operations,
             stale_results=self._stale_results,
@@ -1211,7 +1297,12 @@ class CallbackWorkers(hsm.Instance):
             )
             return
         await instance.dispatch(
-            ctx, dataclasses.replace(_WarmedEvent, source=hsm.id(instance), target=hsm.id(instance))
+            ctx,
+            dataclasses.replace(
+                _WarmedEvent.with_data(_WorkerSignalData()),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+            ),
         )
 
     # -- request routing --------------------------------------------------
@@ -1323,7 +1414,11 @@ class CallbackWorkers(hsm.Instance):
         for slot in instance._slots:
             _ = slot.dispatch(
                 ctx,
-                dataclasses.replace(_SlotStopRequestEvent, source=hsm.id(instance), target=hsm.id(slot)),
+                dataclasses.replace(
+                    _SlotStopRequestEvent.with_data(_WorkerSignalData()),
+                    source=hsm.id(instance),
+                    target=hsm.id(slot),
+                ),
             )
 
     @staticmethod
@@ -1336,7 +1431,11 @@ class CallbackWorkers(hsm.Instance):
         for slot in instance._slots:
             _ = slot.dispatch(
                 ctx,
-                dataclasses.replace(_SlotStopRequestEvent, source=hsm.id(instance), target=hsm.id(slot)),
+                dataclasses.replace(
+                    _SlotStopRequestEvent.with_data(_WorkerSignalData()),
+                    source=hsm.id(instance),
+                    target=hsm.id(slot),
+                ),
             )
 
     @staticmethod

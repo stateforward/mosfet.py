@@ -150,11 +150,25 @@ class TurnData(pydantic.BaseModel):
         frozen=True,
     )
 
-    input: cognition_input.InputData
-    operation_id: str = pydantic.Field(min_length=1)
+    input: cognition_input.InputData = pydantic.Field(
+        description=(
+            "Live body input for this turn: the stimulus plus the abilities, named actors, and focus "
+            "candidates the stage may select from. Built by the Cognition host from live body context."
+        ),
+        examples=[{"focus": "device-a", "focus_candidates": ["device-a"]}],
+    )
+    operation_id: str = pydantic.Field(
+        min_length=1,
+        description=(
+            "Correlation id of the cognition turn. Stage terminals carry it back so the Cognition host "
+            "settles exactly this turn."
+        ),
+        examples=["turn-1"],
+    )
     generation: str = pydantic.Field(
         min_length=1,
         description="Live operation-actor identifier that proves this turn is still current.",
+        examples=["operation:turn-1"],
     )
 
 
@@ -166,14 +180,32 @@ class CompletionData(pydantic.BaseModel):
         frozen=True,
     )
 
-    turn: TurnData
-    output: OutputData | processing.Events | None = None
+    turn: TurnData = pydantic.Field(
+        description=(
+            "The cognition turn this terminal settles. Carries the correlation id and the liveness "
+            "proof the host checks before accepting the output."
+        ),
+    )
+    output: OutputData | processing.Events | None = pydantic.Field(
+        default=None,
+        description=(
+            "Selected modeled events for Processing to dispatch fire-and-forget, or None when the stage "
+            "selected nothing. Hosts do not re-apply OutputData; selection rationale belongs on each "
+            "selection envelope, not here."
+        ),
+        examples=[[{"target": "bot", "event": "bot.focus_device", "data": {"device": "device-a"}}]],
+    )
 
 
 class FailureData(ability.FailureData):
     """Typed cognition-stage failure correlated to its originating turn."""
 
-    turn: TurnData
+    turn: TurnData = pydantic.Field(
+        description=(
+            "The cognition turn that failed. Carries the correlation id so the host attributes the "
+            "failure to exactly this turn."
+        ),
+    )
 
 
 OUTPUT_SCHEMA_CONTRACT = typing.cast(
