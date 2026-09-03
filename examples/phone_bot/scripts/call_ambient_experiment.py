@@ -3,7 +3,7 @@
 
 Starts a local phone bot (no LiveKit room) and injects either:
 
-- **call** — firmware ``IncomingCall`` → elevated ``PhoneSoundData`` (``kind=phone.ringing``)
+- **call** — firmware ``IncomingCall`` → elevated ``SoundData`` (``kind=phone.ringing``)
 - **ambient** — plain ``environment.sound`` with ``kind=ambient`` (no caller)
 
 Records cognition outputs (answer / ignore / focus / other). Uses real Mercury intuition +
@@ -35,8 +35,7 @@ from phone_bot_example import AppConfig, PhoneBot  # noqa: E402
 from bot.abilities import memory  # noqa: E402
 from bot.abilities.cognition import types as cognition_types  # noqa: E402
 from bot.devices.phone import events as phone_events  # noqa: E402
-from bot.devices.phone.phone import PhoneFirmware, RING_SOUND_WAV  # noqa: E402
-from bot.devices.phone.events import PhoneSoundData  # noqa: E402
+from bot.devices.phone.phone import Firmware, RING_SOUND_WAV  # noqa: E402
 from bot.behavior import storage as behavior_storage  # noqa: E402
 from bot.environment import SoundData, SoundEvent, Environment  # noqa: E402
 
@@ -63,8 +62,8 @@ def _minimal_wav() -> bytes:
     )
 
 
-def _firmware(phone: object) -> PhoneFirmware:
-    return typing.cast(PhoneFirmware, object.__getattribute__(phone, "_firmware_instance"))
+def _firmware(phone: object) -> Firmware:
+    return typing.cast(Firmware, object.__getattribute__(phone, "_firmware_instance"))
 
 
 async def _wait_until(pred: typing.Callable[[], bool], *, timeout: float, label: str) -> None:
@@ -144,7 +143,7 @@ async def _inject_call(environment: Environment, body: PhoneBot, *, call_id: str
         body,
         dataclasses.replace(
             SoundEvent.with_data(
-                PhoneSoundData(
+                phone_events.SoundData(
                     audio=RING_SOUND_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,

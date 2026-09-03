@@ -23,7 +23,6 @@ import pytest
 
 from bot import behavior
 from bot.devices import phone as phone_device
-from bot.devices.phone.events import PhoneSoundData
 from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
@@ -815,7 +814,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
 
         ring = dataclasses.replace(
             SoundEvent.with_data(
-                PhoneSoundData(
+                phone_device.SoundData(
                     audio=phone_device.RING_SOUND_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,

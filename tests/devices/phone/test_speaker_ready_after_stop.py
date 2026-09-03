@@ -53,7 +53,7 @@ def test_receiver_forwards_only_current_call_service_audio() -> None:
     async def run() -> tuple[int, int, int]:
         environment = Environment()
         speaker = _RecordingSpeaker()
-        phone = phone_device.Phone(speaker=speaker, service=phone_device.PhoneEventRecorder())
+        phone = phone_device.Phone(speaker=speaker, service=phone_device.EventRecorder())
         firmware = phone_firmware(phone)
 
         async def forwarded_count(call_id: str) -> int:

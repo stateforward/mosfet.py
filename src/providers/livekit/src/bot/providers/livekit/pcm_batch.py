@@ -51,14 +51,14 @@ def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
 
 @dataclasses.dataclass(slots=True)
 class RemotePcmBatcher:
-    """Accumulate remote PCM and emit utterance-sized ``AudioInputData`` chunks.
+    """Accumulate remote PCM and emit utterance-sized ``InputData`` chunks.
 
     Flush rules (first match):
     - buffered duration >= ``max_utterance_ms``
     - idle for ``idle_ms`` with a non-empty buffer (end of talkspurts / single frames)
     """
 
-    emit: collections.abc.Callable[[audio.AudioInputData], collections.abc.Awaitable[None]]
+    emit: collections.abc.Callable[[audio.InputData], collections.abc.Awaitable[None]]
     max_utterance_ms: float = 1_200.0
     idle_ms: float = 250.0
     loop: asyncio.AbstractEventLoop | None = None
@@ -71,7 +71,7 @@ class RemotePcmBatcher:
     _lock: asyncio.Lock = dataclasses.field(default_factory=asyncio.Lock, init=False, repr=False)
     _closed: bool = dataclasses.field(default=False, init=False)
 
-    async def _emit_traced(self, chunk: audio.AudioInputData, reason: str) -> None:
+    async def _emit_traced(self, chunk: audio.InputData, reason: str) -> None:
         """Emit one assembled chunk under a span naming why the seam fell here.
 
         This is the unit that reaches perception, so it is the span a sound is followed by:
@@ -96,7 +96,7 @@ class RemotePcmBatcher:
                 )
             await self.emit(chunk)
 
-    def _note_drop(self, data: audio.AudioInputData, *, reason: str) -> None:
+    def _note_drop(self, data: audio.InputData, *, reason: str) -> None:
         """Record one chunk dropped before assembly as metric + span (never silent).
 
         A drop is data the detector never hears, so the counter answers "how
@@ -117,7 +117,7 @@ class RemotePcmBatcher:
         ) as active:
             active.set_attribute("bot.audio.bytes", len(data.audio))
 
-    async def push(self, data: audio.AudioInputData) -> None:
+    async def push(self, data: audio.InputData) -> None:
         if not data.audio:
             return
         if self._closed:
@@ -126,7 +126,7 @@ class RemotePcmBatcher:
             # can see them instead of returning silently.
             self._note_drop(data, reason="closed")
             return
-        to_emit: list[tuple[audio.AudioInputData, str]] = []
+        to_emit: list[tuple[audio.InputData, str]] = []
         async with self._lock:
             if self._closed:
                 dropped = True
@@ -182,10 +182,10 @@ class RemotePcmBatcher:
         if pending is not None:
             await self._emit_traced(pending, "closed")
 
-    def _snapshot_unlocked(self) -> audio.AudioInputData:
+    def _snapshot_unlocked(self) -> audio.InputData:
         assert self._sample_rate_hz is not None
         assert self._channels is not None
-        return audio.AudioInputData(
+        return audio.InputData(
             audio=bytes(self._buffer),
             media_type=self._media_type,
             sample_rate_hz=self._sample_rate_hz,

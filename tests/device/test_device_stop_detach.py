@@ -8,7 +8,7 @@ import hsm
 
 import bot.lifecycle
 
-from bot.device.device import Device
+from bot.device import Device
 from bot.protocols import attachment
 from bot.environment import Environment
 

@@ -230,13 +230,13 @@ def test_phone_service_request_events_carry_the_call_firmware_stamped() -> None:
 
 def test_phone_public_events_describe_committed_firmware_state() -> None:
     ringing = phone.RingingData(caller="Front desk")
-    hung_up = phone.PhoneHungUpData(call_id="call-123", outcome="remote_hang_up")
-    transfer = phone.PhoneTransferData(
+    hung_up = phone.HungUpData(call_id="call-123", outcome="remote_hang_up")
+    transfer = phone.TransferData(
         call_id="call-123",
         transfer_id="transfer-123",
         target=phone.TransferTarget(kind="address", value="helpdesk@example.com"),
     )
-    transfer_failed = phone.PhoneTransferFailedData(
+    transfer_failed = phone.CallTransferFailedData(
         call_id="call-123",
         transfer_id="transfer-123",
         target=phone.TransferTarget(kind="address", value="helpdesk@example.com"),
@@ -245,7 +245,7 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
 
     assert ringing.caller == "Front desk"
     # A ringing handset shows who is calling, not which session is ringing.
-    assert not isinstance(ringing, phone.PhoneCallData)
+    assert not isinstance(ringing, phone.CallData)
     assert "call_id" not in _schema_properties(phone.RingingEvent.schema)
     assert phone.RingingData().caller is None
     assert hung_up.outcome == "remote_hang_up"
@@ -254,17 +254,17 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
     assert phone.RingingEvent.name == "phone.ringing"
     assert object_dict(phone.RingingEvent.schema) == phone.RingingData.model_json_schema()
     assert phone.AnsweredEvent.name == "phone.answered"
-    assert object_dict(phone.AnsweredEvent.schema) == phone.PhoneCallData.model_json_schema()
+    assert object_dict(phone.AnsweredEvent.schema) == phone.CallData.model_json_schema()
     assert phone.MediaReadyEvent.name == "phone.media_ready"
-    assert object_dict(phone.MediaReadyEvent.schema) == phone.PhoneCallData.model_json_schema()
+    assert object_dict(phone.MediaReadyEvent.schema) == phone.CallData.model_json_schema()
     assert phone.HungUpEvent.name == "phone.hung_up"
-    assert object_dict(phone.HungUpEvent.schema) == phone.PhoneHungUpData.model_json_schema()
+    assert object_dict(phone.HungUpEvent.schema) == phone.HungUpData.model_json_schema()
     assert phone.TransferStartedEvent.name == "phone.transfer_started"
-    assert object_dict(phone.TransferStartedEvent.schema) == phone.PhoneTransferData.model_json_schema()
+    assert object_dict(phone.TransferStartedEvent.schema) == phone.TransferData.model_json_schema()
     assert phone.CallTransferCompletedEvent.name == "phone.transfer_completed"
-    assert object_dict(phone.CallTransferCompletedEvent.schema) == phone.PhoneTransferData.model_json_schema()
+    assert object_dict(phone.CallTransferCompletedEvent.schema) == phone.TransferData.model_json_schema()
     assert phone.CallTransferFailedEvent.name == "phone.transfer_failed"
-    assert object_dict(phone.CallTransferFailedEvent.schema) == phone.PhoneTransferFailedData.model_json_schema()
+    assert object_dict(phone.CallTransferFailedEvent.schema) == phone.CallTransferFailedData.model_json_schema()
 
 
 def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:

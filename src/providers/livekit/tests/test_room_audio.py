@@ -77,10 +77,10 @@ def test_livekit_room_audio_track_path_publishes_local_source_and_subscribes_rem
         bridge = fake_audio_bridge(source)
         room = FakeRoom(tracks_to_emit_on_connect=[FakeRemoteTrack()])
         local_track_sources: list[tuple[str, object]] = []
-        received_audio: list[audio_device.AudioInputData] = []
+        received_audio: list[audio_device.InputData] = []
         connected_events: list[room_audio_module.RoomAudioConnectedData] = []
 
-        async def remote_audio_sink(audio: audio_device.AudioInputData) -> None:
+        async def remote_audio_sink(audio: audio_device.InputData) -> None:
             received_audio.append(audio)
 
         def local_track_factory(name: str, source: object) -> object:
@@ -112,7 +112,7 @@ def test_livekit_room_audio_track_path_publishes_local_source_and_subscribes_rem
             lambda: connected_events == [room_audio_module.RoomAudioConnectedData(local_track_sid="TR_local")]
         )
         await bridge.publish_audio(
-            audio_device.AudioOutputData(
+            audio_device.OutputData(
                 audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48_000, channels=1
             )
         )
@@ -130,9 +130,7 @@ def test_livekit_room_audio_track_path_publishes_local_source_and_subscribes_rem
             )
         ]
         assert received_audio == [
-            audio_device.AudioInputData(
-                audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48_000, channels=1
-            )
+            audio_device.InputData(audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
         ]
 
         await path.disconnect_room(path.context())
@@ -150,7 +148,7 @@ def test_livekit_room_audio_track_path_disconnects_cleanly_while_connect_is_bloc
         bridge = fake_audio_bridge(source)
         room = FakeRoom(connect_gate=asyncio.Event())
 
-        async def remote_audio_sink(audio: audio_device.AudioInputData) -> None:
+        async def remote_audio_sink(audio: audio_device.InputData) -> None:
             del audio
 
         path = RoomAudioTrackPath(

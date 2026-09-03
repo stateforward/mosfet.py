@@ -331,7 +331,7 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
         owner = _OwnerBotActor({"phone": hsm.id(phone)})
         _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
 
-        assert isinstance(firmware, phone_device.PhoneFirmware)
+        assert isinstance(firmware, phone_device.Firmware)
         await firmware.event_recorder().receive(
             phone.context(),
             phone_device.IncomingCallEvent.with_data(

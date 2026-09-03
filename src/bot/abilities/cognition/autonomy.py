@@ -41,10 +41,25 @@ _AUTONOMY_ID_MARKER = ":autonomy:"
 _BEHAVIOR_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
 _BEHAVIOR_ATTACH_TIMEOUT = datetime.timedelta(seconds=runtime.CALLBACK_WARMUP_SECONDS + 1)
 _BEHAVIOR_DETACH_TIMEOUT = datetime.timedelta(seconds=1)
-_InitializingCompleteEvent = hsm.Event[object](
+
+
+class _InitializingCompleteData(pydantic.BaseModel):
+    """Typed empty signal that autonomy finished initialization."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Empty initialization-complete signal for autonomy; carries no payload.",
+            "examples": [{}],
+        },
+    )
+
+
+_InitializingCompleteEvent = hsm.Event[_InitializingCompleteData](
     name="bot.ability.autonomy.initializing.complete",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
+    schema=_InitializingCompleteData,
 )
 _BehaviorsLoadedEvent = hsm.Event[memory.OutputData](
     name="bot.ability.autonomy.behaviors.loaded",
@@ -1633,7 +1648,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         assert isinstance(data, _InitializeData)
         store = data.store
         if store is None:
-            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
+            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
             return
         try:
             output = store.execute(_behavior_select_input())
@@ -1673,7 +1688,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         output = event.data
         assert isinstance(output, memory.OutputData)
         instance._behaviors = _behaviors_from_memory_output(output)
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
+        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
 
     @staticmethod
     def _on_load_behaviors_failure(

@@ -4,7 +4,6 @@ import collections.abc
 import dataclasses
 import enum
 import html
-import re
 import typing
 import xml.etree.ElementTree as ElementTree
 
@@ -75,7 +74,11 @@ def _set_attribute(element: ElementTree.Element, name: str, value: str, budget: 
 
 
 def _snake_case(name: str) -> str:
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    # Shared helper lives on conversation; a top-level import would cycle
+    # cognition -> communication -> cognition through the package inits.
+    from bot.abilities.communication.conversation.conversation import snake_case
+
+    return snake_case(name)
 
 
 def _payload_tag(payload_type: type) -> str:

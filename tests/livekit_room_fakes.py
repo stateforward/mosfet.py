@@ -246,7 +246,7 @@ def fake_pcm_stream(
 
 
 def rtc_pcm_frame(payload: bytes = b"\x01\x00\x02\x00", *, sample_rate: int = 48_000) -> rtc.AudioFrame:
-    """Build a real LiveKit AudioFrame for use with PhoneService's default audio bridge."""
+    """Build a real LiveKit AudioFrame for use with Service's default audio bridge."""
 
     return rtc.AudioFrame(
         data=payload,

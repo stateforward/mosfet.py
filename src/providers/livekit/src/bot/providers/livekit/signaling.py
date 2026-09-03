@@ -18,7 +18,7 @@ The caller's identity is never in a payload: LiveKit hands every handler the aut
 would be a claim rather than a fact.
 
 On this SFU fiction the participant identity **is** the phone number (normalized digits, the same
-form ``phone.PhoneNumber`` / ``DialData`` produce). Setup is addressed to that number by default.
+form ``phone.Number`` / ``DialData`` produce). Setup is addressed to that number by default.
 An optional :class:`DialPlan` is only an alias layer for rare remaps and tests — not required for
 normal dial-by-number operation.
 """
@@ -33,7 +33,7 @@ from livekit import rtc
 
 from bot.devices import phone
 
-_NUMBER = pydantic.TypeAdapter(phone.PhoneNumber)
+_NUMBER = pydantic.TypeAdapter(phone.Number)
 """The one rule for what a number is, so a plan cannot register something no handset could dial."""
 
 

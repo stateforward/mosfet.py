@@ -291,7 +291,7 @@ class Device(hsm.Instance, attachment.Attachment):
         bound behind a body that is busy thinking.
         """
 
-        from bot.environment.environment import elevate_device_observation_to_input
+        from bot.environment import elevate_device_observation_to_input
 
         payload: dict[str, object] | None = None
         data = event.data

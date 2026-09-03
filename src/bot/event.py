@@ -19,7 +19,7 @@ import pydantic_core
 #
 # This is a stateforward.bot concern, not an HSM one: the owning domain is ``abilities.processing``,
 # which builds each turn's tool menu from live topology and refuses selections the target never
-# offered. It is defined here rather than there because ``bot.events``, ``bot.behavior.events``, and
+# offered. It is defined here rather than there because ``bot.events``, ``bot.behavior``, and
 # ``abilities.speaking`` all stamp events and all cycle on importing ``processing``; this module is a
 # leaf. Import it as ``processing.EventKind`` wherever that does not cycle.
 #

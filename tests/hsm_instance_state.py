@@ -153,8 +153,8 @@ def device_peripherals(device: Device) -> tuple[Device, ...]:
     return typing.cast(tuple[Device, ...], object.__getattribute__(device, "_peripherals"))
 
 
-def phone_firmware(phone: phone_device.Phone) -> phone_device.PhoneFirmware:
-    return typing.cast(phone_device.PhoneFirmware, object.__getattribute__(phone, "_firmware_instance"))
+def phone_firmware(phone: phone_device.Phone) -> phone_device.Firmware:
+    return typing.cast(phone_device.Firmware, object.__getattribute__(phone, "_firmware_instance"))
 
 
 def phone_microphone(phone: phone_device.Phone) -> audio_device.Microphone:
@@ -169,26 +169,26 @@ def phone_display(phone: phone_device.Phone) -> phone_device.Display:
     return typing.cast(phone_device.Display, object.__getattribute__(phone, "_display"))
 
 
-def phone_current_call_id(firmware: phone_device.PhoneFirmware) -> str | None:
+def phone_current_call_id(firmware: phone_device.Firmware) -> str | None:
     return typing.cast(str | None, object.__getattribute__(firmware, "_current_call_id"))
 
 
-def phone_current_transfer_id(firmware: phone_device.PhoneFirmware) -> str | None:
+def phone_current_transfer_id(firmware: phone_device.Firmware) -> str | None:
     return typing.cast(str | None, object.__getattribute__(firmware, "_current_transfer_id"))
 
 
-def phone_current_transfer_target(firmware: phone_device.PhoneFirmware) -> phone_device.TransferTarget | None:
+def phone_current_transfer_target(firmware: phone_device.Firmware) -> phone_device.TransferTarget | None:
     return typing.cast(
         phone_device.TransferTarget | None, object.__getattribute__(firmware, "_current_transfer_target")
     )
 
 
-def phone_closed_call_ids(firmware: phone_device.PhoneFirmware) -> frozenset[str]:
+def phone_closed_call_ids(firmware: phone_device.Firmware) -> frozenset[str]:
     return typing.cast(frozenset[str], object.__getattribute__(firmware, "_closed_call_ids"))
 
 
-def phone_service(firmware: phone_device.PhoneFirmware) -> phone_device.PhoneService:
-    return typing.cast(phone_device.PhoneService, object.__getattribute__(firmware, "_service"))
+def phone_service(firmware: phone_device.Firmware) -> phone_device.Service:
+    return typing.cast(phone_device.Service, object.__getattribute__(firmware, "_service"))
 
 
 def behavior_spec(instance: object) -> behavior.source.Source:

@@ -774,9 +774,6 @@ def snake_case(name: str) -> str:
     """Convert a PascalCase model or ability name to snake_case.
 
     Shared naming helper for cognition-visible actor keys and dotted event prefixes.
-    Rename lane: Bot._ability_actor_key (src/bot/bot.py:789) and the private snake-case
-    walks in cognition/event.py and behavior/behavior.py should delegate here instead
-    of reimplementing the boundary walk.
     """
 
     chars: list[str] = []
@@ -798,9 +795,7 @@ def ability_actor_key(
     """Stable cognition-visible actor name for one ability instance.
 
     Uses :func:`snake_case` on the ability class name and appends a numeric suffix on
-    collision. Rename lane: Bot._ability_actor_key (src/bot/bot.py:789, applied at
-    src/bot/bot.py:821) should delegate here; this module does not call it yet so the
-    cutover stays atomic in that lane.
+    collision.
     """
 
     key = snake_case(type(candidate).__name__) or "actor"

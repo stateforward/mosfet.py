@@ -737,7 +737,7 @@ def _mouthpiece() -> audio.Microphone:
     return audio.Microphone(placement=space.Placement(position=_MOUTH, threshold_db=_MOUTHPIECE_THRESHOLD_DB))
 
 
-def _handset(*, service: phone_device.PhoneService | None = None) -> phone_device.Phone:
+def _handset(*, service: phone_device.Service | None = None) -> phone_device.Phone:
     """A handset held to the robot's ear, with its own transducers placed on it."""
 
     return phone_device.Phone(
@@ -1100,9 +1100,13 @@ async def start_bot(
         memory=memory,
     )
     scope = environment if environment is not None else Environment()
-    resolved_placement = placement if placement is not None else space.Placement(
-        position=_BOT_ORIGIN,
-        threshold_db=_EARS_THRESHOLD_DB,
+    resolved_placement = (
+        placement
+        if placement is not None
+        else space.Placement(
+            position=_BOT_ORIGIN,
+            threshold_db=_EARS_THRESHOLD_DB,
+        )
     )
     _ = await body.attach(scope, placement=resolved_placement)
     await _wait_for_active_bot(body)

@@ -1,4 +1,4 @@
-from .events import InputEvent, AudioInputData, routed_audio_event
+from .events import InputEvent, InputData, routed_audio_event
 
 import collections.abc
 import typing
@@ -21,7 +21,7 @@ class Microphone(Device):
     A phone's mouthpiece is therefore live precisely while its firmware holds the attachment.
     """
 
-    input_event: typing.ClassVar[hsm.Event[AudioInputData]] = InputEvent
+    input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
 
     @staticmethod
     def _transduce(ctx: hsm.Context, instance: "Microphone", event: hsm.Event[typing.Any]) -> None:
@@ -30,7 +30,7 @@ class Microphone(Device):
         data = event.data
         if not isinstance(data, SoundData):
             return
-        captured = AudioInputData(
+        captured = InputData(
             audio=data.audio,
             media_type=data.media_type,
             sample_rate_hz=data.sample_rate_hz,
@@ -48,7 +48,7 @@ class Microphone(Device):
         self,
         ctx: hsm.Context,
         target: hsm.Instance,
-        data: AudioInputData,
+        data: InputData,
         *,
         metadata: collections.abc.Mapping[str, object] | None = None,
     ) -> collections.abc.Awaitable[None]:

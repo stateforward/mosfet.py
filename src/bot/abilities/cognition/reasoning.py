@@ -25,10 +25,25 @@ from . import types
 # channel as intuition (plus the deliberative user payload). Behavior create/change/break stay
 # on offered schemas and processor input fields, not a standing assistant policy.
 DEFAULT_INSTRUCTIONS = ""
-_InitializingCompleteEvent = hsm.Event[object](
+
+
+class _InitializingCompleteData(pydantic.BaseModel):
+    """Typed empty signal that deliberative reasoning finished initialization."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Empty initialization-complete signal for deliberative reasoning; carries no payload.",
+            "examples": [{}],
+        },
+    )
+
+
+_InitializingCompleteEvent = hsm.Event[_InitializingCompleteData](
     name="bot.ability.reasoning.initializing.complete",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
+    schema=_InitializingCompleteData,
 )
 
 
@@ -395,7 +410,7 @@ class Reasoning(processing.Processing):
             context=telemetry.event_context(event),
         ):
             del event
-            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(None))
+            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
 
     @staticmethod
     def _input_from_event(event: hsm.Event[typing.Any]) -> InputData:

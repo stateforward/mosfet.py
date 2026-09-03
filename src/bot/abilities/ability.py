@@ -22,7 +22,11 @@ _DataType = type[object] | tuple[type[object], ...] | None
 
 
 def _private_instance_scope(parent: hsm.Context) -> hsm.Context:
-    """Create an explicitly addressed scope for private one-shot attachment actors."""
+    """Create an explicitly addressed scope for private one-shot attachment actors.
+
+    The registry is strong (compare bot._private_scope's weak registry): attachment groups
+    must stay alive in the map for the whole attach/detach operation.
+    """
 
     values: dict[typing.Hashable, object] = {hsm.Keys.Instances: {}}
     return hsm.Context(parent=parent, values=scope.mark_private(values))
@@ -147,6 +151,13 @@ InputEvent = hsm.Event[object](
     name="bot.ability.input",
     schema=object,
 )
+# Intentional generic-envelope exception to the typed-payload rule: base ``Ability`` is
+# generic over ``TInput`` / ``TOutput``, so no single Pydantic schema can describe its
+# input/output. Concrete subclasses narrow ``input_event`` / ``output_event`` with real
+# schemas, and runtime payload validation happens through ``input_data_type`` /
+# ``output_data_type`` — never by sniffing these envelopes. The same exception covers the
+# generic input/output/apply-completed events in decoding, classifying, generative, and
+# encoding, which subclass this envelope the same way.
 OutputEvent = hsm.Event[object](
     name="bot.ability.output",
     schema=object,

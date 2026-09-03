@@ -19,7 +19,7 @@ from bot.protocols import attachment
 
 from . import compiler
 from . import diagnostic
-from . import instance as instance_mod
+from . import instance
 
 
 def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Diagnostic:
@@ -229,14 +229,14 @@ def verify_apply(
     event_id: str | None = None,
     source: str | None = None,
     target: str | None = None,
-) -> diagnostic.Checked[instance_mod.Instance]:
+) -> diagnostic.Checked[instance.Instance]:
     """Parse/build, then dry-run apply; return structured diagnostics on failure.
 
     Optional ``event_id`` / ``source`` / ``target`` stamp the behavior input event the
     same way Autonomy does for a live turn event (not metadata).
     """
 
-    checked = instance_mod.check(
+    checked = instance.check(
         program,
         name=name,
         triggers=triggers,
@@ -274,7 +274,7 @@ def verify_apply(
                 stage=diagnostic.Stage.APPLY,
             )
         )
-        return diagnostic.Checked[instance_mod.Instance](value=None, report=report)
+        return diagnostic.Checked[instance.Instance](value=None, report=report)
 
     live_event_id = event_id or resolved_operation_id
     live_values = _live_binding_values(
@@ -295,7 +295,7 @@ def verify_apply(
                 for message in binding_errors
             )
         )
-        return diagnostic.Checked[instance_mod.Instance](value=None, report=report)
+        return diagnostic.Checked[instance.Instance](value=None, report=report)
 
     return checked
 

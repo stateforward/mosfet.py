@@ -33,7 +33,7 @@ _ALLOWED_NON_HSM_PROPERTIES = {
     "src/bot/protocols/yamux/frame.py:FrameData.is_syn",
     "src/bot/environment/environment.py:Environment.environment_id",
     "src/bot/environment/environment.py:Environment.scope_path",
-    "src/bot/devices/phone/phone.py:PhoneEventRecorder.events",
+    "src/bot/devices/phone/phone.py:EventRecorder.events",
 }
 # HSM instances may own private runtime data, including mutable mappings.
 # This guard blocks public member surfaces that invite direct caller mutation
@@ -63,19 +63,19 @@ _FORBIDDEN_PUBLIC_HSM_OWNED_MEMBER_ANNOTATIONS = {
     "src/bot/abilities/reading/reading.py:Reading.visual_classifier",
     "src/bot/behavior/behavior.py:Behavior.callback_runtime",
     "src/bot/behavior/behavior.py:Behavior.spec",
-    "src/providers/livekit/src/bot/providers/livekit/phone.py:PhoneService.active_call_id",
-    "src/providers/livekit/src/bot/providers/livekit/phone.py:PhoneService.active_transfer_id",
-    "src/providers/livekit/src/bot/providers/livekit/phone.py:PhoneService.active_transfer_target",
-    "src/providers/livekit/src/bot/providers/livekit/phone.py:PhoneService.phone_event_target",
+    "src/providers/livekit/src/bot/providers/livekit/phone.py:Service.active_call_id",
+    "src/providers/livekit/src/bot/providers/livekit/phone.py:Service.active_transfer_id",
+    "src/providers/livekit/src/bot/providers/livekit/phone.py:Service.active_transfer_target",
+    "src/providers/livekit/src/bot/providers/livekit/phone.py:Service.phone_event_target",
     "src/providers/livekit/src/bot/providers/livekit/room_audio.py:RoomAudioTrackPath.local_track_sid",
     "src/providers/livekit/src/bot/providers/livekit/room_audio.py:RoomAudioTrackPath.remote_audio_bytes",
     "src/providers/livekit/src/bot/providers/livekit/room_audio.py:RoomAudioTrackPath.remote_audio_chunks",
     "src/bot/bot.py:Bot.focused_device",
     "src/bot/devices/phone/phone.py:Phone.firmware_instance",
-    "src/bot/devices/phone/phone.py:PhoneFirmware.closed_call_ids",
-    "src/bot/devices/phone/phone.py:PhoneFirmware.current_call_id",
-    "src/bot/devices/phone/phone.py:PhoneFirmware.current_transfer_id",
-    "src/bot/devices/phone/phone.py:PhoneFirmware.current_transfer_target",
+    "src/bot/devices/phone/phone.py:Firmware.closed_call_ids",
+    "src/bot/devices/phone/phone.py:Firmware.current_call_id",
+    "src/bot/devices/phone/phone.py:Firmware.current_transfer_id",
+    "src/bot/devices/phone/phone.py:Firmware.current_transfer_target",
 }
 _FORBIDDEN_PUBLIC_HSM_OWNED_HELPER_FUNCTIONS = {
     "src/providers/livekit/src/bot/providers/livekit/phone.py:active_call_id",

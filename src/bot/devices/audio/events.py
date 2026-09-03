@@ -8,7 +8,7 @@ import pydantic
 TData = typing.TypeVar("TData")
 
 
-class AudioFrameData(pydantic.BaseModel):
+class FrameData(pydantic.BaseModel):
     """Generic chunk of audio carried between devices or device implementations."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -62,21 +62,21 @@ class AudioFrameData(pydantic.BaseModel):
     )
 
 
-class AudioInputData(AudioFrameData):
+class InputData(FrameData):
     """Audio captured by an input peripheral and dispatched to another device."""
 
 
-class AudioOutputData(AudioFrameData):
+class OutputData(FrameData):
     """Audio requested for output and dispatched to an audio output implementation."""
 
 
-InputEvent = hsm.Event[AudioInputData](
+InputEvent = hsm.Event[InputData](
     name="devices.audio.input",
-    schema=AudioInputData,
+    schema=InputData,
 )
-OutputEvent = hsm.Event[AudioOutputData](
+OutputEvent = hsm.Event[OutputData](
     name="devices.audio.output",
-    schema=AudioOutputData,
+    schema=OutputData,
 )
 
 

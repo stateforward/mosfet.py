@@ -468,6 +468,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             context=telemetry.event_context(event),
         ):
             if event.source and event.source != hsm.id(instance):
+                # Directed terminal reply to the caller, not a NACK proxy: delivery is the gate.
                 _ = hsm.dispatch_to(instance.context(), terminal, event.source)
             else:
                 _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
@@ -561,6 +562,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         ) as active:
             span.record_failure(active, "speaking_failed")
             if event.source and event.source != hsm.id(instance):
+                # Directed terminal reply to the caller, not a NACK proxy: delivery is the gate.
                 _ = hsm.dispatch_to(instance.context(), terminal, event.source)
             else:
                 _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))

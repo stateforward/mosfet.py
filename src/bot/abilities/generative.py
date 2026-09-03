@@ -20,6 +20,9 @@ class Generator(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
         ...
 
 
+# Generic envelope (see the intentional-exception note on ability.InputEvent): this base is
+# generic over TInput/TOutput, so subclasses narrow input/output schemas and validate payloads
+# through input_data_type/output_data_type.
 _GenerativeApplyCompletedEvent = hsm.Event[object](
     name="bot.ability.generative.apply.completed",
     kind=hsm.CompletionEventKind,

@@ -56,7 +56,7 @@ def test_messages_memories_are_excluded_from_model_facing_xml() -> None:
 def test_observed_bot_event_keeps_binary_python_dump_but_canonical_omits_media() -> None:
     payload = processing.InputData(
         input=audio.OutputEvent.with_data(
-            audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+            audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
         )
     )
 
@@ -257,7 +257,7 @@ def test_model_facing_xml_keeps_structured_mapping_keys_in_escaped_values() -> N
 def test_inherited_phone_sound_stamps_event_envelope_on_outer_root() -> None:
     """An inherited payload keeps the environment event envelope on its outer root element."""
 
-    sound = phone_events.PhoneSoundData(
+    sound = phone_events.SoundData(
         audio=b"ring-audio",
         media_type="audio/pcm",
         sample_rate_hz=16_000,

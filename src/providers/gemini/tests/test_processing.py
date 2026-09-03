@@ -23,7 +23,7 @@ class _AnswerCallData(pydantic.BaseModel):
     call_id: str
 
 
-_PHONE_ANSWER_CALL = hsm.Event[_AnswerCallData](
+_AnswerCallEvent = hsm.Event[_AnswerCallData](
     name="phone.answer_call",
     kind=hsm.CallEventKind,
     schema=_AnswerCallData,
@@ -114,7 +114,7 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
         data=SoundData(audio=b"Hey I'm Gabe how are you", media_type="audio/pcm", sample_rate_hz=16_000),
         kind=hsm.CompletionEventKind,
     )
-    input = processing.InputData(input=stimulus, schemas=(_PHONE_ANSWER_CALL,))
+    input = processing.InputData(input=stimulus, schemas=(_AnswerCallEvent,))
     content = input.model_facing_payload()
     # Raw media never reaches the prompt, in any encoding; owning Data retains only metadata.
     assert "Hey I'm Gabe how are you" not in content
@@ -160,7 +160,7 @@ def test_processor_maps_dispatch_tool_to_events() -> None:
     processor = Processor(generator=generator)
     input = processing.InputData(
         input="ring",
-        schemas=(_PHONE_ANSWER_CALL,),
+        schemas=(_AnswerCallEvent,),
         instructions="Select events from schemas.",
     )
     output = asyncio.run(process_for_test(processor, input))
@@ -199,7 +199,7 @@ def test_processor_maps_multi_event_dispatch() -> None:
     processor = Processor(generator=generator)
     input = processing.InputData(
         input="ring",
-        schemas=(_PHONE_ANSWER_CALL,),
+        schemas=(_AnswerCallEvent,),
         instructions="Select events from schemas.",
     )
     output = asyncio.run(process_for_test(processor, input))
@@ -228,7 +228,7 @@ def test_processor_lifts_confidence_from_patched_dispatch_data() -> None:
     processor = Processor(generator=generator)
     input = processing.InputData(
         input="ring",
-        schemas=(_PHONE_ANSWER_CALL,),
+        schemas=(_AnswerCallEvent,),
         instructions="Select events from schemas.",
         patch=_ConfidencePatch,
     )

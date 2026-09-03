@@ -102,7 +102,7 @@ def assert_heard_phone_ring(
     assert isinstance(input.data, SoundData)
     assert input.data.kind == "phone.ringing"
     if caller is not None:
-        assert isinstance(input.data, phone_device.PhoneSoundData)
+        assert isinstance(input.data, phone_device.SoundData)
         assert input.data.caller == caller
     if phone is not None:
         assert input.source == hsm.id(phone)
@@ -1383,9 +1383,9 @@ async def answer_phone(phone: phone_device.Phone, call_id: str = "call-123") -> 
 
 async def emit_phone_service_event(phone: phone_device.Phone, event: hsm.Event[typing.Any]) -> None:
     firmware = device_firmware(phone)
-    assert isinstance(firmware, phone_device.PhoneFirmware)
+    assert isinstance(firmware, phone_device.Firmware)
     recorder = firmware.event_recorder()
-    assert isinstance(recorder, phone_device.PhoneEventRecorder)
+    assert isinstance(recorder, phone_device.EventRecorder)
     await recorder.receive(phone.context(), event)
 
 
@@ -1821,7 +1821,7 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert observed_browser_input.input.name == SoundEvent.name
     observed_sound = observed_browser_input.input.data
     # What a ringing phone carries out is who is calling, not which session is ringing.
-    assert isinstance(observed_sound, phone_device.PhoneSoundData)
+    assert isinstance(observed_sound, phone_device.SoundData)
     assert observed_sound.caller == "Front desk"
     offered = {event.name for event in observed_browser_input.schemas}
     assert bot.FocusDeviceEvent.name in offered
@@ -2112,7 +2112,7 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
@@ -2159,7 +2159,7 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
         phone = phone_device.Phone()
         owning_agent = AbilityAgent(devices={"phone": phone}, cognition=owner_ability, input=(ring_hearing(),))
         sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(owning_agent)
         _ = await sibling_agent.attach(environment)

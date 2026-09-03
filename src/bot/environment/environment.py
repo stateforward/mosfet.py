@@ -299,7 +299,7 @@ def elevate_device_observation_to_input(
     No attachment/device tree walk: the caller passes the explicit ``owner``.
     """
 
-    from bot.device.device import ObservationData
+    from bot.device import ObservationData
 
     data = observation.data
     assert isinstance(data, ObservationData)

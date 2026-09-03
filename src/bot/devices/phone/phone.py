@@ -17,7 +17,7 @@ from bot.protocols import attachment
 from bot.telemetry import observer
 from bot.environment import SoundEvent, Environment, require_environment_scope, space
 
-# Flat symbol imports (not `from . import display`): both Phone and PhoneFirmware accept a
+# Flat symbol imports (not `from . import display`): both Phone and Firmware accept a
 # `display` constructor parameter, which would shadow a `display` module import.
 from .display import CallerIdData, CallerIdEvent, Display
 from .events import (
@@ -49,11 +49,11 @@ from .events import (
     MediaReadyEvent,
     NoCallData,
     NoCallEvent,
-    PhoneCallData,
-    PhoneHungUpData,
-    PhoneSoundData,
-    PhoneTransferData,
-    PhoneTransferFailedData,
+    CallData,
+    HungUpData,
+    SoundData,
+    TransferData,
+    CallTransferFailedData,
     RemoteHangUpData,
     RemoteHangUpEvent,
     RingingData,
@@ -139,35 +139,35 @@ _RingingCommittedEvent = hsm.Event[RingingData](
     kind=hsm.CompletionEventKind,
     schema=RingingData,
 )
-_AnsweredCommittedEvent = hsm.Event[PhoneCallData](
+_AnsweredCommittedEvent = hsm.Event[CallData](
     name="bot.phone.answered.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneCallData,
+    schema=CallData,
 )
-_MediaReadyCommittedEvent = hsm.Event[PhoneCallData](
+_MediaReadyCommittedEvent = hsm.Event[CallData](
     name="bot.phone.media_ready.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneCallData,
+    schema=CallData,
 )
-_HungUpCommittedEvent = hsm.Event[PhoneHungUpData](
+_HungUpCommittedEvent = hsm.Event[HungUpData](
     name="bot.phone.hung_up.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneHungUpData,
+    schema=HungUpData,
 )
-_TransferStartedCommittedEvent = hsm.Event[PhoneTransferData](
+_TransferStartedCommittedEvent = hsm.Event[TransferData](
     name="bot.phone.transfer_started.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneTransferData,
+    schema=TransferData,
 )
-_TransferCompletedCommittedEvent = hsm.Event[PhoneTransferData](
+_TransferCompletedCommittedEvent = hsm.Event[TransferData](
     name="bot.phone.transfer_completed.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneTransferData,
+    schema=TransferData,
 )
-_TransferFailedCommittedEvent = hsm.Event[PhoneTransferFailedData](
+_TransferFailedCommittedEvent = hsm.Event[CallTransferFailedData](
     name="bot.phone.transfer_failed.committed",
     kind=hsm.CompletionEventKind,
-    schema=PhoneTransferFailedData,
+    schema=CallTransferFailedData,
 )
 
 
@@ -180,7 +180,7 @@ def _completed_phone_service_event() -> asyncio.Future[None]:
 @dataclasses.dataclass
 class _PhoneObservationService:
     owner: "Phone"
-    service: "PhoneService"
+    service: "Service"
     # Injected by the phone that owns this service: elevating a committed observation into an environment
     # stimulus is the phone's behaviour, not the transport's, and the phone is what knows where it
     # is standing.
@@ -213,7 +213,7 @@ class _PhoneObservationService:
         self.elevate(ctx, event)
 
 
-class PhoneService(typing.Protocol):
+class Service(typing.Protocol):
     """Service that receives provider requests and committed public phone events."""
 
     def attach(self, environment: Environment, target: hsm.Instance) -> collections.abc.Awaitable[None]:
@@ -228,7 +228,7 @@ class PhoneService(typing.Protocol):
         """Publish one phone event emitted by firmware."""
 
 
-class PhoneEventRecorder:
+class EventRecorder:
     """In-memory phone service for tests and embedders without a provider yet."""
 
     _events: list[hsm.Event[typing.Any]]
@@ -261,15 +261,10 @@ class PhoneEventRecorder:
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         del ctx
-        # Ignore local speaker uplink offers only (exact AudioOutputData; ServiceAudioData records).
-        if type(event.data) is audio.AudioOutputData:
+        # Ignore local speaker uplink offers only (exact OutputData; ServiceAudioData records).
+        if type(event.data) is audio.OutputData:
             return
         self._events.append(event)
-
-
-def _require_positive_timeout(name: str, value: datetime.timedelta) -> None:
-    if value <= datetime.timedelta():
-        raise ValueError(f"{name} must be a positive duration.")
 
 
 def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
@@ -299,7 +294,7 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     if isinstance(data, RingingData):
         return dataclasses.replace(
             SoundEvent.with_data(
-                PhoneSoundData(
+                SoundData(
                     audio=RING_SOUND_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,
@@ -330,7 +325,7 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
         busy = data.failure_kind == "call_declined"
         return dataclasses.replace(
             SoundEvent.with_data(
-                PhoneSoundData(
+                SoundData(
                     audio=BUSY_TONE_WAV if busy else REORDER_TONE_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,
@@ -345,10 +340,10 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     return None
 
 
-class PhoneFirmware(hsm.Instance):
+class Firmware(hsm.Instance):
     """Phone-owned firmware state for a single active call."""
 
-    _service: PhoneService
+    _service: Service
     # Firmware owns transducer routing: the speaker transmits service audio into the environment
     # (receiver), the microphone carries local speech to the service (mouthpiece), the display
     # shows who the call is with. The service knows about none of them.
@@ -365,7 +360,7 @@ class PhoneFirmware(hsm.Instance):
     def __init__(
         self,
         *,
-        service: PhoneService | None = None,
+        service: Service | None = None,
         speaker: audio.Speaker | None = None,
         microphone: audio.Microphone | None = None,
         display: Display | None = None,
@@ -373,9 +368,11 @@ class PhoneFirmware(hsm.Instance):
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
         super().__init__()
-        _require_positive_timeout("answer_timeout", answer_timeout)
-        _require_positive_timeout("transfer_timeout", transfer_timeout)
-        self._service = service if service is not None else PhoneEventRecorder()
+        if answer_timeout <= datetime.timedelta():
+            raise ValueError("answer_timeout must be a positive duration.")
+        if transfer_timeout <= datetime.timedelta():
+            raise ValueError("transfer_timeout must be a positive duration.")
+        self._service = service if service is not None else EventRecorder()
         self._speaker = speaker if speaker is not None else audio.Speaker()
         self._microphone = microphone if microphone is not None else audio.Microphone()
         self._display = display if display is not None else Display()
@@ -386,17 +383,17 @@ class PhoneFirmware(hsm.Instance):
         self._current_transfer_id = None
         self._current_transfer_target = None
 
-    def event_recorder(self) -> PhoneEventRecorder:
+    def event_recorder(self) -> EventRecorder:
         service = self._service
         if isinstance(service, _PhoneObservationService):
             service = service.service
-        assert isinstance(service, PhoneEventRecorder)
+        assert isinstance(service, EventRecorder)
         return service
 
     @staticmethod
     def _publish(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         trigger: hsm.Event,
         event: hsm.Event[typing.Any],
     ) -> None:
@@ -413,7 +410,7 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _queue_committed(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         trigger: hsm.Event,
         event: hsm.Event[typing.Any],
     ) -> None:
@@ -430,7 +427,7 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _dispatch_to_peripheral(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         peripheral: hsm.Instance,
         event: hsm.Event[typing.Any],
         trigger: hsm.Event,
@@ -457,13 +454,13 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _is_new_incoming_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _is_new_incoming_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, IncomingCallData) and data.call_id not in instance._closed_call_ids
 
     @staticmethod
-    def _is_live_dial_observation(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _is_live_dial_observation(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         """A service observation about the dial attempt in progress.
 
         A dialing handset has no call id to match on — the exchange has not assigned one yet, and
@@ -476,31 +473,31 @@ class PhoneFirmware(hsm.Instance):
         return isinstance(data, CallIdData) and data.call_id not in instance._closed_call_ids
 
     @staticmethod
-    def _matches_current_call_connected(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_call_connected(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, CallConnectedData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_call_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_call_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, CallFailedData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_incoming_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_incoming_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, IncomingCallData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_media_ready(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_media_ready(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, MediaReadyData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_service_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_service_audio(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         # Own phase data only (payload type + current call). Media readiness is the
         # topology itself — this guard only runs in media_ready / transferring — so
         # speaker/service liveness is never probed here (HSM-CONTEXT-001). Delivery to
@@ -511,13 +508,13 @@ class PhoneFirmware(hsm.Instance):
         return isinstance(data, ServiceAudioData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return isinstance(data, RemoteHangUpData) and instance._current_call_id == data.call_id
 
     @staticmethod
-    def _matches_current_transfer_accepted(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_transfer_accepted(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return (
@@ -528,7 +525,7 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _matches_current_transfer_completed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_transfer_completed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return (
@@ -539,7 +536,7 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _matches_current_transfer_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+    def _matches_current_transfer_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
         del ctx
         data = event.data
         return (
@@ -552,7 +549,7 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _answer_operation_timeout(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         event: hsm.Event,
     ) -> datetime.timedelta:
         del ctx, event
@@ -561,14 +558,14 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _transfer_operation_timeout(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         event: hsm.Event,
     ) -> datetime.timedelta:
         del ctx, event
         return instance._transfer_timeout
 
     @staticmethod
-    def _current_call(instance: "PhoneFirmware") -> str:
+    def _current_call(instance: "Firmware") -> str:
         """The call firmware is on. Only reachable from states that have one."""
 
         call_id = instance._current_call_id
@@ -576,50 +573,50 @@ class PhoneFirmware(hsm.Instance):
         return call_id
 
     @staticmethod
-    def _publish_answer_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_answer_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         # The command names no call; firmware stamps the line it is answering for the exchange.
-        PhoneFirmware._publish(
+        Firmware._publish(
             ctx,
             instance,
             event,
-            ServiceAnswerRequestedEvent.with_data(AnswerRequestData(call_id=PhoneFirmware._current_call(instance))),
+            ServiceAnswerRequestedEvent.with_data(AnswerRequestData(call_id=Firmware._current_call(instance))),
         )
 
     @staticmethod
-    def _publish_dial_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_dial_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, DialData)
-        PhoneFirmware._publish(ctx, instance, event, ServiceDialRequestedEvent.with_data(data))
+        Firmware._publish(ctx, instance, event, ServiceDialRequestedEvent.with_data(data))
 
     @staticmethod
-    def _publish_decline_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(
+    def _publish_decline_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._publish(
             ctx,
             instance,
             event,
-            ServiceDeclineRequestedEvent.with_data(DeclineRequestData(call_id=PhoneFirmware._current_call(instance))),
+            ServiceDeclineRequestedEvent.with_data(DeclineRequestData(call_id=Firmware._current_call(instance))),
         )
 
     @staticmethod
-    def _publish_hang_up_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(
+    def _publish_hang_up_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._publish(
             ctx,
             instance,
             event,
-            ServiceHangUpRequestedEvent.with_data(HangUpRequestData(call_id=PhoneFirmware._current_call(instance))),
+            ServiceHangUpRequestedEvent.with_data(HangUpRequestData(call_id=Firmware._current_call(instance))),
         )
 
     @staticmethod
-    def _publish_transfer_requested(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transfer_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferCallData)
-        PhoneFirmware._publish(
+        Firmware._publish(
             ctx,
             instance,
             event,
             ServiceTransferRequestedEvent.with_data(
                 TransferRequestData(
-                    call_id=PhoneFirmware._current_call(instance),
+                    call_id=Firmware._current_call(instance),
                     transfer_id=data.transfer_id,
                     target=data.target,
                 )
@@ -627,10 +624,10 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_ringing(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_ringing(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, IncomingCallData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
@@ -638,29 +635,29 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_answered(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallIdData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _AnsweredCommittedEvent.with_data(PhoneCallData(call_id=data.call_id)),
+            _AnsweredCommittedEvent.with_data(CallData(call_id=data.call_id)),
         )
 
     @staticmethod
-    def _publish_media_ready(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_media_ready(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallIdData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _MediaReadyCommittedEvent.with_data(PhoneCallData(call_id=data.call_id)),
+            _MediaReadyCommittedEvent.with_data(CallData(call_id=data.call_id)),
         )
 
     @staticmethod
-    def _send_microphone_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _send_microphone_audio(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         """Mouthpiece: carry locally captured audio up the wire.
 
         Only reachable from the answered/media_ready state, so the microphone is live exactly
@@ -669,21 +666,21 @@ class PhoneFirmware(hsm.Instance):
         """
 
         data = event.data
-        assert isinstance(data, audio.AudioInputData)
-        uplink = audio.AudioOutputData(
+        assert isinstance(data, audio.InputData)
+        uplink = audio.OutputData(
             audio=data.audio,
             media_type=data.media_type,
             sample_rate_hz=data.sample_rate_hz,
             channels=data.channels,
         )
-        PhoneFirmware._publish(ctx, instance, event, audio.OutputEvent.with_data(uplink))
+        Firmware._publish(ctx, instance, event, audio.OutputEvent.with_data(uplink))
 
     @staticmethod
-    def _receive_service_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _receive_service_audio(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         """Receiver: transmit far-end audio out of the phone speaker into the environment.
 
         ``data`` is passed through as the ``ServiceAudioData`` it already is. Flattening it to
-        ``AudioOutputData`` used to erase where it came from, which is how receiver audio ended
+        ``OutputData`` used to erase where it came from, which is how receiver audio ended
         up back on the wire.
 
         No call *here* reaches the service — but the loop this closes does. Far-end audio put
@@ -695,52 +692,48 @@ class PhoneFirmware(hsm.Instance):
 
         data = event.data
         assert isinstance(data, ServiceAudioData)
-        PhoneFirmware._dispatch_to_peripheral(
-            ctx, instance, instance._speaker, audio.OutputEvent.with_data(data), event
+        Firmware._dispatch_to_peripheral(ctx, instance, instance._speaker, audio.OutputEvent.with_data(data), event)
+
+    @staticmethod
+    def _publish_declined(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._queue_committed(
+            ctx,
+            instance,
+            event,
+            _HungUpCommittedEvent.with_data(HungUpData(call_id=Firmware._current_call(instance), outcome="declined")),
         )
 
     @staticmethod
-    def _publish_declined(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._queue_committed(
+    def _publish_local_hang_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
             _HungUpCommittedEvent.with_data(
-                PhoneHungUpData(call_id=PhoneFirmware._current_call(instance), outcome="declined")
+                HungUpData(call_id=Firmware._current_call(instance), outcome="local_hang_up")
             ),
         )
 
     @staticmethod
-    def _publish_local_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._queue_committed(
-            ctx,
-            instance,
-            event,
-            _HungUpCommittedEvent.with_data(
-                PhoneHungUpData(call_id=PhoneFirmware._current_call(instance), outcome="local_hang_up")
-            ),
-        )
+    def _publish_nothing_to_answer(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="nothing_to_answer")))
 
     @staticmethod
-    def _publish_nothing_to_answer(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="nothing_to_answer")))
+    def _publish_dial_not_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_not_answered")))
 
     @staticmethod
-    def _publish_dial_not_answered(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_not_answered")))
+    def _publish_dial_abandoned(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_abandoned")))
 
     @staticmethod
-    def _publish_dial_abandoned(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
-        PhoneFirmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_abandoned")))
-
-    @staticmethod
-    def _publish_dial_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_dial_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         # The service's verdict travels with the fact it explains. Firmware does not get to
         # decide why a dial failed and cannot reconstruct it later, so dropping it here is what
         # left the phone unable to say whether the line refused or the network gave up.
         data = event.data
         assert isinstance(data, DialFailedData)
-        PhoneFirmware._publish(
+        Firmware._publish(
             ctx,
             instance,
             event,
@@ -748,60 +741,60 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_remote_hang_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallIdData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=data.call_id, outcome="remote_hang_up")),
+            _HungUpCommittedEvent.with_data(HungUpData(call_id=data.call_id, outcome="remote_hang_up")),
         )
 
     @staticmethod
-    def _publish_failed_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_failed_hang_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallIdData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=data.call_id, outcome="failed")),
+            _HungUpCommittedEvent.with_data(HungUpData(call_id=data.call_id, outcome="failed")),
         )
 
     @staticmethod
-    def _publish_answer_timeout(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_answer_timeout(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         call_id = instance._current_call_id
         assert call_id is not None
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=call_id, outcome="failed")),
+            _HungUpCommittedEvent.with_data(HungUpData(call_id=call_id, outcome="failed")),
         )
 
     @staticmethod
-    def _publish_transferred_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transferred_hang_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallIdData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
-            _HungUpCommittedEvent.with_data(PhoneHungUpData(call_id=data.call_id, outcome="transferred")),
+            _HungUpCommittedEvent.with_data(HungUpData(call_id=data.call_id, outcome="transferred")),
         )
 
     @staticmethod
-    def _publish_transfer_started(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transfer_started(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferCallData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
             _TransferStartedCommittedEvent.with_data(
-                PhoneTransferData(
-                    call_id=PhoneFirmware._current_call(instance),
+                TransferData(
+                    call_id=Firmware._current_call(instance),
                     transfer_id=data.transfer_id,
                     target=data.target,
                 )
@@ -809,28 +802,28 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_transfer_completed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transfer_completed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferCompletedData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
             _TransferCompletedCommittedEvent.with_data(
-                PhoneTransferData(call_id=data.call_id, transfer_id=data.transfer_id, target=data.target)
+                TransferData(call_id=data.call_id, transfer_id=data.transfer_id, target=data.target)
             ),
         )
 
     @staticmethod
-    def _publish_transfer_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transfer_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferFailedData)
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
             _TransferFailedCommittedEvent.with_data(
-                PhoneTransferFailedData(
+                CallTransferFailedData(
                     call_id=data.call_id,
                     transfer_id=data.transfer_id,
                     target=data.target,
@@ -840,19 +833,19 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_transfer_timeout(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_transfer_timeout(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         call_id = instance._current_call_id
         transfer_id = instance._current_transfer_id
         target = instance._current_transfer_target
         assert call_id is not None
         assert transfer_id is not None
         assert target is not None
-        PhoneFirmware._queue_committed(
+        Firmware._queue_committed(
             ctx,
             instance,
             event,
             _TransferFailedCommittedEvent.with_data(
-                PhoneTransferFailedData(
+                CallTransferFailedData(
                     call_id=call_id,
                     transfer_id=transfer_id,
                     target=target,
@@ -862,49 +855,49 @@ class PhoneFirmware(hsm.Instance):
         )
 
     @staticmethod
-    def _publish_committed_ringing(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_ringing(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, RingingData)
-        PhoneFirmware._publish(ctx, instance, event, RingingEvent.with_data(data))
+        Firmware._publish(ctx, instance, event, RingingEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_answered(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneCallData)
-        PhoneFirmware._publish(ctx, instance, event, AnsweredEvent.with_data(data))
+        assert isinstance(data, CallData)
+        Firmware._publish(ctx, instance, event, AnsweredEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_media_ready(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_media_ready(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneCallData)
-        PhoneFirmware._publish(ctx, instance, event, MediaReadyEvent.with_data(data))
+        assert isinstance(data, CallData)
+        Firmware._publish(ctx, instance, event, MediaReadyEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_hung_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_hung_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneHungUpData)
-        PhoneFirmware._publish(ctx, instance, event, HungUpEvent.with_data(data))
+        assert isinstance(data, HungUpData)
+        Firmware._publish(ctx, instance, event, HungUpEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_transfer_started(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_transfer_started(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneTransferData)
-        PhoneFirmware._publish(ctx, instance, event, TransferStartedEvent.with_data(data))
+        assert isinstance(data, TransferData)
+        Firmware._publish(ctx, instance, event, TransferStartedEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_transfer_completed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_transfer_completed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneTransferData)
-        PhoneFirmware._publish(ctx, instance, event, CallTransferCompletedEvent.with_data(data))
+        assert isinstance(data, TransferData)
+        Firmware._publish(ctx, instance, event, CallTransferCompletedEvent.with_data(data))
 
     @staticmethod
-    def _publish_committed_transfer_failed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _publish_committed_transfer_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
-        assert isinstance(data, PhoneTransferFailedData)
-        PhoneFirmware._publish(ctx, instance, event, CallTransferFailedEvent.with_data(data))
+        assert isinstance(data, CallTransferFailedData)
+        Firmware._publish(ctx, instance, event, CallTransferFailedEvent.with_data(data))
 
     @staticmethod
-    def _set_current_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _set_current_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx
         data = event.data
         assert isinstance(data, CallIdData)
@@ -913,7 +906,7 @@ class PhoneFirmware(hsm.Instance):
     @staticmethod
     def _drive_display(
         ctx: hsm.Context,
-        instance: "PhoneFirmware",
+        instance: "Firmware",
         trigger: hsm.Event,
         caller_id: Caller | None,
     ) -> None:
@@ -923,7 +916,7 @@ class PhoneFirmware(hsm.Instance):
         event rather than reaching into the display's attribute directly. The production path
         (``Phone``) starts every peripheral before firmware exists, so a live display is the
         supported contract. Firmware built and driven standalone with no started display — e.g.
-        constructing ``PhoneFirmware()`` directly, outside a ``Phone`` — has nowhere to put a
+        constructing ``Firmware()`` directly, outside a ``Phone`` — has nowhere to put a
         caller id; this makes that visible instead of dispatching to a peripheral that can never
         receive it.
         """
@@ -931,12 +924,12 @@ class PhoneFirmware(hsm.Instance):
         if not lifecycle.is_started(instance._display):
             _LOG.warning("phone firmware display is not started; caller id drive dropped")
             return
-        PhoneFirmware._dispatch_to_peripheral(
+        Firmware._dispatch_to_peripheral(
             ctx, instance, instance._display, CallerIdEvent.with_data(CallerIdData(caller_id=caller_id)), trigger
         )
 
     @staticmethod
-    def _show_caller_id(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _show_caller_id(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         """Put a caller ID on the display: the caller on a ring, the provider-stamped party on a connect.
 
         Set from what the payload itself declares — never looked up anywhere. A connect that names
@@ -952,16 +945,16 @@ class PhoneFirmware(hsm.Instance):
             caller = data.party
         else:
             return
-        PhoneFirmware._drive_display(ctx, instance, event, caller)
+        Firmware._drive_display(ctx, instance, event, caller)
 
     @staticmethod
-    def _clear_caller_id(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _clear_caller_id(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         """A hung-up phone shows nobody on the line; entering hung_up clears the display, including at start."""
 
-        PhoneFirmware._drive_display(ctx, instance, event, None)
+        Firmware._drive_display(ctx, instance, event, None)
 
     @staticmethod
-    def _set_current_transfer_target(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _set_current_transfer_target(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx
         data = event.data
         assert isinstance(data, TransferCallData)
@@ -969,25 +962,25 @@ class PhoneFirmware(hsm.Instance):
         instance._current_transfer_target = data.target
 
     @staticmethod
-    def _clear_current_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _clear_current_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx, event
         instance._current_call_id = None
 
     @staticmethod
-    def _clear_current_transfer_target(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _clear_current_transfer_target(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx, event
         instance._current_transfer_id = None
         instance._current_transfer_target = None
 
     @staticmethod
-    def _remember_closed_call(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _remember_closed_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx
         data = event.data
         assert isinstance(data, CallIdData)
         instance._closed_call_ids = frozenset((*instance._closed_call_ids, data.call_id))
 
     @staticmethod
-    def _remember_current_call_closed(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> None:
+    def _remember_current_call_closed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx, event
         call_id = instance._current_call_id
         assert call_id is not None
@@ -1321,9 +1314,9 @@ class Phone(bot.device.Device):
     _microphone: audio.Microphone
     _speaker: audio.Speaker
     _display: Display
-    _service: PhoneService
-    _firmware_instance: PhoneFirmware
-    firmware_model: typing.ClassVar[hsm.Model] = PhoneFirmware.model
+    _service: Service
+    _firmware_instance: Firmware
+    firmware_model: typing.ClassVar[hsm.Model] = Firmware.model
 
     def __init__(
         self,
@@ -1333,7 +1326,7 @@ class Phone(bot.device.Device):
         display: Display | None = None,
         peripherals: collections.abc.Iterable[bot.device.Device] = (),
         placement: space.Placement | None = None,
-        service: PhoneService | None = None,
+        service: Service | None = None,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
@@ -1353,11 +1346,11 @@ class Phone(bot.device.Device):
         self._display = resolved_display
         observation_service = _PhoneObservationService(
             owner=self,
-            service=service if service is not None else PhoneEventRecorder(),
+            service=service if service is not None else EventRecorder(),
             elevate=self._observe,
         )
         self._service = observation_service
-        self._firmware_instance = PhoneFirmware(
+        self._firmware_instance = Firmware(
             service=observation_service,
             speaker=resolved_speaker,
             microphone=resolved_microphone,
@@ -1387,7 +1380,7 @@ class Phone(bot.device.Device):
 
         Committed public payloads only — not service-request payloads (MediaReadyData / DialData
         and friends), which must not re-enter the phone shell as environment sound. Committed
-        media-ready is PhoneCallData (MediaReadyEvent); MediaReadyData is service-side only.
+        media-ready is CallData (MediaReadyEvent); MediaReadyData is service-side only.
 
         Two paths, because a handset genuinely has two. What it makes a *noise* about goes into
         the environment, where anyone standing nearby hears it — a ring, a busy tone, reorder.
@@ -1407,7 +1400,7 @@ class Phone(bot.device.Device):
 
         if not isinstance(
             event.data,
-            RingingData | PhoneCallData | PhoneHungUpData | PhoneTransferData | PhoneTransferFailedData | NoCallData,
+            RingingData | CallData | HungUpData | TransferData | CallTransferFailedData | NoCallData,
         ):
             return
         stimulus = _environment_observation_event(self, event)

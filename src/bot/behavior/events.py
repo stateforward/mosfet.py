@@ -13,10 +13,6 @@ import hsm
 from bot import event
 import pydantic
 
-CREATE_EVENT_NAME = "bot.behavior.create"
-CHANGE_EVENT_NAME = "bot.behavior.change"
-BREAK_EVENT_NAME = "bot.behavior.break"
-
 
 class CreateData(pydantic.BaseModel):
     """Payload for ``bot.behavior.create``: install a new executable behavior."""
@@ -32,7 +28,7 @@ class CreateData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": CREATE_EVENT_NAME,
+                    "event": "bot.behavior.create",
                     "name": "GreetOnKnock",
                     "triggers": ["environment.sound"],
                     "description": "Say hello when a knock sound arrives.",
@@ -99,7 +95,7 @@ class ChangeData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": CHANGE_EVENT_NAME,
+                    "event": "bot.behavior.change",
                     "name": "GreetOnKnock",
                     "reason": "Also clear focus before greeting.",
                 }
@@ -163,7 +159,7 @@ class BreakData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": BREAK_EVENT_NAME,
+                    "event": "bot.behavior.break",
                     "name": "GreetOnKnock",
                     "reason": "Greeted while the bot was already mid-conversation.",
                 }
@@ -187,31 +183,26 @@ class BreakData(pydantic.BaseModel):
     )
 
 
-Data: typing.TypeAlias = typing.Annotated[
-    CreateData | ChangeData | BreakData,
-    pydantic.Field(discriminator="event"),
-]
-
 CreateEvent = hsm.Event[CreateData](
-    name=CREATE_EVENT_NAME,
+    name="bot.behavior.create",
     kind=event.EventKind,
     schema=CreateData,
 )
 ChangeEvent = hsm.Event[ChangeData](
-    name=CHANGE_EVENT_NAME,
+    name="bot.behavior.change",
     kind=event.EventKind,
     schema=ChangeData,
 )
 BreakEvent = hsm.Event[BreakData](
-    name=BREAK_EVENT_NAME,
+    name="bot.behavior.break",
     kind=event.EventKind,
     schema=BreakData,
 )
 
-Event: typing.TypeAlias = hsm.Event[CreateData] | hsm.Event[ChangeData] | hsm.Event[BreakData]
 
-
-def event_for_data(data: CreateData | ChangeData | BreakData) -> Event:
+def event_for_data(
+    data: CreateData | ChangeData | BreakData,
+) -> hsm.Event[CreateData] | hsm.Event[ChangeData] | hsm.Event[BreakData]:
     """Build the HSM event for a behavior create/change/break payload."""
 
     if isinstance(data, CreateData):
@@ -240,17 +231,12 @@ def is_inventory_event(event: hsm.Event[typing.Any]) -> bool:
 
 
 __all__ = [
-    "BREAK_EVENT_NAME",
     "BreakData",
     "BreakEvent",
-    "CHANGE_EVENT_NAME",
-    "CREATE_EVENT_NAME",
     "ChangeData",
     "ChangeEvent",
     "CreateData",
     "CreateEvent",
-    "Data",
-    "Event",
     "data_from_event",
     "event_for_data",
     "is_inventory_event",

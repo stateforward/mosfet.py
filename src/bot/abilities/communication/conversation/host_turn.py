@@ -83,7 +83,7 @@ def _cognition_input_for_participated(
         target_device=_target_device_ref(participated),
     )
     return abilities.cognition.InputData(
-        stimulus=typing.cast(bot.BotInputData, shaped.input),
+        stimulus=typing.cast(bot.InputData, shaped.input),
         abilities=(cognition,),
         focus=None,
     )

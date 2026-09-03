@@ -63,7 +63,7 @@ crossing the room.
 ## Number = identity
 
 On this SFU fiction the LiveKit **participant identity is the phone number** —
-the same normalized digit form `phone.PhoneNumber` / `DialData` produce (written
+the same normalized digit form `phone.Number` / `DialData` produce (written
 separators stripped: `555-0142` → `5550142`). Mint tokens with that identity;
 `dial()` addresses setup at `request.number` by default.
 
