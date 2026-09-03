@@ -79,6 +79,7 @@ def test_define_without_otlp_does_not_publish(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
     calls: list[object] = []
 
     def _fail_post(payload: object, url: str) -> None:
@@ -90,6 +91,7 @@ def test_define_without_otlp_does_not_publish(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_define_with_endpoint_publishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "1")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
     calls: list[tuple[object, str]] = []
 
@@ -109,7 +111,21 @@ def test_define_with_endpoint_publishes(monkeypatch: pytest.MonkeyPatch) -> None
     )
 
 
+def test_define_with_endpoint_but_without_opt_in_does_not_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    calls: list[tuple[object, str]] = []
+
+    def _record(payload: object, url: str) -> None:
+        calls.append((payload, url))
+
+    monkeypatch.setattr(_DEFINE, "post_model", _record)
+    _ = _demo()
+    assert calls == []
+
+
 def test_define_publish_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "1")
     monkeypatch.setenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     def _boom(payload: object, url: str) -> None:
