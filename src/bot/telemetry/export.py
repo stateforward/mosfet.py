@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections.abc
 import json
+import logging
 import os
 import pathlib
 import stat
@@ -17,6 +18,8 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o755
+
+_LOG = logging.getLogger(__name__)
 
 
 def _severity(record: ReadableLogRecord) -> str | int | None:
@@ -167,7 +170,7 @@ class _JsonlAppendFile:
     def _open_append(self) -> typing.TextIO:
         root_fd = self._root_fd
         if root_fd is None:
-            message = "exporterl exporter already shut down"
+            message = "exporter already shut down"
             raise OSError(message)
         parent_fd = _walk_from_root(root_fd, self._parts, create=True)
         try:
@@ -234,7 +237,13 @@ class JsonlFileLogRecordExporter(LogRecordExporter):
                     "severity": _severity(record),
                 }
             )
-        self._file.write(payloads)
+        try:
+            self._file.write(payloads)
+        except Exception as error:
+            # The SDK batch processor swallows exporter errors on its worker
+            # thread; without this line a full disk reads as a working bot.
+            _LOG.error("otel log export failed records=%d error=%s", len(payloads), type(error).__name__)
+            raise
         return LogRecordExportResult.SUCCESS
 
     @typing.override
@@ -287,7 +296,13 @@ class JsonlFileSpanExporter(SpanExporter):
 
     @typing.override
     def export(self, spans: collections.abc.Sequence[ReadableSpan]) -> SpanExportResult:
-        self._file.write([_span_payload(span) for span in spans])
+        try:
+            self._file.write([_span_payload(span) for span in spans])
+        except Exception as error:
+            # Same hazard as the log exporter: the batch span processor
+            # swallows this on its worker thread, so say it here or lose it.
+            _LOG.error("otel span export failed spans=%d error=%s", len(spans), type(error).__name__)
+            raise
         return SpanExportResult.SUCCESS
 
     @typing.override
@@ -296,4 +311,3 @@ class JsonlFileSpanExporter(SpanExporter):
 
 
 __all__ = ["JsonlFileLogRecordExporter", "JsonlFileSpanExporter"]
-

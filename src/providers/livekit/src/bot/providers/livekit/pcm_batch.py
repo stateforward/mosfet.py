@@ -20,12 +20,26 @@ import typing
 import collections.abc
 import dataclasses
 
+from opentelemetry import metrics
+
 from bot.telemetry import span
 
 
 _LOG = logging.getLogger(__name__)
 _SCOPE = "bot.providers.livekit"
 _COMPONENT = "livekit.pcm_batch"
+
+_METER = metrics.get_meter(_SCOPE)
+_DROPS = _METER.create_counter(
+    "bot.provider.livekit.pcm_batch.dropped.count",
+    unit="{chunk}",
+    description="Count of remote PCM chunks dropped by the LiveKit batcher before assembly.",
+)
+_IDLE_FLUSH_FAILURES = _METER.create_counter(
+    "bot.provider.livekit.pcm_batch.idle_flush.failure.count",
+    unit="{failure}",
+    description="Count of LiveKit batcher idle flushes whose emit failed.",
+)
 
 
 def pcm_duration_ms(pcm: bytes, *, sample_rate_hz: int, channels: int) -> float:
@@ -82,38 +96,72 @@ class RemotePcmBatcher:
                 )
             await self.emit(chunk)
 
+    def _note_drop(self, data: audio.AudioInputData, *, reason: str) -> None:
+        """Record one chunk dropped before assembly as metric + span (never silent).
+
+        A drop is data the detector never hears, so the counter answers "how
+        much" and the span answers "why". ``reason`` is a closed vocabulary;
+        byte counts ride the span as numbers, never as attribute values.
+        """
+
+        try:
+            _DROPS.add(1, attributes={"bot.component.name": _COMPONENT, "bot.pcm_batch.drop_reason": reason})
+        except Exception:
+            pass
+        with span.operation(
+            "bot.provider.livekit.pcm_batch.drop",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="push",
+            attributes={"bot.pcm_batch.drop_reason": reason},
+        ) as active:
+            active.set_attribute("bot.audio.bytes", len(data.audio))
+
     async def push(self, data: audio.AudioInputData) -> None:
-        if self._closed or not data.audio:
+        if not data.audio:
+            return
+        if self._closed:
+            # Closed with data is loss, not a no-op: the producer outlived the
+            # batcher and these bytes go nowhere. Count them where an operator
+            # can see them instead of returning silently.
+            self._note_drop(data, reason="closed")
             return
         to_emit: list[tuple[audio.AudioInputData, str]] = []
         async with self._lock:
             if self._closed:
-                return
-            format_changed = self._sample_rate_hz is not None and (
-                data.sample_rate_hz != self._sample_rate_hz
-                or data.channels != self._channels
-                or data.media_type != self._media_type
-            )
-            if format_changed and self._buffer:
-                to_emit.append((self._snapshot_unlocked(), "format_changed"))
-                self._clear_unlocked()
-            self._sample_rate_hz = data.sample_rate_hz
-            self._channels = data.channels
-            self._media_type = data.media_type
-            self._buffer.extend(data.audio)
-            duration_ms = pcm_duration_ms(
-                bytes(self._buffer),
-                # Same invariant `_snapshot_unlocked` asserts: pushed frames always carry
-                # a concrete format, so the optional fields are populated here.
-                sample_rate_hz=typing.cast(int, data.sample_rate_hz),
-                channels=typing.cast(int, data.channels),
-            )
-            if duration_ms >= self.max_utterance_ms:
-                to_emit.append((self._snapshot_unlocked(), "max_utterance"))
-                self._clear_unlocked()
-                self._cancel_idle_unlocked()
+                dropped = True
             else:
-                self._reschedule_idle_unlocked()
+                dropped = False
+                format_changed = self._sample_rate_hz is not None and (
+                    data.sample_rate_hz != self._sample_rate_hz
+                    or data.channels != self._channels
+                    or data.media_type != self._media_type
+                )
+                if format_changed and self._buffer:
+                    to_emit.append((self._snapshot_unlocked(), "format_changed"))
+                    self._clear_unlocked()
+                self._sample_rate_hz = data.sample_rate_hz
+                self._channels = data.channels
+                self._media_type = data.media_type
+                self._buffer.extend(data.audio)
+                duration_ms = pcm_duration_ms(
+                    bytes(self._buffer),
+                    # Same invariant `_snapshot_unlocked` asserts: pushed frames always carry
+                    # a concrete format, so the optional fields are populated here.
+                    sample_rate_hz=typing.cast(int, data.sample_rate_hz),
+                    channels=typing.cast(int, data.channels),
+                )
+                if duration_ms >= self.max_utterance_ms:
+                    to_emit.append((self._snapshot_unlocked(), "max_utterance"))
+                    self._clear_unlocked()
+                    self._cancel_idle_unlocked()
+                else:
+                    self._reschedule_idle_unlocked()
+        if dropped:
+            # Lost the race with aclose after the pre-check: same loss, same
+            # record, kept outside the lock so telemetry stays off it.
+            self._note_drop(data, reason="closed")
+            return
         for chunk, reason in to_emit:
             await self._emit_traced(chunk, reason)
 
@@ -164,10 +212,29 @@ class RemotePcmBatcher:
             def _surface_failure(done: asyncio.Future[None]) -> None:
                 # Same hazard as the uplink publish: nothing awaits this flush, so a failing
                 # emit would lose the buffered audio and leave only an unretrieved-task warning.
-                # This batcher has no machine to report to, so saying it once is the floor.
+                # This batcher has no machine to report to, so the normalized kind on a
+                # counter, a span, and one log line is the floor. The raw error text is
+                # never logged: it is unbounded-cardinality, the kind is not.
                 if done.cancelled() or done.exception() is None:
                     return
-                _LOG.error("livekit remote pcm idle flush failed reason=%s", done.exception())
+                error = done.exception()
+                assert error is not None
+                kind = span.failure_kind(error, "publish_failed")
+                try:
+                    _IDLE_FLUSH_FAILURES.add(
+                        1,
+                        attributes={"bot.component.name": _COMPONENT, "bot.failure.kind": kind},
+                    )
+                except Exception:
+                    pass
+                with span.operation(
+                    "bot.provider.livekit.pcm_batch.idle_flush",
+                    scope=_SCOPE,
+                    component=_COMPONENT,
+                    stage="flush",
+                ) as failed:
+                    span.record_failure(failed, kind)
+                _LOG.error("livekit remote pcm idle flush failed kind=%s", kind)
 
             flushed.add_done_callback(_surface_failure)
 
