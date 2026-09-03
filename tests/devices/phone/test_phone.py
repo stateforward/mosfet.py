@@ -522,13 +522,14 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert inside_events[0].source == phone_id
     assert inside_events[0].target == "inside"
     sound = inside_events[0].data
-    assert getattr(sound, "kind", None) == "phone.ringing"
-    assert getattr(sound, "media_type", None) == "audio/wav"
-    assert getattr(sound, "sample_rate_hz", None) == 16_000
-    assert getattr(sound, "channels", None) == 1
-    assert getattr(sound, "audio", b"").startswith(b"RIFF")
-    assert getattr(sound, "audio", b"") == phone_device.RING_SOUND_WAV
-    assert getattr(sound, "caller", "") == "Front desk"
+    assert isinstance(sound, phone_device.PhoneSoundData)
+    assert sound.kind == "phone.ringing"
+    assert sound.media_type == "audio/wav"
+    assert sound.sample_rate_hz == 16_000
+    assert sound.channels == 1
+    assert sound.audio.startswith(b"RIFF")
+    assert sound.audio == phone_device.RING_SOUND_WAV
+    assert sound.caller == "Front desk"
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 

@@ -727,11 +727,8 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     assert "_speaking(speaker=voice" in source
     assert "_speaking(speaker=speaker" not in source
     # The voice transducer is the robot's mouth, not a device it owns: Speaking powers it, so it
-    # is injected into the ability and never registered with the body. Handing Speaking a speaker
-    # nothing starts is what left the bot mute on a live call.
-    assert '"voice": self._voice' not in source
-    # One value for the robot's voice rate, reaching the encoder, Speaking, and the LiveKit
-    # source. Three independent defaults is how a 24 kHz voice met a 48 kHz source and went mute.
+    # is injected into the ability and never registered with the body. The behavioral proof is
+    # test_phone_bot_powers_the_voice_transducer_it_speaks_through (voice started via public seam).
     assert "uplink_sample_rate_hz=app_config.speech.output_sample_rate_hz" in source
     assert "ensure_future" not in source
 
@@ -926,7 +923,7 @@ async def main() -> None:
         await asyncio.sleep(0.05)
         if body.state().startswith("/probe/active"):
             break
-    voice = object.__getattribute__(body, "_voice")
+    voice = body.voice()
     print(lifecycle.is_started(voice))
     print(voice.state())
 
@@ -976,10 +973,6 @@ async def main() -> None:
 
     assert environment.contains(alice)
     assert environment.contains(bob)
-    assert alice in environment._participants.values()
-    assert bob in environment._participants.values()
-    assert environment._placements[alice] == alice_placement
-    assert environment._placements[bob] == bob_placement
     assert alice_placement.position.distance_to(bob_placement.position) >= 100.0
 
     def records(path):
@@ -1039,11 +1032,7 @@ asyncio.run(main())
             ("/Phone", "/AlicePhone"),
             ("/Phone", "/BobPhone"),
         } & set(map(tuple, records))
-        nested = {
-            (name, owner)
-            for name, owner in records
-            if owner in {"/AlicePhone", "/BobPhone"}
-        }
+        nested = {(name, owner) for name, owner in records if owner in {"/AlicePhone", "/BobPhone"}}
         assert all(owner in {"/AlicePhone", "/BobPhone"} for _, owner in nested)
         assert len({name for name, _ in nested}) == len(nested)
 

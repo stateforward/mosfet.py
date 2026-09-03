@@ -59,7 +59,7 @@ from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.environment import SoundEvent, Environment
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LESSON = "When the phone rings make sure you answer it"
 _EXPERIENCE_CALL_ID = "learning-say:first-caller"
 _PROOF_CALL_ID = "learning-say:second-caller"

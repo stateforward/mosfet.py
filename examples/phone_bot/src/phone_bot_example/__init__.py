@@ -1015,6 +1015,11 @@ class PhoneBot(Bot):
     def phone(self) -> phone_device.Phone:
         return self._phone
 
+    def voice(self) -> audio.Speaker:
+        """The robot's own voice transducer (mouth), powered by Speaking."""
+
+        return self._voice
+
     def conversation(self) -> ExampleConversation:
         return self._conversation
 

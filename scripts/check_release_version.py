@@ -21,47 +21,45 @@ class PackageSpec:
     version_path: str
 
 
+def _discover_provider_specs() -> tuple[PackageSpec, ...]:
+    """Derive provider package specs from the workspace layout (no hardcoded list)."""
+
+    specs: list[PackageSpec] = []
+    for pyproject_path in sorted(REPO_ROOT.glob("src/providers/*/pyproject.toml")):
+        metadata = tomllib.loads(pyproject_path.read_text())
+        project = metadata.get("project")
+        if not isinstance(project, dict):
+            continue
+        name = project.get("name")
+        if not isinstance(name, str) or not name.startswith("bot-provider-"):
+            continue
+        tool = metadata.get("tool")
+        version_path: object = None
+        if isinstance(tool, dict):
+            hatch = tool.get("hatch")
+            if isinstance(hatch, dict):
+                hatch_version = hatch.get("version")
+                if isinstance(hatch_version, dict):
+                    version_path = hatch_version.get("path")
+        if not isinstance(version_path, str):
+            continue
+        specs.append(
+            PackageSpec(
+                name=name,
+                pyproject_path=pyproject_path,
+                version_path=version_path,
+            )
+        )
+    return tuple(specs)
+
+
 PACKAGE_SPECS = (
     PackageSpec(
         name="stateforward.bot",
         pyproject_path=REPO_ROOT / "pyproject.toml",
         version_path="src/bot/__init__.py",
     ),
-    PackageSpec(
-        name="bot-provider-elevenlabs",
-        pyproject_path=REPO_ROOT / "src/providers/elevenlabs/pyproject.toml",
-        version_path="src/bot/providers/elevenlabs/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-livekit",
-        pyproject_path=REPO_ROOT / "src/providers/livekit/pyproject.toml",
-        version_path="src/bot/providers/livekit/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-mlx-audio",
-        pyproject_path=REPO_ROOT / "src/providers/mlx_audio/pyproject.toml",
-        version_path="src/bot/providers/mlx_audio/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-mlx-vlm",
-        pyproject_path=REPO_ROOT / "src/providers/mlx_vlm/pyproject.toml",
-        version_path="src/bot/providers/mlx_vlm/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-openai-compat",
-        pyproject_path=REPO_ROOT / "src/providers/openai_compat/pyproject.toml",
-        version_path="src/bot/providers/openai_compat/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-sqlite-memory",
-        pyproject_path=REPO_ROOT / "src/providers/sqlite_memory/pyproject.toml",
-        version_path="src/bot/providers/sqlite_memory/__init__.py",
-    ),
-    PackageSpec(
-        name="bot-provider-postgres-memory",
-        pyproject_path=REPO_ROOT / "src/providers/postgres_memory/pyproject.toml",
-        version_path="src/bot/providers/postgres_memory/__init__.py",
-    ),
+    *_discover_provider_specs(),
 )
 
 

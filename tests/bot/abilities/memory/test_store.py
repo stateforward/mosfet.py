@@ -107,3 +107,20 @@ def test_memory_store_ability_rolls_back_on_failure() -> None:
 def test_input_requires_at_least_one_statement() -> None:
     with pytest.raises(Exception):
         _ = memory.InputData(statements=())
+
+
+def test_memory_store_accepts_injected_engine() -> None:
+    """The ability runs on a caller-provided engine; the SQLite default stays in the factory."""
+
+    from bot.abilities.memory import store as store_module
+
+    engine = store_module.open_sqlite_engine()
+    injected = memory.MemoryStore(engine=engine)
+    output = injected.execute(
+        memory.InputData(statements=(_insert_content(content="injected-engine", query_tags="task"),))
+    )
+    assert len(output.results) == 1
+    selected = injected.execute(memory.InputData(statements=(_select_by_query_tags(query_tags="task"),)))
+    assert "injected-engine" in selected.contents()
+    with pytest.raises(ValueError, match="either engine or database/connection"):
+        _ = memory.MemoryStore(engine=engine, database="/tmp/memory-store-injected.db")
