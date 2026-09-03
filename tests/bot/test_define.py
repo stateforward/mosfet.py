@@ -47,9 +47,7 @@ def test_topology_includes_idle_run_and_go() -> None:
     assert states["/Demo/idle"]["parent"] == "/Demo"
     assert states["/Demo/run"]["parent"] == "/Demo"
     assert any(
-        transition["source"] == "/Demo/idle"
-        and transition["target"] == "/Demo/run"
-        and "go" in transition["events"]
+        transition["source"] == "/Demo/idle" and transition["target"] == "/Demo/run" and "go" in transition["events"]
         for transition in payload["transitions"]
     )
 
@@ -106,8 +104,7 @@ def test_define_with_endpoint_publishes(monkeypatch: pytest.MonkeyPatch) -> None
     assert url == "http://127.0.0.1:5173/v1/models"
     assert payload == published
     assert any(
-        transition["source"] == "/Demo/idle" and "go" in transition["events"]
-        for transition in published["transitions"]
+        transition["source"] == "/Demo/idle" and "go" in transition["events"] for transition in published["transitions"]
     )
 
 

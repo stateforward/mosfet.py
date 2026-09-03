@@ -168,4 +168,3 @@ def test_export_rejects_hardlinked_leaf(tmp_path: pathlib.Path) -> None:
     _force_flush()
     assert outside.read_text(encoding="utf-8") == "sentinel-hardlink\n"
     assert "must-not-follow-hardlink" not in outside.read_text(encoding="utf-8")
-

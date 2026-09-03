@@ -24,6 +24,14 @@ The run remains `status: incomplete` when cognition does not select a response. 
 (intuition) and `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or
 phone device. `--play` plays only the generated heard WAV in this slice.
 
+Run its tests from the repository root via the example project env (the root
+env does not install the example package, so the test module skips there
+with a reason instead of failing collection):
+
+```bash
+uv run --project examples/listen_speak_bot python -m pytest tests/examples/test_listen_speak_bot.py -q -m 'not live'
+```
+
 Listening and Speaking remain body composition ports, not direct cognition tools. Communication
 offers the semantic `communication.respond` action and owns the temporary route to Speaking.
 

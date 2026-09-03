@@ -6,7 +6,6 @@ from bot.devices import audio
 from bot.environment import Environment, SoundData, SoundEvent
 from bot.protocols import attachment
 from bot.providers import pyannote
-from listen_speak_bot_example import ListenSpeakBot
 
 import asyncio
 import collections.abc
@@ -18,11 +17,20 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import typing
 import wave
 from typing import ClassVar, Protocol, TypeVar, override
 
 import hsm
 import pytest
+
+if typing.TYPE_CHECKING:
+    from listen_speak_bot_example import ListenSpeakBot
+else:
+    ListenSpeakBot = pytest.importorskip(
+        "listen_speak_bot_example",
+        reason="listen_speak_bot example package not installed (run via the examples/listen_speak_bot project env)",
+    ).ListenSpeakBot
 
 
 class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
