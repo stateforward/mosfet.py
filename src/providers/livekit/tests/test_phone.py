@@ -1376,6 +1376,21 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
     asyncio.run(run())
 
 
+def _display_caller_id(attributes: collections.abc.Mapping[str, object]) -> object:
+    """Caller ID off a started display snapshot, whatever bring-up renamed its model.
+
+    A Display started standalone snapshots under ``/Device/caller_id``; the same display
+    powered as a phone peripheral is redefined ``DeviceDisplay`` (``Device.start``), so the
+    key is ``/DeviceDisplay/caller_id``. Match the leaf the way core
+    ``tests/devices/phone/test_phone.py`` does rather than pinning one bring-up's prefix.
+    """
+
+    for key, value in attributes.items():
+        if key == "caller_id" or str(key).endswith("/caller_id"):
+            return value
+    return "unset"
+
+
 def test_a_connected_call_names_who_is_on_the_line_on_the_display() -> None:
     """Both ends know who they are talking to, readable off their own display snapshots.
 
@@ -1385,7 +1400,7 @@ def test_a_connected_call_names_who_is_on_the_line_on_the_display() -> None:
     """
 
     def shown_caller(phone: phone_device.Phone) -> object:
-        return (phone_display(phone).take_snapshot().Attributes or {}).get("/Device/caller_id", "unset")
+        return _display_caller_id(phone_display(phone).take_snapshot().Attributes or {})
 
     async def run() -> None:
         sfu = FakeSfu()
@@ -1434,7 +1449,7 @@ def test_a_call_with_a_withheld_caller_shows_nobody() -> None:
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
 
         attributes = phone_display(phone).take_snapshot().Attributes or {}
-        assert attributes.get("/Device/caller_id", "unset") is None
+        assert _display_caller_id(attributes) is None
 
     asyncio.run(run())
 
