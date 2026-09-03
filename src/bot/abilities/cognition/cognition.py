@@ -7,7 +7,8 @@ import typing
 import uuid
 
 import hsm
-import bot
+from bot.define import define
+from bot.events import RebootEvent, RebootEventData
 
 from bot.protocols import attachment
 import pydantic
@@ -196,6 +197,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
     _attachment_group: attachment.Group
+    # Injected operation bounds (None = live module default, so tests may still tune
+    # the module constants around construction). Never hardcode per-caller durations.
+    _child_operation_timeout: datetime.timedelta | None
+    _cancel_teardown_timeout: datetime.timedelta | None
 
     @staticmethod
     def _matches_child_terminal(
@@ -282,13 +287,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> None:
         """Await one child hop through the settled one-shot. Timeout is the hop bound."""
 
+        child_timeout = instance._child_operation_timeout
         try:
             terminal = await ability.run_terminal_operation(
                 instance.context(),
                 child=child,
                 request=request,
                 terminals=(child.output_event, child.failed_event),
-                timeout=_CHILD_OPERATION_TIMEOUT,
+                timeout=child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT,
             )
         except TimeoutError:
             _ = hsm.dispatch(
@@ -1031,8 +1037,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
-        del ctx, instance, event
-        return _CANCEL_TEARDOWN_TIMEOUT
+        del ctx, event
+        cancel_timeout = instance._cancel_teardown_timeout
+        return cancel_timeout if cancel_timeout is not None else _CANCEL_TEARDOWN_TIMEOUT
 
     @staticmethod
     def _request_cancel_reboot(
@@ -1055,7 +1062,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         return (
-            isinstance(event.data, bot.RebootEventData)
+            isinstance(event.data, RebootEventData)
             and event.source == hsm.id(instance._reflection)
             and event.target == hsm.id(instance)
         )
@@ -1090,7 +1097,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         del ctx, instance, event
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = define(
         "Cognition",
         hsm.initial(hsm.target("/Cognition/initializing")),
         hsm.state(
@@ -1112,7 +1119,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_accept_ignore),
             ),
             hsm.transition(
-                hsm.on(bot.RebootEvent),
+                hsm.on(RebootEvent),
                 hsm.guard(_is_reflection_reboot),
                 hsm.effect(_forward_reflection_reboot),
                 hsm.target("/Cognition/rebooting"),
@@ -1149,7 +1156,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_accept_ignore),
             ),
             hsm.transition(
-                hsm.on(bot.RebootEvent),
+                hsm.on(RebootEvent),
                 hsm.guard(_is_reflection_reboot),
                 hsm.effect(_forward_reflection_reboot),
                 hsm.target("/Cognition/rebooting"),
@@ -1348,12 +1355,20 @@ class Cognition(ability.Ability[InputData, OutputData]):
         reasoning: reasoning.Reasoning,
         reflection: reflection.Reflection,
         autonomy: autonomy.Autonomy | None = None,
+        child_operation_timeout: datetime.timedelta | None = None,
+        cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
         super().__init__()
+        if child_operation_timeout is not None and child_operation_timeout <= datetime.timedelta():
+            raise ValueError("child_operation_timeout must be positive.")
+        if cancel_teardown_timeout is not None and cancel_teardown_timeout <= datetime.timedelta():
+            raise ValueError("cancel_teardown_timeout must be positive.")
         self._autonomy = autonomy
         self._intuition = intuition
         self._reasoning = reasoning
         self._reflection = reflection
+        self._child_operation_timeout = child_operation_timeout
+        self._cancel_teardown_timeout = cancel_teardown_timeout
         children: list[hsm.Instance] = []
         if autonomy is not None:
             children.append(autonomy)

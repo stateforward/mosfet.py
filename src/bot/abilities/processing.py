@@ -25,8 +25,10 @@ import typing
 import uuid
 import weakref
 
-import bot
 from bot import lifecycle
+from bot.define import define
+from bot.events import RebootEvent, RebootEventData, RebootReason
+from bot.start import started
 import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
@@ -816,10 +818,10 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
         _ = instance
 
     operation = Operation()
-    await bot.started(
+    await started(
         owner.context(),
         operation,
-        bot.define(
+        define(
             "ProcessingOperation",
             hsm.initial(hsm.target("active")),
             hsm.state(
@@ -989,7 +991,7 @@ def request_reboot(
     instance: ability.Ability[typing.Any, typing.Any],
     event: Event[typing.Any],
     *,
-    reason: "bot.RebootReason",
+    reason: RebootReason,
 ) -> None:
     """Ask this ability for a clean robot lifecycle restart.
 
@@ -1004,7 +1006,7 @@ def request_reboot(
         dataclasses.replace(
             ability.RebootRequestEvent.with_data(
                 dataclasses.replace(
-                    bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
+                    RebootEvent.with_data(RebootEventData(reason=reason)),
                     id=request_id,
                 )
             ),
@@ -1845,7 +1847,7 @@ class Processing(ability.Ability[InputData, CompletionData]):
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = define(
         "Processing",
         hsm.initial(hsm.target("/Processing/idle")),
         hsm.state(

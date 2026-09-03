@@ -196,15 +196,6 @@ class _PhoneObservationService:
         if self.target is target:
             self.target = None
 
-    def is_attached(self) -> bool:
-        """True when this service still holds its attach target.
-
-        Routing audio to peripherals is firmware work; the service only reports whether the
-        phone is attached, never which transducer a payload belongs to.
-        """
-
-        return self.target is not None
-
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         # Transport only: forward to the provider service. Direction is decided by which firmware
         # transition fired, never by sniffing the payload type here — a shared channel that infers
@@ -510,17 +501,14 @@ class PhoneFirmware(hsm.Instance):
 
     @staticmethod
     def _matches_current_service_audio(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
+        # Own phase data only (payload type + current call). Media readiness is the
+        # topology itself — this guard only runs in media_ready / transferring — so
+        # speaker/service liveness is never probed here (HSM-CONTEXT-001). Delivery to
+        # the speaker in _receive_service_audio is the gate: an unready transducer
+        # fails loudly there instead of being silently filtered here.
+        del ctx
         data = event.data
-        if not isinstance(data, ServiceAudioData) or instance._current_call_id != data.call_id:
-            return False
-        service = instance._service
-        if isinstance(service, _PhoneObservationService) and not service.is_attached():
-            return False
-        # Elevation stamps source=hsm.id(speaker) on environment.sound, so the speaker must be started
-        # in the same environment Instances map as ctx. Liveness and scope only — never state().
-        if not lifecycle.is_started(instance._speaker):
-            return False
-        return Environment.from_context(ctx).contains(instance._speaker)
+        return isinstance(data, ServiceAudioData) and instance._current_call_id == data.call_id
 
     @staticmethod
     def _matches_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneFirmware", event: hsm.Event) -> bool:
