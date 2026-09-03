@@ -61,10 +61,10 @@ class EventPatch(pydantic.BaseModel):
     )
 
 
-_AppliedEvent = hsm.Event[object](
+_AppliedEvent = hsm.Event[types.CompletionData](
     name="bot.ability.intuition.applied",
     kind=hsm.CompletionEventKind,
-    schema=pydantic.TypeAdapter(object),
+    schema=types.CompletionData,
 )
 _ApplyFailedEvent = hsm.Event[types.FailureData](
     name="bot.ability.intuition.apply.failed",

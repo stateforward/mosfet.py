@@ -330,37 +330,35 @@ def _peer_stream_id_is_valid(role: Role, stream_id: int) -> bool:
 
 
 def _session_role(instance: "Session") -> Role:
-    role = typing.cast(Role, object.__getattribute__(instance, "_role"))
-    assert role in ("client", "server")
-    return role
+    return Session.role_of(instance)
 
 
 def _session_initial_stream_window(instance: "Session") -> int:
-    return typing.cast(int, object.__getattribute__(instance, "_initial_stream_window"))
+    return Session.initial_window_of(instance)
 
 
 def _session_next_stream_id(instance: "Session") -> int:
-    return typing.cast(int, object.__getattribute__(instance, "_next_stream_id"))
+    return Session.next_stream_id_of(instance)
 
 
 def _session_accepts_new_streams(instance: "Session") -> bool:
-    return typing.cast(bool, object.__getattribute__(instance, "_accept_new_streams"))
+    return Session.accepts_new_streams_of(instance)
 
 
 def _session_outstanding_ping(instance: "Session") -> int | None:
-    return typing.cast(int | None, object.__getattribute__(instance, "_outstanding_ping"))
+    return Session.outstanding_ping_of(instance)
 
 
 def _session_ping_timeout_value(instance: "Session") -> datetime.timedelta:
-    return typing.cast(datetime.timedelta, object.__getattribute__(instance, "_ping_timeout"))
+    return Session.ping_timeout_of(instance)
 
 
 def _session_admissions(instance: "Session") -> dict[int, _StreamAdmission]:
-    return typing.cast(dict[int, _StreamAdmission], object.__getattribute__(instance, "_stream_admission"))
+    return Session.admissions_of(instance)
 
 
 def _session_admission(instance: "Session", stream_id: int) -> _StreamAdmission | None:
-    return _session_admissions(instance).get(stream_id)
+    return Session.admission_of(instance, stream_id)
 
 
 def _has_stream_id_capacity(ctx: hsm.Context, instance: "Session", event: hsm.Event[typing.Any]) -> bool:
@@ -748,6 +746,42 @@ class Session(hsm.Instance):
         self._closed_goaway_code = None
         self._outstanding_ping = None
         self._ping_timeout = ping_timeout
+
+    @staticmethod
+    def role_of(instance: "Session") -> Role:
+        """Owning-class read of the session role."""
+
+        role = instance._role
+        assert role in ("client", "server")
+        return role
+
+    @staticmethod
+    def initial_window_of(instance: "Session") -> int:
+        return instance._initial_stream_window
+
+    @staticmethod
+    def next_stream_id_of(instance: "Session") -> int:
+        return instance._next_stream_id
+
+    @staticmethod
+    def accepts_new_streams_of(instance: "Session") -> bool:
+        return instance._accept_new_streams
+
+    @staticmethod
+    def outstanding_ping_of(instance: "Session") -> int | None:
+        return instance._outstanding_ping
+
+    @staticmethod
+    def ping_timeout_of(instance: "Session") -> datetime.timedelta:
+        return instance._ping_timeout
+
+    @staticmethod
+    def admissions_of(instance: "Session") -> dict[int, _StreamAdmission]:
+        return instance._stream_admission
+
+    @staticmethod
+    def admission_of(instance: "Session", stream_id: int) -> _StreamAdmission | None:
+        return instance._stream_admission.get(stream_id)
 
     @typing.override
     def take_snapshot(self) -> SessionSnapshot:

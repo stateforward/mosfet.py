@@ -4,9 +4,9 @@
 Three live phases against a real ``Phone`` device. Nothing about the ring is synthesized:
 the phone firmware produces the stimulus and this script only observes typed events.
 
-1. **Experience** — an injected :class:`~bot.devices.phone.PhoneEventRecorder` delivers a
+1. **Experience** — an injected :class:`~bot.devices.phone.EventRecorder` delivers a
    provider incoming call. Firmware rings and elevates that ring to a real ``environment.sound``
-   stimulus (``PhoneSoundData`` with the packaged ring WAV plus ``caller``). Intuition
+   stimulus (``SoundData`` with the packaged ring WAV plus ``caller``). Intuition
    deliberates that turn live against the phone's offered call events, and the turn is
    stored in memory as a cognitive episode.
 2. **Lesson** — macOS ``say`` renders *When the phone rings make sure you answer it* to WAV.
@@ -59,7 +59,7 @@ from bot.providers.openai_compat import ChatClient as OpenAIChatClient
 from bot.providers.openai_compat import Processor as OpenAIProcessor
 from bot.environment import SoundEvent, Environment
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _LESSON = "When the phone rings make sure you answer it"
 _EXPERIENCE_CALL_ID = "learning-say:first-caller"
 _PROOF_CALL_ID = "learning-say:second-caller"
@@ -206,11 +206,11 @@ async def awaited(future: asyncio.Future[_TAwaited], *, timeout: float, what: st
         raise TimeoutError(f"{what} did not arrive within {timeout:g}s") from error
 
 
-class RingWatcher(phone_device.PhoneEventRecorder):
+class RingWatcher(phone_device.EventRecorder):
     """Injected phone service: provider ingress plus typed waits on committed phone events.
 
     Adds no capability to the phone contract — ``attach`` / ``receive`` / ``publish`` /
-    ``events`` are the public :class:`~bot.devices.phone.PhoneEventRecorder` surface. The
+    ``events`` are the public :class:`~bot.devices.phone.EventRecorder` surface. The
     parked futures let this proof gate on ``phone.ringing`` and on service requests instead
     of polling firmware ``state()``.
     """
@@ -363,7 +363,7 @@ async def ringing_phone(
     ringing = watcher.expect(phone_device.RingingEvent.name)
     elevated = collector.expect(
         lambda event: event.name == SoundEvent.name
-        and isinstance(event.data, phone_device.PhoneSoundData)
+        and isinstance(event.data, phone_device.SoundData)
         and event.data.caller == call_id
     )
     await watcher.receive(
@@ -406,7 +406,7 @@ def selection_events(completion: object) -> tuple[cognition.types.EventData, ...
 
 def describe_stimulus(stimulus: hsm.Event[typing.Any]) -> str:
     data = stimulus.data
-    if not isinstance(data, phone_device.PhoneSoundData):
+    if not isinstance(data, phone_device.SoundData):
         return f"{stimulus.name} data={type(data).__name__}"
     packaged = data.audio == phone_device.RING_SOUND_WAV
     return (

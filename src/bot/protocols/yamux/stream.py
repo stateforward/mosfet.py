@@ -109,7 +109,28 @@ class _StreamOperationFailure:
     message: str
 
 
-_AcknowledgeEvent = hsm.Event[None](name="protocol.yamux.stream.acknowledge")
+class _StreamSignalData(pydantic.BaseModel):
+    """Typed empty signal for Yamux stream lifecycle transitions.
+
+    Acknowledge, local/remote FIN, and reset carry no payload; this type gives those
+    signals a modeled schema instead of an untyped ``Event[None]``. Delivery still
+    matches on the event name, so the schema change is wire-compatible.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Empty lifecycle signal for one Yamux stream; carries no payload.",
+            "examples": [{}],
+        },
+    )
+
+
+_AcknowledgeEvent = hsm.Event[_StreamSignalData](
+    name="protocol.yamux.stream.acknowledge",
+    schema=_StreamSignalData,
+)
 _SendEvent = hsm.Event[StreamSendData](
     name="protocol.yamux.stream.send",
     schema=StreamSendData,
@@ -126,9 +147,18 @@ _GrantReceiveWindowEvent = hsm.Event[StreamWindowData](
     name="protocol.yamux.stream.receive_window.grant",
     schema=StreamWindowData,
 )
-_LocalFinEvent = hsm.Event[None](name="protocol.yamux.stream.local_fin")
-_RemoteFinEvent = hsm.Event[None](name="protocol.yamux.stream.remote_fin")
-_ResetEvent = hsm.Event[None](name="protocol.yamux.stream.reset")
+_LocalFinEvent = hsm.Event[_StreamSignalData](
+    name="protocol.yamux.stream.local_fin",
+    schema=_StreamSignalData,
+)
+_RemoteFinEvent = hsm.Event[_StreamSignalData](
+    name="protocol.yamux.stream.remote_fin",
+    schema=_StreamSignalData,
+)
+_ResetEvent = hsm.Event[_StreamSignalData](
+    name="protocol.yamux.stream.reset",
+    schema=_StreamSignalData,
+)
 
 
 def _send_data(event: hsm.Event[typing.Any]) -> StreamSendData | None:
@@ -643,7 +673,7 @@ class Stream(hsm.Instance):
     def acknowledge(self) -> None:
         """Mark a locally initiated stream as accepted by the peer."""
 
-        self._dispatch_stream_event(_AcknowledgeEvent)
+        self._dispatch_stream_event(_AcknowledgeEvent.with_data(_StreamSignalData()))
 
     def send(self, payload: bytes, *, end_stream: bool = False) -> None:
         """Record sent data bytes and optionally local FIN."""
@@ -670,17 +700,17 @@ class Stream(hsm.Instance):
     def local_fin(self) -> None:
         """Half-close local writes."""
 
-        self._dispatch_stream_event(_LocalFinEvent)
+        self._dispatch_stream_event(_LocalFinEvent.with_data(_StreamSignalData()))
 
     def remote_fin(self) -> None:
         """Half-close remote writes and publish EOF to the Python reader."""
 
-        self._dispatch_stream_event(_RemoteFinEvent)
+        self._dispatch_stream_event(_RemoteFinEvent.with_data(_StreamSignalData()))
 
     def reset(self) -> None:
         """Hard-close the stream."""
 
-        self._dispatch_stream_event(_ResetEvent)
+        self._dispatch_stream_event(_ResetEvent.with_data(_StreamSignalData()))
 
     def _dispatch_stream_event(self, event: hsm.Event[typing.Any]) -> None:
         completion = self.dispatch(self.context(), event)

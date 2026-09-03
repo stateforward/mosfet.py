@@ -3147,8 +3147,6 @@ name = "stateforward-bot"
 source = { editable = "." }
 dependencies = [
     { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
-    { name = "opentelemetry-sdk" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
     { name = "starlark-go" },
@@ -3164,13 +3162,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "opentelemetry-api", specifier = ">=1.42.1,<2.0.0" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.42.1,<2.0.0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.42.1,<2.0.0" },
+    { name = "opentelemetry-api", specifier = ">=1.37.0,<2.0.0" },
     { name = "pydantic", specifier = ">=2.10.0,<3.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0,<3.0.0" },
     { name = "starlark-go", specifier = ">=1.0.1,<2.0.0" },
-    { name = "stateforward-hsm", specifier = ">=1.3.2,<1.4" },
+    { name = "stateforward-hsm", specifier = ">=1.3.7,<1.4" },
 ]
 
 [package.metadata.requires-dev]
@@ -3182,11 +3178,11 @@ dev = [
 
 [[package]]
 name = "stateforward-hsm"
-version = "1.3.2"
+version = "1.3.7"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a7/3b/8423a14fd2d92d69b0bf3611f49f68a83e166fd32ce2a5b30876f28acad5/stateforward_hsm-1.3.2.tar.gz", hash = "sha256:9103371c516b8e48a98465ed36e0ed27b61c082991d171de3d16078bb2bd3a52", size = 169919, upload-time = "2026-07-19T00:28:38.044Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/ea/c37a069fae40c6e07fc378453c4ebe8915e7aa6e8cc49c2801e734d2eeac/stateforward_hsm-1.3.7.tar.gz", hash = "sha256:8656f776c614c6eee48dec637a95bba0aa5fd43a8176bcc034ebaa628add9552", size = 186084, upload-time = "2026-08-28T01:54:14.738Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/a5/2609ac7197d79cd7823eadf9b5806e0b5337376e901e16f05abfad05a268/stateforward_hsm-1.3.2-py3-none-any.whl", hash = "sha256:1ad00959d8af867fb2c9391c7341258b8b09da2c70fbe625500ca1065e3f5881", size = 39482, upload-time = "2026-07-19T00:28:36.982Z" },
+    { url = "https://files.pythonhosted.org/packages/35/f0/411848079eb479520e8f492c3bbc9e1139f04763441a01af2f630c2489a2/stateforward_hsm-1.3.7-py3-none-any.whl", hash = "sha256:6deda02a002c37782a4ab3ff1f1682d78199e80e18ab0b994416773df6246e01", size = 39555, upload-time = "2026-08-28T01:54:13.566Z" },
 ]
 
 [[package]]

@@ -6,19 +6,26 @@ This repo uses Hatchling dynamic version metadata with a package-owned
 - `bot` reads its version from `src/bot/__init__.py`.
 - `bot-provider-elevenlabs` reads its version from
   `src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py`.
+- `bot-provider-gemini` reads its version from
+  `src/providers/gemini/src/bot/providers/gemini/__init__.py`.
 - `bot-provider-livekit` reads its version from
   `src/providers/livekit/src/bot/providers/livekit/__init__.py`.
 - `bot-provider-mlx-audio` reads its version from
   `src/providers/mlx_audio/src/bot/providers/mlx_audio/__init__.py`.
 - `bot-provider-mlx-vlm` reads its version from
   `src/providers/mlx_vlm/src/bot/providers/mlx_vlm/__init__.py`.
+- `bot-provider-moonshine` reads its version from
+  `src/providers/moonshine/src/bot/providers/moonshine/__init__.py`.
 - `bot-provider-openai-compat` reads its version from
   `src/providers/openai_compat/src/bot/providers/openai_compat/__init__.py`.
+- `bot-provider-pyannote` reads its version from
+  `src/providers/pyannote/src/bot/providers/pyannote/__init__.py`.
 - `bot-provider-sqlite-memory` reads its version from
   `src/providers/sqlite_memory/src/bot/providers/sqlite_memory/__init__.py`.
 - `bot-provider-postgres-memory` reads its version from
   `src/providers/postgres_memory/src/bot/providers/postgres_memory/__init__.py`.
-- `scripts/check_release_version.py` validates that package `pyproject.toml`
+- `scripts/check_release_version.py` discovers provider packages via
+  `src/providers/*/pyproject.toml` (workspace glob, not a hardcoded list), validates that package `pyproject.toml`
   files declare `dynamic = ["version"]`, that Hatchling points at the expected
   version file, and that a release tag such as `v0.1.0` matches the package
   versions.

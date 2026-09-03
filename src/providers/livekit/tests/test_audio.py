@@ -70,7 +70,7 @@ def fake_audio_frame_factory(
 
 def test_livekit_audio_frame_encoder_converts_bot_audio_output_to_livekit_frame() -> None:
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
-    output = audio_device.AudioOutputData(
+    output = audio_device.OutputData(
         audio=b"\x01\x00\x02\x00\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=2
     )
 
@@ -91,7 +91,7 @@ def test_livekit_audio_frame_encoder_uses_livekit_sdk_audio_frame_by_default() -
     frame = asyncio.run(
         await_value(
             encoder.encode(
-                audio_device.AudioOutputData(
+                audio_device.OutputData(
                     audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
                 )
             )
@@ -112,7 +112,7 @@ def test_livekit_audio_frame_encoder_uses_configured_pcm_defaults() -> None:
         audio_frame_factory=fake_audio_frame_factory,
     )
 
-    frame = asyncio.run(await_value(encoder.encode(audio_device.AudioOutputData(audio=b"\x01\x00\x02\x00"))))
+    frame = asyncio.run(await_value(encoder.encode(audio_device.OutputData(audio=b"\x01\x00\x02\x00"))))
 
     assert frame.sample_rate == 16000
     assert frame.num_channels == 1
@@ -130,9 +130,7 @@ def test_livekit_audio_frame_encoder_rejects_non_pcm_audio(media_type: str) -> N
     encoder = AudioFrameEncoder[FakeAudioFrame](audio_frame_factory=fake_audio_frame_factory)
 
     with pytest.raises(AudioFrameError, match="PCM"):
-        _ = asyncio.run(
-            await_value(encoder.encode(audio_device.AudioOutputData(audio=b"\x01\x00", media_type=media_type)))
-        )
+        _ = asyncio.run(await_value(encoder.encode(audio_device.OutputData(audio=b"\x01\x00", media_type=media_type))))
 
 
 def test_livekit_audio_frame_encoder_rejects_misaligned_pcm() -> None:
@@ -142,7 +140,7 @@ def test_livekit_audio_frame_encoder_rejects_misaligned_pcm() -> None:
         _ = asyncio.run(
             await_value(
                 encoder.encode(
-                    audio_device.AudioOutputData(
+                    audio_device.OutputData(
                         audio=b"\x01\x00\x02", media_type="audio/pcm", sample_rate_hz=48000, channels=1
                     )
                 )
@@ -161,7 +159,7 @@ def test_livekit_audio_frame_decoder_converts_livekit_frame_to_bot_audio_input()
 
     audio = asyncio.run(await_value(decoder.decode(frame)))
 
-    assert audio == audio_device.AudioInputData(
+    assert audio == audio_device.InputData(
         audio=b"\x01\x00\x02\x00",
         media_type="audio/pcm",
         sample_rate_hz=24000,
@@ -177,9 +175,7 @@ def test_livekit_audio_source_writer_captures_bot_audio_output() -> None:
 
     asyncio.run(
         writer.write(
-            audio_device.AudioOutputData(
-                audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
-            )
+            audio_device.OutputData(audio=b"\x01\x00\x02\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
         )
     )
 
@@ -212,13 +208,11 @@ def test_livekit_audio_bridge_receives_remote_frames_and_publishes_local_audio()
     )
     asyncio.run(
         bridge.publish_audio(
-            audio_device.AudioOutputData(
-                audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
-            )
+            audio_device.OutputData(audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1)
         )
     )
 
-    assert received == audio_device.AudioInputData(
+    assert received == audio_device.InputData(
         audio=b"\x01\x00\x02\x00",
         media_type="audio/pcm",
         sample_rate_hz=24000,
@@ -235,7 +229,7 @@ def test_livekit_audio_bridge_receives_remote_frames_and_publishes_local_audio()
 
 
 def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
-    async def exercise_bridge() -> audio_device.AudioInputData:
+    async def exercise_bridge() -> audio_device.InputData:
         bridge = create_audio_bridge(sample_rate_hz=48000, channels=1, queue_size_ms=10)
         frame = rtc.AudioFrame(
             data=b"\x01\x00\x02\x00",
@@ -247,7 +241,7 @@ def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
         received = await bridge.receive_frame(frame)
         await asyncio.wait_for(
             bridge.publish_audio(
-                audio_device.AudioOutputData(
+                audio_device.OutputData(
                     audio=b"\x03\x00\x04\x00", media_type="audio/pcm", sample_rate_hz=48000, channels=1
                 )
             ),
@@ -257,7 +251,7 @@ def test_create_audio_bridge_stands_up_sdk_backed_bridge() -> None:
 
     received = asyncio.run(exercise_bridge())
 
-    assert received == audio_device.AudioInputData(
+    assert received == audio_device.InputData(
         audio=b"\x01\x00\x02\x00",
         media_type="audio/pcm",
         sample_rate_hz=24000,

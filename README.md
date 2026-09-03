@@ -44,16 +44,48 @@ behavior disappear into prompt glue or callback chains.
 
 ## Package Map
 
-- `src/bot/bot.py` defines the body machine; `src/bot/abilities`,  `behavior`, and
+- `src/bot/bot.py` defines the body machine; `src/bot/abilities`, `behavior`, and
   `skills` define cognitive, ability, behavior, memory, and action contracts.
+- `src/bot/address.py` and `src/bot/scope.py` define actor addressing and visibility;
+  `src/bot/lifecycle.py` is the single started/stopped predicate.
 - `src/bot/device` and `src/bot/devices` define device lifecycle,
   notifications, audio peripherals, and phone behavior.
+- `src/bot/environment` defines the broadcast/parenting scope, typed stimuli
+  (`events.py`), world snapshots (`snapshot.py`), and spatial placement (`space.py`).
+- `src/bot/protocols` defines attachment, transport, and cross-boundary protocols.
 - `src/bot/telemetry` records HSM observations as OpenTelemetry metrics and
   spans.
-- `src/providers/*` contains optional provider packages for SDK-backed audio,
-  vision, memory, LiveKit, Gemini, and OpenAI-compatible integrations.
+- `src/providers/*` contains optional provider packages: elevenlabs, gemini,
+  livekit, mlx_audio, mlx_vlm, moonshine, openai_compat, postgres_memory,
+  pyannote, sqlite_memory. Provider packages own SDKs and transport while core
+  stays provider-agnostic.
 - `examples/` contains runnable examples that stay outside the distributable
   core package.
+- `tests/` mirrors `src/bot` one-to-one (see `docs/test_mapping.md` for indirect
+  coverage); provider tests stay under `src/providers/<provider>/tests`.
+
+## Quickstart
+
+Clone, sync, run an example, and inspect the trace artifact:
+
+```sh
+git clone <repo-url> && cd bot.py
+uv sync --locked --all-packages --all-groups
+uv run --project examples/listen_speak_bot listen-speak-bot --help
+uv run --locked python -m pytest -q -m 'not live'
+ls otel-spans.jsonl otel-logs.jsonl
+```
+
+## Telemetry and Privacy (OTEL disclosure)
+
+HSM-visible behavior is observed through OpenTelemetry metrics and spans with
+low-cardinality attributes only (machine/component, event kind/name, stage,
+outcome, normalized failure kind). Raw media, credentials, and
+high-cardinality diagnostics never become metric/span attributes.
+
+Local JSONL export writes `otel-spans.jsonl` / `otel-logs.jsonl` (and
+`otel-*.jsonl` test dumps) in the repo root with `0600` permissions. These
+files are git-ignored. Opt out with `BOT_OTEL_DISABLED=1`.
 
 ## Development
 
@@ -136,3 +168,19 @@ Run the Postgres memory provider tests:
 ```sh
 uv run --package bot-provider-postgres-memory --group dev python -m pytest src/providers/postgres_memory/tests
 ```
+
+Run the Moonshine provider tests:
+
+```sh
+uv run --package bot-provider-moonshine --group dev python -m pytest src/providers/moonshine/tests
+```
+
+Run the pyannote provider tests:
+
+```sh
+uv run --package bot-provider-pyannote --group dev python -m pytest src/providers/pyannote/tests
+```
+
+> Note: `context.md` and `handoff.md` at the repo root are local working notes,
+> not framework docs. They are intentionally left in place for the owner to
+> decide (keep, move to `~/journal/`, or delete); CI and releases ignore them.

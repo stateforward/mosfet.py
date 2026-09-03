@@ -24,6 +24,14 @@ The run remains `status: incomplete` when cognition does not select a response. 
 (intuition) and `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or
 phone device. `--play` plays only the generated heard WAV in this slice.
 
+Run its tests from the repository root via the example project env (the root
+env does not install the example package, so the test module skips there
+with a reason instead of failing collection):
+
+```bash
+uv run --project examples/listen_speak_bot python -m pytest tests/examples/test_listen_speak_bot.py -q -m 'not live'
+```
+
 Listening and Speaking remain body composition ports, not direct cognition tools. Communication
 offers the semantic `communication.respond` action and owns the temporary route to Speaking.
 
@@ -54,6 +62,23 @@ contracts and configuration summaries; they are not live room proof.
 Remote LiveKit PCM frames are batched into utterance-sized chunks at the LiveKit
 provider boundary before Listening. A LiveKit SIP call-control gateway remains
 out of scope for this example.
+
+`phone_bot/learning_say_lesson.py` is part of the `phone_bot` project (same
+`pyproject.toml`/`uv.lock`, same `--project examples/phone_bot`): it is a live
+Learning proof in three phases (experience a real ring, hear a spoken lesson,
+answer the next ring) that needs the phone device plus OpenAI cognition and
+macOS `say`, so it lives with the project that already declares those
+dependencies instead of piggybacking from `examples/`. Run it from the
+repository root:
+
+```bash
+uv run --project examples/phone_bot examples/phone_bot/learning_say_lesson.py
+```
+
+It reads credentials from the repo `.env` or `examples/phone_bot/.env`
+(`BOT_OPENAI_API_KEY` / `OPENAI_API_KEY`, optional `BOT_REFLECTION_MODEL`);
+`.env` files stay untracked and `recordings/` plus per-example `.venv/` are
+ignored (see `examples/phone_bot/.gitignore`).
 
 Executable examples use this shebang:
 

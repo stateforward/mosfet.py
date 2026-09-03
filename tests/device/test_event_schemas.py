@@ -1,4 +1,4 @@
-from bot.device.events import (
+from bot.device import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEventData,

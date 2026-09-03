@@ -8,8 +8,10 @@
     "src/providers/livekit/src",
     "src/providers/mlx_audio/src",
     "src/providers/mlx_vlm/src",
+    "src/providers/moonshine/src",
     "src/providers/openai_compat/src",
     "src/providers/postgres_memory/src",
+    "src/providers/pyannote/src",
     "src/providers/sqlite_memory/src"
   ],
   "exclude": [
@@ -22,8 +24,10 @@
     "src/providers/livekit/src",
     "src/providers/mlx_audio/src",
     "src/providers/mlx_vlm/src",
+    "src/providers/moonshine/src",
     "src/providers/openai_compat/src",
     "src/providers/postgres_memory/src",
+    "src/providers/pyannote/src",
     "src/providers/sqlite_memory/src"
   ],
   "pythonVersion": "3.13",

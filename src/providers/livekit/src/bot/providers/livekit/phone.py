@@ -196,9 +196,9 @@ ServiceTransferFailedEvent = hsm.Event[phone.TransferFailedData](
     schema=phone.TransferFailedData,
 )
 # Private: room remote PCM enters the service machine; delivery is gated by HSM guards.
-_RemoteAudioReceivedEvent = hsm.Event[audio.AudioInputData](
+_RemoteAudioReceivedEvent = hsm.Event[audio.InputData](
     name="bot.provider.livekit.phone.remote_audio.received",
-    schema=audio.AudioInputData,
+    schema=audio.InputData,
 )
 _RoomAudioStatusEvent = hsm.Event[RoomAudioConnectedData](
     name="bot.provider.livekit.phone.room_audio.status",
@@ -304,11 +304,6 @@ _PhoneServiceAfter = collections.abc.Callable[
 ]
 
 
-def _require_positive_timeout(value: datetime.timedelta) -> None:
-    if value <= datetime.timedelta():
-        raise ValueError("operation_timeout must be a positive duration.")
-
-
 def _failure_kind(error: Exception) -> phone.FailureKind:
     if isinstance(error, PhoneServiceError):
         return error.failure_kind
@@ -406,8 +401,8 @@ def _matches_active_operation_id(instance: "PhoneService", event: hsm.Event[typi
 
 def _matches_active_transfer(
     instance: "PhoneService",
-    data: phone.PhoneTransferData
-    | phone.PhoneTransferFailedData
+    data: phone.TransferData
+    | phone.CallTransferFailedData
     | phone.TransferAcceptedData
     | phone.TransferCompletedData
     | phone.TransferFailedData,
@@ -495,7 +490,7 @@ def _has_hung_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[ty
     """True for any committed hang-up observation (all HangUpOutcome values)."""
 
     del ctx, instance
-    return isinstance(event.data, phone.PhoneHungUpData)
+    return isinstance(event.data, phone.HungUpData)
 
 
 def _has_provider_terminal_hang_up(
@@ -508,7 +503,7 @@ def _has_provider_terminal_hang_up(
     del ctx
     data = event.data
     return (
-        isinstance(data, phone.PhoneHungUpData)
+        isinstance(data, phone.HungUpData)
         and data.outcome in {"declined", "failed", "local_hang_up", "remote_hang_up"}
         and _matches_active_call(instance, data.call_id)
     )
@@ -521,7 +516,7 @@ def _publish_local_audio_uplink(
 ) -> None:
     del ctx
     data = event.data
-    assert isinstance(data, audio.AudioOutputData)
+    assert isinstance(data, audio.OutputData)
     published = asyncio.ensure_future(instance.publish_audio(data))
 
     def _surface_failure(done: asyncio.Future[None]) -> None:
@@ -553,7 +548,7 @@ def _has_provider_transfer_completed(
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx
-    return isinstance(event.data, phone.PhoneTransferData) and _matches_active_transfer(instance, event.data)
+    return isinstance(event.data, phone.TransferData) and _matches_active_transfer(instance, event.data)
 
 
 def _has_provider_transfer_failed(
@@ -562,7 +557,7 @@ def _has_provider_transfer_failed(
     event: hsm.Event[typing.Any],
 ) -> bool:
     del ctx
-    return isinstance(event.data, phone.PhoneTransferFailedData) and _matches_active_transfer(instance, event.data)
+    return isinstance(event.data, phone.CallTransferFailedData) and _matches_active_transfer(instance, event.data)
 
 
 def _has_current_remote_hang_up(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -931,8 +926,10 @@ class PhoneService(hsm.Instance):
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__()
-        _require_positive_timeout(operation_timeout)
-        _require_positive_timeout(setup_timeout)
+        if operation_timeout <= datetime.timedelta():
+            raise ValueError("operation_timeout must be a positive duration.")
+        if setup_timeout <= datetime.timedelta():
+            raise ValueError("setup_timeout must be a positive duration.")
         if (url is None) != (token is None):
             raise ValueError("url and token must both be provided or both omitted.")
         if not track_name:
@@ -1147,7 +1144,7 @@ class PhoneService(hsm.Instance):
             return self._bridge, self._track_path
         service_ref = weakref.ref(self)
 
-        async def deliver_batched_remote_audio(audio_input: audio.AudioInputData) -> None:
+        async def deliver_batched_remote_audio(audio_input: audio.InputData) -> None:
             """Publish one batched utterance into PhoneService (guards decide deliver vs drop).
 
             HSM-CONTEXT-001: do not gate on ``context().is_done()`` or ``state()``. Attach
@@ -1159,7 +1156,7 @@ class PhoneService(hsm.Instance):
                 return
             await live_service.receive_remote_audio(live_service.context(), audio_input)
 
-        async def consume_remote_audio(audio_input: audio.AudioInputData) -> None:
+        async def consume_remote_audio(audio_input: audio.InputData) -> None:
             """Ingress: batch ~10 ms LiveKit frames into utterance-sized PCM for Listening."""
 
             live_service = service_ref()
@@ -1374,7 +1371,7 @@ class PhoneService(hsm.Instance):
         if track_path.model is not None:
             _ = bot.register(track_path, track_path.model, clear_owner=True)
 
-    async def publish_audio(self, output: audio.AudioOutputData) -> None:
+    async def publish_audio(self, output: audio.OutputData) -> None:
         """Publish generated or encoded audio through the local LiveKit audio track."""
 
         bridge, _ = self._ensure_media()
@@ -1495,7 +1492,7 @@ class PhoneService(hsm.Instance):
     @staticmethod
     def _has_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, audio.AudioInputData)
+        return isinstance(event.data, audio.InputData)
 
     @staticmethod
     def _phone_event_target(instance: "PhoneService") -> hsm.Instance | None:
@@ -1507,7 +1504,7 @@ class PhoneService(hsm.Instance):
     @staticmethod
     def _can_deliver_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        if not isinstance(event.data, audio.AudioInputData):
+        if not isinstance(event.data, audio.InputData):
             return False
         if instance._media_call_id is None:
             return False
@@ -1519,11 +1516,11 @@ class PhoneService(hsm.Instance):
         instance: "PhoneService",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        """True when local speaker playout should uplink (exact AudioOutputData, not remote service audio)."""
+        """True when local speaker playout should uplink (exact OutputData, not remote service audio)."""
 
         del ctx
-        # Exact type: ServiceAudioData subclasses AudioOutputData and must not uplink as local playout.
-        return type(event.data) is audio.AudioOutputData and not instance._delivering_remote_audio
+        # Exact type: ServiceAudioData subclasses OutputData and must not uplink as local playout.
+        return type(event.data) is audio.OutputData and not instance._delivering_remote_audio
 
     @staticmethod
     def _clear_media_on_hung_up(
@@ -1534,7 +1531,7 @@ class PhoneService(hsm.Instance):
         """Any HungUp observation ends the media session (matches prior publish-side clear)."""
 
         del ctx
-        if isinstance(event.data, phone.PhoneHungUpData):
+        if isinstance(event.data, phone.HungUpData):
             instance._media_call_id = None
             instance._call_peer_identity = None
 
@@ -1563,7 +1560,7 @@ class PhoneService(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        assert isinstance(data, audio.AudioInputData)
+        assert isinstance(data, audio.InputData)
         call_id = instance._media_call_id
         phone_event_target = PhoneService._phone_event_target(instance)
         assert call_id is not None
@@ -1624,7 +1621,7 @@ class PhoneService(hsm.Instance):
     def _drop_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         del ctx
         data = event.data
-        assert isinstance(data, audio.AudioInputData)
+        assert isinstance(data, audio.InputData)
         instance._remote_audio_dropped_chunks += 1
         instance._remote_audio_dropped_bytes += len(data.audio)
         # Refusing delivery is decisive and was previously invisible: the counters said how much
@@ -2055,7 +2052,7 @@ class PhoneService(hsm.Instance):
 
         return self.dispatch(ctx, ServiceIncomingCallEvent.with_data(data))
 
-    def receive_remote_audio(self, ctx: hsm.Context, data: audio.AudioInputData) -> collections.abc.Awaitable[None]:
+    def receive_remote_audio(self, ctx: hsm.Context, data: audio.InputData) -> collections.abc.Awaitable[None]:
         """Publish remote room PCM into PhoneService. Delivery is gated by HSM guards.
 
         Remote audio is delivered to phone firmware as `ServiceAudioReceived` only when a media

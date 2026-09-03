@@ -1,9 +1,35 @@
-"""OpenTelemetry observation helpers for stateforward.bot HSM models."""
+"""OpenTelemetry observation helpers for stateforward.bot HSM models.
+
+Observation is opt-in at the application boundary: wire ``hsm.observe(observer)``
+into a model and call ``bot.telemetry.configure()`` from the owning runtime.
+Until ``configure()`` installs the JSONL exporters, emission bottoms out in the
+OpenTelemetry API no-op implementations, so an unwired process pays only the
+attribute-building cost of each observation and records nothing.
+
+Reusable library/protocol models must not force observation; their callers
+decide (see ``AGENTS.md`` observability). The ``hsm.observe(observer)`` lines
+on models in this repo are that wiring, applied by each model's owning
+boundary — not a mandate on downstream consumers.
+
+``hsm.event.kind`` is the numeric ``hsm`` event-kind discriminant, kept as-is
+so dashboards can filter on the stable value. Mapping (from ``hsm``):
+
+| ``hsm.event.kind`` | Meaning |
+| --- | --- |
+| 280 | ``EventKind`` — an ordinary domain event (the default) |
+| 71705 | ``CompletionEventKind`` — a terminal/completion signal |
+| 71707 | ``TimeEventKind`` — a modeled ``hsm.after(...)`` deadline |
+| 71709 | ``CallEventKind`` — an enabled call event (a model-callable tool) |
+| 18356506 | ``ErrorEventKind`` — a typed failure event |
+"""
 
 import collections.abc
 import dataclasses
 import datetime
 import logging
+import sys
+import threading
+import time
 import typing
 
 import hsm
@@ -34,6 +60,55 @@ _OBSERVATION_FAILURES = _METER.create_counter(
 _ATTRIBUTE_VALUE = str | bool | int | float
 _Attributes = dict[str, _ATTRIBUTE_VALUE]
 _OBSERVATION_EVENT_NAME = "hsm/observation"
+
+# Telemetry-about-telemetry: when the observation pipeline itself is down
+# (metrics backend and tracer both failing), the failure must still reach an
+# operator instead of vanishing inside ``except: pass``. Reports are
+# rate-limited to one log + stderr line per minute; anything suppressed in
+# between is counted and reported with the next line. Never raises.
+_PIPELINE_FAILURE_LOG_INTERVAL_S = 60.0
+_pipeline_failure_lock = threading.Lock()
+_pipeline_failure_total = 0
+_pipeline_failure_suppressed = 0
+_pipeline_failure_last_log_monotonic = 0.0
+
+
+def _note_pipeline_failure(stage: str) -> None:
+    """Record that recording one observation failed at ``stage`` (never raises)."""
+
+    global _pipeline_failure_total, _pipeline_failure_suppressed, _pipeline_failure_last_log_monotonic
+    try:
+        now = time.monotonic()
+        with _pipeline_failure_lock:
+            _pipeline_failure_total += 1
+            _pipeline_failure_suppressed += 1
+            if now - _pipeline_failure_last_log_monotonic < _PIPELINE_FAILURE_LOG_INTERVAL_S:
+                return
+            _pipeline_failure_last_log_monotonic = now
+            total = _pipeline_failure_total
+            suppressed = _pipeline_failure_suppressed
+            _pipeline_failure_suppressed = 0
+        _LOG.warning(
+            "hsm telemetry pipeline degraded stage=%s suppressed=%d total=%d",
+            stage,
+            suppressed,
+            total,
+        )
+        # Fallback counter when logging itself is unwired: a batch-processor
+        # outage must be operator-visible even with no log handler installed.
+        print(
+            f"hsm telemetry pipeline degraded stage={stage} suppressed={suppressed} total={total}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
+
+def pipeline_failure_total() -> int:
+    """Return how many observation recordings have failed in this process."""
+
+    with _pipeline_failure_lock:
+        return _pipeline_failure_total
 
 
 class ObservationData(typing.TypedDict):
@@ -175,11 +250,13 @@ def _record_observation_failure(
     try:
         _OBSERVATION_FAILURES.add(1, attributes=_metric_attributes(failure_attributes))
     except Exception:
-        pass
+        # The failure counter is the last resort before silence: if it is down
+        # too, the outage is reported through the rate-limited fallback.
+        _note_pipeline_failure("failure_counter")
     try:
         _set_span_outcome(span, "failed", exception_type)
     except Exception:
-        pass
+        _note_pipeline_failure("failure_span")
 
 
 def _failure_message(event: hsm.Event[typing.Any]) -> str:
@@ -238,7 +315,10 @@ def observer(ctx: hsm.Context, instance: hsm.Instance, observation: hsm.Event[ty
                 return
             _set_span_outcome(span, "observed")
     except Exception:
-        pass
+        # Never break the HSM transition being observed, but never vanish
+        # either: a dead tracer must page the operator once a minute, not
+        # swallow every observation for the life of the process.
+        _note_pipeline_failure("observe_span")
 
 
 __all__ = [
@@ -249,5 +329,6 @@ __all__ = [
     "observation_attributes",
     "observed_event",
     "observed_occurrence",
+    "pipeline_failure_total",
     "propagate",
 ]

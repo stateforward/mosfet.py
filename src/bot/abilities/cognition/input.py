@@ -49,7 +49,7 @@ class InputData(pydantic.BaseModel):
         },
     )
 
-    stimulus: SkipJsonSchema[bot.BotInputData] = pydantic.Field(
+    stimulus: SkipJsonSchema[bot.InputData] = pydantic.Field(
         exclude=True,
         repr=False,
         description="Event or bot input payload that triggered the cognition.",

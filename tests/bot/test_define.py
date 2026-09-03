@@ -47,9 +47,7 @@ def test_topology_includes_idle_run_and_go() -> None:
     assert states["/Demo/idle"]["parent"] == "/Demo"
     assert states["/Demo/run"]["parent"] == "/Demo"
     assert any(
-        transition["source"] == "/Demo/idle"
-        and transition["target"] == "/Demo/run"
-        and "go" in transition["events"]
+        transition["source"] == "/Demo/idle" and transition["target"] == "/Demo/run" and "go" in transition["events"]
         for transition in payload["transitions"]
     )
 
@@ -79,6 +77,7 @@ def test_define_without_otlp_does_not_publish(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
     calls: list[object] = []
 
     def _fail_post(payload: object, url: str) -> None:
@@ -90,6 +89,7 @@ def test_define_without_otlp_does_not_publish(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_define_with_endpoint_publishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "1")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
     calls: list[tuple[object, str]] = []
 
@@ -104,12 +104,25 @@ def test_define_with_endpoint_publishes(monkeypatch: pytest.MonkeyPatch) -> None
     assert url == "http://127.0.0.1:5173/v1/models"
     assert payload == published
     assert any(
-        transition["source"] == "/Demo/idle" and "go" in transition["events"]
-        for transition in published["transitions"]
+        transition["source"] == "/Demo/idle" and "go" in transition["events"] for transition in published["transitions"]
     )
 
 
+def test_define_with_endpoint_but_without_opt_in_does_not_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    calls: list[tuple[object, str]] = []
+
+    def _record(payload: object, url: str) -> None:
+        calls.append((payload, url))
+
+    monkeypatch.setattr(_DEFINE, "post_model", _record)
+    _ = _demo()
+    assert calls == []
+
+
 def test_define_publish_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "1")
     monkeypatch.setenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
     def _boom(payload: object, url: str) -> None:

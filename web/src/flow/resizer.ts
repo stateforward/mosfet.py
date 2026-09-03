@@ -5,6 +5,7 @@ import {
   MIN_RESIZE_HEIGHT,
   MIN_RESIZE_WIDTH,
   type ResizeBounds,
+  type ResizeChannel,
   type ResizeConstraints,
   type ResizeDirection,
 } from "./types.ts";
@@ -12,6 +13,7 @@ import {
 export type ResizeStartData = {
   readonly nodeId: string;
   readonly direction: ResizeDirection;
+  readonly channel: ResizeChannel;
   readonly origin: ResizeBounds;
   readonly pointer: { readonly x: number; readonly y: number };
   readonly minWidth: number;
@@ -44,18 +46,31 @@ export class Resizer extends hsm.Instance {
       "idle",
       hsm.transition(
         hsm.on(Resizer.resizeStartEvent.name),
-        hsm.target("../resizing"),
+        hsm.guard(Resizer.isKeyboardChannel),
+        hsm.target("../resizing/keyboard"),
+        hsm.effect(Resizer.startResize),
+      ),
+      hsm.transition(
+        hsm.on(Resizer.resizeStartEvent.name),
+        hsm.target("../resizing/pointer"),
         hsm.effect(Resizer.startResize),
       ),
     ),
     hsm.state(
       "resizing",
-      hsm.transition(hsm.on(Resizer.resizeSampleEvent.name), hsm.effect(Resizer.applySample)),
-      hsm.transition(hsm.on(Resizer.resizeKeyStepEvent.name), hsm.effect(Resizer.applyKeyStep)),
+      hsm.initial(hsm.target("pointer")),
       hsm.transition(
         hsm.on(Resizer.resizeEndEvent.name),
         hsm.target("../idle"),
         hsm.effect(Resizer.endResize),
+      ),
+      hsm.state(
+        "pointer",
+        hsm.transition(hsm.on(Resizer.resizeSampleEvent.name), hsm.effect(Resizer.applySample)),
+      ),
+      hsm.state(
+        "keyboard",
+        hsm.transition(hsm.on(Resizer.resizeKeyStepEvent.name), hsm.effect(Resizer.applyKeyStep)),
       ),
     ),
   );
@@ -73,6 +88,10 @@ export class Resizer extends hsm.Instance {
   #current: ResizeBounds = { x: 0, y: 0, width: 0, height: 0 };
   #keyDx: number = 0;
   #keyDy: number = 0;
+
+  static isKeyboardChannel(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
+    return resizeStartOf(event.data)?.channel === "keyboard";
+  }
 
   static startResize(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
     const data = resizeStartOf(event.data);
@@ -200,16 +219,19 @@ export class Resizer extends hsm.Instance {
  * Start a Resizer under `ctx`.
  *
  * Inputs: `ctx` — owner context used as the HSM parent environment. Pointer
- * samples arrive as `resize_sample` events carrying the world point; keyboard
- * steps arrive as `resize_key_step` events carrying one arrow key (each step
- * moves the edge by 1 world px through the shared clamp logic).
+ * samples arrive as `resize_sample` events carrying the world point while
+ * `resizing/pointer`; keyboard steps arrive as `resize_key_step` events
+ * carrying one arrow key while `resizing/keyboard` (each step moves the
+ * edge by 1 world px through the shared clamp logic). The start payload's
+ * `channel` selects the exclusive nested state.
  * Outputs: a started Resizer in `/Resizer/idle`.
  * Ownership: caller owns the returned actor and must `hsm.stop` it.
  * Lifetime: until `hsm.stop` or owner context cancel.
- * Concurrency: one resize at a time; samples and key steps are serialized by
- * the machine.
+ * Concurrency: one resize at a time; pointer and keyboard cannot share a
+ * session. Samples and key steps are serialized by the machine.
  * Failure modes: malformed start or sample payloads are ignored; samples
- * with non-finite world coordinates are skipped.
+ * with non-finite world coordinates are skipped; a second start while
+ * resizing is ignored.
  * Units: positions and sizes in world coordinates. Classification: runtime-safe.
  */
 export function startResizer(args: { ctx: hsm.Context }): Resizer {
@@ -311,9 +333,11 @@ function resizeStartOf(value: unknown): ResizeStartData | null {
   if (typeof minHeight !== "number" || !Number.isFinite(minHeight)) return null;
   const maxWidth = value["maxWidth"];
   const maxHeight = value["maxHeight"];
+  const channel = value["channel"] === "keyboard" ? "keyboard" : "pointer";
   return {
     nodeId,
     direction,
+    channel,
     origin,
     pointer,
     minWidth,

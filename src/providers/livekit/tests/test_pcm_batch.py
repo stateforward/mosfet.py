@@ -56,9 +56,9 @@ class ManualLoop:
 
 @dataclasses.dataclass
 class RecordingEmit:
-    chunks: list[audio_device.AudioInputData] = dataclasses.field(default_factory=list)
+    chunks: list[audio_device.InputData] = dataclasses.field(default_factory=list)
 
-    async def __call__(self, chunk: audio_device.AudioInputData) -> None:
+    async def __call__(self, chunk: audio_device.InputData) -> None:
         self.chunks.append(chunk)
 
 
@@ -126,7 +126,7 @@ def test_livekit_pcm_batch_batcher_flushes_at_max_utterance_threshold() -> None:
         batcher = pcm_batch.RemotePcmBatcher(emit=emit)
         pcm = pcm_16bit_le(*range(1200))
 
-        await batcher.push(audio_device.AudioInputData(audio=pcm, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=pcm, sample_rate_hz=1000, channels=1))
         return emit
 
     emit = asyncio.run(scenario())
@@ -142,7 +142,7 @@ def test_livekit_pcm_batch_batcher_does_not_flush_below_max_utterance_threshold(
         batcher = pcm_batch.RemotePcmBatcher(emit=emit, loop=as_loop(loop))
         pcm = pcm_16bit_le(*range(100))
 
-        await batcher.push(audio_device.AudioInputData(audio=pcm, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=pcm, sample_rate_hz=1000, channels=1))
         return emit, loop
 
     emit, loop = asyncio.run(scenario())
@@ -159,7 +159,7 @@ def test_livekit_pcm_batch_batcher_flushes_on_idle_timeout_with_partial_buffer()
         batcher = pcm_batch.RemotePcmBatcher(emit=emit, idle_ms=250.0, loop=as_loop(loop))
         pcm = pcm_16bit_le(*range(50))
 
-        await batcher.push(audio_device.AudioInputData(audio=pcm, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=pcm, sample_rate_hz=1000, channels=1))
         assert emit.chunks == []
 
         loop.fire_idle()
@@ -187,11 +187,9 @@ def test_livekit_pcm_batch_batcher_emits_chunk_with_accumulated_bytes_rate_chann
         first = pcm_16bit_le(*range(700))
         second = pcm_16bit_le(*range(700, 1200))
 
+        await batcher.push(audio_device.InputData(audio=first, media_type="audio/pcm", sample_rate_hz=1000, channels=1))
         await batcher.push(
-            audio_device.AudioInputData(audio=first, media_type="audio/pcm", sample_rate_hz=1000, channels=1)
-        )
-        await batcher.push(
-            audio_device.AudioInputData(audio=second, media_type="audio/pcm", sample_rate_hz=1000, channels=1)
+            audio_device.InputData(audio=second, media_type="audio/pcm", sample_rate_hz=1000, channels=1)
         )
         return emit
 
@@ -225,7 +223,7 @@ def test_livekit_pcm_batch_batcher_flush_emits_partial_buffer_and_cancels_idle_t
         batcher = pcm_batch.RemotePcmBatcher(emit=emit, loop=as_loop(loop))
         pcm = pcm_16bit_le(*range(10))
 
-        await batcher.push(audio_device.AudioInputData(audio=pcm, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=pcm, sample_rate_hz=1000, channels=1))
         assert emit.chunks == []
 
         await batcher.flush()
@@ -246,7 +244,7 @@ def test_livekit_pcm_batch_batcher_aclose_emits_pending_buffer_and_marks_closed(
         batcher = pcm_batch.RemotePcmBatcher(emit=emit)
         pcm = pcm_16bit_le(*range(10))
 
-        await batcher.push(audio_device.AudioInputData(audio=pcm, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=pcm, sample_rate_hz=1000, channels=1))
         await batcher.aclose()
         return emit
 
@@ -266,9 +264,7 @@ def test_livekit_pcm_batch_batcher_drops_pushes_after_close() -> None:
         # own. If the closed flag were not actually honored, this single push would flush
         # immediately (same as test_..._flushes_at_max_utterance_threshold) and emit a chunk;
         # a working closed check must drop it before it ever reaches that accounting.
-        await batcher.push(
-            audio_device.AudioInputData(audio=pcm_16bit_le(*range(1200)), sample_rate_hz=1000, channels=1)
-        )
+        await batcher.push(audio_device.InputData(audio=pcm_16bit_le(*range(1200)), sample_rate_hz=1000, channels=1))
         return emit
 
     emit = asyncio.run(scenario())
@@ -283,8 +279,8 @@ def test_livekit_pcm_batch_batcher_flushes_buffered_audio_when_format_changes_be
         mono = pcm_16bit_le(*range(10))
         stereo = pcm_16bit_le(*range(10, 14))
 
-        await batcher.push(audio_device.AudioInputData(audio=mono, sample_rate_hz=1000, channels=1))
-        await batcher.push(audio_device.AudioInputData(audio=stereo, sample_rate_hz=1000, channels=2))
+        await batcher.push(audio_device.InputData(audio=mono, sample_rate_hz=1000, channels=1))
+        await batcher.push(audio_device.InputData(audio=stereo, sample_rate_hz=1000, channels=2))
         return emit
 
     emit = asyncio.run(scenario())
@@ -314,7 +310,7 @@ def test_livekit_pcm_batch_batcher_forwards_every_sample_in_order_across_chunk_s
         batcher = pcm_batch.RemotePcmBatcher(emit=emit, loop=as_loop(loop))
         for start in range(0, 3000, 10):
             await batcher.push(
-                audio_device.AudioInputData(
+                audio_device.InputData(
                     audio=pcm_16bit_le(*range(start, start + 10)),
                     sample_rate_hz=1000,
                     channels=1,

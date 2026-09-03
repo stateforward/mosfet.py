@@ -43,10 +43,9 @@ function optionalPositiveNumber(value: string | null): number | undefined {
  * Space starts a resize in that direction from the node's current bounds,
  * the arrow keys step-resize by 1px in world units per keypress (min/max and
  * aspect constraints apply through the shared clamp logic), and Escape or a
- * second Enter ends the resize, applying the bounds and emitting
- * `flow-node-resize-end`. All progression is typed events into the Resizer
- * machine; no timers are involved. See `flow-node-resize-control` for the
- * per-key mapping.
+ * second Enter ends the resize. Progression is typed `resize_key` events on
+ * the graph; Pointer `resize/keyboard` owns the session exclusively with
+ * pointer resize. See `flow-node-resize-control` for the per-key mapping.
  */
 export class FlowNodeResizer extends HTMLElement {
   static get observedAttributes(): string[] {

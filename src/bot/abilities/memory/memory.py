@@ -4,7 +4,7 @@ Memory apply is one transaction (query, store, or both). Generation is a separat
 ability that produces content for INSERT parameters—not an encode/decode store pipeline.
 """
 
-from . import classification as classification_mod
+from . import classification
 from . import store
 from .. import ability
 from .. import generative
@@ -91,10 +91,10 @@ class CandidateData(pydantic.BaseModel):
         },
     )
 
-    memory: classification_mod.GeneratedMemory = pydantic.Field(
+    memory: classification.GeneratedMemory = pydantic.Field(
         description="Structured memory candidate available for inspection and SQL INSERT.",
     )
-    encoded: classification_mod.EncodedMemory | None = pydantic.Field(
+    encoded: classification.EncodedMemory | None = pydantic.Field(
         default=None,
         description=(
             "Optional encoded packaging of the candidate when a generator encoder is configured. "
@@ -103,7 +103,7 @@ class CandidateData(pydantic.BaseModel):
     )
 
 
-class MemoryGenerator(generative.Generator[SourceData, classification_mod.GeneratedMemory], abc.ABC):
+class MemoryGenerator(generative.Generator[SourceData, classification.GeneratedMemory], abc.ABC):
     """Generator that creates a structured memory from decoded input."""
 
 
@@ -123,7 +123,7 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
     """Generate a structured memory candidate for callers to store via Memory SQL apply."""
 
     generator: MemoryGenerator
-    encoder: encoding.Encoder[classification_mod.GeneratedMemory, classification_mod.EncodedMemory] | None
+    encoder: encoding.Encoder[classification.GeneratedMemory, classification.EncodedMemory] | None
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = SourceData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = CandidateData
     input_event: typing.ClassVar[hsm.Event[SourceData]] = hsm.Event[SourceData](
@@ -141,7 +141,7 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
         self,
         *,
         generator: MemoryGenerator,
-        encoder: encoding.Encoder[classification_mod.GeneratedMemory, classification_mod.EncodedMemory] | None = None,
+        encoder: encoding.Encoder[classification.GeneratedMemory, classification.EncodedMemory] | None = None,
     ) -> None:
         super().__init__()
         self.generator = generator

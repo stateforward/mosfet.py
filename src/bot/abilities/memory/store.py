@@ -284,20 +284,20 @@ def _execute_transaction(
     return OutputData(results=tuple(results))
 
 
-def _sqlite_url(database: str) -> str:
-    if database == ":memory:":
-        return "sqlite+pysqlite:///:memory:"
-    return f"sqlite+pysqlite:///{database}"
+def open_sqlite_engine(*, database: str = ":memory:", connection: typing.Any | None = None) -> Engine:
+    """Composition-root factory: open a private SQLite engine with the canonical schema.
 
-
-def _open_memory_engine(*, database: str = ":memory:", connection: typing.Any | None = None) -> Engine:
-    """Open a private SQLAlchemy engine and materialize the canonical schema."""
+    The ``sqlite+pysqlite`` URL default lives here — not in :class:`MemoryStore` — so the
+    ability stays dialect-agnostic and the sqlite_memory provider (or any explicit root)
+    owns the SQLite default. Pass the result as ``MemoryStore(engine=...)``.
+    """
 
     if connection is not None:
         engine = create_engine("sqlite+pysqlite://", creator=lambda: connection)
     else:
+        url = "sqlite+pysqlite:///:memory:" if database == ":memory:" else f"sqlite+pysqlite:///{database}"
         engine = create_engine(
-            _sqlite_url(database),
+            url,
             connect_args={"check_same_thread": False},
         )
     schema.metadata.create_all(engine)
@@ -334,9 +334,21 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     _apply_completed_event: typing.ClassVar[hsm.Event[OutputData]] = _MemoryStoreApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryStoreApplyFailedEvent
 
-    def __init__(self, *, connection: typing.Any | None = None, database: str = ":memory:") -> None:
+    def __init__(
+        self,
+        *,
+        engine: Engine | None = None,
+        connection: typing.Any | None = None,
+        database: str = ":memory:",
+    ) -> None:
         super().__init__()
-        self._engine = _open_memory_engine(database=database, connection=connection)
+        if engine is not None:
+            if connection is not None or database != ":memory:":
+                raise ValueError("MemoryStore takes either engine or database/connection, not both.")
+            schema.metadata.create_all(engine)
+            self._engine = engine
+            return
+        self._engine = open_sqlite_engine(database=database, connection=connection)
 
     def execute(self, data: InputData) -> OutputData:
         """Run one SQL transaction on this store's engine and return per-statement results.
@@ -463,4 +475,5 @@ __all__ = [
     "StatementResult",
     "compile_statement",
     "compile_statements",
+    "open_sqlite_engine",
 ]

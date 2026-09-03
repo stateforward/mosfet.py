@@ -6,7 +6,6 @@ from bot.devices import audio
 from bot.environment import Environment, SoundData, SoundEvent
 from bot.protocols import attachment
 from bot.providers import pyannote
-from listen_speak_bot_example import ListenSpeakBot
 
 import asyncio
 import collections.abc
@@ -18,11 +17,20 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import typing
 import wave
 from typing import ClassVar, Protocol, TypeVar, override
 
 import hsm
 import pytest
+
+if typing.TYPE_CHECKING:
+    from listen_speak_bot_example import ListenSpeakBot
+else:
+    ListenSpeakBot = pytest.importorskip(
+        "listen_speak_bot_example",
+        reason="listen_speak_bot example package not installed (run via the examples/listen_speak_bot project env)",
+    ).ListenSpeakBot
 
 
 class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
@@ -670,6 +678,79 @@ def test_listen_speak_run_progress_reports_conversation_failure(tmp_path: pathli
     asyncio.run(run())
 
 
+def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_path: pathlib.Path) -> None:
+    """The composed Communication ability admits handoffs into the body conversation.
+
+    Behavioral wiring proof for the example composition (replaces
+    constructor-text asserts): a listening handoff plus a selected
+    ``communication.respond`` completes the run through the body's own
+    conversation and speaking ports, recorded on public seams.
+    """
+
+    import bot
+    from bot.abilities import speaking
+    from bot.abilities.communication import communication, conversation
+
+    async def run() -> tuple[int, tuple[object, ...]]:
+        body = _test_bot(tmp_path)
+        assert isinstance(body.communication(), communication.Communication)
+        assert isinstance(body.conversation(), conversation.Conversation)
+        assert isinstance(body.speaking(), speaking.Speaking)
+        environment = Environment()
+        _ = await body.attach(environment)
+        turn_id = "wiring-turn"
+        history = conversation.OutputEvent.with_data(conversation.Messages())
+        await body.dispatch(
+            environment,
+            _routed_event(
+                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
+                source=hsm.id(body.listening()),
+                target=hsm.id(body),
+            ),
+        )
+        await asyncio.sleep(0.05)
+        await body.dispatch(
+            environment,
+            _routed_event(
+                bot.ProcessingCompletedEvent.with_data_and_id(
+                    bot.ProcessingCompletedEventData(
+                        output=(
+                            cognition.EventData(
+                                event=communication.RespondEvent.name,
+                                target="communication",
+                                data=communication.RespondData(text="Hello."),
+                            ),
+                        ),
+                        focus_candidates=(),
+                    ),
+                    turn_id,
+                ),
+                source="cognition",
+                target=hsm.id(body),
+            ),
+        )
+        # Let run progress observe the selected response before its speaking
+        # terminal arrives; production always separates the two by Speaking work.
+        await asyncio.sleep(0.05)
+        await body.dispatch(
+            environment,
+            _routed_event(
+                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Hello."), f"{turn_id}:intuition"),
+                source=hsm.id(body.speaking()),
+                target=hsm.id(body),
+            ),
+        )
+        await _assert_ready(body)
+        selections = body.response_selection_count()
+        done = body.completed()
+        _ = await body.detach(environment)
+        return selections, done
+
+    selections, completed = asyncio.run(run())
+    assert selections == 1
+    assert completed
+
+
 def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_boundary() -> None:
     root = _repo_root()
     source = (root / "examples" / "listen_speak_bot" / "src" / "listen_speak_bot_example" / "__init__.py").read_text(
@@ -688,9 +769,6 @@ def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_bounda
     assert "from bot.abilities.communication import conversation" in source
     assert "seeded_behaviors=(communication.speech_heard_seed(),)" in source
     assert "memory=store" in source
-    assert "active_conversation=self._conversation" in source
-    assert "speaking=self._speaking" in source
-    assert "acquired_abilities=(self._communication,)" in source
     assert 'DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"' in source
     assert 'DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"' in source
     assert '"BOT_SILERO_VAD_MODEL", "BOT_VAD_MODEL", "SILERO_VAD_MODEL"' in source
@@ -720,9 +798,11 @@ def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_bounda
     assert "ActivatingFailedEventData" in source
     assert "_BotLifecycle" not in source
     assert "bot.lifecycle." not in source
-    assert "_selected_response_operation_ids" in source
+    # Response-selection tracking is pinned behaviorally, not textually: one
+    # terminal per selection, stale/duplicate rejection, and failure correlation
+    # are covered by the run-progress tests (one-terminal-per-selection, rejects
+    # stale/duplicates, correlates speaking failure).
     assert 'reason="response_execution_failed"' in source
-    assert "len(instance._selected_response_operation_ids)" in source
     assert "observe_response_request" not in source
     assert "hsm.choice(" in source
     assert "_RunTerminalEvent" in source

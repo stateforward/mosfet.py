@@ -645,14 +645,7 @@ class RecordingCognition(cognition.Cognition):
         intuition_processor: processing.Processor | None = None,
         reasoning_processor: processing.Processor | None = None,
         reflection: cognition.Reflection | None = None,
-        processing: cognition.Cognition | processing.Processing | None = None,
     ) -> None:
-        # `processing=` accepted only for transitional call sites that pass make_cognition().
-        if isinstance(processing, cognition.Cognition):
-            intuition = processing._intuition
-            reasoning = processing._reasoning
-            autonomy = processing._autonomy if autonomy is None else autonomy
-            reflection = processing._reflection if reflection is None else reflection
         if intuition is None or reasoning is None:
             default_i, default_r = cognition_abilities(
                 intuition_processor=intuition_processor,

@@ -10,10 +10,12 @@ from bot.behavior import seed
 import bot
 
 import asyncio
+import ast
 import collections.abc
 import dataclasses
 import datetime
 import inspect
+import pathlib
 import typing
 
 import hsm
@@ -21,7 +23,6 @@ import pytest
 
 from bot import behavior
 from bot.devices import phone as phone_device
-from bot.devices.phone.events import PhoneSoundData
 from bot.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
@@ -93,18 +94,35 @@ def test_autonomy_returns_directed_terminal_to_one_shot_operation() -> None:
     assert terminal.target
 
 
+def _autonomy_activity_function_names() -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Activity implementations by name, read from source text — never reached for at runtime."""
+
+    module_file = autonomy_module.__file__
+    assert module_file is not None
+    tree = ast.parse(pathlib.Path(module_file).read_text(encoding="utf-8"))
+    found: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Autonomy":
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found[member.name] = member
+    return found
+
+
 def test_autonomy_activities_use_event_carried_inventory_and_no_runtime_registry() -> None:
     """Activities consume immutable payloads; actor lifecycle never traverses registries."""
 
     source = inspect.getsource(autonomy_module.Autonomy)
     assert "hsm.Keys.Instances" not in source
-    match_source = inspect.getsource(getattr(autonomy_module.Autonomy, "_match_activity"))
-    assert "instance._behaviors" not in match_source
-    assert "instance._seeded_behaviors" not in match_source
-    initialize_source = inspect.getsource(getattr(autonomy_module.Autonomy, "_initialize_activity"))
-    assert "instance._behaviors" not in initialize_source
-    persistence_source = inspect.getsource(getattr(autonomy_module.Autonomy, "_persist_usage_activity"))
-    assert "instance._memory" not in persistence_source
+    activities = _autonomy_activity_function_names()
+    for activity_name, forbidden in (
+        ("_match_activity", ("instance._behaviors", "instance._seeded_behaviors")),
+        ("_initialize_activity", ("instance._behaviors",)),
+        ("_persist_usage_activity", ("instance._memory",)),
+    ):
+        activity_source = ast.unparse(activities[activity_name])
+        for private_reach in forbidden:
+            assert private_reach not in activity_source
 
 
 def test_autonomy_routes_candidate_outcomes_with_distinct_typed_events() -> None:
@@ -796,7 +814,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
 
         ring = dataclasses.replace(
             SoundEvent.with_data(
-                PhoneSoundData(
+                phone_device.SoundData(
                     audio=phone_device.RING_SOUND_WAV,
                     media_type="audio/wav",
                     sample_rate_hz=16_000,

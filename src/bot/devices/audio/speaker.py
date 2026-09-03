@@ -1,4 +1,4 @@
-from .events import OutputEvent, AudioOutputData, routed_audio_event
+from .events import OutputEvent, OutputData, routed_audio_event
 
 import collections.abc
 import dataclasses
@@ -21,7 +21,7 @@ class Speaker(Device):
     Transduction happens only while attached, exactly as an unwired speaker is silent.
     """
 
-    output_event: typing.ClassVar[hsm.Event[AudioOutputData]] = OutputEvent
+    output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
 
     _amplitude_db: float | None
 
@@ -60,7 +60,7 @@ class Speaker(Device):
         """
 
         data = event.data
-        if not isinstance(data, AudioOutputData):
+        if not isinstance(data, OutputData):
             return
         placement = instance._placement
         sound = dataclasses.replace(
@@ -88,7 +88,7 @@ class Speaker(Device):
         self,
         ctx: hsm.Context,
         target: hsm.Instance,
-        data: AudioOutputData,
+        data: OutputData,
         *,
         metadata: collections.abc.Mapping[str, object] | None = None,
     ) -> collections.abc.Awaitable[None]:

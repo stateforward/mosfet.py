@@ -18,7 +18,7 @@ import bot.device.device as device_module
 import bot.lifecycle
 from bot.device import Device
 from bot.protocols import attachment
-from bot.device.events import (
+from bot.device import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEventData,
@@ -1388,9 +1388,7 @@ def test_device_start_refreshes_owner_for_a_pre_started_peripheral(
     live_payloads = [
         payload
         for payload, url in calls
-        if url.endswith("/v1/models/live")
-        and payload.get("name") == "/Device"
-        and payload.get("owner") == "/Device"
+        if url.endswith("/v1/models/live") and payload.get("name") == "/Device" and payload.get("owner") == "/Device"
     ]
     assert before == after == "pre-started"
     assert len(live_payloads) == 1

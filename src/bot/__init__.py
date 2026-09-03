@@ -32,7 +32,7 @@ from bot.events import (
     ActivatingDoneEventData,
     ActivatingFailedEvent,
     ActivatingFailedEventData,
-    BotInputData,
+    InputData,
     ClearFocusEvent,
     ClearFocusEventData,
     DeactivateEvent,
@@ -52,6 +52,7 @@ from bot.events import (
     RebootReason,
     StimulusData,
 )
+
 # Construction API before abilities so class-body `bot.define` sees the hook.
 from bot.define import (
     activity,
@@ -73,7 +74,7 @@ from bot.define import (
     transition,
 )
 from bot.start import register, start, started
-from bot import abilities, behavior, skills
+from bot import abilities, behavior, skills, address
 
 if TYPE_CHECKING:
     from bot.bot import Bot
@@ -106,6 +107,7 @@ __all__ = [
     "start",
     "started",
     "register",
+    "address",
     "state",
     "target",
     "transition",
@@ -115,7 +117,7 @@ __all__ = [
     "ActivatingDoneEventData",
     "ActivatingFailedEvent",
     "ActivatingFailedEventData",
-    "BotInputData",
+    "InputData",
     "ClearFocusEvent",
     "ClearFocusEventData",
     "DeactivateEvent",

@@ -14,10 +14,6 @@ from . import snapshot
 from . import space
 
 
-def _instance_scope(instance: hsm.Instance) -> object | None:
-    return instance.context().value(hsm.Keys.Instances)
-
-
 class _Scope:
     """Context key carrying the Environment that published this context chain."""
 
@@ -96,6 +92,16 @@ class Environment(hsm.Context):
             revived._id = scope._id
         return revived
 
+    @property
+    def environment_id(self) -> str:
+        """This environment's stable identity segment: ``<id>`` in ``/<id>/<actor-id>``.
+
+        The same string the addressing registry uses as this environment's root, and the
+        one model-facing observation renders as ``<environment id="…">``. Revival by
+        :meth:`from_context` carries it forward, so an address survives scope cancellation.
+        """
+        return self._id
+
     def join(self, instance: hsm.Instance, *, placement: space.Placement | None = None) -> None:
         """Admit a started instance as an environment citizen. Idempotent.
 
@@ -150,12 +156,38 @@ class Environment(hsm.Context):
         have.
         """
 
-        if _instance_scope(perspective) is not self._instances:
+        if not self.contains(perspective):
             return None
         self_element = snapshot.render_self(perspective, self._instances.get, 1)
         if self_element is None:
             return None
         return snapshot.render_environment(self._id, self_element)
+
+    @property
+    def scope_path(self) -> str:
+        """The environment's own address: ``/env/<id>``.
+
+        Built from the environment's stable identity (``_id``), never from any actor inside
+        it, so the path says where this environment is without saying who is in it."""
+        return f"/env/{self._id}"
+
+    def contains(self, instance: hsm.Instance) -> bool:
+        """Whether ``instance`` runs in this environment's own addressing scope.
+
+        Map identity is the only honest test — a shared ancestor is not a shared scope — and an
+        unstarted instance has no scope to test, so it is ``False``. Callers that must tell
+        "not started yet" from "started elsewhere" check ``lifecycle.is_started`` first, the
+        way ``require_environment_scope`` does."""
+        return instance.context().value(hsm.Keys.Instances) is self._instances
+
+    def path_of(self, instance: hsm.Instance) -> str | None:
+        """``instance``'s path under this environment, or ``None`` when it is not a member.
+
+        Derived on demand, never stored: a stored path would outlive the instance it named and
+        address nothing — the same lie ``contains`` already refuses."""
+        if not self.contains(instance):
+            return None
+        return f"{self.scope_path}/{hsm.id(instance)}"
 
     def _reception(
         self,
@@ -245,6 +277,48 @@ def require_environment_scope(environment: Environment, instance: hsm.Instance, 
     # Only enforce while the machine is started; a stopped instance has no environment scope yet.
     if not lifecycle.is_started(instance):
         return
-    if _instance_scope(instance) is environment.value(hsm.Keys.Instances):
+    if environment.contains(instance):
         return
     raise RuntimeError(f"{participant} is already started in another environment.")
+
+
+def elevate_device_observation_to_input(
+    ctx: hsm.Context,
+    owner: hsm.Instance,
+    observation: hsm.Event[typing.Any],
+) -> None:
+    """Elevate one typed device observation into body ``bot.input`` for ``owner``.
+
+    Explicit boundary contract owned by environment: body and cognition consume the
+    elevated ``bot.input`` form, never device event names. Coordinates via typed
+    payload (device ``ObservationData``) — every observation elevates
+    unconditionally; the ``source_event`` string rides along as cognition context
+    data and is never branched on for routing. Producers stamp identity and
+    provenance at emission (observation ``id``/``source``/``metadata``); this
+    preserves them onto the elevated envelope with ``target`` addressed to ``owner``.
+    No attachment/device tree walk: the caller passes the explicit ``owner``.
+    """
+
+    from bot.device import ObservationData
+
+    data = observation.data
+    assert isinstance(data, ObservationData)
+    from bot import events as bot_events
+
+    _ = hsm.dispatch(
+        ctx,
+        owner,
+        dataclasses.replace(
+            bot_events.InputEvent.with_data(
+                bot_events.InputEventData(
+                    priority=data.priority,
+                    source_event=data.source_event,
+                    payload=data.payload,
+                )
+            ),
+            id=observation.id or uuid.uuid4().hex,
+            source=observation.source,
+            target=hsm.id(owner),
+            metadata=dict(observation.metadata),
+        ),
+    )

@@ -47,16 +47,15 @@ function coerceDirection(value: string | null): ResizeDirection {
  * CSS `:host([direction=se])` cannot desync.
  *
  * Keyboard contract: the inner `<button>` is focusable and labeled
- * `Resize <direction>`. `flow-graph` listens for `keydown` whose composed
- * path hits this control: Enter or Space starts a keyboard resize in this
- * direction (origin = the node's current bounds, typed `resize_start` into
- * the Resizer), ArrowUp/ArrowDown/ArrowLeft/ArrowRight each step the edge by
- * 1px in world units through the Resizer's shared min/max/aspect clamp
- * logic (one typed `resize_key_step` per keypress), and Escape or a second
- * Enter ends the resize (typed `resize_end`, which applies the bounds and
- * emits `flow-node-resize-end`). Enter/Space never activate the node: a
- * click originating from this control's button is excluded from node
- * activation. The button carries a `:focus-visible` outline.
+ * `Resize <direction>`. `flow-graph` maps a `keydown` on this control to a
+ * typed `resize_key` event; Pointer topology owns start (idle →
+ * `resize/keyboard`), step, and end. Enter or Space starts a keyboard
+ * resize in this direction (origin = the node's current bounds). Arrows
+ * step the edge by 1px in world units through the Resizer's shared clamp.
+ * Escape or a second Enter ends the resize. Pointer and keyboard cannot
+ * share one session. Enter/Space never activate the node: a click from this
+ * control's button is excluded from node activation. The button carries a
+ * `:focus-visible` outline.
  *
  * Inputs: `direction` attribute or property. Outputs: reflected attribute,
  * `direction`, and the focusable labeled button. Ownership: the element owns

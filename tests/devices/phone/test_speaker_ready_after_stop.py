@@ -1,17 +1,19 @@
-"""Receiver readiness needs an attach hold plus a started, same-environment speaker."""
+"""The receiver forwards service audio only for its current call."""
 
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import typing
 
 import hsm
 import bot
+import bot.lifecycle
 
 from bot.devices import audio
-from bot.devices.phone import phone as phone_device
-from bot.devices.phone.phone import PhoneFirmware, _PhoneObservationService
+from bot.devices import phone as phone_device
 from bot.environment import Environment
+from tests.hsm_instance_state import phone_firmware
 
 
 def _service_audio(call_id: str) -> hsm.Event[phone_device.ServiceAudioData]:
@@ -26,35 +28,68 @@ def _service_audio(call_id: str) -> hsm.Event[phone_device.ServiceAudioData]:
     )
 
 
-def test_receiver_requires_attach_and_started_speaker() -> None:
-    """Speaker liveness is firmware's guard now; the service only reports attachment."""
+class _RecordingSpeaker(audio.Speaker):
+    """Speaker that records receiver audio forwarded by phone firmware."""
 
-    async def run() -> tuple[bool, bool, bool, bool]:
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[object] = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        if event.name == audio.OutputEvent.name:
+            self.received.append(event.data)
+        return super().dispatch(ctx, event)
+
+
+def test_receiver_forwards_only_current_call_service_audio() -> None:
+    """Call correlation — not transducer readiness — gates the receiver path.
+
+    The firmware guard admits service audio by payload type and current call id
+    only; transducer liveness is a delivery-time concern, so this test drives the
+    whole path through public phone seams and asserts who hears what.
+    """
+
+    async def run() -> tuple[int, int, int]:
         environment = Environment()
-        speaker = audio.Speaker()
-        target = hsm.Instance()
-        # This test is about attach/liveness gating, not elevation; the phone injects the real
-        # elevation, so a no-op stands in here.
-        observation = _PhoneObservationService(
-            owner=phone_device.Phone(),
-            service=phone_device.PhoneEventRecorder(),
-            elevate=lambda ctx, event: None,
+        speaker = _RecordingSpeaker()
+        phone = phone_device.Phone(speaker=speaker, service=phone_device.EventRecorder())
+        firmware = phone_firmware(phone)
+
+        async def forwarded_count(call_id: str) -> int:
+            await firmware.event_recorder().receive(phone.context(), _service_audio(call_id))
+            await asyncio.sleep(0)
+            return len(speaker.received)
+
+        # No call yet: service audio for an unknown call goes nowhere.
+        before_call = await forwarded_count("call-1")
+
+        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        assert bot.lifecycle.is_started(speaker)
+        await firmware.event_recorder().receive(
+            phone.context(),
+            phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),
         )
-        firmware = PhoneFirmware(service=observation, speaker=speaker)
-        firmware._current_call_id = "call-1"
-        event = _service_audio("call-1")
+        await phone.dispatch(
+            phone.context(),
+            phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
+        )
+        await firmware.event_recorder().receive(
+            phone.context(),
+            phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1")),
+        )
+        await firmware.event_recorder().receive(
+            phone.context(),
+            phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1")),
+        )
 
-        unattached = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        observation.target = target
-        attached_unstarted = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        _ = await bot.started(environment, speaker, typing.cast(hsm.Model, audio.Speaker.model))
-        ready = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        await hsm.stop(speaker)
-        after_stop = PhoneFirmware._matches_current_service_audio(environment, firmware, event)
-        return unattached, attached_unstarted, ready, after_stop
+        # Current call on a started same-environment speaker: audio is forwarded.
+        ready = await forwarded_count("call-1")
+        # A live receiver never leaks another call's audio onto this speaker.
+        after_wrong_call = await forwarded_count("call-2")
+        return before_call, ready, after_wrong_call
 
-    unattached, attached_unstarted, ready, after_stop = asyncio.run(run())
-    assert unattached is False
-    assert attached_unstarted is False
-    assert ready is True
-    assert after_stop is False
+    before_call, ready, after_wrong_call = asyncio.run(run())
+    assert before_call == 0
+    assert ready == 1
+    assert after_wrong_call == 1

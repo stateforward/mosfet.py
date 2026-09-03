@@ -26,8 +26,6 @@ from .events import (
     ChangeEvent,
     CreateData,
     CreateEvent,
-    Data,
-    Event,
     data_from_event,
     event_for_data,
     is_inventory_event,
@@ -77,7 +75,6 @@ _LAZY = {
     "schema": ".schema",
     "storage": ".storage",
     "source": ".source",
-    "events": ".events",
     "behavior_table": ".storage",
     "behavior_trigger_table": ".storage",
 }
@@ -89,8 +86,6 @@ __all__ = [
     "ChangeEvent",
     "CreateData",
     "CreateEvent",
-    "Data",
-    "Event",
     "Instance",
     "Seed",
     "Behavior",
@@ -116,7 +111,6 @@ __all__ = [
     "behavior",
     "compiler",
     "diagnostic",
-    "events",
     "instance",
     "seed",
     "runtime",
@@ -141,7 +135,6 @@ def __getattr__(name: str) -> object:
         "runtime",
         "schema",
         "source",
-        "events",
         "seed",
     }:
         value: object = module

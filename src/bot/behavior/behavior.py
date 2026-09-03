@@ -14,7 +14,6 @@ import asyncio
 import dataclasses
 import datetime
 import hashlib
-import re
 import typing
 import uuid
 
@@ -645,8 +644,11 @@ class Behavior(abilities.Ability[object, object]):
 
 
 def _snake_case_model_name(name: str) -> str:
-    with_boundaries = re.sub(r"(?<!^)(?=[A-Z])", "_", name)
-    return with_boundaries.lower()
+    # Shared helper lives on conversation; a top-level import would cycle
+    # behavior -> communication -> cognition -> autonomy -> behavior.
+    from bot.abilities.communication.conversation.conversation import snake_case
+
+    return snake_case(name)
 
 
 def _callback_event(event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:

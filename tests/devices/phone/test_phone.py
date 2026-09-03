@@ -43,9 +43,9 @@ DIAL_NUMBER = "5550142"
 """A number to dial. Digits, from the fictional 555-01xx range, the way a real number is."""
 
 
-def _phone_firmware(phone: phone_device.Phone) -> phone_device.PhoneFirmware:
+def _phone_firmware(phone: phone_device.Phone) -> phone_device.Firmware:
     firmware = phone_firmware(phone)
-    assert isinstance(firmware, phone_device.PhoneFirmware)
+    assert isinstance(firmware, phone_device.Firmware)
     return firmware
 
 
@@ -64,7 +64,7 @@ async def _wait_until(predicate: collections.abc.Callable[[], bool], *, timeout:
     raise AssertionError("Timed out waiting for phone firmware condition.")
 
 
-def _event_names(recorder: phone_device.PhoneEventRecorder) -> list[str]:
+def _event_names(recorder: phone_device.EventRecorder) -> list[str]:
     return [event.name for event in recorder.events]
 
 
@@ -90,11 +90,11 @@ class AttachablePhoneService:
     target: hsm.Instance | None = None
 
     async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+        assert environment.contains(target)
         self.target = target
 
     async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        assert target.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances)
+        assert environment.contains(target)
         if self.target is target:
             self.target = None
 
@@ -187,11 +187,11 @@ def test_phone_accepts_injected_audio_and_display_peripherals() -> None:
 def test_phone_uses_phone_firmware_instance() -> None:
     phone = phone_device.Phone()
 
-    assert phone.firmware_model is phone_device.PhoneFirmware.model
+    assert phone.firmware_model is phone_device.Firmware.model
     assert not hasattr(phone, "operation_events")
     assert not hasattr(phone_module, "_PHONE_FIRMWARE_STATES")
     assert not hasattr(phone_module, "_PHONE_STATES")
-    assert isinstance(_phone_firmware(phone), phone_device.PhoneFirmware)
+    assert isinstance(_phone_firmware(phone), phone_device.Firmware)
     assert phone_closed_call_ids(_phone_firmware(phone)) == frozenset()
     assert phone_current_call_id(_phone_firmware(phone)) is None
     assert phone_current_transfer_target(_phone_firmware(phone)) is None
@@ -274,7 +274,7 @@ def test_phone_rejects_non_positive_timeouts() -> None:
 
 
 def test_phone_accepts_injected_service() -> None:
-    recorder = phone_device.PhoneEventRecorder()
+    recorder = phone_device.EventRecorder()
     phone = phone_device.Phone(service=recorder)
 
     assert _phone_firmware(phone).event_recorder() is recorder
@@ -374,8 +374,8 @@ def test_phone_service_ingress_does_not_forward_non_service_events() -> None:
 
 
 def test_phone_exports_service_contract_without_event_sink_alias() -> None:
-    assert phone_contracts.PhoneService is phone_device.PhoneService
-    assert "PhoneService" in phone_contracts.__all__
+    assert phone_contracts.Service is phone_device.Service
+    assert "Service" in phone_contracts.__all__
     assert "PHONE_SERVICE_CONNECTED" not in phone_contracts.__all__
     assert "PhoneServiceConnectionData" not in phone_contracts.__all__
     assert not hasattr(phone_contracts, "PHONE_SERVICE_CONNECTED")
@@ -522,20 +522,21 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert inside_events[0].source == phone_id
     assert inside_events[0].target == "inside"
     sound = inside_events[0].data
-    assert getattr(sound, "kind", None) == "phone.ringing"
-    assert getattr(sound, "media_type", None) == "audio/wav"
-    assert getattr(sound, "sample_rate_hz", None) == 16_000
-    assert getattr(sound, "channels", None) == 1
-    assert getattr(sound, "audio", b"").startswith(b"RIFF")
-    assert getattr(sound, "audio", b"") == phone_device.RING_SOUND_WAV
-    assert getattr(sound, "caller", "") == "Front desk"
+    assert isinstance(sound, phone_device.SoundData)
+    assert sound.kind == "phone.ringing"
+    assert sound.media_type == "audio/wav"
+    assert sound.sample_rate_hz == 16_000
+    assert sound.channels == 1
+    assert sound.audio.startswith(b"RIFF")
+    assert sound.audio == phone_device.RING_SOUND_WAV
+    assert sound.caller == "Front desk"
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 
 
 async def _dialing_phone_in_environment(
     environment: Environment,
-) -> tuple[phone_device.Phone, phone_device.PhoneFirmware, PhoneObservationRecorder]:
+) -> tuple[phone_device.Phone, phone_device.Firmware, PhoneObservationRecorder]:
     """A started phone mid-dial, with an environment citizen standing where it can hear it."""
 
     phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
@@ -584,7 +585,7 @@ def test_phone_dial_failure_is_heard_as_the_call_progress_tone_the_exchange_woul
         assert heard[0].name == SoundEvent.name
         assert heard[0].source == phone_id
         tone = heard[0].data
-        assert isinstance(tone, phone_device.PhoneSoundData)
+        assert isinstance(tone, phone_device.SoundData)
         assert tone.kind == expected_kind
         assert tone.audio == expected_audio
         assert tone.audio.startswith(b"RIFF")
@@ -1156,20 +1157,22 @@ def test_phone_firmware_logs_instead_of_silently_dropping_when_display_is_not_st
 ) -> None:
     """Standalone firmware with an unstarted display cannot show a caller id; it says so.
 
-    ``PhoneFirmware()`` alone constructs its own default, unstarted ``Display`` — firmware driven
+    ``Firmware()`` alone constructs its own default, unstarted ``Display`` — firmware driven
     that way (bypassing ``Phone``, which starts every peripheral before firmware exists) has no
     live display to put a caller id on. That used to vanish as a dispatch to nowhere with no
     trace; it is now an observable warning instead of a silent drop.
     """
 
     async def run() -> None:
-        firmware = phone_device.PhoneFirmware()
+        firmware = phone_device.Firmware()
+        _ = await bot.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
+        caplog.clear()
         event = phone_device.IncomingCallEvent.with_data(
             phone_device.IncomingCallData(call_id="call-1", caller="Front desk")
         )
 
         with caplog.at_level(logging.WARNING, logger="bot.devices.phone.phone"):
-            phone_device.PhoneFirmware._show_caller_id(hsm.Context(), firmware, event)
+            await firmware.dispatch(firmware.context(), event)
         await asyncio.sleep(0)
 
     asyncio.run(run())
@@ -1293,7 +1296,7 @@ def test_phone_service_audio_routes_through_speaker_to_environment_observers() -
         assert len(observer.events) == 1
         assert observer.events[0].name == SoundEvent.name
         ring_data = observer.events[0].data
-        assert isinstance(ring_data, phone_device.PhoneSoundData)
+        assert isinstance(ring_data, phone_device.SoundData)
         assert ring_data.kind == "phone.ringing"
         # A withheld caller still rings.
         assert ring_data.caller is None
@@ -1588,7 +1591,7 @@ def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> N
 
 
 def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
-    async def started_phone() -> tuple[phone_device.Phone, phone_device.PhoneFirmware]:
+    async def started_phone() -> tuple[phone_device.Phone, phone_device.Firmware]:
         phone = phone_device.Phone()
         _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
@@ -1983,11 +1986,11 @@ def test_phone_dispatch_drops_invalid_dict_command_without_shell_fallthrough() -
 
 
 def test_phone_event_recorder_ignores_local_audio_output_not_service_audio() -> None:
-    """Recorder skips exact AudioOutputData uplink offers; ServiceAudioData still records."""
+    """Recorder skips exact OutputData uplink offers; ServiceAudioData still records."""
 
-    recorder = phone_device.PhoneEventRecorder()
+    recorder = phone_device.EventRecorder()
     local = audio_device.OutputEvent.with_data(
-        audio_device.AudioOutputData(audio=b"local", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+        audio_device.OutputData(audio=b"local", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
     )
     service = phone_device.ServiceAudioReceivedEvent.with_data(
         phone_device.ServiceAudioData(
@@ -2004,10 +2007,34 @@ def test_phone_event_recorder_ignores_local_audio_output_not_service_audio() -> 
     assert isinstance(recorder.events[0].data, phone_device.ServiceAudioData)
 
 
+async def _media_ready_firmware(firmware: phone_device.Firmware) -> None:
+    """Bring a standalone firmware to answered/media_ready through public dispatch.
+
+    Starts the firmware and walks the real call flow — ring, answer, connect,
+    media ready — so audio-path tests exercise the transitions that gate the
+    receiver and mouthpiece instead of invoking private effect functions.
+    """
+
+    _ = await bot.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
+    await firmware.dispatch(
+        firmware.context(),
+        phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),
+    )
+    await firmware.dispatch(firmware.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
+    await firmware.dispatch(
+        firmware.context(),
+        phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1")),
+    )
+    await firmware.dispatch(
+        firmware.context(),
+        phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1")),
+    )
+
+
 def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
     """Regression: far-end audio must never take the uplink path back to the caller.
 
-    Previously firmware flattened ServiceAudioData into an exact AudioOutputData and published
+    Previously firmware flattened ServiceAudioData into an exact OutputData and published
     it through the service, whose direction was inferred from `type(data)`. The flattening
     erased the provenance the guard depended on, so the receiver fed the wire and the caller
     heard themselves. Direction is now which transition fired, and the service never sees it.
@@ -2015,7 +2042,7 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
 
     async def run() -> tuple[list[bytes], list[str]]:
         class TrackingSpeaker(audio_device.Speaker):
-            elevated: list[audio_device.AudioOutputData]
+            elevated: list[audio_device.OutputData]
 
             def __init__(self) -> None:
                 super().__init__()
@@ -2025,7 +2052,7 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
             def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
                 del ctx
                 data = event.data
-                if isinstance(data, audio_device.AudioOutputData):
+                if isinstance(data, audio_device.OutputData):
                     self.elevated.append(data)
                 return asyncio.ensure_future(asyncio.sleep(0))
 
@@ -2047,8 +2074,8 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
 
         speaker = TrackingSpeaker()
         inner = TrackingService()
-        firmware = phone_device.PhoneFirmware(service=inner, speaker=speaker)
-        ctx = hsm.Context()
+        firmware = phone_device.Firmware(service=inner, speaker=speaker)
+        await _media_ready_firmware(firmware)
         service_audio = phone_device.ServiceAudioReceivedEvent.with_data(
             phone_device.ServiceAudioData(
                 call_id="call-1",
@@ -2058,9 +2085,10 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
                 channels=1,
             )
         )
-        phone_device.PhoneFirmware._receive_service_audio(ctx, firmware, service_audio)
+        await firmware.dispatch(firmware.context(), service_audio)
         await asyncio.sleep(0)
-        return [bytes(item.audio) for item in speaker.elevated], [event.name for event in inner.events]
+        uplinked = [event.name for event in inner.events if event.name == audio_device.OutputEvent.name]
+        return [bytes(item.audio) for item in speaker.elevated], uplinked
 
     elevated, published = asyncio.run(run())
     assert elevated == [b"remote"], "far-end audio must reach the speaker"
@@ -2068,25 +2096,26 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
 
 
 def test_receiver_audio_keeps_its_service_type() -> None:
-    """The speaker is handed ServiceAudioData, not a flattened AudioOutputData."""
+    """The speaker is handed ServiceAudioData, not a flattened OutputData."""
 
-    captured: list[audio_device.AudioOutputData] = []
+    captured: list[audio_device.OutputData] = []
 
     class CapturingSpeaker(audio_device.Speaker):
         @typing.override
         def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
             del ctx
             data = event.data
-            if isinstance(data, audio_device.AudioOutputData):
+            if isinstance(data, audio_device.OutputData):
                 captured.append(data)
             return asyncio.ensure_future(asyncio.sleep(0))
 
     async def run() -> None:
-        firmware = phone_device.PhoneFirmware(service=phone_device.PhoneEventRecorder(), speaker=CapturingSpeaker())
+        firmware = phone_device.Firmware(service=phone_device.EventRecorder(), speaker=CapturingSpeaker())
+        await _media_ready_firmware(firmware)
         event = phone_device.ServiceAudioReceivedEvent.with_data(
             phone_device.ServiceAudioData(call_id="call-1", audio=b"remote", media_type="audio/pcm")
         )
-        phone_device.PhoneFirmware._receive_service_audio(hsm.Context(), firmware, event)
+        await firmware.dispatch(firmware.context(), event)
         await asyncio.sleep(0)
 
     asyncio.run(run())
@@ -2119,20 +2148,23 @@ def test_microphone_audio_uplinks_only_while_media_ready() -> None:
             del ctx
             self.events.append(event)
 
-    inner = TrackingService()
-    firmware = phone_device.PhoneFirmware(service=inner, speaker=audio_device.Speaker())
-    captured = audio_device.InputEvent.with_data(
-        audio_device.AudioInputData(audio=b"local speech", media_type="audio/pcm", sample_rate_hz=24_000, channels=1)
-    )
-    phone_device.PhoneFirmware._send_microphone_audio(hsm.Context(), firmware, captured)
+    async def run() -> list[hsm.Event[typing.Any]]:
+        inner = TrackingService()
+        firmware = phone_device.Firmware(service=inner, speaker=audio_device.Speaker())
+        await _media_ready_firmware(firmware)
+        captured = audio_device.InputEvent.with_data(
+            audio_device.InputData(audio=b"local speech", media_type="audio/pcm", sample_rate_hz=24_000, channels=1)
+        )
+        await firmware.dispatch(firmware.context(), captured)
+        return [event for event in inner.events if event.name == audio_device.OutputEvent.name]
 
-    uplinked = [event for event in inner.events if event.name == audio_device.OutputEvent.name]
-    assert len(uplinked) == 1, f"microphone audio must uplink; got {[e.name for e in inner.events]!r}"
+    uplinked = asyncio.run(run())
+    assert len(uplinked) == 1, f"microphone audio must uplink; got {[e.name for e in uplinked]!r}"
     payload = uplinked[0].data
-    assert isinstance(payload, audio_device.AudioOutputData)
+    assert isinstance(payload, audio_device.OutputData)
     assert bytes(payload.audio) == b"local speech"
-    # Exact type: the LiveKit provider only uplinks exact AudioOutputData.
-    assert type(payload) is audio_device.AudioOutputData
+    # Exact type: the LiveKit provider only uplinks exact OutputData.
+    assert type(payload) is audio_device.OutputData
 
 
 def _uplinks(service: AttachablePhoneService) -> list[hsm.Event[typing.Any]]:
@@ -2354,7 +2386,7 @@ def test_the_robots_own_voice_goes_up_the_wire() -> None:
         await voice.dispatch(
             Environment.from_context(voice.context()),
             audio_device.OutputEvent.with_data(
-                audio_device.AudioOutputData(
+                audio_device.OutputData(
                     audio=b"local speech", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
                 )
             ),
@@ -2405,7 +2437,7 @@ def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire()
         await _wait_until(lambda: bool(_uplinks(service)), timeout=2.0)
         uplinks = _uplinks(service)
         carried = uplinks[0].data
-        assert isinstance(carried, audio_device.AudioOutputData)
+        assert isinstance(carried, audio_device.OutputData)
         return len(uplinks), carried.audio
 
     count, carried = asyncio.run(run())
@@ -2560,7 +2592,7 @@ class RoomOccupant(hsm.Instance):
 
 async def _phone_in_a_hand(
     environment: Environment,
-) -> tuple[phone_device.Phone, phone_device.PhoneFirmware, PhoneHolder, RoomOccupant]:
+) -> tuple[phone_device.Phone, phone_device.Firmware, PhoneHolder, RoomOccupant]:
     """A started phone attached to something holding it, plus somebody standing in the room."""
 
     phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))

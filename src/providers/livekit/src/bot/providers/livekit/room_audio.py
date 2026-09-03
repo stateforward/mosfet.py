@@ -247,7 +247,7 @@ class RoomHandle(typing.Protocol):
 type AudioStreamFactory = collections.abc.Callable[[object], collections.abc.AsyncIterable[object]]
 type RoomAudioConnectionSink = collections.abc.Callable[[RoomAudioConnectedData], None]
 type LocalAudioTrackFactory = collections.abc.Callable[[str, object], object]
-type RemoteAudioSink = collections.abc.Callable[[audio_device.AudioInputData], collections.abc.Awaitable[None]]
+type RemoteAudioSink = collections.abc.Callable[[audio_device.InputData], collections.abc.Awaitable[None]]
 
 
 def _livekit_room(loop: asyncio.AbstractEventLoop | None = None) -> RoomHandle:
@@ -260,11 +260,6 @@ def _livekit_audio_stream(track: object) -> collections.abc.AsyncIterable[object
 
 def _livekit_local_audio_track(name: str, source: object) -> object:
     return rtc.LocalAudioTrack.create_audio_track(name, typing.cast(rtc.AudioSource, source))
-
-
-def _require_positive_timeout(value: datetime.timedelta) -> None:
-    if value <= datetime.timedelta():
-        raise ValueError("operation_timeout must be a positive duration.")
 
 
 def _stable_failure_kind(error: BaseException, fallback: str) -> str:
@@ -349,7 +344,8 @@ class RoomAudioTrackPath(hsm.Instance):
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__()
-        _require_positive_timeout(operation_timeout)
+        if operation_timeout <= datetime.timedelta():
+            raise ValueError("operation_timeout must be a positive duration.")
         instance_ref = weakref.ref(self)
 
         def handle_track_subscribed(track: object, publication: object, participant: object) -> object:

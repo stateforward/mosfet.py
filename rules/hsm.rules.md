@@ -51,6 +51,10 @@ Events with payloads MUST declare typed, validated payload contracts.
 
 Event payload contracts MUST describe the actual event payload, not an incidental wrapper around it.
 
+Generic base-class envelopes (``Ability`` input/output and the decoding/classifying/generative/encoding
+input/output/apply-completed events) are the intentional exception: the base is generic, so concrete
+subclasses narrow the schema and runtime validation moves through ``input_data_type``/``output_data_type``.
+
 # HSM-EVENT-002 MUST Treat Events As The Boundary Contract
 
 See:

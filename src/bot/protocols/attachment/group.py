@@ -14,6 +14,7 @@ import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
 from bot import lifecycle
+from bot import scope
 
 from . import events
 from .attachment import Attachment
@@ -32,8 +33,19 @@ class _OperationKind(enum.StrEnum):
 
 
 class _OperationData(pydantic.BaseModel):
+    """Immutable correlation + phase descriptor for one group barrier operation.
+
+    Frozen: never mutated in place. Phase transitions (attach -> rollback, detach ->
+    recovery) produce a new snapshot via ``model_copy`` stored on the owning Group
+    instance; member outcome events carry the phase-correct snapshot for correlation.
+    Result accumulation (per-member outcomes, failures, created sets) lives on the
+    owning Group instance (owned state, read/written only by Group's own HSM
+    callbacks), never in this event-carried object.
+    """
+
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
+        frozen=True,
     )
 
     coordinator: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]]
@@ -45,10 +57,6 @@ class _OperationData(pydantic.BaseModel):
     timeout: datetime.timedelta
     kind: _OperationKind
     members: tuple[int, ...]
-    results: dict[int, _MemberResult] = pydantic.Field(default_factory=dict)
-    attempted_members: set[int] = pydantic.Field(default_factory=set)
-    created_members: tuple[int, ...] = ()
-    failure: events.FailedData | None = None
     fallback_attached: bool = False
 
 
@@ -113,9 +121,9 @@ def _operation(event: hsm.Event[typing.Any]) -> _OperationData:
     return data
 
 
-def _first_failure(operation: _OperationData) -> events.FailedData | None:
-    for index in sorted(operation.results):
-        result = operation.results[index]
+def _first_failure(results: collections.abc.Mapping[int, _MemberResult]) -> events.FailedData | None:
+    for index in sorted(results):
+        result = results[index]
         if isinstance(result, events.FailedData):
             return result
     return None
@@ -297,10 +305,8 @@ class _Reply(hsm.Instance):
         with_timeout: bool,
     ) -> "_Reply":
         reply = cls()
-        reply_ctx = hsm.Context(
-            parent=ctx,
-            values={hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()},
-        )
+        values = scope.mark_private({hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()})
+        reply_ctx = hsm.Context(parent=ctx, values=values)
         try:
             return await bot.started(
                 reply_ctx,
@@ -344,16 +350,26 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         self._attachment_request_id: str = ""
         # Machine-owned attach hold (HSM-CONTEXT-001): not instance.state() for fallback routing.
         self._held_attached: bool = False
+        # Owned barrier accumulation for the active operation phase. Events carry an
+        # immutable _OperationData snapshot for correlation; per-member outcomes and
+        # derived failure/created sets accumulate here (owning-class reads/writes only).
+        self._op: _OperationData | None = None
+        self._op_results: dict[int, _MemberResult] = {}
+        self._op_attempted: set[int] = set()
+        self._op_failure: events.FailedData | None = None
+        self._op_created: tuple[int, ...] = ()
+        self._op_fallback: bool = False
 
     @staticmethod
     async def _attach_members_activity(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         replies: dict[int, _Reply] = {}
 
         def fail_replies() -> None:
             lifetime = instance.context()
             failure = events.FailedData(
-                actor=operation.actor,
+                actor=phase.actor,
                 kind=events.FailureKind.DISPATCH,
                 message=f"{type(instance).__name__} member attach was canceled.",
             )
@@ -377,18 +393,18 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             reply: _Reply | None = None
             try:
                 reply = await _Reply.started(
-                    operation.context,
-                    operation,
+                    phase.context,
+                    phase,
                     index,
                     dict(event.metadata),
                     with_timeout=True,
                 )
                 replies[index] = reply
                 await member.attach(
-                    operation.context,
+                    phase.context,
                     dataclasses.replace(
                         events.AttachEvent.with_data(
-                            events.AttachData(actor=operation.actor, reply_to=reply, timeout=operation.timeout)
+                            events.AttachData(actor=phase.actor, reply_to=reply, timeout=phase.timeout)
                         ),
                         id=hsm.id(reply),
                         source=hsm.id(instance),
@@ -404,16 +420,16 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         dataclasses.replace(
                             _MemberAttachFailedEvent.with_data(
                                 _MemberAttachFailedData(
-                                    operation=operation,
+                                    operation=phase,
                                     index=index,
                                     result=events.FailedData(
-                                        actor=operation.actor,
+                                        actor=phase.actor,
                                         kind=events.FailureKind.DISPATCH,
                                         message=f"{type(instance).__name__} member reply start was canceled.",
                                     ),
                                 )
                             ),
-                            id=operation.request_id,
+                            id=phase.request_id,
                             source=hsm.id(member),
                             target=hsm.id(instance),
                             metadata=dict(event.metadata),
@@ -423,7 +439,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 raise
             except Exception as error:
                 failure = events.FailedData(
-                    actor=operation.actor,
+                    actor=phase.actor,
                     kind=events.FailureKind.DISPATCH,
                     message=f"{type(instance).__name__} member attach failed: {error}",
                 )
@@ -447,16 +463,16 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     ctx,
                     dataclasses.replace(
                         _MemberAttachFailedEvent.with_data(
-                            _MemberAttachFailedData(operation=operation, index=index, result=failure)
+                            _MemberAttachFailedData(operation=phase, index=index, result=failure)
                         ),
-                        id=operation.request_id,
+                        id=phase.request_id,
                         source=member_id,
                         target=hsm.id(instance),
                         metadata=dict(event.metadata),
                     ),
                 )
 
-        fanout = asyncio.gather(*(attach_member(index) for index in operation.members))
+        fanout = asyncio.gather(*(attach_member(index) for index in phase.members))
         context_done = asyncio.wrap_future(ctx.done())
         try:
             done, _ = await asyncio.wait((fanout, context_done), return_when=asyncio.FIRST_COMPLETED)
@@ -487,13 +503,14 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
 
     @staticmethod
     async def _detach_members_activity(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         replies: dict[int, _Reply] = {}
 
         def fail_replies() -> None:
             lifetime = instance.context()
             failure = events.FailedData(
-                actor=operation.actor,
+                actor=phase.actor,
                 kind=events.FailureKind.DISPATCH,
                 message=f"{type(instance).__name__} member detach was canceled.",
             )
@@ -517,22 +534,22 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             reply: _Reply | None = None
             try:
                 reply = await _Reply.started(
-                    operation.context,
-                    operation,
+                    phase.context,
+                    phase,
                     index,
                     dict(event.metadata),
                     with_timeout=True,
                 )
                 replies[index] = reply
-                operation.attempted_members.add(index)
+                instance._op_attempted.add(index)
                 await member.detach(
-                    operation.context,
+                    phase.context,
                     dataclasses.replace(
                         events.DetachEvent.with_data(
                             events.DetachData(
-                                actor=operation.actor,
+                                actor=phase.actor,
                                 reply_to=reply,
-                                timeout=operation.timeout,
+                                timeout=phase.timeout,
                             )
                         ),
                         id=hsm.id(reply),
@@ -549,16 +566,16 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         dataclasses.replace(
                             _MemberDetachFailedEvent.with_data(
                                 _MemberDetachFailedData(
-                                    operation=operation,
+                                    operation=phase,
                                     index=index,
                                     result=events.FailedData(
-                                        actor=operation.actor,
+                                        actor=phase.actor,
                                         kind=events.FailureKind.DISPATCH,
                                         message=f"{type(instance).__name__} member reply start was canceled.",
                                     ),
                                 )
                             ),
-                            id=operation.request_id,
+                            id=phase.request_id,
                             source=hsm.id(member),
                             target=hsm.id(instance),
                             metadata=dict(event.metadata),
@@ -568,7 +585,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 raise
             except Exception as error:
                 failure = events.FailedData(
-                    actor=operation.actor,
+                    actor=phase.actor,
                     kind=events.FailureKind.DISPATCH,
                     message=f"{type(instance).__name__} member detach failed: {error}",
                 )
@@ -590,16 +607,16 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     ctx,
                     dataclasses.replace(
                         _MemberDetachFailedEvent.with_data(
-                            _MemberDetachFailedData(operation=operation, index=index, result=failure)
+                            _MemberDetachFailedData(operation=phase, index=index, result=failure)
                         ),
-                        id=operation.request_id,
+                        id=phase.request_id,
                         source=hsm.id(member),
                         target=hsm.id(instance),
                         metadata=dict(event.metadata),
                     ),
                 )
 
-        fanout = asyncio.gather(*(detach_member(index) for index in operation.members))
+        fanout = asyncio.gather(*(detach_member(index) for index in phase.members))
         context_done = asyncio.wrap_future(ctx.done())
         try:
             done, _ = await asyncio.wait((fanout, context_done), return_when=asyncio.FIRST_COMPLETED)
@@ -642,41 +659,51 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
         ):
             return False
-        operation = data.operation
+        snapshot = data.operation
+        phase = instance._op
+        if phase is None:
+            return False
         index = data.index
         result = data.result
+        # Phase match: ignore stale member outcomes from a previous phase (same request,
+        # different kind/members after a rollback transition). Accumulation lives on the
+        # instance; the event snapshot is correlation only.
         return (
-            index in operation.members
-            and index not in operation.results
+            snapshot.request_id == phase.request_id
+            and snapshot.kind == phase.kind
+            and snapshot.members == phase.members
+            and index in phase.members
+            and index not in instance._op_results
             and 0 <= index < len(instance._attachments)
-            and event.id == operation.request_id
-            and event.source == hsm.id(operation.expected_members[index])
+            and event.id == phase.request_id
+            and event.source == hsm.id(phase.expected_members[index])
             and event.target == hsm.id(instance)
-            and hsm.id(result.actor) == hsm.id(operation.actor)
+            and hsm.id(result.actor) == hsm.id(phase.actor)
         )
 
     @staticmethod
     def _is_last_result(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
         data = event.data
+        phase = instance._op
         return (
             Group._is_correlated(ctx, instance, event)
             and isinstance(
                 data,
                 (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
             )
-            and len(data.operation.results) + 1 == len(data.operation.members)
+            and phase is not None
+            and len(instance._op_results) + 1 == len(phase.members)
         )
 
     @staticmethod
     def _operation_failed(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return _operation(event).failure is not None
+        del ctx, event
+        return instance._op_failure is not None
 
     @staticmethod
     def _attach_needs_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        operation = _operation(event)
-        return operation.failure is not None and bool(operation.created_members)
+        del ctx, event
+        return instance._op_failure is not None and bool(instance._op_created)
 
     @staticmethod
     def _mark_held_attached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
@@ -690,109 +717,129 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
 
     @staticmethod
     def _fallback_is_attached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        return _operation(event).fallback_attached
+        del ctx, event
+        return instance._op_fallback
 
     @staticmethod
     def _begin_operation(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        _operation(event).request_id = event.id
+        del ctx
+        snapshot = _operation(event)
+        # New barrier phase: store the immutable snapshot and reset accumulation.
+        # The snapshot already carries request_id == event.id from attach()/detach().
+        instance._op = snapshot.model_copy(update={"request_id": event.id or snapshot.request_id})
+        instance._op_results = {}
+        instance._op_attempted = set()
+        instance._op_failure = None
+        instance._op_created = ()
+        instance._op_fallback = snapshot.fallback_attached
 
     @staticmethod
     def _record_result(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
+        del ctx
         data = event.data
         assert isinstance(
             data,
             (_MemberAttachCompleteData, _MemberAttachFailedData, _MemberDetachedData, _MemberDetachFailedData),
         )
-        data.operation.results[data.index] = data.result
+        instance._op_results[data.index] = data.result
 
     @staticmethod
     def _finalize_attach(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        operation = _operation(event)
-        operation.failure = _first_failure(operation)
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        instance._op_failure = _first_failure(instance._op_results)
         created_members: list[int] = []
-        for index in operation.members:
-            result = operation.results[index]
+        for index in phase.members:
+            result = instance._op_results[index]
             if isinstance(result, events.AttachCompleteData) and result.created:
                 created_members.append(index)
-        operation.created_members = tuple(created_members)
+        instance._op_created = tuple(created_members)
 
     @staticmethod
     def _begin_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        operation = _operation(event)
-        operation.kind = _OperationKind.DETACH
-        operation.members = operation.created_members
-        operation.results.clear()
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        # New detach phase over the members this attach created; fresh accumulation.
+        # dataclasses.replace would copy the event, but the phase descriptor itself is
+        # immutable — produce the next snapshot via model_copy and store it owned.
+        instance._op = phase.model_copy(update={"kind": _OperationKind.DETACH, "members": instance._op_created})
+        instance._op_results = {}
 
     @staticmethod
     def _finalize_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        operation = _operation(event)
-        failure = _first_failure(operation)
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        failure = _first_failure(instance._op_results)
         if failure is not None:
-            operation.failure = events.FailedData(
-                actor=operation.actor,
+            instance._op_failure = events.FailedData(
+                actor=phase.actor,
                 kind=events.FailureKind.ROLLBACK,
                 message=f"{type(instance).__name__} rollback failed: {failure.message}",
             )
-            operation.fallback_attached = True
+            instance._op_fallback = True
 
     @staticmethod
     def _finalize_detach(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx, instance
-        operation = _operation(event)
-        operation.failure = _first_failure(operation)
-        operation.created_members = (
-            tuple(index for index in operation.members if index in operation.attempted_members)
-            if operation.failure is not None
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        instance._op_failure = _first_failure(instance._op_results)
+        instance._op_created = (
+            tuple(index for index in phase.members if index in instance._op_attempted)
+            if instance._op_failure is not None
             else ()
         )
 
     @staticmethod
     def _detach_needs_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, instance
-        operation = _operation(event)
-        return operation.failure is not None and bool(operation.created_members)
+        del ctx, event
+        return instance._op_failure is not None and bool(instance._op_created)
 
     @staticmethod
     def _begin_detach_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        operation = _operation(event)
-        operation.kind = _OperationKind.ATTACH
-        operation.members = operation.created_members
-        operation.results.clear()
-        operation.timeout = instance._attachment_timeout
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        instance._op = phase.model_copy(
+            update={
+                "kind": _OperationKind.ATTACH,
+                "members": instance._op_created,
+                "timeout": instance._attachment_timeout,
+            }
+        )
+        instance._op_results = {}
 
     @staticmethod
     def _finalize_detach_rollback(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        operation = _operation(event)
-        failure = _first_failure(operation)
+        del ctx, event
+        phase = instance._op
+        assert phase is not None
+        failure = _first_failure(instance._op_results)
         if failure is not None:
-            operation.failure = events.FailedData(
-                actor=operation.actor,
+            instance._op_failure = events.FailedData(
+                actor=phase.actor,
                 kind=events.FailureKind.ROLLBACK,
                 message=f"{type(instance).__name__} detach recovery failed: {failure.message}",
             )
 
     @staticmethod
     def _dispatch_attach_complete(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         created = any(
-            isinstance(result, events.AttachCompleteData) and result.created for result in operation.results.values()
+            isinstance(result, events.AttachCompleteData) and result.created for result in instance._op_results.values()
         )
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=operation.actor, created=created)),
-                id=operation.request_id,
+                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=phase.actor, created=created)),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )
@@ -803,80 +850,85 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         instance: "Group",
         event: hsm.Event[typing.Any],
     ) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=operation.actor, created=True)),
-                id=operation.request_id,
+                events.AttachCompleteEvent.with_data(events.AttachCompleteData(actor=phase.actor, created=True)),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _dispatch_attach_failure(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
-        assert operation.failure is not None
+        phase = instance._op
+        assert phase is not None
+        assert instance._op_failure is not None
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.AttachFailedEvent.with_data(operation.failure),
-                id=operation.request_id,
+                events.AttachFailedEvent.with_data(instance._op_failure),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _dispatch_detached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         removed = any(
-            isinstance(result, events.DetachedData) and result.removed for result in operation.results.values()
+            isinstance(result, events.DetachedData) and result.removed for result in instance._op_results.values()
         )
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.DetachedEvent.with_data(events.DetachedData(actor=operation.actor, removed=removed)),
-                id=operation.request_id,
+                events.DetachedEvent.with_data(events.DetachedData(actor=phase.actor, removed=removed)),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _dispatch_empty_detached(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
+        phase = instance._op
+        assert phase is not None
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.DetachedEvent.with_data(events.DetachedData(actor=operation.actor, removed=True)),
-                id=operation.request_id,
+                events.DetachedEvent.with_data(events.DetachedData(actor=phase.actor, removed=True)),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )
 
     @staticmethod
     def _dispatch_detach_failure(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
-        operation = _operation(event)
-        assert operation.failure is not None
+        phase = instance._op
+        assert phase is not None
+        assert instance._op_failure is not None
         _ = hsm.dispatch(
             ctx,
-            operation.reply_to,
+            phase.reply_to,
             dataclasses.replace(
-                events.DetachFailedEvent.with_data(operation.failure),
-                id=operation.request_id,
+                events.DetachFailedEvent.with_data(instance._op_failure),
+                id=phase.request_id,
                 source=hsm.id(instance),
-                target=hsm.id(operation.reply_to),
+                target=hsm.id(phase.reply_to),
                 metadata=dict(event.metadata),
             ),
         )

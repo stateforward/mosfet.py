@@ -11,6 +11,7 @@ import pydantic
 from pydantic.json_schema import SkipJsonSchema
 
 from bot import lifecycle
+from bot import scope
 from bot.protocols import attachment
 from bot.telemetry import observer
 
@@ -21,10 +22,14 @@ _DataType = type[object] | tuple[type[object], ...] | None
 
 
 def _private_instance_scope(parent: hsm.Context) -> hsm.Context:
-    """Create an explicitly addressed scope for private one-shot attachment actors."""
+    """Create an explicitly addressed scope for private one-shot attachment actors.
 
-    instances: dict[str, hsm.Instance] = {}
-    return hsm.Context(parent=parent, values={hsm.Keys.Instances: instances})
+    The registry is strong (compare bot._private_scope's weak registry): attachment groups
+    must stay alive in the map for the whole attach/detach operation.
+    """
+
+    values: dict[typing.Hashable, object] = {hsm.Keys.Instances: {}}
+    return hsm.Context(parent=parent, values=scope.mark_private(values))
 
 
 class _CompositeAttachmentTerminalData(pydantic.BaseModel):
@@ -146,6 +151,13 @@ InputEvent = hsm.Event[object](
     name="bot.ability.input",
     schema=object,
 )
+# Intentional generic-envelope exception to the typed-payload rule: base ``Ability`` is
+# generic over ``TInput`` / ``TOutput``, so no single Pydantic schema can describe its
+# input/output. Concrete subclasses narrow ``input_event`` / ``output_event`` with real
+# schemas, and runtime payload validation happens through ``input_data_type`` /
+# ``output_data_type`` — never by sniffing these envelopes. The same exception covers the
+# generic input/output/apply-completed events in decoding, classifying, generative, and
+# encoding, which subclass this envelope the same way.
 OutputEvent = hsm.Event[object](
     name="bot.ability.output",
     schema=object,
@@ -189,7 +201,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
 
     _attachment_limit: typing.ClassVar[int | None] = 1
     _attachments: list[hsm.Instance]
-    _attachment_group: attachment.Group
+    _attachment_group: attachment.Group | None = None
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
@@ -287,14 +299,16 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> None:
         request = event.data
         assert isinstance(request, attachment.AttachData)
+        group = instance._attachment_group
+        assert isinstance(group, attachment.Group)
         reply: hsm.Instance | None = None
-        source: hsm.Instance = instance._attachment_group
+        source: hsm.Instance = group
         try:
             private_scope = _private_instance_scope(instance.context())
             # Start the group when it is not live yet, then attach members.
-            if not lifecycle.is_started(instance._attachment_group):
+            if not lifecycle.is_started(group):
                 try:
-                    _ = await bot.started(private_scope, instance._attachment_group, instance._attachment_group.model)
+                    _ = await bot.started(private_scope, group, group.model)
                 except Exception:
                     source = instance
                     raise
@@ -303,7 +317,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 request,
                 event,
             )
-            await instance._attachment_group.attach(
+            await group.attach(
                 private_scope,
                 dataclasses.replace(
                     attachment.AttachEvent.with_data(
@@ -311,7 +325,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     ),
                     id=event.id,
                     source=hsm.id(instance),
-                    target=hsm.id(instance._attachment_group),
+                    target=hsm.id(group),
                     metadata=dict(event.metadata),
                 ),
             )
@@ -350,15 +364,17 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> None:
         request = event.data
         assert isinstance(request, attachment.DetachData)
+        group = instance._attachment_group
+        assert isinstance(group, attachment.Group)
         reply: hsm.Instance | None = None
         try:
             private_scope = _private_instance_scope(instance.context())
             reply = await instance._start_composite_attachment_reply(
-                instance._attachment_group,
+                group,
                 request,
                 event,
             )
-            await instance._attachment_group.detach(
+            await group.detach(
                 private_scope,
                 dataclasses.replace(
                     attachment.DetachEvent.with_data(
@@ -366,7 +382,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                     ),
                     id=event.id,
                     source=hsm.id(instance),
-                    target=hsm.id(instance._attachment_group),
+                    target=hsm.id(group),
                     metadata=dict(event.metadata),
                 ),
             )
@@ -379,7 +395,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             if reply is None:
                 instance._dispatch_composite_attachment_failure(
                     ctx,
-                    instance._attachment_group,
+                    group,
                     request,
                     event,
                     failure,
@@ -391,7 +407,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                 dataclasses.replace(
                     attachment.DetachFailedEvent.with_data(failure),
                     id=event.id,
-                    source=hsm.id(instance._attachment_group),
+                    source=hsm.id(group),
                     target=hsm.id(reply),
                     metadata=dict(event.metadata),
                 ),
@@ -410,32 +426,35 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         operation.consumed = True
         request = data.request
         terminal = data.terminal
+        terminal_data = terminal.data
         target = request.actor if request.reply_to is None else request.reply_to
-        if terminal.name == attachment.AttachCompleteEvent.name:
-            assert isinstance(request, attachment.AttachData)
+        # Classify by typed payload + request type (no event.name routing, HSM-DELIVERY-001).
+        if isinstance(request, attachment.AttachData) and isinstance(terminal_data, attachment.AttachCompleteData):
             public = attachment.AttachCompleteEvent.with_data(
                 attachment.AttachCompleteData(actor=request.actor, created=True)
             )
-        elif terminal.name == attachment.DetachedEvent.name:
-            assert isinstance(request, attachment.DetachData)
+        elif isinstance(request, attachment.DetachData) and isinstance(terminal_data, attachment.DetachedData):
             index = instance._attachment_index(request.actor)
             assert index is not None
             del instance._attachments[index]
             public = attachment.DetachedEvent.with_data(attachment.DetachedData(actor=request.actor, removed=True))
-        else:
-            failure = terminal.data
-            assert isinstance(failure, attachment.FailedData)
+        elif isinstance(terminal_data, attachment.FailedData):
             if isinstance(request, attachment.AttachData):
                 index = instance._attachment_index(request.actor)
                 assert index is not None
                 del instance._attachments[index]
                 public = attachment.AttachFailedEvent.with_data(
-                    attachment.FailedData(actor=request.actor, kind=failure.kind, message=failure.message)
+                    attachment.FailedData(actor=request.actor, kind=terminal_data.kind, message=terminal_data.message)
                 )
             else:
+                assert isinstance(request, attachment.DetachData)
                 public = attachment.DetachFailedEvent.with_data(
-                    attachment.FailedData(actor=request.actor, kind=failure.kind, message=failure.message)
+                    attachment.FailedData(actor=request.actor, kind=terminal_data.kind, message=terminal_data.message)
                 )
+        else:
+            raise AssertionError(
+                f"unsupported composite attachment terminal: {type(request).__name__} + {type(terminal_data).__name__}"
+            )
         _ = hsm.dispatch(
             ctx,
             target,
@@ -524,7 +543,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> bool:
         return Ability._is_valid_composite_attachment_terminal(ctx, instance, event) and (
             isinstance(event.data, _CompositeAttachmentTerminalData)
-            and event.data.terminal.name == attachment.AttachCompleteEvent.name
+            and isinstance(event.data.request, attachment.AttachData)
+            and isinstance(event.data.terminal.data, attachment.AttachCompleteData)
         )
 
     @staticmethod
@@ -535,7 +555,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     ) -> bool:
         return Ability._is_valid_composite_attachment_terminal(ctx, instance, event) and (
             isinstance(event.data, _CompositeAttachmentTerminalData)
-            and event.data.terminal.name == attachment.DetachFailedEvent.name
+            and isinstance(event.data.request, attachment.DetachData)
+            and isinstance(event.data.terminal.data, attachment.FailedData)
         )
 
     @staticmethod
@@ -547,7 +568,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         return (
             Ability._is_valid_composite_attachment_terminal(ctx, instance, event)
             and isinstance(event.data, _CompositeAttachmentTerminalData)
-            and event.data.terminal.name == attachment.DetachFailedEvent.name
+            and isinstance(event.data.request, attachment.DetachData)
             and isinstance(event.data.terminal.data, attachment.FailedData)
             and event.data.terminal.data.kind is attachment.FailureKind.ROLLBACK
         )
@@ -584,9 +605,14 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         instance: "Ability[typing.Any, typing.Any]",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        return Ability._is_valid_composite_attachment_terminal(ctx, instance, event) and (
-            isinstance(event.data, _CompositeAttachmentTerminalData)
-            and event.data.terminal.name in {attachment.AttachFailedEvent.name, attachment.DetachedEvent.name}
+        if not Ability._is_valid_composite_attachment_terminal(ctx, instance, event):
+            return False
+        if not isinstance(event.data, _CompositeAttachmentTerminalData):
+            return False
+        request = event.data.request
+        terminal_data = event.data.terminal.data
+        return (isinstance(request, attachment.AttachData) and isinstance(terminal_data, attachment.FailedData)) or (
+            isinstance(request, attachment.DetachData) and isinstance(terminal_data, attachment.DetachedData)
         )
 
     model: typing.ClassVar[hsm.Model | None] = bot.define(
@@ -903,7 +929,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     async def stop(self, ctx: hsm.Context) -> None:
         """Stop this ability and any nested composite attachment group if started."""
 
-        group = getattr(self, "_attachment_group", None)
+        group = self._attachment_group
         await hsm.Instance.stop(self, ctx)
         if not isinstance(group, attachment.Group):
             return

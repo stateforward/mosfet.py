@@ -20,7 +20,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
-import typing as typ
+import typing
 import uuid
 
 import hsm
@@ -37,13 +37,13 @@ from bot import telemetry
 from bot.telemetry import observer
 from bot.telemetry import span
 
-Stage: typ.TypeAlias = typ.Literal["memory", "turn_detector", "voice_routing"]
-Content: typ.TypeAlias = object
+Stage: typing.TypeAlias = typing.Literal["memory", "turn_detector", "voice_routing"]
+Content: typing.TypeAlias = object
 type MessageContent = str | int | float | bool | None | list[MessageContent] | dict[str, MessageContent]
-IdentitySet: typ.TypeAlias = value.IdentitySet
-IdentityValue: typ.TypeAlias = value.IdentityValue
-TrackRef: typ.TypeAlias = str
-TurnDetectorFactory: typ.TypeAlias = typ.Callable[[str, TrackRef], turn_detector.TurnDetector]
+IdentitySet: typing.TypeAlias = value.IdentitySet
+IdentityValue: typing.TypeAlias = value.IdentityValue
+TrackRef: typing.TypeAlias = str
+TurnDetectorFactory: typing.TypeAlias = typing.Callable[[str, TrackRef], turn_detector.TurnDetector]
 
 _TURN_TIMEOUT_SECONDS = 5.0
 # Recall, detector ready, detector turn, and remember are sequential inner stages.
@@ -90,7 +90,7 @@ class TurnData(pydantic.BaseModel):
     rehydrates audio/* content to bytes so downstream turn decode stays on typed events.
     """
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         arbitrary_types_allowed=True,
         extra="forbid",
@@ -102,7 +102,7 @@ class TurnData(pydantic.BaseModel):
         ),
     )
 
-    __producer_stamped_fields__: typ.ClassVar[frozenset[str]] = frozenset({"parent"})
+    __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
     parent: SkipJsonSchema[events.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
         default=None,
@@ -155,7 +155,7 @@ class TurnData(pydantic.BaseModel):
 
         if not isinstance(raw_value, dict):
             return raw_value
-        data = dict(typ.cast(dict[str, object], raw_value))
+        data = dict(typing.cast(dict[str, object], raw_value))
         content_type = data.get("content_type")
         content = data.get("content")
         if isinstance(content_type, str) and content_type.lower().startswith("audio/"):
@@ -181,7 +181,7 @@ class TurnData(pydantic.BaseModel):
         return identities
 
     @pydantic.model_validator(mode="after")
-    def require_audio_bytes(self) -> typ.Self:
+    def require_audio_bytes(self) -> typing.Self:
         """Audio modalities must carry bytes after typed validation."""
 
         if self.content_type.lower().startswith("audio/") and not isinstance(self.content, bytes):
@@ -200,7 +200,7 @@ class MessageProvenance(pydantic.BaseModel):
     no payload or media, so model-facing history cannot become a raw-media side channel.
     """
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
@@ -230,7 +230,7 @@ class MessageProvenance(pydantic.BaseModel):
 class Message(pydantic.BaseModel):
     """One immutable, ordered, model-safe inbound or outbound message."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
@@ -254,7 +254,7 @@ class Message(pydantic.BaseModel):
     )
 
     sequence: int = pydantic.Field(ge=0, description="Zero-based position in committed conversation history.")
-    direction: typ.Literal["inbound", "outbound"] = pydantic.Field(
+    direction: typing.Literal["inbound", "outbound"] = pydantic.Field(
         description="Whether the message came from a participant or the bot."
     )
     source_ids: IdentitySet = pydantic.Field(description="Opaque source identities associated with the message.")
@@ -296,9 +296,9 @@ class Message(pydantic.BaseModel):
 class Messages(pydantic.BaseModel):
     """Cumulative immutable conversation history emitted after each commit."""
 
-    __model_facing_excluded_fields__: typ.ClassVar[frozenset[str]] = frozenset({"memories"})
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"memories"})
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
@@ -323,7 +323,7 @@ class Messages(pydantic.BaseModel):
         },
     )
 
-    __producer_stamped_fields__: typ.ClassVar[frozenset[str]] = frozenset({"parent"})
+    __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
     parent: events.StimulusData[TurnData] | None = pydantic.Field(
         default=None,
@@ -362,7 +362,7 @@ def _message_for_turn(
 class FailureData(pydantic.BaseModel):
     """Failure signal produced when a conversation phase cannot complete."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     stage: Stage = pydantic.Field(description="Conversation phase that failed.")
     message: str = pydantic.Field(min_length=1, description="Human-readable failure message.")
@@ -371,7 +371,7 @@ class FailureData(pydantic.BaseModel):
 class SnapshotRequest(pydantic.BaseModel):
     """Request for the current inferred relationship snapshot."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     request_ref: str = pydantic.Field(min_length=1, description="Caller correlation reference.")
 
@@ -379,7 +379,7 @@ class SnapshotRequest(pydantic.BaseModel):
 class Snapshot(pydantic.BaseModel):
     """Current transient detector registry observation."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     request_ref: str = pydantic.Field(min_length=1)
     detector_refs: tuple[tuple[str, IdentityValue], ...] = pydantic.Field(
@@ -391,7 +391,7 @@ class Snapshot(pydantic.BaseModel):
 class ParticipatedTurn(pydantic.BaseModel):
     """Completed source contribution exposed to host composition."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
 
     input: pydantic.SkipValidation[TurnData]
     stimulus: turn_detector.ParticipationStimulus
@@ -415,7 +415,7 @@ def participated_turn_from_messages(
     content_type = inbound.content_type
     normalized_type = content_type.lower()
     sources = value.sorted_identities(inbound.source_ids)
-    structured = typ.cast(dict[str, object] | None, content) if isinstance(content, dict) else None
+    structured = typing.cast(dict[str, object] | None, content) if isinstance(content, dict) else None
     readable = content if isinstance(content, str) else None
     if content is None and structured is None:
         readable = ""
@@ -477,7 +477,7 @@ InputEvent = hsm.Event[TurnData](
 class RoutedInputData(pydantic.BaseModel):
     """Internal typed handoff preserving Communication's original input event envelope."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     parent: events.StimulusData[TurnData]
 
@@ -491,7 +491,7 @@ RoutedInputEvent = hsm.Event[RoutedInputData](
 class AppendData(pydantic.BaseModel):
     """Trusted outbound message record submitted by an effector to Conversation."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
 
     message: Message = pydantic.Field(description="Immutable bot message and its typed effector provenance.")
 
@@ -519,14 +519,14 @@ SnapshotOutputEvent = hsm.Event[Snapshot](
 
 
 class _InputWorkData(pydantic.BaseModel):
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[TurnData]
     input_parent: events.StimulusData[TurnData] | None = None
 
 
 class _InputCancelledData(pydantic.BaseModel):
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str = pydantic.Field(min_length=1)
 
@@ -534,7 +534,7 @@ class _InputCancelledData(pydantic.BaseModel):
 class _TurnOperationProvenance(pydantic.BaseModel):
     """Typed identity for one Conversation child-operation aggregate."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     operation_id: str = pydantic.Field(min_length=1)
     session_ref: str = pydantic.Field(min_length=1)
@@ -556,7 +556,7 @@ class _TurnOperationProvenance(pydantic.BaseModel):
 class _TurnOperationCompletedData(pydantic.BaseModel):
     """Conversation-owned aggregate of correlated child turn terminals."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         arbitrary_types_allowed=True,
     )
@@ -572,7 +572,7 @@ class _TurnOperationCompletedData(pydantic.BaseModel):
 class _TurnFailedData(pydantic.BaseModel):
     """Failure correlated to the Conversation operation that produced it."""
 
-    model_config: typ.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[TurnData]
     input_parent: events.StimulusData[TurnData] | None = None
@@ -761,20 +761,57 @@ def _maximum_identity_assignment(
     assigned_scores = [scores[row][column] for row, column in enumerate(assignment)]
     if any(score is None for score in assigned_scores):
         return None
-    return sum(typ.cast(float, score) for score in assigned_scores), tuple(assignment)
+    return sum(typing.cast(float, score) for score in assigned_scores), tuple(assignment)
 
 
-def _operation_id(event: hsm.Event[typ.Any]) -> str:
+def _operation_id(event: hsm.Event[typing.Any]) -> str:
     if not event.id:
         raise ValueError(f"Conversation event {event.name!r} requires an id.")
     return event.id
 
 
+def snake_case(name: str) -> str:
+    """Convert a PascalCase model or ability name to snake_case.
+
+    Shared naming helper for cognition-visible actor keys and dotted event prefixes.
+    """
+
+    chars: list[str] = []
+    for index, char in enumerate(name):
+        if (
+            char.isupper()
+            and index > 0
+            and (name[index - 1].islower() or (index + 1 < len(name) and name[index + 1].islower()))
+        ):
+            chars.append("_")
+        chars.append(char.lower())
+    return "".join(chars)
+
+
+def ability_actor_key(
+    candidate: ability.Ability[typing.Any, typing.Any],
+    actors: dict[str, hsm.Instance],
+) -> str:
+    """Stable cognition-visible actor name for one ability instance.
+
+    Uses :func:`snake_case` on the ability class name and appends a numeric suffix on
+    collision.
+    """
+
+    key = snake_case(type(candidate).__name__) or "actor"
+    if key in actors:
+        suffix = 2
+        while f"{key}_{suffix}" in actors:
+            suffix += 1
+        key = f"{key}_{suffix}"
+    return key
+
+
 def _with_operation(
-    event: hsm.Event[typ.Any],
-    source: hsm.Event[typ.Any],
+    event: hsm.Event[typing.Any],
+    source: hsm.Event[typing.Any],
     operation_id: str | None = None,
-) -> hsm.Event[typ.Any]:
+) -> hsm.Event[typing.Any]:
     resolved = operation_id or source.id
     if resolved:
         event = event.with_data_and_id(event.data, resolved)
@@ -797,7 +834,7 @@ def _model_safe_content(content: object) -> MessageContent:
             if not isinstance(key, str):
                 continue
             projected[key] = _model_safe_content(item)
-        return typ.cast(MessageContent, projected)
+        return typing.cast(MessageContent, projected)
     if isinstance(content, list | tuple):
         return [_model_safe_content(item) for item in content]
     return None
@@ -834,9 +871,9 @@ def _content_for_detector(
 async def _run_memory_operation(
     ctx: hsm.Context,
     *,
-    memory: ability.Ability[typ.Any, typ.Any],
+    memory: ability.Ability[typing.Any, typing.Any],
     operation_id: str,
-    operation: typ.Literal["recall", "remember"],
+    operation: typing.Literal["recall", "remember"],
     memory_input: memory_ability.InputData,
     metadata: collections.abc.Mapping[str, object],
     timeout: float,
@@ -863,7 +900,7 @@ async def _run_memory_operation(
     return terminal.data
 
 
-def _messages_from_contribution_terminal(terminal: hsm.Event[typ.Any]) -> Messages:
+def _messages_from_contribution_terminal(terminal: hsm.Event[typing.Any]) -> Messages:
     """Extract cumulative history from a Conversation contribution terminal."""
 
     if isinstance(terminal.data, Messages):
@@ -878,7 +915,7 @@ def _messages_from_contribution_terminal(terminal: hsm.Event[typ.Any]) -> Messag
 def _terminal_output(
     ctx: hsm.Context,
     instance: "Conversation",
-    event: hsm.Event[typ.Any],
+    event: hsm.Event[typing.Any],
     output: Messages,
     *,
     reply_target: str | None,
@@ -913,7 +950,7 @@ def _terminal_output(
 def _terminal_failure(
     ctx: hsm.Context,
     instance: "Conversation",
-    event: hsm.Event[typ.Any],
+    event: hsm.Event[typing.Any],
     failure: FailureData,
     *,
     reply_target: str | None,
@@ -935,15 +972,15 @@ class Conversation(ability.Ability[TurnData, Messages]):
     conversation_ref.
     """
 
-    input_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
-    output_data_type: typ.ClassVar[type[object] | tuple[type[object], ...] | None] = Messages
-    input_event: typ.ClassVar[hsm.Event[TurnData]] = InputEvent
-    output_event: typ.ClassVar[hsm.Event[Messages]] = OutputEvent
-    failed_event: typ.ClassVar[hsm.Event[FailureData]] = FailedEvent
-    snapshot_request_event: typ.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
-    snapshot_output_event: typ.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
-    _composite_attachment_lifecycle: typ.ClassVar[bool] = False
-    submodel: typ.ClassVar[hsm.Model | None] = bot.define(
+    input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = Messages
+    input_event: typing.ClassVar[hsm.Event[TurnData]] = InputEvent
+    output_event: typing.ClassVar[hsm.Event[Messages]] = OutputEvent
+    failed_event: typing.ClassVar[hsm.Event[FailureData]] = FailedEvent
+    snapshot_request_event: typing.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
+    snapshot_output_event: typing.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = False
+    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
         "Conversation",
         hsm.initial(hsm.target("/Conversation/inactive")),
         hsm.state("inactive"),
@@ -958,8 +995,8 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _similarity_threshold: float
     _similarity_margin: float
     _typing: language.TextGeneration | None
-    _encoding: encoding_module.Encoding[typ.Any, str | bytes] | None
-    _memory: ability.Ability[typ.Any, typ.Any] | None
+    _encoding: encoding_module.Encoding[typing.Any, str | bytes] | None
+    _memory: ability.Ability[typing.Any, typing.Any] | None
     _history: list[Message]
     _history_parent: events.StimulusData[TurnData] | None
 
@@ -969,9 +1006,9 @@ class Conversation(ability.Ability[TurnData, Messages]):
         turn_detector: turn_detector.TurnDetector | None = None,
         turn_detector_factory: TurnDetectorFactory | None = None,
         typing: language.TextGeneration | None = None,
-        encoding: encoding_module.Encoding[typ.Any, str | bytes] | None = None,
-        encoder: encoding_module.Encoder[typ.Any, str | bytes] | None = None,
-        memory: ability.Ability[typ.Any, typ.Any] | None = None,
+        encoding: encoding_module.Encoding[typing.Any, str | bytes] | None = None,
+        encoder: encoding_module.Encoder[typing.Any, str | bytes] | None = None,
+        memory: ability.Ability[typing.Any, typing.Any] | None = None,
         similarity_threshold: float = 0.85,
         similarity_margin: float = 0.05,
     ) -> None:
@@ -1008,11 +1045,11 @@ class Conversation(ability.Ability[TurnData, Messages]):
         return self._typing
 
     @property
-    def encoding(self) -> encoding_module.Encoding[typ.Any, str | bytes] | None:
+    def encoding(self) -> encoding_module.Encoding[typing.Any, str | bytes] | None:
         return self._encoding
 
     @property
-    def memory(self) -> ability.Ability[typ.Any, typ.Any] | None:
+    def memory(self) -> ability.Ability[typing.Any, typing.Any] | None:
         return self._memory
 
     @property
@@ -1202,27 +1239,27 @@ class Conversation(ability.Ability[TurnData, Messages]):
         return source_id, centroid, vector_sum, profile.count + 1
 
     @staticmethod
-    def _has_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, TurnData)
 
     @staticmethod
-    def _has_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, RoutedInputData)
 
     @staticmethod
-    def _has_snapshot_request(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_snapshot_request(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, SnapshotRequest)
 
     @staticmethod
-    def _has_append(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_append(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, AppendData)
 
     @staticmethod
-    def _append_message(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _append_message(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, AppendData)
         message = data.message
@@ -1258,7 +1295,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     @staticmethod
-    def _has_input_cancelled(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_input_cancelled(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         data = event.data
         return (
@@ -1269,7 +1306,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @staticmethod
-    def _queue_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _queue_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         with span.operation(
             "bot.conversation.ingress",
             scope="bot.abilities.communication",
@@ -1298,7 +1335,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             )
 
     @staticmethod
-    def _queue_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _queue_routed_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         routed = event.data
         assert isinstance(routed, RoutedInputData)
         operation_id = _operation_id(event)
@@ -1315,7 +1352,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @staticmethod
-    async def _run_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    async def _run_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         work = event.data
         assert isinstance(work, _InputWorkData)
         data = work.input
@@ -1675,7 +1712,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
     def _has_turn_operation_completed(
         ctx: hsm.Context,
         instance: "Conversation",
-        event: hsm.Event[typ.Any],
+        event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
         data = event.data
@@ -1721,7 +1758,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         return True
 
     @staticmethod
-    def _has_failure(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> bool:
+    def _has_failure(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         data = event.data
         if not isinstance(data, _TurnFailedData):
@@ -1785,7 +1822,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @staticmethod
-    def _complete_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _complete_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _TurnOperationCompletedData)
         input_data = data.input
@@ -1830,7 +1867,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @staticmethod
-    def _fail_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _fail_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         failure = event.data
         assert isinstance(failure, _TurnFailedData)
         relationship = next(
@@ -1857,7 +1894,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @staticmethod
-    def _snapshot(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typ.Any]) -> None:
+    def _snapshot(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
         request = event.data
         assert isinstance(request, SnapshotRequest)
         _ = hsm.dispatch(
@@ -2052,6 +2089,7 @@ __all__ = [
     "InputEvent",
     "OutputEvent",
     "ParticipatedTurn",
+    "ability_actor_key",
     "participated_turn_from_messages",
     "Messages",
     "Message",
@@ -2069,4 +2107,5 @@ __all__ = [
     "append_conversation_message",
     "conversation_event_with_operation",
     "define_conversation_model",
+    "snake_case",
 ]

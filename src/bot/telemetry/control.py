@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import grpc
 import hsm
+from opentelemetry import metrics
+from opentelemetry.trace import Span
 
 from bot.telemetry import span
 from bot.telemetry.configure import otlp_endpoint
@@ -21,6 +23,13 @@ _LOG = logging.getLogger(__name__)
 _COMPONENT = "telemetry.control"
 _SCOPE = "bot.telemetry.control"
 _SUBSCRIBE_PATH = "/bot.control.v1.Control/Subscribe"
+
+_METER = metrics.get_meter(_SCOPE)
+_REJECTIONS = _METER.create_counter(
+    "bot.telemetry.control.command.rejected.count",
+    unit="{command}",
+    description="Count of dashboard control commands dropped before dispatch.",
+)
 
 _LOCK = threading.Lock()
 _SUBSCRIPTIONS: dict[int, _Subscription] = {}
@@ -171,8 +180,31 @@ def _run(subscription: _Subscription) -> None:
                     break
                 _accept(subscription, event_name, data_json)
         except Exception as error:
-            span.record_failure(active, span.failure_kind(error, "subscribe_failed"))
-            _LOG.warning("control subscribe ended")
+            kind = span.failure_kind(error, "subscribe_failed")
+            span.record_failure(active, kind)
+            _LOG.warning(
+                "control subscribe ended kind=%s endpoint=%s outcome=failed",
+                kind,
+                subscription.target,
+            )
+
+
+def _reject(active: Span, *, reason: str) -> None:
+    """Record one dropped control command as metric + span + log (never span-only).
+
+    A rejection carries no dispatchable event — an empty name names nothing and
+    a non-object payload fits no schema — so the counter is the load-bearing
+    signal and the log line is the human-readable one. ``reason`` is a closed
+    vocabulary (``empty_name`` / ``invalid_data``); raw names and payloads are
+    never logged or attributed.
+    """
+
+    span.record_failure(active, "invalid_response")
+    try:
+        _REJECTIONS.add(1, attributes={"bot.component.name": _COMPONENT, "bot.failure.kind": "invalid_response"})
+    except Exception:
+        pass
+    _LOG.warning("control command rejected reason=%s outcome=rejected", reason)
 
 
 def _accept(subscription: _Subscription, event_name: str, data_json: str) -> None:
@@ -184,12 +216,12 @@ def _accept(subscription: _Subscription, event_name: str, data_json: str) -> Non
     ) as active:
         name = event_name.strip()
         if name == "":
-            span.record_failure(active, "invalid_response")
+            _reject(active, reason="empty_name")
             return
         try:
             data = _parse_data(data_json)
         except ValueError:
-            span.record_failure(active, "invalid_response")
+            _reject(active, reason="invalid_data")
             return
         event = hsm.Event[object](name=name, data=data)
         _deliver(subscription.environment, event, subscription.loop)

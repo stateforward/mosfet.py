@@ -20,6 +20,9 @@ import dataclasses
 import datetime
 import io
 import inspect
+import os
+import subprocess
+import sys
 import typing
 import wave
 
@@ -99,7 +102,7 @@ def assert_heard_phone_ring(
     assert isinstance(input.data, SoundData)
     assert input.data.kind == "phone.ringing"
     if caller is not None:
-        assert isinstance(input.data, phone_device.PhoneSoundData)
+        assert isinstance(input.data, phone_device.SoundData)
         assert input.data.caller == caller
     if phone is not None:
         assert input.source == hsm.id(phone)
@@ -1011,7 +1014,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
         ) -> collections.abc.Awaitable[None]:
             nonlocal attach_calls, group_is_private
             attach_calls += 1
-            group_is_private = group.context().value(hsm.Keys.Instances) is not environment.value(hsm.Keys.Instances)
+            group_is_private = not environment.contains(group)
             return group_attach(group, ctx, event)
 
         def detach_group(
@@ -1056,7 +1059,7 @@ def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it()
         return (
             active_bot.state(),
             cognition_ability.state(),
-            cognition_ability.context().value(hsm.Keys.Instances) is environment.value(hsm.Keys.Instances),
+            environment.contains(cognition_ability),
         )
 
     state, ability_state, ability_stayed_in_environment = asyncio.run(run())
@@ -1380,9 +1383,9 @@ async def answer_phone(phone: phone_device.Phone, call_id: str = "call-123") -> 
 
 async def emit_phone_service_event(phone: phone_device.Phone, event: hsm.Event[typing.Any]) -> None:
     firmware = device_firmware(phone)
-    assert isinstance(firmware, phone_device.PhoneFirmware)
+    assert isinstance(firmware, phone_device.Firmware)
     recorder = firmware.event_recorder()
-    assert isinstance(recorder, phone_device.PhoneEventRecorder)
+    assert isinstance(recorder, phone_device.EventRecorder)
     await recorder.receive(phone.context(), event)
 
 
@@ -1818,7 +1821,7 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert observed_browser_input.input.name == SoundEvent.name
     observed_sound = observed_browser_input.input.data
     # What a ringing phone carries out is who is calling, not which session is ringing.
-    assert isinstance(observed_sound, phone_device.PhoneSoundData)
+    assert isinstance(observed_sound, phone_device.SoundData)
     assert observed_sound.caller == "Front desk"
     offered = {event.name for event in observed_browser_input.schemas}
     assert bot.FocusDeviceEvent.name in offered
@@ -2109,7 +2112,7 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
@@ -2156,7 +2159,7 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
         phone = phone_device.Phone()
         owning_agent = AbilityAgent(devices={"phone": phone}, cognition=owner_ability, input=(ring_hearing(),))
         sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(owning_agent)
         _ = await sibling_agent.attach(environment)
@@ -4104,7 +4107,6 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
         environment = await start_bot_with_devices(active_bot)
         firmware = device_firmware(phone)
         assert firmware is not None
-        environment_scope = environment.value(hsm.Keys.Instances)
 
         microphone = phone_microphone(phone)
         speaker = phone_speaker(phone)
@@ -4113,10 +4115,10 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
             firmware.state(),
             microphone.state(),
             speaker.state(),
-            active_bot.context().value(hsm.Keys.Instances) is environment_scope,
-            phone.context().value(hsm.Keys.Instances) is environment_scope,
-            microphone.context().value(hsm.Keys.Instances) is environment_scope,
-            speaker.context().value(hsm.Keys.Instances) is environment_scope,
+            environment.contains(active_bot),
+            environment.contains(phone),
+            environment.contains(microphone),
+            environment.contains(speaker),
         )
 
     phone_state, firmware_state, microphone_state, speaker_state, agent_scope, phone_scope, mic_scope, speaker_scope = (
@@ -4806,3 +4808,226 @@ def test_a_bot_that_is_not_awake_has_no_moments() -> None:
     assert before_attach == 0
     assert while_awake > 0
     assert after_rest == at_rest
+
+
+class _PriorityReportingDevice(ReportingDevice):
+    """ReportingDevice that lets a test choose the report priority."""
+
+    def happen_with_priority(self, situation: str, *, priority: int) -> None:
+        self._report(self.context(), HappeningEvent.with_data(HappeningData(situation=situation)), priority=priority)
+
+
+def test_body_handles_device_reports_in_arrival_order_regardless_of_priority() -> None:
+    """The body never ranks stimuli: a background report first is handled first.
+
+    Architectural negative: a priority table ("a ring outranks a thought") would be
+    writing the bot's behavior for it. Urgency rides along on the handoff but must
+    never reorder it; cognition decides what anything is worth.
+    """
+
+    async def run() -> list[processing.InputData]:
+        ability = IgnoreAbility()
+        device = _PriorityReportingDevice()
+        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        environment = await start_bot_with_devices(active_bot)
+
+        device.happen_with_priority("background thought", priority=10)
+        device.happen_with_priority("urgent ring", priority=0)
+        await wait_until(lambda: len(ability.calls) == 2)
+
+        turns = list(ability.calls)
+        _ = await active_bot.detach(environment)
+        return turns
+
+    turns = asyncio.run(run())
+
+    assert len(turns) == 2
+    assert isinstance(turns[0].input, bot.InputEventData)
+    assert isinstance(turns[1].input, bot.InputEventData)
+    assert turns[0].input.payload == {"situation": "background thought"}
+    assert turns[1].input.payload == {"situation": "urgent ring"}
+
+
+class _OutputTap(ProbeAbility):
+    """Output-slot ability that records every event name dispatched to it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[str] = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        self.seen.append(event.name)
+        return super().dispatch(ctx, event)
+
+
+def test_body_never_fans_environment_stimuli_out_to_output_abilities() -> None:
+    """Output abilities are effectors, not stimulus recipients.
+
+    The body fans environment stimuli to input abilities in parallel; output
+    abilities join no fan-out path, so a heard sound never reaches them.
+    """
+
+    async def run() -> tuple[list[str], list[processing.InputData]]:
+        ability = IgnoreAbility()
+        listening_ability = RecordingListening()
+        output_tap = _OutputTap()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(output_tap,))
+        environment = await start_bot_with_devices(active_bot)
+        sound = SoundEvent.with_data(
+            SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        )
+        await active_bot.dispatch(active_bot.context(), sound)
+        await close_hearing_speech(active_bot, environment, sample_rate_hz=48_000)
+        await wait_until(lambda: len(ability.calls) == 1)
+        seen = list(output_tap.seen)
+        _ = await active_bot.detach(environment)
+        return seen, list(ability.calls)
+
+    seen, calls = asyncio.run(run())
+
+    assert len(calls) == 1
+    assert SoundEvent.name not in seen
+    assert listening.SpeechEvent.name not in seen
+
+
+def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
+    """Focus legality is recomputed every turn, never inherited.
+
+    Turn 1 focuses phone; turn 2 clears it; turn 3 hears browser. A turn-3 focus
+    selection for phone must be rejected and retried even though phone was a legal
+    candidate on turn 1 — the turn slot is set when the turn starts and retired with
+    it, so a stale allowlist never gates a later turn and never becomes an action.
+    """
+
+    async def run() -> tuple[
+        str,
+        list[cognition.InputData],
+        list[processing.InputData],
+        list[cognition.types.OutputData],
+        list[bot.ProcessingFailedEventData],
+    ]:
+        ability = SequenceAbility(
+            no_output("stay on phone"),
+            clear_output("look away"),
+            focus_output("phone", "stale grab"),
+            no_output("backs off"),
+        )
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=cognitive)
+        environment = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+        )
+        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/unfocused")
+        await active_bot.dispatch(
+            active_bot.context(),
+            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=1)),
+        )
+        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
+        result = (
+            active_bot.state(),
+            list(cognitive.inputs),
+            list(ability.calls),
+            list(active_bot.actions),
+            list(active_bot.failures),
+        )
+        _ = await active_bot.detach(environment)
+        return result
+
+    state, inputs, calls, actions, failures = asyncio.run(run())
+
+    assert state == "/Bot/active/focused"
+    assert inputs[0].focus_candidates == ("phone",)
+    assert inputs[1].focus_candidates == ("phone",)
+    assert inputs[2].focus == "browser"
+    assert inputs[2].focus_candidates == ("browser",)
+    # The stale grab was rejected and retried (4 processor calls for 3 turns) and never
+    # became an action: only the back-off completed turn 3, with no terminal failure.
+    assert len(calls) == 4
+    assert actions == [
+        no_output("stay on phone"),
+        clear_output("look away"),
+        no_output("backs off"),
+    ]
+    assert failures == []
+
+
+def _socket_guarded_import_probe() -> str:
+    """Child preamble: record every connection attempt, block it, then import bot."""
+
+    return (
+        "import http.client\n"
+        "import os\n"
+        "import socket\n"
+        "record_path = os.environ['BOT_SOCKET_RECORD_PATH']\n"
+        "def _note(kind):\n"
+        "    with open(record_path, 'a') as handle:\n"
+        "        handle.write(kind + '\\n')\n"
+        "def _blocked_create_connection(*args, **kwargs):\n"
+        "    _note('create_connection')\n"
+        "    raise RuntimeError('network blocked during import')\n"
+        "def _blocked_http_connect(self):\n"
+        "    _note('http_connect')\n"
+        "    raise RuntimeError('network blocked during import')\n"
+        "socket.create_connection = _blocked_create_connection\n"
+        "http.client.HTTPConnection.connect = _blocked_http_connect\n"
+        "import bot\n"
+    )
+
+
+def _run_import_probe(*, publish_opt_in: bool, record_path: Path) -> "subprocess.CompletedProcess[str]":
+    probe_environment = dict(os.environ)
+    probe_environment["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:9"
+    if publish_opt_in:
+        probe_environment["BOT_MODEL_PUBLISH"] = "1"
+    else:
+        probe_environment.pop("BOT_MODEL_PUBLISH", None)
+    probe_environment["BOT_SOCKET_RECORD_PATH"] = str(record_path)
+    return subprocess.run(
+        [sys.executable, "-c", _socket_guarded_import_probe()],
+        capture_output=True,
+        text=True,
+        env=probe_environment,
+        timeout=180,
+    )
+
+
+def test_importing_bot_opens_zero_connections_without_publish_opt_in(tmp_path: Path) -> None:
+    """Importing the package never attempts network I/O unless publishing is opted in.
+
+    Model definition runs at import time, so ``define`` must not publish implicitly:
+    with an OTLP endpoint configured (publish path armed) and connections blocked,
+    ``import bot`` succeeds without a single connection attempt. Setting
+    ``BOT_MODEL_PUBLISH=1`` re-arms the explicit path (attempt recorded, still
+    non-fatal to the import).
+    """
+
+    record_path = tmp_path / "connections.log"
+    completed = _run_import_probe(publish_opt_in=False, record_path=record_path)
+    assert completed.returncode == 0, completed.stderr
+    assert not record_path.exists()
+
+    opted_in = _run_import_probe(publish_opt_in=True, record_path=record_path)
+    assert opted_in.returncode == 0, opted_in.stderr
+    assert record_path.exists()
+    assert record_path.read_text() != ""
+
+
+def test_model_publish_opt_in_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model publishing is explicit: only ``BOT_MODEL_PUBLISH=1`` enables it."""
+
+    from bot.define import model_publish_enabled
+
+    monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
+    assert model_publish_enabled() is False
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "1")
+    assert model_publish_enabled() is True
+    monkeypatch.setenv("BOT_MODEL_PUBLISH", "0")
+    assert model_publish_enabled() is False

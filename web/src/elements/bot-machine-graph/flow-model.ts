@@ -11,6 +11,7 @@ import {
   INITIAL_SIZE,
   STATE_NODE_SIZE,
   graphEdgeIdentity,
+  graphEdgeSignature,
   initialPosition,
   initialTargets,
   isRenderableGraphEdge,
@@ -22,29 +23,30 @@ import {
   type Size,
 } from "../../machine-graph-view.ts";
 import type { MachineGraph, MachineStateNode } from "../../otel/machines.ts";
-import {
-  ancestorSet,
-  boundaryPoint,
-  classifyEdge,
-  edgeOccurrenceIndex,
-  edgePoints,
-  labelPosition,
-  offsetPoints,
-  pathFor,
-  rectFor,
-  shareAxis,
-  shiftedPoint,
-  type Bounds,
-} from "./geometry.ts";
 
 const WORLD_PADDING = 56;
 const EDGE_LABEL_LIMIT = 30;
+// Centers within this distance of a shared axis classify as "aligned".
+const AXIS_EPS = 0.5;
+// Standoff of the semantic loop-channel wire from the state rect it wraps.
+const LOOP_STUB_X = 28;
+const LOOP_STUB_Y = 36;
 
 export type GraphHit = {
   readonly machineName: string;
   readonly path: string;
   readonly bounds: { left: number; right: number; top: number; bottom: number };
 };
+
+type Bounds = { left: number; right: number; top: number; bottom: number };
+
+type Rect = { left: number; right: number; top: number; bottom: number; center: Point };
+
+/**
+ * Wire class of a rendered transition. "loop" edges keep their dedicated
+ * semantic stub shapes; "taxi" and "aligned" edges ship as flow-engine cables.
+ */
+type EdgeKind = "taxi" | "aligned" | "loop";
 
 export type FlowGraphModel = {
   readonly nodes: Node[];
@@ -76,6 +78,122 @@ function nodeClass(
   if (machineRoot) classes.push("machine-shell");
   if (owned) classes.push("owned-machine");
   return classes.join(" ");
+}
+
+function rectFor(center: Point, size: Size): Rect {
+  return {
+    left: center.x - size.width / 2,
+    right: center.x + size.width / 2,
+    top: center.y - size.height / 2,
+    bottom: center.y + size.height / 2,
+    center,
+  };
+}
+
+function boundaryPoint(rect: Rect, toward: Point): Point {
+  const dx = toward.x - rect.center.x;
+  const dy = toward.y - rect.center.y;
+  if (dx === 0 && dy === 0) return { x: rect.right, y: rect.center.y };
+  const width = rect.right - rect.left;
+  const height = rect.bottom - rect.top;
+  if (Math.abs(dx) * height >= Math.abs(dy) * width) {
+    return {
+      x: dx < 0 ? rect.left : rect.right,
+      y: rect.center.y + (dy * (width / 2)) / Math.max(Math.abs(dx), 1),
+    };
+  }
+  return {
+    x: rect.center.x + (dx * (height / 2)) / Math.max(Math.abs(dy), 1),
+    y: dy < 0 ? rect.top : rect.bottom,
+  };
+}
+
+function shareAxis(left: Point, right: Point): boolean {
+  return Math.abs(left.x - right.x) <= AXIS_EPS || Math.abs(left.y - right.y) <= AXIS_EPS;
+}
+
+function isDescendantPath(descendant: string, ancestor: string): boolean {
+  return descendant.startsWith(`${ancestor}/`);
+}
+
+function classifyEdge(source: string, target: string, positions: Map<string, Point>): EdgeKind {
+  if (source === target || isDescendantPath(source, target) || isDescendantPath(target, source)) {
+    return "loop";
+  }
+  const from = positions.get(source);
+  const to = positions.get(target);
+  return from !== undefined && to !== undefined && shareAxis(from, to) ? "aligned" : "taxi";
+}
+
+function shiftedPoint(point: Point, origin: Point): Point {
+  return { x: point.x + origin.x, y: point.y + origin.y };
+}
+
+function pathFor(points: readonly Point[], radius = 9): string {
+  const first = points[0];
+  if (first === undefined) return "";
+  if (points.length === 1) return `M ${first.x} ${first.y}`;
+  const commands = [`M ${first.x} ${first.y}`];
+  for (let index = 1; index < points.length; index += 1) {
+    const point = points[index];
+    const previous = points[index - 1];
+    const next = points[index + 1];
+    if (point === undefined || previous === undefined) continue;
+    if (next === undefined) {
+      commands.push(`L ${point.x} ${point.y}`);
+      continue;
+    }
+    const incoming = Math.hypot(point.x - previous.x, point.y - previous.y);
+    const outgoing = Math.hypot(next.x - point.x, next.y - point.y);
+    const trim = Math.min(radius, incoming / 2, outgoing / 2);
+    const before = {
+      x: point.x - ((point.x - previous.x) / Math.max(incoming, 1)) * trim,
+      y: point.y - ((point.y - previous.y) / Math.max(incoming, 1)) * trim,
+    };
+    const after = {
+      x: point.x + ((next.x - point.x) / Math.max(outgoing, 1)) * trim,
+      y: point.y + ((next.y - point.y) / Math.max(outgoing, 1)) * trim,
+    };
+    commands.push(`L ${before.x} ${before.y}`, `Q ${point.x} ${point.y} ${after.x} ${after.y}`);
+  }
+  return commands.join(" ");
+}
+
+function labelPosition(points: readonly Point[]): Point {
+  let best = { length: 0, midpoint: points[0] ?? { x: 0, y: 0 }, horizontal: true };
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    if (start === undefined || end === undefined) continue;
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    if (length > best.length) {
+      best = {
+        length,
+        midpoint: { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 },
+        horizontal: Math.abs(end.x - start.x) >= Math.abs(end.y - start.y),
+      };
+    }
+  }
+  return {
+    x: best.midpoint.x + (best.horizontal ? 0 : 8),
+    y: best.midpoint.y + (best.horizontal ? -8 : 0),
+  };
+}
+
+function loopEdgePoints(source: Rect, target: Rect, sourcePath: string, targetPath: string): Point[] {
+  if (sourcePath === targetPath) {
+    return [
+      { x: source.right, y: source.center.y },
+      { x: source.right + LOOP_STUB_X, y: source.center.y },
+      { x: source.right + LOOP_STUB_X, y: source.top - LOOP_STUB_Y },
+      { x: source.center.x, y: source.top - LOOP_STUB_Y },
+      { x: source.center.x, y: source.top },
+    ];
+  }
+  const start = boundaryPoint(source, target.center);
+  const end = boundaryPoint(target, source.center);
+  const channelX = (isDescendantPath(sourcePath, targetPath) ? source : target).left - LOOP_STUB_X;
+  return [start, { x: channelX, y: start.y }, { x: channelX, y: end.y }, end];
 }
 
 export function flowModelFromGraphs(graphs: readonly MachineGraph[]): FlowGraphModel {
@@ -128,13 +246,25 @@ export function flowModelFromGraphs(graphs: readonly MachineGraph[]): FlowGraphM
     const graph = renderable.find((item) => item.name === node.machineName);
     if (graph === undefined) continue;
     const index = renderable.indexOf(graph);
+    const machine = machineKey(graph, index);
     const machineRoot = node.path === graph.name;
     const compound = node.size.width > STATE_NODE_SIZE || node.size.height > STATE_NODE_SIZE
       || graph.nodes.some((item) => item.parent === node.path);
+    const activeParts = graph.currentState.split("/").filter((part) => part.length > 0);
+    const active = new Set<string>();
+    for (let part = 0; part < activeParts.length; part += 1) {
+      active.add(`/${activeParts.slice(0, part + 1).join("/")}`);
+    }
+    // Ownership namespacing: a child state's parentId is the id of the
+    // compound/machine-shell node whose interior contains it, when that
+    // container is rendered. Standalone machine roots stay unparented.
+    const container = node.source.parent === null
+      ? undefined
+      : layout.get(namespacedPath(machine, node.source.parent));
     const className = nodeClass(
       node.path,
       graph.currentState,
-      ancestorSet(graph.currentState),
+      active,
       compound,
       machineRoot,
       machineRoot && machineOwnerIndex(renderable, index) !== null,
@@ -148,6 +278,7 @@ export function flowModelFromGraphs(graphs: readonly MachineGraph[]): FlowGraphM
       width: node.size.width,
       height: node.size.height,
       className,
+      ...(container === undefined ? {} : { parentId: container.id }),
       data: {
         className,
         label: nodeLabel(node.source.label, node.path, graph.currentState),
@@ -199,33 +330,52 @@ export function flowModelFromGraphs(graphs: readonly MachineGraph[]): FlowGraphM
     }
     for (const edge of graph.edges) {
       if (edge.eventName === INITIAL_EVENT || !isRenderableGraphEdge(edge, known)) continue;
-      const occurrence = edgeOccurrenceIndex(occurrences, edge);
+      const signature = graphEdgeSignature(edge);
+      const occurrence = occurrences.get(signature) ?? 0;
+      occurrences.set(signature, occurrence + 1);
       const source = local.get(edge.source);
       const target = local.get(edge.target);
       if (source === undefined || target === undefined) continue;
       const kind = classifyEdge(edge.source, edge.target, new Map([...local].map(([path, node]) => [path, node.center])));
-      const offset = kind === "loop" ? 0 : (occurrence % 3 - 1) * 12;
-      const points = offsetPoints(
-        edgePoints(rectFor(source.center, source.size), rectFor(target.center, target.size), kind, edge.source, edge.target, offset),
-        offset,
-      );
-      const shifted = points.map((point) => shiftedPoint(point, origin));
       const label = edge.eventName.length > EDGE_LABEL_LIMIT
         ? `${edge.eventName.slice(0, EDGE_LABEL_LIMIT - 1)}…`
         : edge.eventName;
+      if (kind === "loop") {
+        // Loop-class transitions keep their dedicated semantic stub shapes.
+        const points = loopEdgePoints(
+          rectFor(source.center, source.size),
+          rectFor(target.center, target.size),
+          edge.source,
+          edge.target,
+        );
+        const shifted = points.map((point) => shiftedPoint(point, origin));
+        edges.push({
+          id: graphEdgeIdentity(machine, edge, occurrence),
+          source: source.id,
+          target: target.id,
+          type: "step",
+          label,
+          className: `${kind}${edge.lastFired ? " last-fired" : ""}`,
+          data: {
+            d: pathFor(shifted),
+            eventName: edge.eventName,
+            lastFired: edge.lastFired,
+            labelPosition: labelPosition(shifted),
+          },
+        });
+        continue;
+      }
+      // Taxi/aligned transitions route live through FlowGraph's cable engine
+      // (Routes actor, smoothstep fallback until routed, auto-placed labels),
+      // so the model ships identity and metadata without a precomputed path.
       edges.push({
         id: graphEdgeIdentity(machine, edge, occurrence),
         source: source.id,
         target: target.id,
-        type: "step",
+        type: "cable",
         label,
         className: `${kind}${edge.lastFired ? " last-fired" : ""}`,
-        data: {
-          d: pathFor(shifted),
-          eventName: edge.eventName,
-          lastFired: edge.lastFired,
-          labelPosition: labelPosition(shifted),
-        },
+        data: { eventName: edge.eventName, lastFired: edge.lastFired },
       });
     }
   }

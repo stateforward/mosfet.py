@@ -34,7 +34,6 @@ from bot.abilities.cognition import types as cognition_types
 from bot.devices.phone import events as phone_events
 from bot.devices.phone.phone import RING_SOUND_WAV
 from bot.events import ClearFocusEvent, FocusDeviceEvent
-from bot.devices.phone.events import PhoneSoundData
 from bot.environment import SoundData, SoundEvent
 from bot.providers.openai_compat import ChatClient, Processor
 
@@ -101,12 +100,12 @@ def _minimal_wav() -> bytes:
     )
 
 
-def _ring_stimulus() -> hsm.Event[PhoneSoundData]:
-    """Match phone ring elevation: kind=phone.ringing, PhoneSoundData.caller, event.id."""
+def _ring_stimulus() -> hsm.Event[phone_events.SoundData]:
+    """Match phone ring elevation: kind=phone.ringing, SoundData.caller, event.id."""
 
     return dataclasses.replace(
         SoundEvent.with_data(
-            PhoneSoundData(
+            phone_events.SoundData(
                 audio=RING_SOUND_WAV,
                 media_type="audio/wav",
                 sample_rate_hz=16_000,

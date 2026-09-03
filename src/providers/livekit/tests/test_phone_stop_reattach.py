@@ -69,9 +69,7 @@ def test_phone_service_direct_stop_clears_owner(monkeypatch: pytest.MonkeyPatch)
 
     asyncio.run(run())
     live_payloads = [
-        payload
-        for payload, url in calls
-        if url.endswith("/v1/models/live") and payload.get("name") == "/PhoneService"
+        payload for payload, url in calls if url.endswith("/v1/models/live") and payload.get("name") == "/PhoneService"
     ]
     assert live_payloads
     assert live_payloads[-1].get("live") is False

@@ -1,6 +1,5 @@
 import asyncio
 
-import hsm
 import bot
 
 from bot.protocols.yamux.client import Client

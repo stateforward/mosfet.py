@@ -48,7 +48,7 @@ class CognitiveEpisode(pydantic.BaseModel):
     )
 
 
-def stimulus_name(stimulus: bot.BotInputData) -> str | None:
+def stimulus_name(stimulus: bot.InputData) -> str | None:
     """Low-cardinality stimulus label for episode recall (event name or bot.input)."""
 
     if isinstance(stimulus, bot.InputEventData):

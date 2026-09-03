@@ -43,45 +43,23 @@ jobs:
 
       - name: Ruff
         run: |
+          # Provider list derived via glob so new providers are covered automatically.
           uv run --locked ruff check \
             scripts/check_release_version.py \
-            src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py \
-            src/providers/elevenlabs/tests/test_package_metadata.py \
-            src/providers/livekit/src/bot/providers/livekit \
-            src/providers/livekit/tests \
-            src/providers/mlx_audio/src/bot/providers/mlx_audio \
-            src/providers/mlx_audio/tests \
-            src/providers/mlx_vlm/src/bot/providers/mlx_vlm \
-            src/providers/mlx_vlm/tests \
-            src/providers/postgres_memory/src/bot/providers/postgres_memory \
-            src/providers/postgres_memory/tests \
-            src/providers/openai_compat/src/bot/providers/openai_compat \
-            src/providers/openai_compat/tests \
+            src/providers/*/src \
+            src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
-            src/providers/sqlite_memory/src/bot/providers/sqlite_memory \
-            src/providers/sqlite_memory/tests \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
       - name: Ruff format
         run: |
+          # Provider list derived via glob so new providers are covered automatically.
           uv run --locked ruff format --check \
             scripts/check_release_version.py \
-            src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py \
-            src/providers/elevenlabs/tests/test_package_metadata.py \
-            src/providers/livekit/src/bot/providers/livekit \
-            src/providers/livekit/tests \
-            src/providers/mlx_audio/src/bot/providers/mlx_audio \
-            src/providers/mlx_audio/tests \
-            src/providers/mlx_vlm/src/bot/providers/mlx_vlm \
-            src/providers/mlx_vlm/tests \
-            src/providers/postgres_memory/src/bot/providers/postgres_memory \
-            src/providers/postgres_memory/tests \
-            src/providers/openai_compat/src/bot/providers/openai_compat \
-            src/providers/openai_compat/tests \
+            src/providers/*/src \
+            src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
-            src/providers/sqlite_memory/src/bot/providers/sqlite_memory \
-            src/providers/sqlite_memory/tests \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
@@ -95,42 +73,24 @@ jobs:
             src/providers/sqlite_memory/hatch_build.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
-          (
-            cd src/providers/livekit
-            uv run --locked --package bot-provider-livekit --with basedpyright basedpyright
-          )
-          (
-            cd src/providers/mlx_audio
-            uv run --locked --package bot-provider-mlx-audio --with basedpyright basedpyright
-          )
-          (
-            cd src/providers/mlx_vlm
-            uv run --locked --package bot-provider-mlx-vlm --with basedpyright basedpyright
-          )
-          (
-            cd src/providers/postgres_memory
-            uv run --locked --package bot-provider-postgres-memory --with basedpyright basedpyright
-          )
-          (
-            cd src/providers/openai_compat
-            uv run --locked --package bot-provider-openai-compat --with basedpyright basedpyright
-          )
-          (
-            cd src/providers/sqlite_memory
-            uv run --locked --package bot-provider-sqlite-memory --with basedpyright basedpyright
-          )
+          # Per-provider typecheck derived via glob so new providers are covered automatically.
+          for provider_dir in src/providers/*/; do
+            (
+              cd "$provider_dir"
+              provider="$(basename "$provider_dir")"
+              uv run --locked --package "bot-provider-$(echo "$provider" | tr '_' '-')" --with basedpyright basedpyright
+            )
+          done
 
       - name: Tests
         run: |
           uv run --locked python -m pytest tests/scripts/test_check_release_version.py -q
           uv run --locked python -m pytest tests/test_init.py -q
-          uv run --locked --package bot-provider-elevenlabs python -m pytest src/providers/elevenlabs/tests -q
-          uv run --locked --package bot-provider-livekit python -m pytest src/providers/livekit/tests -q
-          uv run --locked --package bot-provider-mlx-audio python -m pytest src/providers/mlx_audio/tests -q
-          uv run --locked --package bot-provider-mlx-vlm python -m pytest src/providers/mlx_vlm/tests -q
-          uv run --locked --package bot-provider-postgres-memory python -m pytest src/providers/postgres_memory/tests -q
-          uv run --locked --package bot-provider-openai-compat python -m pytest src/providers/openai_compat/tests -q
-          uv run --locked --package bot-provider-sqlite-memory python -m pytest src/providers/sqlite_memory/tests -q
+          # Provider tests derived via glob so new providers are covered automatically.
+          for provider_dir in src/providers/*/; do
+            provider="$(basename "$provider_dir")"
+            uv run --locked --package "bot-provider-$(echo "$provider" | tr '_' '-')" python -m pytest "$provider_dir/tests" -q
+          done
 
       - name: Build packages
         run: uv build --all-packages --no-sources

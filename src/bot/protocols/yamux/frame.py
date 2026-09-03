@@ -62,10 +62,15 @@ class FrameData:
     version: int = VERSION
 
     def __post_init__(self) -> None:
-        frame_type = _coerce_frame_type(self.frame_type)
-        flags = _coerce_flags(self.flags)
-        object.__setattr__(self, "frame_type", frame_type)
-        object.__setattr__(self, "flags", flags)
+        # Declared contract requires enums; coerce helpers stay on the decode path
+        # (decode_frame coerces wire ints before constructing). Rejecting ints here
+        # keeps the frozen dataclass free of post-init mutation workarounds.
+        if not isinstance(self.frame_type, FrameType):
+            raise ProtocolError(f"Unsupported Yamux frame type {self.frame_type!r}.")
+        if not isinstance(self.flags, Flag):
+            raise ProtocolError(f"Unsupported Yamux flag bits {self.flags!r}.")
+        frame_type = self.frame_type
+        flags = self.flags
         _validate_uint8("version", self.version)
         _validate_uint32("stream_id", self.stream_id)
         _validate_uint32("length", self.length)

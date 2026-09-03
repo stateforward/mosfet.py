@@ -111,7 +111,7 @@ Gemini probe proves the tool **menu can produce dial**; Mercury 400 is provider-
 | STT modality | `examples/phone_bot/.../GeminiVoiceDecoder`, turn_detector normalize |
 | `_content_for_detector` | conversation package (audio/* → AudioStimulus) |
 | Listening no STT | `phone_bot_example._listening` (`speech_decoder=None`) |
-| Phone earpiece elevation | `phone.PhoneFirmware._receive_service_audio` → speaker → `environment.sound` |
+| Phone earpiece elevation | `phone.Firmware._receive_service_audio` → speaker → `environment.sound` |
 | Tool menu | `processing.enabled_call_events` / `cognition.input.build_processing_input` |
 | Intuition client (TEMP Gemini probe) | `examples/phone_bot/.../_phone_cognition` |
 | OpenAI-compat error wrap | `src/providers/openai_compat/.../client.py` (`RequestError` message) |

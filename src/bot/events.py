@@ -189,7 +189,7 @@ ObservedBotEvent: typing.TypeAlias = SkipJsonSchema[
         PlainSerializer(_jsonable_bot_observed_event, return_type=dict[str, object], when_used="json"),
     ]
 ]
-BotInputData: typing.TypeAlias = InputEventData | ObservedBotEvent
+InputData: typing.TypeAlias = InputEventData | ObservedBotEvent
 
 
 class FocusDeviceEventData(pydantic.BaseModel):

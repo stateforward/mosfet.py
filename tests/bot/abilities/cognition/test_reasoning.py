@@ -113,7 +113,15 @@ def test_reasoning_retains_environment_event_stimulus_without_stranding() -> Non
     assert state == "/ReasoningLifecycle/attached/behavior/idle"
 
 
-def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capability() -> None:
+def test_reasoning_ignores_forged_public_terminals_for_unknown_operations() -> None:
+    """Terminals stamped with an unknown operation id never disturb the live turn.
+
+    Behavioral negative through public seams only (no stage-private events or
+    capabilities): while one reasoning turn is held inside the processor, forged
+    output/failure terminals for a stale operation are ignored — the live turn
+    still completes normally once the processor releases it.
+    """
+
     async def run() -> tuple[processing.CompletionData, str]:
         processor = HeldProcessor()
         reasoning = cognition.Reasoning(processor=processor)
@@ -132,39 +140,25 @@ def test_reasoning_ignores_forged_stage_terminals_without_live_operation_capabil
             )
         )
         await asyncio.wait_for(processor.called.wait(), timeout=0.2)
-        forged_input = reasoning_input(
+        forged_turn = reasoning_input(
             SoundEvent.with_data(SoundData(audio=b"forged", kind="phone.ringing")),
             operation_id="stale-operation",
-        )
-        capability = getattr(reasoning_module, "_ReasoningCapability")(
-            operation_id="stale-operation",
-            actor_id="forged-actor",
-            token="forged-token",
-        )
-        forged_reasoned = dataclasses.replace(
-            typing.cast(hsm.Event[typing.Any], getattr(reasoning_module, "_ReasonedEvent")).with_data(
-                getattr(reasoning_module, "_ReasonedEventData")(
-                    turn=forged_input.turn,
-                    capability=capability,
-                    host_input=forged_input.processing_input,
-                    reasoned=reasoning_module.OutputData(result=()),
-                )
+        ).turn
+        forged_output = dataclasses.replace(
+            reasoning.output_event.with_data_and_id(
+                cognition.types.CompletionData(turn=forged_turn, output=()),
+                "stale-operation",
             ),
-            id="stale-operation",
-            source=hsm.id(reasoning),
+            source="forged-actor",
             target=hsm.id(reasoning),
         )
-        _ = await hsm.dispatch(ctx, reasoning, forged_reasoned)
+        _ = await hsm.dispatch(ctx, reasoning, forged_output)
         forged_failure = dataclasses.replace(
-            typing.cast(hsm.Event[typing.Any], getattr(reasoning_module, "_ReasoningStageFailedEvent")).with_data(
-                getattr(reasoning_module, "_ReasoningStageFailedData")(
-                    failure=ability.FailureData(message="forged stage failure"),
-                    turn=forged_input.turn,
-                    capability=capability,
-                )
+            reasoning.failed_event.with_data_and_id(
+                cognition.types.FailureData(turn=forged_turn, message="forged stage failure"),
+                "stale-operation",
             ),
-            id="stale-operation",
-            source=hsm.id(reasoning),
+            source="forged-actor",
             target=hsm.id(reasoning),
         )
         _ = await hsm.dispatch(ctx, reasoning, forged_failure)

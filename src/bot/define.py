@@ -1,8 +1,11 @@
 """HSM construction namespace for stateforward.bot.
 
-``define`` is the only hooked constructor: it calls ``hsm.define`` and best-effort
-publishes the finalized topology to the web studio. Other names are pass-throughs
-to ``hsm``.
+``define`` is the only hooked constructor: it calls ``hsm.define`` and, only when
+model publishing is explicitly opted in (``BOT_MODEL_PUBLISH=1``), publishes the
+finalized topology to the web studio. ``publish`` / ``post_model`` stay available
+for explicit runtime callers (e.g. live registration in ``bot.start``), which opt
+in by calling. Importing this module — or any module that defines models at import
+time — never performs network I/O.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import collections.abc
 import http.client
 import json
 import logging
+import os
 import posixpath
 import typing
 import urllib.parse
@@ -44,6 +48,7 @@ class Topology(typing.TypedDict):
 Owner = hsm.Instance | str
 
 _LOG = logging.getLogger(__name__)
+_MODEL_PUBLISH_ENV_VAR = "BOT_MODEL_PUBLISH"
 _POST_TIMEOUT_SECONDS = 0.5
 _STUDIO_PORT = 5173
 _MODELS_PATH = "/v1/models"
@@ -53,6 +58,9 @@ _PUBLISH_SKIPPED = "skipped"
 _PUBLISH_OK = "ok"
 _PUBLISH_FAILED = "failed"
 
+# Import compatibility only (not public surface): ``bot/__init__.py`` re-exports these
+# HSM constructors while it still owns the package-root construction namespace. New code
+# imports them from ``hsm`` directly. They are deliberately absent from ``__all__``.
 activity = hsm.activity
 after = hsm.after
 choice = hsm.choice
@@ -89,15 +97,13 @@ def topology(
     Schema::
 
         {
-          "name": "/Demo",
-          "states": [
-            {"qualified_name": "/Demo", "parent": "/", "initial": "/Demo/.initial"},
-            {"qualified_name": "/Demo/idle", "parent": "/Demo", "initial": ""}
-          ],
-          "transitions": [
-            {"source": "/Demo/idle", "target": "/Demo/run", "events": ["go"]}
-          ],
-          "initial": "/Demo/.initial"
+            "name": "/Demo",
+            "states": [
+                {"qualified_name": "/Demo", "parent": "/", "initial": "/Demo/.initial"},
+                {"qualified_name": "/Demo/idle", "parent": "/Demo", "initial": ""},
+            ],
+            "transitions": [{"source": "/Demo/idle", "target": "/Demo/run", "events": ["go"]}],
+            "initial": "/Demo/.initial",
         }
 
     States come from ``StateElement`` members. Transitions carry event name
@@ -191,7 +197,8 @@ def post_model(payload: collections.abc.Mapping[str, object], url: str) -> None:
 def publish(payload: collections.abc.Mapping[str, object], url: str | None = None) -> str:
     """Publish topology or live state when an OTLP endpoint is configured.
 
-    Returns ``skipped``, ``ok``, or ``failed``. Never raises.
+    Returns ``skipped``, ``ok``, or ``failed``. Never raises. Calling this function
+    directly is the explicit opt-in; ``define`` only calls it when ``BOT_MODEL_PUBLISH=1``.
     """
 
     endpoint = otlp_endpoint()
@@ -209,8 +216,19 @@ def publish(payload: collections.abc.Mapping[str, object], url: str | None = Non
     return _PUBLISH_OK
 
 
+def model_publish_enabled() -> bool:
+    """True only when model publishing is explicitly opted in via ``BOT_MODEL_PUBLISH=1``."""
+
+    return os.environ.get(_MODEL_PUBLISH_ENV_VAR, "") == "1"
+
+
 def define(name: str, *elements: hsm.Element) -> hsm.Model:
-    """Define a model through ``hsm.define`` and publish its topology."""
+    """Define a model through ``hsm.define``; publish its topology only when opted in.
+
+    Model definition runs at import time across the package, so publishing here must
+    never be implicit: without ``BOT_MODEL_PUBLISH=1`` this is pure construction with
+    zero network I/O. Explicit runtime callers use ``publish`` directly.
+    """
 
     with span.operation(
         "bot.define",
@@ -219,7 +237,7 @@ def define(name: str, *elements: hsm.Element) -> hsm.Model:
         stage="construct",
     ) as active:
         model = hsm.define(name, *elements)
-        outcome = publish(topology(model))
+        outcome = publish(topology(model)) if model_publish_enabled() else _PUBLISH_SKIPPED
         active.set_attribute(_PUBLISH_ATTR, outcome)
         if outcome == _PUBLISH_FAILED:
             span.record_failure(active, "publish_failed")
@@ -230,29 +248,14 @@ __all__ = [
     "State",
     "Topology",
     "Transition",
-    "activity",
-    "after",
-    "choice",
-    "defer",
     "define",
-    "effect",
-    "entry",
-    "exit",
-    "final",
-    "guard",
-    "initial",
-    "observe",
-    "on",
+    "model_publish_enabled",
     "Owner",
     "owner_qualified_name",
     "post_model",
     "publish",
-    "source",
-    "state",
     "studio_live_url",
     "studio_models_url",
     "studio_url",
-    "target",
     "topology",
-    "transition",
 ]

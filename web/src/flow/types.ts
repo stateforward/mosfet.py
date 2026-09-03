@@ -42,7 +42,7 @@ export type ResizeBounds = {
   readonly height: number;
 };
 
-export type EdgeType = "bezier" | "straight" | "step" | "smoothstep";
+export type EdgeType = "bezier" | "straight" | "step" | "smoothstep" | "cable";
 
 export type Node = {
   readonly id: string;
@@ -166,6 +166,15 @@ export type ResizeHit = {
   readonly keepAspectRatio: boolean;
   readonly maxWidth?: number;
   readonly maxHeight?: number;
+};
+
+/** Active resize input channel. Pointer and keyboard cannot share one session. */
+export type ResizeChannel = "pointer" | "keyboard";
+
+/** Payload of `FlowGraph.resize_key`. `hit` is null for Escape with no control under the path. */
+export type ResizeKeyData = {
+  readonly key: string;
+  readonly hit: ResizeHit | null;
 };
 
 /**

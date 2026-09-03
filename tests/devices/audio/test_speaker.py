@@ -53,7 +53,7 @@ def test_speaker_dispatches_audio_output_to_target_device() -> None:
         _ = await bot.started(None, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
         _ = await bot.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="physical-speaker"))
         target.events.clear()
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
         await speaker.dispatch_audio_output(
             hsm.Context(),
@@ -100,7 +100,7 @@ def test_speaker_transduces_attached_controller_signal_into_environment_sound() 
         await wait_until(lambda: speaker.state() == "/Device/attached")
         inside.events.clear()
         outside.events.clear()
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
         await speaker.dispatch(
             environment,
@@ -144,7 +144,7 @@ def test_unattached_speaker_transduces_nothing() -> None:
             environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker")
         )
         inside.events.clear()
-        data = audio.AudioOutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
+        data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
         await speaker.dispatch(environment, audio.OutputEvent.with_data(data))
         await asyncio.sleep(0)

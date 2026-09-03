@@ -54,7 +54,7 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
         )
         _ = await bot.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="phone-audio"))
         target.events.clear()
-        data = audio.AudioInputData(audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1)
+        data = audio.InputData(audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1)
 
         await microphone.dispatch_audio_input(
             hsm.Context(),
@@ -118,7 +118,7 @@ def test_microphone_transduces_one_capture_per_environment_sound_to_each_attache
     captured, overheard = asyncio.run(run())
 
     assert len(captured) == 1
-    assert captured[0].data == audio.AudioInputData(
+    assert captured[0].data == audio.InputData(
         audio=b"heard-audio",
         media_type="audio/pcm",
         sample_rate_hz=16_000,

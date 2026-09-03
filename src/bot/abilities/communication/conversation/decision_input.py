@@ -50,7 +50,7 @@ def agent_conversation_decision_input(
     """Default host input: map a contribution onto ``InputEventData`` bot input.
 
     This is host policy, not conversation lifecycle. Conversation remains free of
-    ``BotInputData`` construction by calling an injected factory instead.
+    ``InputData`` construction by calling an injected factory instead.
 
     ``participated`` must expose:
 

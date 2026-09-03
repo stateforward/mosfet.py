@@ -1,5 +1,5 @@
 from bot.devices import audio
-from bot.environment import SoundData
+from bot import environment
 
 import typing
 
@@ -47,7 +47,7 @@ def _dialed_digits(value: object) -> object:
     return value
 
 
-PhoneNumber = typing.Annotated[
+Number = typing.Annotated[
     str,
     # Field before BeforeValidator, and not the other way round: a validator listed first hides
     # the pattern from the generated JSON schema, which is the one thing a model reads to learn
@@ -172,7 +172,7 @@ class DialData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    number: PhoneNumber
+    number: Number
 
 
 class AnswerCallData(pydantic.BaseModel):
@@ -312,7 +312,7 @@ class MediaReadyData(CallIdData):
     """Signal from a phone service provider that call media is ready for audio routing."""
 
 
-class ServiceAudioData(audio.AudioOutputData):
+class ServiceAudioData(audio.OutputData):
     """Signal from a phone service provider carrying audio that should play from the phone speaker."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -435,7 +435,7 @@ class TransferFailedData(CallIdData):
     )
 
 
-class PhoneCallData(CallIdData):
+class CallData(CallIdData):
     """Committed public phone state for a specific call."""
 
 
@@ -443,7 +443,7 @@ class RingingData(pydantic.BaseModel):
     """Committed public phone state that a call is ringing.
 
     Carries who is calling, not which session is ringing: a ringing handset shows caller ID, and
-    the session handle has no counterpart on it. Distinct from :class:`PhoneCallData` so
+    the session handle has no counterpart on it. Distinct from :class:`CallData` so
     environment elevation can select ring acoustics by payload type, never by ``event.name``.
     """
 
@@ -457,7 +457,7 @@ class RingingData(pydantic.BaseModel):
     caller: Caller | None = None
 
 
-class PhoneSoundData(SoundData):
+class SoundData(environment.SoundData):
     """``environment.sound`` payload elevated from phone ringing (or call-scoped acoustic energy).
 
     Subclasses :class:`~bot.environment.SoundData` with the caller ID, so what a bot perceives
@@ -515,7 +515,7 @@ class PhoneSoundData(SoundData):
     )
 
 
-class PhoneHungUpData(CallIdData):
+class HungUpData(CallIdData):
     """Committed public phone state that the call ended."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -572,7 +572,7 @@ class NoCallData(pydantic.BaseModel):
     )
 
 
-class PhoneTransferData(CallIdData):
+class TransferData(CallIdData):
     """Committed public phone state for an in-progress or completed transfer."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -595,7 +595,7 @@ class PhoneTransferData(CallIdData):
     )
 
 
-class PhoneTransferFailedData(PhoneTransferData):
+class CallTransferFailedData(TransferData):
     """Committed public phone state that an attempted transfer failed and the original call remains active."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -711,31 +711,31 @@ RingingEvent = hsm.Event[RingingData](
     name="phone.ringing",
     schema=RingingData,
 )
-AnsweredEvent = hsm.Event[PhoneCallData](
+AnsweredEvent = hsm.Event[CallData](
     name="phone.answered",
-    schema=PhoneCallData,
+    schema=CallData,
 )
-MediaReadyEvent = hsm.Event[PhoneCallData](
+MediaReadyEvent = hsm.Event[CallData](
     name="phone.media_ready",
-    schema=PhoneCallData,
+    schema=CallData,
 )
-HungUpEvent = hsm.Event[PhoneHungUpData](
+HungUpEvent = hsm.Event[HungUpData](
     name="phone.hung_up",
-    schema=PhoneHungUpData,
+    schema=HungUpData,
 )
 NoCallEvent = hsm.Event[NoCallData](
     name="phone.no_call",
     schema=NoCallData,
 )
-TransferStartedEvent = hsm.Event[PhoneTransferData](
+TransferStartedEvent = hsm.Event[TransferData](
     name="phone.transfer_started",
-    schema=PhoneTransferData,
+    schema=TransferData,
 )
-CallTransferCompletedEvent = hsm.Event[PhoneTransferData](
+CallTransferCompletedEvent = hsm.Event[TransferData](
     name="phone.transfer_completed",
-    schema=PhoneTransferData,
+    schema=TransferData,
 )
-CallTransferFailedEvent = hsm.Event[PhoneTransferFailedData](
+CallTransferFailedEvent = hsm.Event[CallTransferFailedData](
     name="phone.transfer_failed",
-    schema=PhoneTransferFailedData,
+    schema=CallTransferFailedData,
 )

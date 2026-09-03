@@ -9,8 +9,9 @@ import { FlowNode } from "../src/flow/node.ts";
 import { FlowNodeResizer } from "../src/flow/node-resizer.ts";
 import { RESIZE_DIRECTIONS } from "../src/flow/resize-control.ts";
 import { resizedBounds } from "../src/flow/resizer.ts";
+import { Selection } from "../src/flow/selection.ts";
 import { registerFlowElements } from "../src/flow/register.ts";
-import { getBezierPath, getNodesBounds, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
+import { getBezierPath, getNodesBounds, getSmoothStepPath, getStraightPath, getViewportForBounds } from "../src/flow/path.ts";
 import {
   FIT_PADDING_RATIO,
   MAX_FLOW_EDGES,
@@ -22,6 +23,7 @@ import {
   type PointerSampleData,
 } from "../src/flow/types.ts";
 import { getByRole } from "./by-role.ts";
+import { labelPoint } from "../src/flow/pathing/trace.ts";
 
 registerFlowElements();
 
@@ -62,9 +64,9 @@ function controlOf(args: { resizer: FlowNodeResizer; direction: string }): HTMLE
   return control;
 }
 
-function keyDownOn(target: Element, key: string): void {
-  target.dispatchEvent(new KeyboardEvent("keydown", {
-    key,
+function keyDownOn(args: { target: Element; key: string }): void {
+  args.target.dispatchEvent(new KeyboardEvent("keydown", {
+    key: args.key,
     bubbles: POINTER_BUBBLES,
     composed: POINTER_COMPOSED,
     cancelable: true,
@@ -143,6 +145,53 @@ function pointerData(overrides: Partial<PointerSampleData> = {}): PointerSampleD
     },
     ...overrides,
   };
+}
+
+/**
+ * Painted `d` of the graph's first flow-edge path, or null before any paint.
+ */
+function edgePathDOf(graph: FlowGraph): string | null {
+  const element = graph.querySelector("flow-edge");
+  if (!(element instanceof FlowEdge)) return null;
+  return element.path.getAttribute("d");
+}
+
+/**
+ * Waypoints recovered from a `polylinePath` serialization.
+ *
+ * Interior corners survive as Q control points -- fillets only trim their
+ * surrounding L/Q endpoints -- so the recovered set equals the routed
+ * waypoint list. Returns an empty list while no polyline is painted.
+ */
+function cableWaypointsOf(d: string | null): Array<{ x: number; y: number }> {
+  const points: Array<{ x: number; y: number }> = [];
+  if (d === null || !d.startsWith("M")) return points;
+  const start = d.match(/^M(-?[0-9.]+),(-?[0-9.]+)/);
+  if (start === null) return points;
+  points.push({ x: Number(start[1]), y: Number(start[2]) });
+  for (const match of d.matchAll(/Q(-?[0-9.]+),(-?[0-9.]+)/g)) {
+    points.push({ x: Number(match[1]), y: Number(match[2]) });
+  }
+  const lineTos = [...d.matchAll(/L(-?[0-9.]+),(-?[0-9.]+)/g)];
+  const last = lineTos[lineTos.length - 1];
+  if (last !== undefined) points.push({ x: Number(last[1]), y: Number(last[2]) });
+  return points;
+}
+
+async function waitForCablePolyline(
+  graph: FlowGraph,
+  start: { x: number; y: number },
+): Promise<Array<{ x: number; y: number }>> {
+  for (let i = 0; i < 50; i += 1) {
+    const pts = cableWaypointsOf(edgePathDOf(graph));
+    // Gate on the routed border anchor: a painted smoothstep fallback also
+    // recovers >=4 points but starts at the node-bottom spline anchor.
+    if (pts.length >= 4 && pts[0]?.x === start.x && pts[0]?.y === start.y) return pts;
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, YIELD_MS);
+    });
+  }
+  throw new Error("timed out waiting for a routed cable polyline");
 }
 
 describe("flow-graph", () => {
@@ -2194,6 +2243,83 @@ describe("flow-graph", () => {
     graph.remove();
   });
 
+  test("cable edges route around blockers, fall back to smoothstep during drags, and resume after drag_end", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    // Source and target face each other across a wall no straight corridor
+    // crosses; the routed polyline must leave the wall's band to reach around.
+    // Short enough that wrapping stays clearly cheaper than any punch-through
+    // under the shadow-pad standoff (the reference routes with vPad>=8 on).
+    const wall = { x: 200, y: -140, width: 60, height: 380 };
+    const strictlyInsideWallPlus16 = (p: { x: number; y: number }): boolean =>
+      p.x > wall.x - 16 && p.x < wall.x + wall.width + 16
+      && p.y > wall.y - 16 && p.y < wall.y + wall.height + 16;
+    graph.nodes = [
+      { id: "src", position: { x: 0, y: 0 }, data: {}, width: 80, height: 40 },
+      { id: "wall", position: { x: wall.x, y: wall.y }, data: {}, width: wall.width, height: wall.height },
+      { id: "tgt", position: { x: 400, y: 0 }, data: {}, width: 80, height: 40 },
+    ];
+    graph.edges = [{ id: "wire", source: "src", target: "tgt", type: "cable", label: "W" }];
+    await waitUntil(() => graph.querySelectorAll("flow-node").length === 3);
+    const edgeEl = graph.querySelector("flow-edge");
+    assert.ok(edgeEl instanceof FlowEdge);
+
+    const routed = await waitForCablePolyline(graph, { x: 80, y: 20 });
+    assert.ok(routed.length >= 4, `expected a multipoint route, got ${JSON.stringify(routed)}`);
+    assert.deepEqual(routed[0], { x: 80, y: 20 }); // source right-border anchor
+    for (const p of routed) {
+      assert.ok(!strictlyInsideWallPlus16(p), `waypoint ${JSON.stringify(p)} entered blocker+16`);
+    }
+    assert.ok(
+      routed.some((p) => p.y < wall.y - 16 || p.y > wall.y + wall.height + 16),
+      `route never left the wall band: ${JSON.stringify(routed)}`,
+    );
+    // The label sits at the longest-segment midpoint of the routed polyline,
+    // and the painted path carries the cable class token.
+    const expectedLabel = labelPoint(routed);
+    assert.equal(edgeEl.label.getAttribute("x"), String(expectedLabel.x));
+    assert.equal(edgeEl.label.getAttribute("y"), String(expectedLabel.y));
+    const routedClass = edgeEl.path.getAttribute("class") ?? "";
+    assert.match(routedClass, /(^| )cable( |$)/);
+
+    // Drag the target node: while it drags its edge drops out of the routed
+    // map and paint falls back to the smoothstep spline.
+    const tgtEl = Array.from(graph.querySelectorAll("flow-node"))
+      .find((el) => el instanceof FlowNode && el.node?.id === "tgt");
+    assert.ok(tgtEl instanceof FlowNode);
+    tgtEl.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 420, clientY: 20 })));
+    assert.match(graph.state(), /\/click$/);
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 460, clientY: 20 })));
+    assert.match(graph.state(), /\/drag$/);
+    // The first sample while dragging establishes the dedupe baseline...
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 500, clientY: 30 })));
+    await flush();
+    assert.equal(graph.nodes.find((node) => node.id === "tgt")?.position.x, 400);
+    // ...the next past-epsilon sample moves the node. The grab offset came
+    // from the entering-drag sample: (460,20) - (400,0) = (60,20), so the
+    // node lands at (540-60, 40-20) = (480, 20).
+    tgtEl.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 540, clientY: 40 })));
+    await waitUntil(() => graph.nodes.find((node) => node.id === "tgt")?.position.x === 480);
+    assert.equal(graph.nodes.find((node) => node.id === "tgt")?.position.y, 20);
+    // Node at (480, 20); the fallback spline runs bottom-center of src to
+    // top-center of the moved target.
+    const fallbackD = getSmoothStepPath({ sourceX: 40, sourceY: 40, targetX: 520, targetY: 20 })[0];
+    await waitUntil(() => edgePathDOf(graph) === fallbackD);
+    assert.equal(edgePathDOf(graph), fallbackD);
+
+    // drag_end clears draggingNodeIds; the post-drag sync restores a routed
+    // polyline for the moved geometry.
+    tgtEl.dispatchEvent(new PointerEvent("pointerup", pointerInit({ clientX: 540, clientY: 40 })));
+    await waitUntil(() => /\/idle$/.test(graph.state()));
+    const resumed = await waitForCablePolyline(graph, { x: 80, y: 20 });
+    assert.deepEqual(resumed[0], { x: 80, y: 20 });
+    assert.deepEqual(resumed[resumed.length - 1], { x: 480, y: 40 }); // moved target left-border anchor
+    for (const p of resumed) {
+      assert.ok(!strictlyInsideWallPlus16(p), `resumed waypoint ${JSON.stringify(p)} entered blocker+16`);
+    }
+    graph.remove();
+  });
+
   test("mutating caller nested node fields after a valid set does not change admitted nodes", async () => {
     const graph = document.createElement("flow-graph");
     const originX = 0;
@@ -2322,14 +2448,24 @@ describe("flow-graph", () => {
     document.body.append(graph);
     await waitUntil(() => /\/connected\//.test(graph.state()));
     const actors = ownedActors(graph);
-    const childCount = 7;
+    const childCount = 8;
     assert.equal(actors.length, childCount);
     for (const actor of actors) {
       assert.notEqual(actor.state(), "");
     }
+    // Detach must carry every actor -- including Routes -- into stopActors via
+    // #childActors(); a missing entry leaks one live router per attach/detach
+    // cycle even though Host.stop's owned-children teardown masks it here.
+    const routes = actors.find((actor) => actor.state().startsWith("/Routes"));
+    assert.ok(routes !== undefined, "Routes missing from graph-owned actors");
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    assert.equal(routes.state(), "", "detach must stop the Routes actor with the others");
+    document.body.append(graph);
+    await waitUntil(() => /\/connected\//.test(graph.state()));
     await graph.stop();
     assert.equal(graph.state(), "");
-    for (const actor of actors) {
+    for (const actor of ownedActors(graph)) {
       assert.equal(actor.state(), "");
     }
     graph.remove();
@@ -2480,7 +2616,7 @@ describe("flow-graph", () => {
     const clientX = 80;
     const clientY = 40;
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX, clientY })));
-    assert.match(graph.state(), /\/resize$/);
+    assert.match(graph.state(), /\/resize\/pointer$/);
     assert.doesNotMatch(graph.state(), /\/drag$/);
     assert.doesNotMatch(graph.state(), /\/pan$/);
     graph.remove();
@@ -2500,7 +2636,7 @@ describe("flow-graph", () => {
     await selectFirstNode(nodeEl);
     const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
-    assert.match(graph.state(), /\/resize$/);
+    assert.match(graph.state(), /\/resize\/pointer$/);
     se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
     await flush();
     assert.equal(graph.nodes[0]?.width, originWidth);
@@ -2622,7 +2758,7 @@ describe("flow-graph", () => {
     const se = resizer.shadowRoot?.querySelector('flow-node-resize-control[direction="se"]');
     assert.ok(se instanceof HTMLElement);
     se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
-    assert.doesNotMatch(graph.state(), /\/resize$/);
+    assert.doesNotMatch(graph.state(), /\/resize/);
     graph.remove();
   });
 
@@ -2812,20 +2948,20 @@ describe("flow-graph", () => {
     }
     const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     const button = controlButtonOf(se);
-    keyDownOn(button, "Enter");
+    keyDownOn({ target: button, key: "Enter" });
     await flush();
     const start = seen.find((item) => item.name === "flow-node-resize-start");
     assert.ok(start !== undefined);
     assert.equal(start.width, originWidth);
     assert.equal(start.height, originHeight);
-    keyDownOn(button, "ArrowRight");
-    keyDownOn(button, "ArrowRight");
-    keyDownOn(button, "ArrowDown");
+    keyDownOn({ target: button, key: "ArrowRight" });
+    keyDownOn({ target: button, key: "ArrowRight" });
+    keyDownOn({ target: button, key: "ArrowDown" });
     await waitUntil(() => graph.nodes[0]?.width === originWidth + 2 && graph.nodes[0]?.height === originHeight + 1);
     assert.equal(graph.nodes[0]?.width, originWidth + 2);
     assert.equal(graph.nodes[0]?.height, originHeight + 1);
     assert.ok(seen.some((item) => item.name === "flow-node-resize"));
-    keyDownOn(button, "Escape");
+    keyDownOn({ target: button, key: "Escape" });
     await waitUntil(() => seen.some((item) => item.name === "flow-node-resize-end"));
     const end = seen.filter((item) => item.name === "flow-node-resize-end");
     assert.equal(end.length, 1);
@@ -2855,11 +2991,11 @@ describe("flow-graph", () => {
     });
     const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
     const button = controlButtonOf(se);
-    keyDownOn(button, " ");
+    keyDownOn({ target: button, key: " " });
     await flush();
-    keyDownOn(button, "ArrowRight");
+    keyDownOn({ target: button, key: "ArrowRight" });
     await waitUntil(() => graph.nodes[0]?.width === originWidth + 1);
-    keyDownOn(button, "Enter");
+    keyDownOn({ target: button, key: "Enter" });
     await waitUntil(() => ends.length === 1);
     assert.equal(ends[0], originWidth + 1);
     assert.equal(graph.nodes[0]?.width, originWidth + 1);
@@ -2881,14 +3017,14 @@ describe("flow-graph", () => {
     resizer.setAttribute("min-width", String(minWidth));
     const w = controlOf({ resizer, direction: "w" });
     const button = controlButtonOf(w);
-    keyDownOn(button, "Enter");
+    keyDownOn({ target: button, key: "Enter" });
     await flush();
     const east = originX + originWidth;
     // Three rightward steps of 1px: width 80 → 78 (clamped at min-width);
     // the east edge stays fixed at 120.
     const steps = 3;
     for (let i = 0; i < steps; i += 1) {
-      keyDownOn(button, "ArrowRight");
+      keyDownOn({ target: button, key: "ArrowRight" });
     }
     await waitUntil(() => graph.nodes[0]?.width === minWidth);
     const node = graph.nodes[0];
@@ -2945,6 +3081,217 @@ describe("flow-graph", () => {
     assert.equal(detail.node.id, "a");
     await waitUntil(() => nodeEl.node?.selected === true);
     assert.ok(nodeEl.node?.selected === true);
+    graph.remove();
+  });
+
+  test("unknown and orthogonal keys are no-ops during keyboard resize", async () => {
+    const originWidth = 80;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const moves: number[] = [];
+    graph.addEventListener("flow-node-resize", () => moves.push(1));
+    const e = controlOf({ resizer: offeredResizer(nodeEl), direction: "e" });
+    const button = controlButtonOf(e);
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    keyDownOn({ target: button, key: "x" });
+    keyDownOn({ target: button, key: "ArrowUp" });
+    await flush();
+    assert.equal(moves.length, 0);
+    assert.equal(graph.nodes[0]?.width, originWidth);
+    keyDownOn({ target: button, key: "Escape" });
+    graph.remove();
+  });
+
+  test("idle arrows do not start a resize", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const starts: Event[] = [];
+    graph.addEventListener("flow-node-resize-start", (event) => starts.push(event));
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    keyDownOn({ target: controlButtonOf(se), key: "ArrowRight" });
+    await flush();
+    assert.equal(starts.length, 0);
+    assert.doesNotMatch(graph.state(), /\/resize/);
+    assert.equal(graph.nodes[0]?.width, 80);
+    graph.remove();
+  });
+
+  test("stop in flight drops further keyboard resize apply and emit", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const seen: string[] = [];
+    graph.addEventListener("flow-node-resize", () => seen.push("move"));
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const button = controlButtonOf(controlOf({ resizer: offeredResizer(nodeEl), direction: "se" }));
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    const stopping = graph.stop();
+    keyDownOn({ target: button, key: "ArrowRight" });
+    keyDownOn({ target: button, key: "ArrowRight" });
+    await stopping;
+    assert.equal(graph.nodes[0]?.width, 80);
+    assert.equal(seen.length, 0);
+    graph.remove();
+  });
+
+  test("keys on another control are ignored while a keyboard resize is active", async () => {
+    const originWidth = 80;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const resizer = offeredResizer(nodeEl);
+    const seButton = controlButtonOf(controlOf({ resizer, direction: "se" }));
+    const nwButton = controlButtonOf(controlOf({ resizer, direction: "nw" }));
+    keyDownOn({ target: seButton, key: "Enter" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    keyDownOn({ target: nwButton, key: "Enter" });
+    keyDownOn({ target: nwButton, key: "ArrowLeft" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    assert.equal(graph.nodes[0]?.width, originWidth);
+    keyDownOn({ target: seButton, key: "Escape" });
+    await waitUntil(() => !/\/resize/.test(graph.state()));
+    graph.remove();
+  });
+
+  test("removing the node ends the keyboard resize session", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    const ends: Event[] = [];
+    graph.addEventListener("flow-node-resize-end", (event) => ends.push(event));
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const button = controlButtonOf(controlOf({ resizer: offeredResizer(nodeEl), direction: "se" }));
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    graph.nodes = [];
+    await waitUntil(() => !/\/resize/.test(graph.state()));
+    assert.doesNotMatch(graph.state(), /\/resize/);
+    graph.remove();
+  });
+
+  test("deselecting the node ends the keyboard resize session", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const button = controlButtonOf(controlOf({ resizer: offeredResizer(nodeEl), direction: "se" }));
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    await graph.dispatch(hsm.typedEvent({
+      event: Selection.changedEvent,
+      data: { nodeIds: [], edgeIds: [] },
+    }));
+    await waitUntil(() => !/\/resize/.test(graph.state()));
+    assert.doesNotMatch(graph.state(), /\/resize/);
+    graph.remove();
+  });
+
+  test("pointer-then-Enter does not jump the box or start a keyboard session", async () => {
+    const originWidth = 80;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
+    se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 90, clientY: 45 })));
+    se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 100, clientY: 50 })));
+    await waitUntil(() => graph.nodes[0]?.width === 100);
+    assert.match(graph.state(), /\/resize\/pointer$/);
+    keyDownOn({ target: controlButtonOf(se), key: "Enter" });
+    keyDownOn({ target: controlButtonOf(se), key: "ArrowRight" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/pointer$/);
+    assert.equal(graph.nodes[0]?.width, 100);
+    graph.remove();
+  });
+
+  test("keyboard-then-pointerdown does not apply world-as-delta", async () => {
+    const originWidth = 80;
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: originWidth, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const se = controlOf({ resizer: offeredResizer(nodeEl), direction: "se" });
+    const button = controlButtonOf(se);
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    keyDownOn({ target: button, key: "ArrowRight" });
+    await waitUntil(() => graph.nodes[0]?.width === originWidth + 1);
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    se.dispatchEvent(new PointerEvent("pointerdown", pointerInit({ clientX: 80, clientY: 40 })));
+    se.dispatchEvent(new PointerEvent("pointermove", pointerInit({ clientX: 200, clientY: 90 })));
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    assert.equal(graph.nodes[0]?.width, originWidth + 1);
+    keyDownOn({ target: button, key: "Escape" });
+    graph.remove();
+  });
+
+  test("disconnect and reconnect mid-keyboard resize does not leave a stale session", async () => {
+    const graph = document.createElement("flow-graph");
+    document.body.append(graph);
+    graph.nodes = [{ id: "a", position: { x: 0, y: 0 }, data: { label: "A" }, width: 80, height: 40 }];
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const nodeEl = graph.querySelector("flow-node");
+    assert.ok(nodeEl instanceof FlowNode);
+    await selectFirstNode(nodeEl);
+    const button = controlButtonOf(controlOf({ resizer: offeredResizer(nodeEl), direction: "se" }));
+    keyDownOn({ target: button, key: "Enter" });
+    await flush();
+    assert.match(graph.state(), /\/resize\/keyboard$/);
+    graph.remove();
+    await waitUntil(() => /\/disconnected$/.test(graph.state()));
+    document.body.append(graph);
+    await flush();
+    assert.match(graph.state(), /\/connected\//);
+    assert.doesNotMatch(graph.state(), /\/resize/);
+    await waitUntil(() => graph.querySelector("flow-node") !== null);
+    const reattached = graph.querySelector("flow-node");
+    assert.ok(reattached instanceof FlowNode);
+    await selectFirstNode(reattached);
+    const next = controlButtonOf(controlOf({ resizer: offeredResizer(reattached), direction: "se" }));
+    const starts: Event[] = [];
+    graph.addEventListener("flow-node-resize-start", (event) => starts.push(event));
+    keyDownOn({ target: next, key: "Enter" });
+    await flush();
+    assert.equal(starts.length, 1);
+    assert.match(graph.state(), /\/resize\/keyboard$/);
     graph.remove();
   });
 });

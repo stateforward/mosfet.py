@@ -1,6 +1,6 @@
 """Device primitives for stateforward.bot."""
 
-from bot.device.device import Device
+from bot.device.device import Device, ObservationData, ObservationEvent
 from bot.device.events import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
@@ -15,5 +15,7 @@ __all__ = [
     "FirmwareInitializingDoneEventData",
     "FirmwareInitializingFailedEvent",
     "FirmwareInitializingFailedEventData",
+    "ObservationData",
+    "ObservationEvent",
     "Sandbox",
 ]

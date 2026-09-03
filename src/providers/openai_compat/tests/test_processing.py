@@ -28,7 +28,7 @@ class _AnswerCallData(pydantic.BaseModel):
     call_id: str
 
 
-_PHONE_ANSWER_CALL = hsm.Event[_AnswerCallData](
+_AnswerCallEvent = hsm.Event[_AnswerCallData](
     name="phone.answer_call",
     kind=hsm.CallEventKind,
     schema=_AnswerCallData,
@@ -133,7 +133,7 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     processor = Processor(generator=generator)
     input = processing.InputData(
         input=stimulus,
-        schemas=(_PHONE_ANSWER_CALL,),
+        schemas=(_AnswerCallEvent,),
         instructions="Select events from schemas.",
     )
     output = asyncio.run(process_for_test(processor, input))
@@ -171,7 +171,7 @@ def test_processor_maps_dispatch_tool_to_events() -> None:
     processor = Processor(generator=generator)
     input = processing.InputData(
         input="ring",
-        schemas=(_PHONE_ANSWER_CALL,),
+        schemas=(_AnswerCallEvent,),
         instructions="Select events from schemas.",
     )
     output = asyncio.run(process_for_test(processor, input))
@@ -271,7 +271,7 @@ def test_processor_process_records_otel_wire_payload(
             processor,
             processing.InputData(
                 input=user_input,
-                schemas=(_PHONE_ANSWER_CALL,),
+                schemas=(_AnswerCallEvent,),
                 instructions=instructions,
             ),
         )

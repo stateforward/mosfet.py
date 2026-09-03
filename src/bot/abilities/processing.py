@@ -23,9 +23,12 @@ import json
 import re
 import typing
 import uuid
+import weakref
 
-import bot
 from bot import lifecycle
+from bot.define import define
+from bot.events import RebootEvent, RebootEventData, RebootReason
+from bot.start import started
 import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
@@ -782,8 +785,13 @@ _OperationFinishedEvent = hsm.Event[_OperationData](
 )
 
 
-def _operation_key(owner: hsm.Instance, operation_id: str) -> str:
-    return f"processing.operation:{hsm.id(owner)}:{operation_id}"
+# Owner-scoped operation store for live capabilities (HSM-CONTEXT-001: liveness is store
+# membership, never ``state()`` probing). Keyed by ``(hsm.id(owner), operation_id)`` so one
+# machine's capabilities are never addressable through another machine's scope. Weak values
+# mirror the environment Instances registry lifetime: a capability disappears when its actor
+# is garbage collected, and ``finish_operation`` removes it explicitly before retirement.
+# Confined to the event loop; entries vanish with their actors, so tests need no reset hook.
+_operations: weakref.WeakValueDictionary[tuple[str, str], Operation] = weakref.WeakValueDictionary()
 
 
 def cancellation_operation_id(
@@ -810,10 +818,10 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
         _ = instance
 
     operation = Operation()
-    await bot.started(
+    await started(
         owner.context(),
         operation,
-        bot.define(
+        define(
             "ProcessingOperation",
             hsm.initial(hsm.target("active")),
             hsm.state(
@@ -829,37 +837,27 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
     )
     instances = owner.context().value(hsm.Keys.Instances)
     if isinstance(instances, collections.abc.MutableMapping):
+        # Keep private operation actors out of the scope addressing map.
         _ = instances.pop(hsm.id(operation), None)
-        instances[_operation_key(owner, operation_id)] = operation
+    _operations[(hsm.id(owner), operation_id)] = operation
     return operation
 
 
 def active_operation(owner: hsm.Instance, operation_id: str) -> Operation | None:
     """Resolve the exact live operation capability owned by a machine.
 
-    Liveness is map membership under the operation key. ``finish_operation`` removes the
-    entry before the capability is retired (HSM-CONTEXT-001: do not probe ``state()``).
+    Liveness is store membership. ``finish_operation`` removes the entry before the
+    capability is retired (HSM-CONTEXT-001: do not probe ``state()``).
     """
 
-    instances = owner.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.Mapping):
-        return None
-    operation = instances.get(_operation_key(owner, operation_id))
-    return operation if isinstance(operation, Operation) else None
+    return _operations.get((hsm.id(owner), operation_id))
 
 
 def active_operation_id(owner: hsm.Instance) -> str | None:
     """Return the sole active operation ID owned by an operation-scoped actor."""
 
-    instances = owner.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.Mapping):
-        return None
-    prefix = f"processing.operation:{hsm.id(owner)}:"
-    active = [
-        key.removeprefix(prefix)
-        for key, operation in instances.items()
-        if isinstance(key, str) and key.startswith(prefix) and isinstance(operation, Operation)
-    ]
+    owner_id = hsm.id(owner)
+    active = [operation_id for candidate_owner_id, operation_id in _operations if candidate_owner_id == owner_id]
     return active[0] if len(active) == 1 else None
 
 
@@ -873,11 +871,8 @@ def matches_operation(owner: hsm.Instance, operation_id: str, actor_id: str) -> 
 def finish_operation(ctx: hsm.Context, owner: hsm.Instance, operation_id: str) -> None:
     """Retire an operation capability so delayed terminals and cancels cannot match it."""
 
-    instances = owner.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.MutableMapping):
-        return
-    operation = instances.pop(_operation_key(owner, operation_id), None)
-    if isinstance(operation, Operation) and lifecycle.is_started(operation):
+    operation = _operations.pop((hsm.id(owner), operation_id), None)
+    if operation is not None and lifecycle.is_started(operation):
         _ = hsm.dispatch(
             ctx,
             operation,
@@ -893,14 +888,9 @@ def finish_operation(ctx: hsm.Context, owner: hsm.Instance, operation_id: str) -
 def finish_operations(ctx: hsm.Context, owner: hsm.Instance) -> None:
     """Retire every live operation capability owned by a machine abandoning its work."""
 
-    instances = owner.context().value(hsm.Keys.Instances)
-    if not isinstance(instances, collections.abc.Mapping):
-        return
-    prefix = f"processing.operation:{hsm.id(owner)}:"
+    owner_id = hsm.id(owner)
     operation_ids = tuple(
-        key.removeprefix(prefix)
-        for key, operation in instances.items()
-        if isinstance(key, str) and key.startswith(prefix) and isinstance(operation, Operation)
+        operation_id for candidate_owner_id, operation_id in _operations if candidate_owner_id == owner_id
     )
     for operation_id in operation_ids:
         finish_operation(ctx, owner, operation_id)
@@ -1001,7 +991,7 @@ def request_reboot(
     instance: ability.Ability[typing.Any, typing.Any],
     event: Event[typing.Any],
     *,
-    reason: "bot.RebootReason",
+    reason: RebootReason,
 ) -> None:
     """Ask this ability for a clean robot lifecycle restart.
 
@@ -1016,7 +1006,7 @@ def request_reboot(
         dataclasses.replace(
             ability.RebootRequestEvent.with_data(
                 dataclasses.replace(
-                    bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
+                    RebootEvent.with_data(RebootEventData(reason=reason)),
                     id=request_id,
                 )
             ),
@@ -1857,7 +1847,7 @@ class Processing(ability.Ability[InputData, CompletionData]):
             ),
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = define(
         "Processing",
         hsm.initial(hsm.target("/Processing/idle")),
         hsm.state(

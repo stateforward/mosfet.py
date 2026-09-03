@@ -15,6 +15,8 @@ from opentelemetry.trace import Span
 
 from bot import lifecycle
 from bot.define import Owner, owner_qualified_name, publish, studio_live_url, topology
+from bot import address
+from bot import scope
 from bot.environment import Environment
 from bot.telemetry import span
 from bot.telemetry.configure import otlp_endpoint
@@ -26,6 +28,13 @@ _TOPOLOGY_ATTR = "bot.start.topology"
 _LIVE_ATTR = "bot.start.live"
 
 TInstance = typing.TypeVar("TInstance", bound=hsm.Instance)
+
+
+@typing.runtime_checkable
+class _HasModel(typing.Protocol):
+    """Typed surface for reading an instance's published lifecycle model without ``getattr``."""
+
+    model: hsm.Model | None
 
 
 class Live(typing.TypedDict):
@@ -82,9 +91,10 @@ def live_payload(
 def bound_model(instance: hsm.Instance) -> hsm.Model | None:
     """Return a public ``model`` attribute when it is an ``hsm.Model``."""
 
-    model = getattr(instance, "model", None)
-    if isinstance(model, hsm.Model):
-        return model
+    if isinstance(instance, _HasModel):
+        model = instance.model
+        if isinstance(model, hsm.Model):
+            return model
     return None
 
 
@@ -107,15 +117,9 @@ def _register(
     ctx: hsm.Context | None,
     clear_owner: bool = False,
 ) -> tuple[str, str]:
-    """Publish topology when known and mark the model live. Never raises."""
-
+    """Publish topology when known, register the actor's address, mark live. Never raises."""
     try:
-        environment_root = (
-            owner is None
-            and ctx is not None
-            and instance.context().value(hsm.Keys.Instances)
-            is Environment.from_context(ctx).value(hsm.Keys.Instances)
-        )
+        environment_root = owner is None and ctx is not None and Environment.from_context(ctx).contains(instance)
         publish_clear_owner = clear_owner or environment_root
         topology_outcome = (
             publish(topology(model, owner=owner, clear_owner=publish_clear_owner))
@@ -128,6 +132,27 @@ def _register(
     except Exception as error:
         _LOG.warning("live register failed kind=%s", span.failure_kind(error, type(error).__name__))
         return _PUBLISH_FAILED, _PUBLISH_FAILED
+
+
+def _register_address(instance: hsm.Instance, ctx: hsm.Context | None) -> None:
+    """Register the started instance's runtime address. Never raises.
+
+    The path is the environment's identity plus the actor's: ``/<env-id>/<actor-id>``.
+    Private scopes inherit their parent environment's environment segment — visibility
+    is decided at dispatch, not by hiding the address — so a private actor stays
+    addressable by explicit dispatch and invisible to environment broadcast.
+    """
+
+    try:
+        if ctx is None:
+            return
+        environment = Environment.from_context(ctx)
+        path = f"{environment.scope_path}/{hsm.id(instance)}"
+        address.register(path, instance)
+        if scope.is_private(ctx):
+            address.mark_private(path)
+    except Exception as error:
+        _LOG.warning("address register failed kind=%s", span.failure_kind(error, type(error).__name__))
 
 
 def _record(active: Span, topology_outcome: str, live_outcome: str) -> None:
@@ -154,6 +179,7 @@ async def started(
     ) as active:
         started_instance = await hsm.started(ctx, instance, model, config)
         _record(active, *_register(started_instance, model, owner, ctx))
+        _register_address(started_instance, ctx)
         return started_instance
 
 
@@ -173,6 +199,7 @@ async def start(
         stage="start",
     ) as active:
         started_instance = await hsm.start(ctx, instance, data)
+        _register_address(started_instance, ctx)
         _record(active, *_register(started_instance, bound_model(started_instance), owner, ctx))
         return started_instance
 

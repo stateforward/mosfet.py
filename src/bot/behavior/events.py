@@ -13,10 +13,6 @@ import hsm
 from bot import event
 import pydantic
 
-CREATE_EVENT_NAME = "bot.behavior.create"
-CHANGE_EVENT_NAME = "bot.behavior.change"
-BREAK_EVENT_NAME = "bot.behavior.break"
-
 
 class CreateData(pydantic.BaseModel):
     """Payload for ``bot.behavior.create``: install a new executable behavior."""
@@ -32,7 +28,7 @@ class CreateData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": CREATE_EVENT_NAME,
+                    "event": "bot.behavior.create",
                     "name": "GreetOnKnock",
                     "triggers": ["environment.sound"],
                     "description": "Say hello when a knock sound arrives.",
@@ -47,9 +43,32 @@ class CreateData(pydantic.BaseModel):
         description="Behavior create event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable PascalCase behavior / HSM model name to install.")
-    triggers: tuple[str, ...] = pydantic.Field(default=(), description="Optional trigger names.")
-    description: str | None = pydantic.Field(default=None, min_length=1)
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    triggers: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "External environment event names that may propose this behavior to fast intuition. "
+            "Installed on the inventory instance alongside the Starlark program's own triggers."
+        ),
+        examples=[["environment.sound"]],
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Human-readable summary of what the behavior does, shown in inventory and reflection. "
+            "The install keeps the caller-supplied description when present."
+        ),
+        examples=["Say hello when a knock sound arrives."],
+    )
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being installed now: the observed pattern across recent episodes "
+            "that justifies it. Recorded for reflection, never dispatched."
+        ),
+        examples=["Same knock→greeting pattern across recent episodes."],
+    )
     source: str | None = pydantic.Field(
         default=None,
         min_length=1,
@@ -76,7 +95,7 @@ class ChangeData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": CHANGE_EVENT_NAME,
+                    "event": "bot.behavior.change",
                     "name": "GreetOnKnock",
                     "reason": "Also clear focus before greeting.",
                 }
@@ -89,9 +108,32 @@ class ChangeData(pydantic.BaseModel):
         description="Behavior change event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable name of the behavior to revise.")
-    triggers: tuple[str, ...] = pydantic.Field(default=(), description="Optional replacement triggers.")
-    description: str | None = pydantic.Field(default=None, min_length=1)
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    triggers: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Replacement external event names that may propose this behavior to fast intuition. "
+            "Installed on the inventory instance alongside the revised Starlark program."
+        ),
+        examples=[["environment.sound", "conversation.greeting.recognized"]],
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Revised human-readable summary of what the behavior does, shown in inventory and reflection. "
+            "The install keeps the caller-supplied description when present."
+        ),
+        examples=["Say hello when a knock sound arrives, after clearing focus."],
+    )
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being revised now: the observed gap or regression the revision fixes. "
+            "Recorded for reflection, never dispatched."
+        ),
+        examples=["Also clear focus before greeting."],
+    )
     source: str | None = pydantic.Field(
         default=None,
         min_length=1,
@@ -117,7 +159,7 @@ class BreakData(pydantic.BaseModel):
             ),
             "examples": [
                 {
-                    "event": BREAK_EVENT_NAME,
+                    "event": "bot.behavior.break",
                     "name": "GreetOnKnock",
                     "reason": "Greeted while the bot was already mid-conversation.",
                 }
@@ -130,34 +172,37 @@ class BreakData(pydantic.BaseModel):
         description="Behavior break event name (discriminator).",
     )
     name: str = pydantic.Field(min_length=1, description="Stable name of the behavior to set status=BROKEN.")
-    reason: str | None = pydantic.Field(default=None, min_length=1)
+    reason: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Why this behavior is being retired: the observed harm or staleness. Becomes the inventory "
+            "status_reason so a later change can repair it."
+        ),
+        examples=["Greeted while the bot was already mid-conversation."],
+    )
 
-
-Data: typing.TypeAlias = typing.Annotated[
-    CreateData | ChangeData | BreakData,
-    pydantic.Field(discriminator="event"),
-]
 
 CreateEvent = hsm.Event[CreateData](
-    name=CREATE_EVENT_NAME,
+    name="bot.behavior.create",
     kind=event.EventKind,
     schema=CreateData,
 )
 ChangeEvent = hsm.Event[ChangeData](
-    name=CHANGE_EVENT_NAME,
+    name="bot.behavior.change",
     kind=event.EventKind,
     schema=ChangeData,
 )
 BreakEvent = hsm.Event[BreakData](
-    name=BREAK_EVENT_NAME,
+    name="bot.behavior.break",
     kind=event.EventKind,
     schema=BreakData,
 )
 
-Event: typing.TypeAlias = hsm.Event[CreateData] | hsm.Event[ChangeData] | hsm.Event[BreakData]
 
-
-def event_for_data(data: CreateData | ChangeData | BreakData) -> Event:
+def event_for_data(
+    data: CreateData | ChangeData | BreakData,
+) -> hsm.Event[CreateData] | hsm.Event[ChangeData] | hsm.Event[BreakData]:
     """Build the HSM event for a behavior create/change/break payload."""
 
     if isinstance(data, CreateData):
@@ -186,17 +231,12 @@ def is_inventory_event(event: hsm.Event[typing.Any]) -> bool:
 
 
 __all__ = [
-    "BREAK_EVENT_NAME",
     "BreakData",
     "BreakEvent",
-    "CHANGE_EVENT_NAME",
-    "CREATE_EVENT_NAME",
     "ChangeData",
     "ChangeEvent",
     "CreateData",
     "CreateEvent",
-    "Data",
-    "Event",
     "data_from_event",
     "event_for_data",
     "is_inventory_event",
