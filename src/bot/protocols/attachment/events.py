@@ -27,17 +27,30 @@ _ACTOR_JSON_SCHEMA = {
 }
 
 
+class _DeserializedActor(hsm.Instance):
+    """Typed placeholder for an attachment actor decoded from JSON.
+
+    Owns its ``id`` as a declared field set in its own ``__init__`` (no ``setattr`` workaround).
+    Unstarted, so ``hsm.id`` cannot address it; :func:`_actor_to_schema` and peer
+    ``_actor_id`` helpers read the declared field through normal attribute access.
+    """
+
+    id: str
+
+    def __init__(self, actor_id: str) -> None:
+        super().__init__()
+        self.id = actor_id
+
+
 def _actor_from_schema(data: object) -> hsm.Instance:
     if isinstance(data, hsm.Instance):
         return data
     if isinstance(data, dict):
         values = typing.cast(dict[str, object], data)
-        actor = hsm.Instance()
         identifier = values.get("id")
         if not isinstance(identifier, str):
             raise ValueError("Attachment actor JSON data requires a string id.")
-        setattr(actor, "id", identifier)
-        return actor
+        return _DeserializedActor(identifier)
     raise TypeError("Attachment actor must be an hsm.Instance or an object containing a string id.")
 
 

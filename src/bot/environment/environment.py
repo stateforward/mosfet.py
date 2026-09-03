@@ -92,6 +92,16 @@ class Environment(hsm.Context):
             revived._id = scope._id
         return revived
 
+    @property
+    def environment_id(self) -> str:
+        """This environment's stable identity segment: ``<id>`` in ``/<id>/<actor-id>``.
+
+        The same string the addressing registry uses as this environment's root, and the
+        one model-facing observation renders as ``<environment id="…">``. Revival by
+        :meth:`from_context` carries it forward, so an address survives scope cancellation.
+        """
+        return self._id
+
     def join(self, instance: hsm.Instance, *, placement: space.Placement | None = None) -> None:
         """Admit a started instance as an environment citizen. Idempotent.
 
@@ -270,3 +280,45 @@ def require_environment_scope(environment: Environment, instance: hsm.Instance, 
     if environment.contains(instance):
         return
     raise RuntimeError(f"{participant} is already started in another environment.")
+
+
+def elevate_device_observation_to_input(
+    ctx: hsm.Context,
+    owner: hsm.Instance,
+    observation: hsm.Event[typing.Any],
+) -> None:
+    """Elevate one typed device observation into body ``bot.input`` for ``owner``.
+
+    Explicit boundary contract owned by environment: body and cognition consume the
+    elevated ``bot.input`` form, never device event names. Coordinates via typed
+    payload (device ``ObservationData``) — every observation elevates
+    unconditionally; the ``source_event`` string rides along as cognition context
+    data and is never branched on for routing. Producers stamp identity and
+    provenance at emission (observation ``id``/``source``/``metadata``); this
+    preserves them onto the elevated envelope with ``target`` addressed to ``owner``.
+    No attachment/device tree walk: the caller passes the explicit ``owner``.
+    """
+
+    from bot.device.device import ObservationData
+
+    data = observation.data
+    assert isinstance(data, ObservationData)
+    from bot import events as bot_events
+
+    _ = hsm.dispatch(
+        ctx,
+        owner,
+        dataclasses.replace(
+            bot_events.InputEvent.with_data(
+                bot_events.InputEventData(
+                    priority=data.priority,
+                    source_event=data.source_event,
+                    payload=data.payload,
+                )
+            ),
+            id=observation.id or uuid.uuid4().hex,
+            source=observation.source,
+            target=hsm.id(owner),
+            metadata=dict(observation.metadata),
+        ),
+    )

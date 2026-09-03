@@ -10,6 +10,7 @@ import bot
 import pydantic
 
 from bot import abilities
+from bot import address
 from bot import lifecycle
 from bot.protocols import attachment
 
@@ -59,12 +60,68 @@ _FirmwareInitializingCleanupFailedEvent = hsm.Event[_FirmwareInitializingCleanup
 )
 
 
+class ObservationData(pydantic.BaseModel):
+    """Bot-agnostic device observation for body/environment elevation.
+
+    What the device became, stated plainly and asking for nothing. The device stamps
+    what happened (``source_event`` + JSON ``payload``) and how insistent it is
+    (``priority``); it never names what the bot should do. Body/environment owns the
+    explicit elevation of this typed event into ``bot.input`` — devices never
+    construct body events and never route on event names.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "description": (
+                "Device-domain observation: a state change felt by whoever holds the device. "
+                "Elevated to bot.input at the body/environment boundary."
+            ),
+            "examples": [{"priority": 5, "source_event": "test.device.happening", "payload": {"situation": "changed"}}],
+        },
+    )
+
+    priority: int = pydantic.Field(
+        default=5,
+        ge=0,
+        le=10,
+        description=(
+            "How insistent this observation is, where 0 is the highest priority and 10 is the lowest. "
+            "Like loudness, this belongs to the signal rather than to whatever produced it; a "
+            "source that does not distinguish leaves it at the ordinary default."
+        ),
+        examples=[0, 5, 10],
+    )
+    source_event: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Modeled device event name that caused this observation, when the runtime knows it. "
+            "Carried as data for cognition context, never branched on for routing."
+        ),
+        examples=["test.device.happening"],
+    )
+    payload: dict[str, object] | None = pydantic.Field(
+        default=None,
+        description=(
+            "JSON-serializable payload from the source event, when needed for cognition to choose a typed output. "
+            "Do not include raw audio, text transcripts, credentials, provider-specific blobs, or high-cardinality "
+            "diagnostic data."
+        ),
+        examples=[{"situation": "changed"}],
+    )
+
+
+ObservationEvent = hsm.Event[ObservationData](
+    name="device.observation",
+    schema=ObservationData,
+)
+
+
 def _require_attach_environment_scope(environment: Environment, instance: "Device") -> None:
-    instance_scope = instance.context().value(hsm.Keys.Instances)
-    environment_scope = environment.value(hsm.Keys.Instances)
-    if instance_scope is environment_scope:
+    if environment.contains(instance):
         return
-    if instance_scope is None:
+    if not lifecycle.is_started(instance):
         raise RuntimeError("Device is not started in this environment.")
     raise RuntimeError("Device is already started in another environment.")
 
@@ -223,16 +280,18 @@ class Device(hsm.Instance, attachment.Attachment):
         carries; everything else about a device is felt only by whoever is holding it.
 
         The report says *what happened* and never what to do about it. It carries the source
-        event name and its payload, and there is deliberately no hint, suggestion, or requested
-        action: the bot is the one that decides whether a change is worth acting on, and doing
-        nothing is a legitimate answer.
+        event name and its payload as typed device-domain data, and there is deliberately no
+        hint, suggestion, or requested action: the bot is the one that decides whether a change
+        is worth acting on, and doing nothing is a legitimate answer. Body/environment owns the
+        explicit elevation of this typed observation into ``bot.input`` — devices never
+        construct body events.
 
         Reserved for state changes. Never call this per media frame, per audio chunk, or per
         sample: streams already have their own path, and a per-frame report would defer without
         bound behind a body that is busy thinking.
         """
 
-        import bot
+        from bot.environment.environment import elevate_device_observation_to_input
 
         payload: dict[str, object] | None = None
         data = event.data
@@ -243,24 +302,26 @@ class Device(hsm.Instance, attachment.Attachment):
                 # A payload that will not serialize is not worth bricking the device over; the
                 # bot still gets the occasion and the source event name that produced it.
                 payload = None
-        for owner in self._attachments:
-            _ = hsm.dispatch(
-                ctx,
-                owner,
-                dataclasses.replace(
-                    bot.InputEvent.with_data(
-                        bot.InputEventData(
-                            priority=priority,
-                            source_event=event.name,
-                            payload=payload,
-                        )
-                    ),
-                    id=event.id or uuid.uuid4().hex,
-                    source=hsm.id(self),
-                    target=hsm.id(owner),
-                    metadata=dict(event.metadata),
-                ),
-            )
+        owners = tuple(self._attachments)
+        if not owners:
+            # Nowhere to feel it: an unattached device reports to nobody (same as before —
+            # the per-owner envelope stamp below never runs, so an unstarted device with no
+            # owners stays silent instead of failing on hsm.id).
+            return
+        observation = dataclasses.replace(
+            ObservationEvent.with_data(
+                ObservationData(
+                    priority=priority,
+                    source_event=event.name,
+                    payload=payload,
+                )
+            ),
+            id=event.id or uuid.uuid4().hex,
+            source=hsm.id(self),
+            metadata=dict(event.metadata),
+        )
+        for owner in owners:
+            elevate_device_observation_to_input(ctx, owner, observation)
 
     @typing.override
     async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
@@ -306,10 +367,10 @@ class Device(hsm.Instance, attachment.Attachment):
         # an error — Bot activation cleanup stops the whole configured device set regardless.
         # No test can observe this: hsm.Started re-news the machine with a fresh id and
         # dispatch_to de-dupes on snapshot ID, so a stale entry can never mis-deliver. It is
-        # ownership completeness and map hygiene — the presence analogue of the firmware-entry
-        # cleanup below, which exists because HSM never prunes Keys.Instances on stop. Do not
-        # delete it as untested.
-        Environment.from_context(self.context()).leave(self)
+        environment = Environment.from_context(self.context())
+        environment.leave(self)
+        device_path = f"{environment.scope_path}/{hsm.id(self)}" if lifecycle.is_started(self) else None
+        address.unregister_instance(self, device_path)
         await hsm.Instance.stop(self, ctx)
         if self.model is not None:
             _ = bot.register(self, self.model, clear_owner=True)
@@ -321,15 +382,11 @@ class Device(hsm.Instance, attachment.Attachment):
                 if self._firmware is firmware:
                     self._firmware = None
             else:
-                firmware_id = hsm.id(firmware)
-                firmware_instances: object | None = firmware.context().value(hsm.Keys.Instances)
+                firmware_path = f"{environment.scope_path}/{hsm.id(firmware)}"
+                address.unregister_instance(firmware, firmware_path)
                 await hsm.stop(firmware)
                 if lifecycle.is_started(firmware):
                     raise RuntimeError("Device firmware remained started after Device stop.")
-                if firmware_id and isinstance(firmware_instances, collections.abc.MutableMapping):
-                    typed_map = typing.cast(collections.abc.MutableMapping[str, object], firmware_instances)
-                    if typed_map.get(firmware_id) is firmware:
-                        _ = typed_map.pop(firmware_id, None)
                 if self._firmware is firmware:
                     self._firmware = None
             _ = bot.register(firmware, self.firmware_model, clear_owner=True)
@@ -340,12 +397,16 @@ class Device(hsm.Instance, attachment.Attachment):
         # cleanup boundary relies on. This is the only teardown path peripherals have.
         for peripheral in Device._powered_peripherals(self):
             model = type(peripheral).model
+            peripheral_path = (
+                f"{environment.scope_path}/{hsm.id(peripheral)}" if lifecycle.is_started(peripheral) else None
+            )
+            address.unregister_instance(peripheral, peripheral_path)
             await peripheral.stop(ctx)
             if model is not None:
                 _ = bot.register(peripheral, model, clear_owner=True)
 
     @typing.override
-    async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self | None:
+    async def restart(self, ctx: hsm.Context, data: object = None) -> typing.Self:
         """Stop and start again under ``ctx``, the scope the device comes back up in.
 
         ``ctx`` MUST outlive this device's own context, which ``stop`` cancels — pass the environment,
@@ -364,7 +425,7 @@ class Device(hsm.Instance, attachment.Attachment):
                 "Device.restart needs a scope that outlives the device; self.context() is canceled by stop."
             )
         if ctx.is_done():
-            return None
+            raise ValueError("Device.restart needs a live scope; the given context is already canceled.")
         await self.stop(ctx)
         # Device.start, not hsm.Instance.start: restart must re-join the presence stop left.
         _ = await self.start(ctx, data)

@@ -14,6 +14,7 @@ import hsm
 import bot
 
 from bot.abilities import processing
+from bot.abilities.ability import FailureData
 from bot.protocols import attachment
 
 from . import compiler
@@ -31,35 +32,70 @@ def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Di
 
 
 class _TerminalOwner(hsm.Instance):
-    """Minimal owner that completes when the behavior ability forwards a terminal."""
+    """Minimal owner that completes when the behavior ability forwards a terminal.
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
-        "BehaviorVerifyOwner",
-        hsm.initial(hsm.target("/BehaviorVerifyOwner/waiting")),
-        hsm.state("waiting"),
-    )
-    output_event_name: str
-    failed_event_name: str
+    Topology selects the terminal via explicit ``hsm.on(output_event)`` /
+    ``hsm.on(failed_event)`` transitions with typed-payload guards (no ``event.name``
+    routing). Single-shot: the first correlated terminal settles ``result``.
+    """
+
     result: asyncio.Future[object]
 
-    def __init__(self, *, output_event_name: str, failed_event_name: str) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.output_event_name = output_event_name
-        self.failed_event_name = failed_event_name
         self.result = asyncio.get_running_loop().create_future()
 
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
-        if not self.result.done():
-            if event.name == self.output_event_name:
-                self.result.set_result(event.data)
-            elif event.name == self.failed_event_name:
-                failure = event.data
-                message = getattr(failure, "message", None)
-                if not isinstance(message, str) or not message:
-                    message = str(failure)
-                self.result.set_exception(RuntimeError(message))
-        return super().dispatch(ctx, event)
+    @staticmethod
+    def _is_output_data(ctx: hsm.Context, instance: "_TerminalOwner", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        # Topology already selected the behavior's output event; any payload the
+        # behavior produced (selections object or list) is the terminal data.
+        return event.data is not None
+
+    @staticmethod
+    def _is_failure_data(ctx: hsm.Context, instance: "_TerminalOwner", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, FailureData)
+
+    @staticmethod
+    def _settle_output(ctx: hsm.Context, instance: "_TerminalOwner", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        if not instance.result.done():
+            instance.result.set_result(event.data)
+
+    @staticmethod
+    def _settle_failed(ctx: hsm.Context, instance: "_TerminalOwner", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        if not instance.result.done():
+            failure = event.data
+            assert isinstance(failure, FailureData)
+            message = failure.message if failure.message else str(failure)
+            instance.result.set_exception(RuntimeError(message))
+
+    @classmethod
+    def model_for(cls, output_event: hsm.Event[typing.Any], failed_event: hsm.Event[typing.Any]) -> hsm.Model:
+        """Define the one-shot waiting model for this behavior's terminal events."""
+
+        return bot.define(
+            "BehaviorVerifyOwner",
+            hsm.initial(hsm.target("/BehaviorVerifyOwner/waiting")),
+            hsm.state(
+                "waiting",
+                hsm.transition(
+                    hsm.on(output_event),
+                    hsm.guard(cls._is_output_data),
+                    hsm.effect(cls._settle_output),
+                    hsm.target("/BehaviorVerifyOwner/done"),
+                ),
+                hsm.transition(
+                    hsm.on(failed_event),
+                    hsm.guard(cls._is_failure_data),
+                    hsm.effect(cls._settle_failed),
+                    hsm.target("/BehaviorVerifyOwner/done"),
+                ),
+            ),
+            hsm.final("done"),
+        )
 
 
 async def _apply_once(
@@ -82,12 +118,9 @@ async def _apply_once(
     """
 
     behavior = compiler.build(program)
-    owner = _TerminalOwner(
-        output_event_name=behavior.output_event.name,
-        failed_event_name=behavior.failed_event.name,
-    )
+    owner = _TerminalOwner()
     ctx = hsm.Context()
-    _ = await bot.started(ctx, owner, typing.cast(hsm.Model, owner.model))
+    _ = await bot.started(ctx, owner, _TerminalOwner.model_for(behavior.output_event, behavior.failed_event))
     owner_id = hsm.id(owner)
     _ = await behavior.attach(
         ctx,

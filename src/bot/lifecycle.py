@@ -64,3 +64,39 @@ def is_started(instance: hsm.Instance) -> bool:
     """True when ``instance`` has a running HSM and can therefore be addressed by ``hsm.id``."""
 
     return snapshot_if_started(instance) is not None
+
+
+# Lifecycle idempotency for attach/detach/activate (not peer-state gating; HSM-CONTEXT-001).
+# Prefer typed HSM errors when present. Stock stateforward-hsm still often surfaces these
+# conditions as fixed exception prose (ErrorAlreadyStarted / ErrorMissingHSM are exported
+# but not always raised). All residual message detection is confined to these two predicates
+# — call sites must not open-code hsm exception text. Centralized here (single source of
+# truth) so body, devices, and abilities share one prose allowlist that may only shrink.
+
+
+def is_already_running_error(error: BaseException) -> bool:
+    """True when ``error`` means the machine already has a running HSM (idempotent start)."""
+
+    if isinstance(error, hsm.ErrorAlreadyStarted):
+        return True
+    if isinstance(error, hsm.ErrorValidatingModel | RuntimeError):
+        message = str(error)
+        return "already has a running HSM" in message or "already started HSM" in message
+    return False
+
+
+def is_not_started_error(error: BaseException) -> bool:
+    """True when ``error`` means the machine has no running HSM (idempotent stop/dispatch)."""
+
+    if isinstance(error, hsm.ErrorMissingHSM):
+        return True
+    if isinstance(error, RuntimeError):
+        message = str(error)
+        return (
+            "dispatch requires a started HSM" in message
+            or "take snapshot requires a started HSM" in message
+            or "operation requires a started HSM" in message
+            or "restart requires a started HSM" in message
+            or "set requires a started HSM" in message
+        )
+    return False
