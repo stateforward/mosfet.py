@@ -1382,7 +1382,7 @@ class Reflection(processing.Processing):
             memory=memory,
         )
         self._memory = memory
-        self._attachment_group: attachment.Group = attachment.Group(
+        self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,
             self._memory,

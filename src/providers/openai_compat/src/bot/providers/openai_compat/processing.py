@@ -317,7 +317,7 @@ def _events_from_dispatch_tool_calls(
             raise _StructuredOutputValidationError(str(error)) from error
         for selection in selections:
             event = by_name[selection.event]
-            payload = dict(selection.data or {})
+            payload = dict(typing.cast(collections.abc.Mapping[str, object], selection.data or {}))
             if selection.meta:
                 payload.update(selection.meta)
             elif selection.confidence is not None and "confidence" not in payload:

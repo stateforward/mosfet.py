@@ -238,7 +238,6 @@ class Communication(ability.Ability[TurnData, object]):
     _active_conversation: Conversation
     _conversations: list[Conversation]
     _speaking: speaking.Speaking
-    _attachment_group: attachment.Group
     failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = FailedEvent
 
     @staticmethod

@@ -1234,7 +1234,7 @@ class Revision(processing.Processing):
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)
         self._memory = memory
         self._active_attempt = None
-        self._attachment_group: attachment.Group = attachment.Group(self._change_processing)
+        self._attachment_group = attachment.Group(self._change_processing)
 
 
 InputEvent = Revision.input_event

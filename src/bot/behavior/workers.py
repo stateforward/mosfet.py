@@ -147,14 +147,6 @@ class WorkerEvaluationResult:
     declared_events: tuple[source.EventContract, ...]
 
 
-@dataclasses.dataclass(frozen=True)
-class _RoundTripOutcome:
-    kind: str
-    value: bool | None
-    dispatches: tuple[RawDispatch, ...]
-    declared_events: tuple[source.EventContract, ...]
-
-
 class _WorkerLoopError(RuntimeError):
     """Internal error raised inside the worker loop and reported over the pipe."""
 

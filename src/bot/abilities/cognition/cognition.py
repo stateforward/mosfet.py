@@ -196,7 +196,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _intuition: intuition.Intuition
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
-    _attachment_group: attachment.Group
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
     _child_operation_timeout: datetime.timedelta | None

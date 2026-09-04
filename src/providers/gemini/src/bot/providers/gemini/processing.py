@@ -321,7 +321,7 @@ def _events_from_dispatch_tool_calls(
             event = by_name[selection.event]
             raw = selection.data if selection.data is not None else {}
             # Validate pre-unpatch shape: re-merge meta into data for schema check when present.
-            payload = dict(raw)
+            payload = dict(typing.cast(collections.abc.Mapping[str, object], raw))
             if selection.meta:
                 payload.update(selection.meta)
             elif selection.confidence is not None and "confidence" not in payload:

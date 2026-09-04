@@ -88,7 +88,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _sensitivity: sensitivity.Sensitivity
     _interpretation: interpretation.Interpretation
-    _attachment_group: attachment.Group
 
     def __init__(
         self,

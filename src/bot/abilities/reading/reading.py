@@ -824,7 +824,7 @@ class Reading(ability.Ability[InputData, OutputData]):
         self._text_decoder = decoding.Decoding(decoder=text_decoder)
         self._image_decoder = decoding.Decoding(decoder=image_decoder)
         self._output_encoder = encoding.Encoding(encoder=output_encoder)
-        self._attachment_group: attachment.Group = attachment.Group(
+        self._attachment_group = attachment.Group(
             self._visual_classifier,
             self._text_decoder,
             self._image_decoder,

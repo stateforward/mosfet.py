@@ -38,4 +38,5 @@ def test_agent_decision_input_maps_contribution_onto_bot_input() -> None:
 def test_agent_decision_input_uses_neutral_host_priority() -> None:
     decision = conversation.agent_conversation_decision_input(_participated(), target_device="phone")
 
+    assert isinstance(decision.input, bot.InputEventData)
     assert decision.input.priority == 0

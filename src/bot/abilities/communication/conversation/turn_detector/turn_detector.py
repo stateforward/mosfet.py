@@ -342,7 +342,6 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
     _content: object | None
     _content_type: str | None
     _decoding: decoding.Decoding[ParticipationStimulus, str] | None
-    _attachment_group: attachment.Group
 
     def __init__(
         self,

@@ -884,7 +884,6 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _speech_decoding: speech.SpeechDecoding | None
     _voice_diarization: voice.diarization.VoiceDiarization | None
     _voice_identification: voice.identification.VoiceIdentification | None
-    _attachment_group: attachment.Group
     # Open utterance PCM while HearingSpeech (machine-owned sticky stream, not peer coordination).
     _open_speech_audio: bytearray
     _open_speech_sample_rate_hz: int | None
