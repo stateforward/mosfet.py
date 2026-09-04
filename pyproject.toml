@@ -61,5 +61,5 @@ reportPrivateUsage = "error"
 executionEnvironments = [
   { root = "src" },
   { root = "benchmarks" },
-  { root = "tests" },
+  { root = "." },
 ]
