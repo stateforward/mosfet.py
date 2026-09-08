@@ -44,6 +44,26 @@ CallerIdEvent = hsm.Event[CallerIdData](
 )
 
 
+class DisplaySmsTextData(events.SmsTextData):
+    """Display-domain copy of one phone-domain SMS text.
+
+    We model this separately so the display can carry the text without
+    importing phone transport semantics outside the display module.
+    """
+
+    @classmethod
+    def from_sms_text(cls, sms_text: events.SmsTextData) -> "DisplaySmsTextData":
+        """Project phone-domain message into display-domain view."""
+
+        return cls.model_validate(sms_text.model_dump())
+
+
+DisplaySmsTextEvent = hsm.Event[DisplaySmsTextData](
+    name="phone.display.sms_text",
+    schema=DisplaySmsTextData,
+)
+
+
 class Display(Device):
     """Passive output peripheral that shows caller ID on a phone handset's screen.
 
@@ -77,8 +97,19 @@ class Display(Device):
         assert isinstance(data, CallerIdData)
         _ = instance.set("caller_id", data.caller_id)
 
+    @staticmethod
+    def _show_sms_text(ctx: hsm.Context, instance: "Display", event: hsm.Event[typing.Any]) -> None:
+        """Store the phone-domain SMS text on the display."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, DisplaySmsTextData)
+        _ = instance.set("sms_text", data)
+
     model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
         typing.cast(hsm.Model, Device.model),
         hsm.attribute("caller_id"),
         hsm.transition(hsm.on(CallerIdEvent), hsm.effect(_show)),
+        hsm.attribute("sms_text"),
+        hsm.transition(hsm.on(DisplaySmsTextEvent), hsm.effect(_show_sms_text)),
     )

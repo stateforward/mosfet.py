@@ -20,6 +20,7 @@ from bot.environment import SoundEvent, Environment, require_environment_scope, 
 # Flat symbol imports (not `from . import display`): both Phone and Firmware accept a
 # `display` constructor parameter, which would shadow a `display` module import.
 from .display import CallerIdData, CallerIdEvent, Display
+from .display import DisplaySmsTextData, DisplaySmsTextEvent
 from .events import (
     AnswerCallData,
     AnswerCallEvent,
@@ -78,6 +79,7 @@ from .events import (
     TransferRequestData,
     TransferStartedEvent,
     TransferTarget,
+    SmsTextData,
 )
 
 RINGER_DB = 80.0
@@ -1427,6 +1429,12 @@ class Phone(bot.device.Device):
         """
 
         async def _deliver() -> None:
+            if isinstance(event.data, SmsTextData):
+                await self._display.dispatch(
+                    ctx,
+                    DisplaySmsTextEvent.with_data(DisplaySmsTextData.from_sms_text(event.data)),
+                )
+                return
             firmware = self._firmware
             command = Phone._coerce_owner_command(event)
             if command is not None:
@@ -1435,6 +1443,7 @@ class Phone(bot.device.Device):
                 return
             # Device shell lifecycle / other events.
             await hsm.Instance.dispatch(self, ctx, event)
+            return
 
         return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
 

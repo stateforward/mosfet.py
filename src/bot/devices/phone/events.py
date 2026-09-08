@@ -105,6 +105,66 @@ FailureKind = typing.Literal[
 HangUpOutcome = typing.Literal["local_hang_up", "declined", "remote_hang_up", "failed", "transferred"]
 NoCallReason = typing.Literal["nothing_to_answer", "dial_not_answered", "dial_abandoned", "dial_failed"]
 
+SmsText = typing.Annotated[
+    str,
+    pydantic.Field(
+        min_length=1,
+        description=(
+            "Text body of one phone-domain message. This is the local handset property, not a model payload: "
+            "the phone stores the last incoming text under its display."
+        ),
+        examples=["Book me the 10:15."],
+    ),
+]
+
+
+class SmsTextData(pydantic.BaseModel):
+    """Phone-domain text message.
+
+    SMS event payload carries no call identity because it is independent
+    transport on the same phone. The phone is the wired object; a service
+    provider may need its own source identity, but the phone does not.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "message-id",
+                    "sender": "+15555550101",
+                    "text": "Book me the 10:15.",
+                }
+            ],
+        },
+    )
+
+    id: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional provider-neutral message identifier. This has no handset-global meaning and is never "
+            "written onto the phone as a default."
+        ),
+        examples=["message-id"],
+    )
+    sender: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Who sent this message. Null when the service did not report a sender. A routed reply needs "
+            "the phone's own sender policy outside this payload."
+        ),
+        examples=["+15555550101"],
+    )
+    text: SmsText
+
+
+SmsTextEvent = hsm.Event[SmsTextData](
+    name="phone.sms.text",
+    schema=SmsTextData,
+)
+
 
 class CallIdData(pydantic.BaseModel):
     """Payload scoped to one provider-neutral call identifier."""

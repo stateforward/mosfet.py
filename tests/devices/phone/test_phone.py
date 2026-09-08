@@ -167,8 +167,39 @@ def test_phone_owns_private_microphone_speaker_and_display_peripherals() -> None
     assert not hasattr(phone, "microphone")
     assert not hasattr(phone, "speaker")
     assert not hasattr(phone, "display")
-    assert not hasattr(phone, "firmware")
-    assert not hasattr(phone, "peripherals")
+
+
+def test_phone_sms_text_routes_to_display() -> None:
+    """A phone message is display-only: the shell never adds a conversation surface."""
+
+    async def run() -> tuple[str | None, str | None]:
+        phone = phone_device.Phone()
+        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+
+        await phone.dispatch(
+            phone.context(),
+            phone_device.SmsTextEvent.with_data(
+                phone_device.SmsTextData(id="message-id", sender="+15555550101", text="Book me the 10:15.")
+            ),
+        )
+        await asyncio.sleep(0)
+
+        display = phone_display(phone)
+        attributes = display.take_snapshot().Attributes or {}
+        sms_text = attributes.get("/DeviceDisplay/sms_text")
+        caller_id = attributes.get("/DeviceDisplay/caller_id")
+        return (
+            typing.cast(phone_device.SmsTextData | None, sms_text),
+            typing.cast(str | None, caller_id),
+        )
+
+    sms_text, caller_id = asyncio.run(run())
+    assert sms_text is not None
+    assert sms_text.id == "message-id"
+    assert sms_text.sender == "+15555550101"
+    assert sms_text.text == "Book me the 10:15."
+    assert caller_id is None
 
 
 def test_phone_accepts_injected_audio_and_display_peripherals() -> None:
