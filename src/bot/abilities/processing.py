@@ -17,17 +17,19 @@ from . import ability
 import abc
 import asyncio
 import collections.abc
+import copy
 import dataclasses
 import enum
 import json
+import logging
 import re
 import typing
 import uuid
 import weakref
 
+import bot
 from bot import lifecycle
 from bot.define import define
-from bot.events import RebootEvent, RebootEventData, RebootReason
 from bot.start import started
 import hsm
 import pydantic
@@ -43,6 +45,8 @@ from bot.event import (
 )
 from .cognition.event import model_facing_xml
 from bot.telemetry import observer
+
+_LOG = logging.getLogger(__name__)
 
 # Processing inputs offer live HSM events (not a parallel offer DTO).
 Event = hsm.Event
@@ -218,33 +222,13 @@ def patch_field_names(patch: SchemaPatch | None) -> frozenset[str]:
     return frozenset(patch.model_fields)
 
 
-def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, typing.Any]:
-    """Build create_model field kwargs from a patch model (fresh Field, not borrowed FieldInfo)."""
+def _patch_create_model_fields(patch: SchemaPatch) -> dict[str, tuple[object, pydantic.fields.FieldInfo]]:
+    """Deep-copy patch field definitions for a freshly built projection model."""
 
-    fields: dict[str, typing.Any] = {}
+    fields: dict[str, tuple[object, pydantic.fields.FieldInfo]] = {}
     for name, field_info in patch.model_fields.items():
-        annotation: object = field_info.annotation if field_info.annotation is not None else object
-        kwargs: dict[str, typing.Any] = {}
-        if field_info.description is not None:
-            kwargs["description"] = field_info.description
-        if field_info.examples is not None:
-            kwargs["examples"] = field_info.examples
-        if field_info.is_required():
-            # Required patch fields stay required on the projected model.
-            pass
-        elif field_info.default is not pydantic.fields.PydanticUndefined:
-            kwargs["default"] = field_info.default
-        elif field_info.default_factory is not None:
-            kwargs["default_factory"] = field_info.default_factory
-        metadata = list(field_info.metadata)
-        for item in metadata:
-            ge = getattr(item, "ge", None)
-            le = getattr(item, "le", None)
-            if ge is not None:
-                kwargs["ge"] = ge
-            if le is not None:
-                kwargs["le"] = le
-        fields[name] = (annotation, pydantic.Field(**kwargs))
+        annotation = field_info.annotation if field_info.annotation is not None else object
+        fields[name] = (annotation, copy.deepcopy(field_info))
     return fields
 
 
@@ -264,30 +248,24 @@ def patched_event_data_model(
     if patch is None or not _is_schema_patch(patch) or not patch.model_fields:
         if base is not None:
             return base
-        return typing.cast(
-            type[pydantic.BaseModel],
-            pydantic.create_model(name, __config__=pydantic.ConfigDict(extra="allow")),
-        )
+        return pydantic.create_model(name, __config__=pydantic.ConfigDict(extra="allow"))
 
     patch_fields = _patch_create_model_fields(patch)
     if base is not None:
-        for key in tuple(patch_fields):
-            if key in base.model_fields:
-                del patch_fields[key]
+        available_keys = tuple(base.model_fields)
+        patch_fields = {key: definition for key, definition in patch_fields.items() if key not in available_keys}
         if not patch_fields:
             return base
-        return typing.cast(
-            type[pydantic.BaseModel],
-            pydantic.create_model(name, __base__=base, **patch_fields),
-        )
-    return typing.cast(
-        type[pydantic.BaseModel],
-        pydantic.create_model(
-            name,
-            __config__=pydantic.ConfigDict(extra="allow"),
-            **patch_fields,
-        ),
-    )
+        base_class = base
+    else:
+        base_class = pydantic.BaseModel
+    annotations: dict[str, object] = {}
+    attributes: dict[str, object] = {"model_config": pydantic.ConfigDict(extra="allow")}
+    for field_name, (annotation, field_info) in patch_fields.items():
+        annotations[field_name] = annotation
+        attributes[field_name] = field_info
+    attributes["__annotations__"] = annotations
+    return typing.cast(type[pydantic.BaseModel], type(name, (base_class,), attributes))
 
 
 def model_facing_event_json_schema(
@@ -322,7 +300,8 @@ def model_facing_event_json_schema(
     else:
         properties = {}
         schema["properties"] = properties
-        schema.setdefault("type", "object")
+        if "type" not in schema:
+            schema["type"] = "object"
     patch_schema = event_schema_json_schema(patch)
     patch_properties = patch_schema.get("properties")
     names = patch_field_names(patch)
@@ -387,9 +366,9 @@ def selection_confidence(selections: Events) -> int | None:
 
 
 def _object_schema_required_names(schema: collections.abc.Mapping[str, object]) -> list[str]:
-    required = schema.get("required")
+    required = typing.cast(object, schema.get("required"))
     if isinstance(required, list):
-        return [item for item in required if isinstance(item, str)]
+        return [item for item in typing.cast(list[object], required) if isinstance(item, str)]
     return []
 
 
@@ -399,21 +378,43 @@ def collect_offered_events(
     """Collect enabled call events and the actor keys that enable each event name.
 
     Walks ``actors.items()`` so provenance is live topology keys, never hard-coded product
-    names. One canonical ``Event`` object is kept per name (first enabler). Actor keys per
-    name are sorted for stable tool enums.
+    names. One canonical ``Event`` object is kept per name. When actors declare the same
+    name with conflicting payload contracts, the mismatch is recorded and the contract
+    shared by the most enablers is selected (``actor_key`` ties broken deterministically);
+    iteration order never decides the offered contract.
     """
 
-    events_by_name: dict[str, Event[typing.Any]] = {}
-    targets_by_name: dict[str, list[str]] = {}
-    for actor_key, instance in actors.items():
+    candidates_by_name: dict[str, list[tuple[str, Event[typing.Any]]]] = {}
+    for actor_key in sorted(actors):
+        instance = actors[actor_key]
         for event in enabled_call_events(instance):
             if not event.name:
                 continue
-            if event.name not in events_by_name:
-                events_by_name[event.name] = event
-            targets_by_name.setdefault(event.name, []).append(actor_key)
-    actor_events = {name: tuple(sorted(set(keys))) for name, keys in targets_by_name.items()}
+            candidates_by_name.setdefault(event.name, []).append((actor_key, event))
+
+    events_by_name: dict[str, Event[typing.Any]] = {}
+    actor_events: dict[str, tuple[str, ...]] = {}
+    for name, candidates in candidates_by_name.items():
+        by_contract: dict[str, list[tuple[str, Event[typing.Any]]]] = {}
+        for actor_key, event in candidates:
+            by_contract.setdefault(_event_contract_key(event), []).append((actor_key, event))
+        if len(by_contract) > 1:
+            _LOG.warning("Offered event contract mismatch for %r; selecting the shared authoritative contract.", name)
+        ordered = sorted(by_contract.values(), key=lambda group: (-len(group), group[0][0]))
+        selected = ordered[0]
+        events_by_name[name] = selected[0][1]
+        targets = tuple(actor_key for actor_key, _event in selected)
+        if targets:
+            actor_events[name] = targets
+
     return tuple(events_by_name.values()), actor_events
+
+
+def _event_contract_key(event: Event[typing.Any]) -> str:
+    """Deterministic equality key for an offered event's payload contract."""
+
+    schema = event_json_schema(event)
+    return json.dumps(schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _normalized_targets(targets: collections.abc.Sequence[str]) -> tuple[str, ...]:
@@ -438,7 +439,7 @@ def _selection_item_branch(
     routing target.
     """
 
-    data_schema = model_facing_event_json_schema(event, patch=patch)
+    data_schema: dict[str, object] = model_facing_event_json_schema(event, patch=patch)
     if not data_schema:
         data_schema = {
             "type": "object",
@@ -454,11 +455,13 @@ def _selection_item_branch(
         }
     else:
         data_schema = embeddable_json_schema(data_schema)
-        data_schema.setdefault("type", "object")
-        data_schema.setdefault("additionalProperties", False)
+        if "type" not in data_schema:
+            data_schema["type"] = "object"
+        if "additionalProperties" not in data_schema:
+            data_schema["additionalProperties"] = False
 
     # Branch description is the event schema's own description when present.
-    event_description = data_schema.get("description")
+    event_description = typing.cast(object, data_schema.get("description"))
     if not isinstance(event_description, str) or not event_description.strip():
         event_description = event.name
 
@@ -505,9 +508,9 @@ def _selection_item_branch(
         "required": item_required,
         "additionalProperties": False,
     }
-    data_examples = data_schema.get("examples")
+    data_examples = typing.cast(object, data_schema.get("examples"))
     if isinstance(data_examples, list) and data_examples:
-        first = data_examples[0]
+        first = typing.cast(object, data_examples[0])
         if isinstance(first, dict):
             example: dict[str, object] = {"event": event.name, "data": first}
             if len(legal_targets) == 1:
@@ -578,9 +581,9 @@ def dispatch_tool(
     array_examples: list[object] = [[]]
     if unique:
         first_branch = branch_for(unique[0])
-        branch_examples = first_branch.get("examples")
+        branch_examples = typing.cast(object, first_branch.get("examples"))
         if isinstance(branch_examples, list) and branch_examples:
-            array_examples.append(branch_examples)
+            array_examples.append(typing.cast(object, branch_examples[0]))
 
     parameters: dict[str, object] = {
         "type": "object",
@@ -818,7 +821,7 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
         _ = instance
 
     operation = Operation()
-    await started(
+    started_operation: Operation = await started(
         owner.context(),
         operation,
         define(
@@ -835,10 +838,13 @@ async def start_operation(owner: hsm.Instance, operation_id: str) -> Operation:
             hsm.final("done"),
         ),
     )
+    if started_operation is not operation:
+        raise RuntimeError("started operation capability was not the requested instance.")
     instances = owner.context().value(hsm.Keys.Instances)
     if isinstance(instances, collections.abc.MutableMapping):
         # Keep private operation actors out of the scope addressing map.
-        _ = instances.pop(hsm.id(operation), None)
+        if hsm.id(operation) in instances:
+            del instances[hsm.id(operation)]
     _operations[(hsm.id(owner), operation_id)] = operation
     return operation
 
@@ -991,7 +997,7 @@ def request_reboot(
     instance: ability.Ability[typing.Any, typing.Any],
     event: Event[typing.Any],
     *,
-    reason: RebootReason,
+    reason: bot.RebootReason,
 ) -> None:
     """Ask this ability for a clean robot lifecycle restart.
 
@@ -1006,7 +1012,7 @@ def request_reboot(
         dataclasses.replace(
             ability.RebootRequestEvent.with_data(
                 dataclasses.replace(
-                    RebootEvent.with_data(RebootEventData(reason=reason)),
+                    bot.RebootEvent.with_data(bot.RebootEventData(reason=reason)),
                     id=request_id,
                 )
             ),
@@ -1205,9 +1211,10 @@ def coerce_event_selections(
     if isinstance(output, OutputData):
         return output.events if output.handled else None
     if isinstance(output, Result):
-        if not output.is_handled or output.output is None:
+        payload = typing.cast(object, output.output)
+        if not output.is_handled or payload is None:
             return None
-        return coerce_event_selections(output.output, patch=patch)
+        return coerce_event_selections(payload, patch=patch)
     # Ability envelopes (intuition/reasoning OutputData) carry events on ``result``.
     result = getattr(output, "result", _MISSING)
     if result is not _MISSING and result is not output:
@@ -1233,8 +1240,15 @@ def _as_event_data_dict(data: object) -> dict[str, object] | None:
     if data is None:
         return None
     if isinstance(data, collections.abc.Mapping):
-        return dict(typing.cast(collections.abc.Mapping[str, object], data))
+        mapping = typing.cast(collections.abc.Mapping[object, object], data)
+        return {key: item for key, item in mapping.items() if isinstance(key, str)}
     return None
+
+
+def _is_event(value: object) -> typing.TypeGuard[Event[typing.Any]]:
+    """Runtime check for live HSM event objects crossing a typed model boundary."""
+
+    return isinstance(value, hsm.Event)
 
 
 def _one_selection(
@@ -1244,15 +1258,16 @@ def _one_selection(
 ) -> SelectedEvent | None:
     if isinstance(value, SelectedEvent):
         domain, meta = unpatch_event_data(value.data, patch=patch)
-        if isinstance(domain, collections.abc.Mapping):
-            domain_data = _as_event_data_dict(domain)
-        elif domain is None and value.data is not None and not isinstance(value.data, collections.abc.Mapping):
-            domain_data = value.data
+        value_data: object = value.data
+        if domain is None:
+            domain_data = None if isinstance(value_data, collections.abc.Mapping) else value_data
+        elif isinstance(domain, collections.abc.Mapping):
+            domain_data = _as_event_data_dict(typing.cast(object, domain))
         else:
-            domain_data = None if domain is None else value.data
+            domain_data = value_data
         resolved_meta = value.meta if value.meta is not None else meta
         resolved_confidence = value.confidence if value.confidence is not None else _confidence_from_meta(resolved_meta)
-        if domain_data == value.data and resolved_confidence == value.confidence and resolved_meta == value.meta:
+        if domain_data == value_data and resolved_confidence == value.confidence and resolved_meta == value.meta:
             return value
         return dataclasses.replace(
             value,
@@ -1261,24 +1276,25 @@ def _one_selection(
             meta=resolved_meta,
         )
     if isinstance(value, collections.abc.Mapping):
-        event = value.get("event")
+        selection = typing.cast(collections.abc.Mapping[str, object], value)
+        event = selection.get("event")
         if not isinstance(event, str) or not event:
             return None
-        target = value.get("target")
-        data = value.get("data")
-        reason = value.get("reason")
+        target = selection.get("target")
+        data = selection.get("data")
+        reason = selection.get("reason")
         data_map = _as_event_data_dict(data)
         domain, meta = unpatch_event_data(data_map, patch=patch)
         domain_data = _as_event_data_dict(domain)
         if meta is None and patch is None:
             # Top-level confidence without an active patch still lifts for convenience.
-            top_conf = normalize_confidence(value.get("confidence"))
+            top_conf = normalize_confidence(selection.get("confidence"))
             if top_conf is not None:
                 lifted: dict[str, object] = {"confidence": top_conf}
                 meta = lifted
         confidence = _confidence_from_meta(meta)
         if confidence is None:
-            confidence = normalize_confidence(value.get("confidence"))
+            confidence = normalize_confidence(selection.get("confidence"))
         return SelectedEvent(
             event=event,
             target=target if isinstance(target, str) else None,
@@ -1287,7 +1303,7 @@ def _one_selection(
             confidence=confidence,
             meta=meta,
         )
-    event = getattr(value, "event", None)
+    event = typing.cast(object, getattr(value, "event", None))
     if not isinstance(event, str) or not event:
         return None
     target = getattr(value, "target", None)
@@ -1298,10 +1314,11 @@ def _one_selection(
     if data is None:
         data_map = None
     elif isinstance(data, collections.abc.Mapping):
-        data_map = _as_event_data_dict(data)
-    elif hasattr(data, "model_dump"):
-        dumped = data.model_dump(mode="json")
-        data_map = dict(dumped) if isinstance(dumped, dict) else None
+        data_mapping = typing.cast(collections.abc.Mapping[str, object], data)
+        data_map = _as_event_data_dict(data_mapping)
+    elif isinstance(data, pydantic.BaseModel):
+        dumped = typing.cast(dict[str, object], data.model_dump(mode="json"))
+        data_map = dict(dumped)
     else:
         data_map = None
     domain, meta = unpatch_event_data(data_map, patch=patch)
@@ -1324,11 +1341,12 @@ def _one_selection(
 def _instance_event_map(instance: hsm.Instance) -> dict[str, Event[typing.Any]]:
     mapped: dict[str, Event[typing.Any]] = {}
     for model in (getattr(instance, "model", None), getattr(instance, "firmware_model", None)):
-        raw = getattr(model, "events", None)
+        raw = typing.cast(object, getattr(model, "events", None))
         if not isinstance(raw, collections.abc.Mapping):
             continue
-        for name, event in raw.items():
-            if isinstance(event, hsm.Event):
+        events = typing.cast(collections.abc.Mapping[str, object], raw)
+        for name, event in events.items():
+            if _is_event(event):
                 mapped[str(name)] = event
     return mapped
 
@@ -1368,7 +1386,7 @@ def _declared_call_event_names(
     return {
         name
         for name, event in _instance_event_map(instance).items()
-        if isinstance(event, hsm.Event) and _is_dispatchable_event(event, dispatch_trust=dispatch_trust)
+        if _is_event(event) and _is_dispatchable_event(event, dispatch_trust=dispatch_trust)
     }
 
 
@@ -1451,8 +1469,8 @@ async def dispatch_selected_events(
     if dispatch_trust is DispatchTrust.TRUSTED_BEHAVIOR:
         for instance in input.actors.values():
             for event in _instance_event_map(instance).values():
-                if _is_dispatchable_event(event, dispatch_trust=dispatch_trust):
-                    by_name.setdefault(event.name, event)
+                if _is_dispatchable_event(event, dispatch_trust=dispatch_trust) and event.name not in by_name:
+                    by_name[event.name] = event
     event_metadata = dict(metadata or {})
     prepared: list[tuple[hsm.Instance, hsm.Event[typing.Any]]] = []
 
@@ -1531,10 +1549,7 @@ async def dispatch_selected_events(
             for target, events in by_target.values():
                 _ = tasks.create_task(dispatch_target(target, events))
     except ExceptionGroup as errors:
-        first = errors.exceptions[0]
-        if isinstance(first, Exception):
-            raise first
-        raise
+        raise errors.exceptions[0]
 
 
 # --- private completion payloads / events ---
@@ -1768,13 +1783,13 @@ class Processing(ability.Ability[InputData, CompletionData]):
 
         input = Processing._input_for_processor(instance, typing.cast(InputData, event.data))
         if active_operation(instance, event.id) is None:
-            await start_operation(instance, event.id)
+            _ = await start_operation(instance, event.id)
         try:
             raw = await instance.processor.process(input)
             if isinstance(raw, Result) and not raw.is_handled:
                 output = OutputData(handled=False)
             else:
-                payload = raw.output if isinstance(raw, Result) else raw
+                payload = typing.cast(object, raw.output) if isinstance(raw, Result) else raw
                 coerced = coerce_event_selections(payload, patch=input.patch)
                 if coerced is None:
                     raise TypeError("Processor must return an array of events.")

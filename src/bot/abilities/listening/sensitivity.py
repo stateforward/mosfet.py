@@ -35,7 +35,6 @@ import bot
 import pydantic
 
 from bot.environment import SoundData, SoundEvent
-from bot import events
 from bot.telemetry import observer
 from ..speaking import EfferenceData, EfferenceEvent
 
@@ -60,7 +59,7 @@ class OutputData(pydantic.BaseModel):
     )
 
     sound: SoundData = pydantic.Field(description="The sound exactly as it was received. Never altered here.")
-    parent: events.StimulusData[SoundData] | None = pydantic.Field(
+    parent: bot.StimulusData[SoundData] | None = pydantic.Field(
         default=None,
         description=(
             "The exact environment.sound event and payload that produced this scored sound. "
@@ -86,7 +85,7 @@ class ScoreData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    stimulus: events.StimulusData[SoundData] = pydantic.Field(
+    stimulus: bot.StimulusData[SoundData] = pydantic.Field(
         description=(
             "Exact environment sound request being scored, including the acoustic source needed "
             "to compare an arrival with the currently producing mouth."
@@ -200,7 +199,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
             if isinstance(data, ScoreData):
                 product = product.model_copy(update={"parent": data.stimulus})
             elif isinstance(data, SoundData):
-                product = product.model_copy(update={"parent": events.StimulusData.from_event(event)})
+                product = product.model_copy(update={"parent": bot.StimulusData.from_event(event)})
         # Return-to-source routing applies to a directed-operation request: ScoreEvent (ScoreData)
         # is the typed PRIVATE DIRECTED interface, dispatched as a terminal operation targeted at
         # this machine by an external operation actor. When such a request was targeted here

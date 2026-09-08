@@ -533,7 +533,8 @@ def _detach_associative_memory_children_on_detach(
     instance: "AssociativeMemory",
     event: hsm.Event[typing.Any],
 ) -> None:
-    AssociativeMemory.detach_subordinate_abilities_on_detach(ctx, instance, event)
+    del ctx
+    AssociativeMemory.detach_subordinate_abilities_on_detach(instance, event)
 
 
 async def _decode_associative_memory_sources(
@@ -753,11 +754,7 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
         _ = hsm.dispatch(ctx, instance, _AssociativeMemoryChildrenAttachedEvent.with_data(None))
 
     @staticmethod
-    def detach_subordinate_abilities_on_detach(
-        ctx: hsm.Context,
-        instance: "AssociativeMemory",
-        event: hsm.Event[typing.Any],
-    ) -> None:
+    def detach_subordinate_abilities_on_detach(instance: "AssociativeMemory", event: hsm.Event[typing.Any]) -> None:
         # Shared exit fires on every exit; cascade only for typed DetachEvent payloads.
         if not isinstance(event.data, attachment.DetachData):
             return

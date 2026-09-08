@@ -33,7 +33,7 @@ from bot.abilities.cognition import intuition
 from bot.abilities.cognition import types as cognition_types
 from bot.devices.phone import events as phone_events
 from bot.devices.phone.phone import RING_SOUND_WAV
-from bot.events import ClearFocusEvent, FocusDeviceEvent
+import bot
 from bot.environment import SoundData, SoundEvent
 from bot.providers.openai_compat import ChatClient, Processor
 
@@ -83,8 +83,8 @@ def _phone_bot_intuition_schemas() -> tuple[hsm.Event[typing.Any], ...]:
     """Event surface offered to phone_bot intuition (focus + call control + cognition ignore)."""
 
     return (
-        FocusDeviceEvent,
-        ClearFocusEvent,
+        bot.FocusDeviceEvent,
+        bot.ClearFocusEvent,
         phone_events.AnswerCallEvent,
         phone_events.DeclineCallEvent,
         cognition_types.IgnoreEvent,

@@ -49,6 +49,7 @@ Role = typing.Literal["client", "server"]
 DEFAULT_PING_TIMEOUT = datetime.timedelta(seconds=30)
 _MAX_UINT32 = (1 << 32) - 1
 TSessionReturn = typing.TypeVar("TSessionReturn")
+_RETAINED_TERMINAL_STREAMS = 64
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1210,6 +1211,7 @@ class Session(hsm.Instance):
             self._drive_stream_reset(stream_id)
         self._write_input(FrameData.data(stream_id=stream_id, flags=Flag.RST))
         self._record_failure(stage, failure_kind, stream_id=stream_id)
+        self._retire_terminal_streams()
 
     def _fail_protocol(self, stage: SessionStage, *, stream_id: int | None = None) -> None:
         self._accept_new_streams = False
@@ -1220,6 +1222,7 @@ class Session(hsm.Instance):
             if admission is not None and not _admission_is_terminal(admission):
                 self._drive_stream_reset(stream_id)
             self._write_input(FrameData.data(stream_id=stream_id, flags=Flag.RST))
+            self._retire_terminal_streams()
         self._record_failure(stage, "protocol_error", stream_id=stream_id)
         self._write_input(FrameData.go_away(code=GoAwayCode.PROTOCOL_ERROR))
 
@@ -1233,6 +1236,7 @@ class Session(hsm.Instance):
         self._failed_operations.append(SessionFailure(stage=stage, failure_kind=failure_kind, stream_id=stream_id))
 
     def _dispatch_drained_if_ready(self, ctx: hsm.Context) -> None:
+        self._retire_terminal_streams()
         if self._accept_new_streams or self._active_streams_exist():
             return
         code = (
@@ -1244,6 +1248,30 @@ class Session(hsm.Instance):
 
     def _active_streams_exist(self) -> bool:
         return any(not _admission_is_terminal(admission) for admission in self._stream_admission.values())
+
+    def _retire_terminal_streams(self) -> None:
+        """Reclaim finished streams instead of retaining every terminal id forever.
+
+        A closed or reset stream stays meaningful until its final ACK lands and the
+        application has drained the inbound buffer. We keep a bounded window of the most
+        recent finished streams and release only older entries that no longer owe an ACK
+        and whose buffer is already at EOF. This bounds memory for long-lived Yamux
+        sessions while preserving late-ACK handling and the terminal lifecycle visible in
+        snapshots. Late frames for a retired id fall through to the unknown/inactive
+        handlers as a bounded protocol failure.
+        """
+
+        safe = [
+            stream_id
+            for stream_id, admission in self._stream_admission.items()
+            if _admission_is_terminal(admission) and not admission.awaiting_ack and self._streams[stream_id].at_eof()
+        ]
+        overflow = len(safe) - _RETAINED_TERMINAL_STREAMS
+        if overflow <= 0:
+            return
+        for stream_id in safe[:overflow]:
+            _ = self._streams.pop(stream_id, None)
+            _ = self._stream_admission.pop(stream_id, None)
 
     model: typing.ClassVar[hsm.Model] = bot.define(
         "Session",

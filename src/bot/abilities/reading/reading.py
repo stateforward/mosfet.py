@@ -784,6 +784,7 @@ def _dispatch_invalid_classification_route_failure(
 
 
 class Reading(ability.Ability[InputData, OutputData]):
+    _attachment_group: attachment.Group | None
     """Composite ability that focuses on readable text or image input and emits normalized reading output."""
 
     input_event: typing.ClassVar[hsm.Event[InputData]] = ReadingInputEvent

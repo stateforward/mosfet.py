@@ -29,6 +29,7 @@ from ..hearing import voice
 from ..identity import value
 
 import dataclasses
+import collections.abc
 import datetime
 import io
 import math
@@ -44,7 +45,6 @@ import pydantic
 
 from bot.abilities import cognition
 from bot.environment import SoundData, SoundEvent
-from bot import events
 from bot import telemetry
 from bot.telemetry import observer
 from bot.telemetry import span
@@ -225,7 +225,7 @@ class SpeechData(pydantic.BaseModel):
         },
     )
 
-    parent: events.StimulusData[SoundData] | None = pydantic.Field(
+    parent: bot.StimulusData[SoundData] | None = pydantic.Field(
         default=None,
         description=(
             "The exact environment.sound event and typed payload that produced this speech "
@@ -400,7 +400,7 @@ def _listening_event_with_context(
 ) -> hsm.Event[typing.Any]:
     """Copy operation id, acoustic source, and metadata along the private completion chain."""
 
-    resolved_operation_id = operation_id if operation_id is not None else source.id
+    resolved_operation_id = typing.cast(str | None, operation_id if operation_id is not None else source.id)
     if resolved_operation_id is None:
         resolved_operation_id = uuid.uuid4().hex
     event = event.with_data_and_id(event.data, resolved_operation_id)
@@ -449,9 +449,10 @@ def _dispatch_listening_cognition_input_with_operation(
         # Whether the product carries any speaker identity at all is the difference between a
         # product downstream can admit and one it silently rejects; the ids themselves never
         # leave the payload.
-        source_ids = getattr(stimulus.data, "source_ids", None)
+        source_ids = typing.cast(object, getattr(stimulus.data, "source_ids", None))
         active.set_attribute("bot.stimulus.name", stimulus.name)
-        active.set_attribute("bot.identity.source.count", len(source_ids) if source_ids is not None else 0)
+        source_count = len(source_ids) if isinstance(source_ids, collections.abc.Collection) else 0
+        active.set_attribute("bot.identity.source.count", source_count)
         handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus))
         handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
         handoff = dataclasses.replace(
@@ -582,11 +583,12 @@ def _speech_from_sensed(
     *,
     sensed: sensitivity.OutputData,
     voice_detection: voice.detection.ApplyData,
-    source_ids: value.IdentitySet = frozenset(),
+    source_ids: value.IdentitySet | None = None,
     voice_embedding: voice.identification.VoiceEmbedding | None = None,
 ) -> SpeechData | None:
     """Build a public PCM speech product; unsupported or incomplete formats fail closed."""
 
+    identities = typing.cast(value.IdentitySet, source_ids if source_ids is not None else frozenset())
     sound = sensed.sound
     sample_rate_hz = sound.sample_rate_hz
     channels = sound.channels if sound.channels is not None else 1
@@ -598,7 +600,7 @@ def _speech_from_sensed(
         sample_rate_hz=sample_rate_hz,
         channels=channels,
         media_type="audio/pcm",
-        source_ids=source_ids,
+        source_ids=identities,
         voice_embedding=voice_embedding,
         parent=sensed.parent,
     )
@@ -609,7 +611,7 @@ def _speech_from_voice_segment(
     *,
     sensed: sensitivity.OutputData,
     segment: voice.VoiceSegment,
-    source_ids: value.IdentitySet = frozenset(),
+    source_ids: value.IdentitySet | None = None,
     voice_embedding: voice.identification.VoiceEmbedding | None = None,
     voice_detection: voice.detection.ApplyData | None = None,
 ) -> SpeechData | None:
@@ -619,6 +621,7 @@ def _speech_from_voice_segment(
     listening-stage failure instead of silently dropping a product.
     """
 
+    identities = typing.cast(value.IdentitySet, source_ids if source_ids is not None else frozenset())
     sound = sensed.sound
     if sound.media_type != "audio/pcm" or sound.sample_rate_hz is None:
         raise ValueError("voice segment speech requires source audio/pcm with a sample rate.")
@@ -656,7 +659,7 @@ def _speech_from_voice_segment(
         start_seconds=segment.start_seconds,
         end_seconds=segment.end_seconds,
         confidence=diarization_confidence,
-        source_ids=source_ids,
+        source_ids=identities,
         voice_embedding=voice_embedding,
         parent=sensed.parent,
     )
@@ -942,7 +945,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             children.append(self._voice_identification)
         if self._speech_decoding is not None:
             children.append(self._speech_decoding)
-        self._attachment_group = attachment.Group(*children)
+        self._attachment_group: attachment.Group | None = attachment.Group(*children)
         self._open_speech_audio = bytearray()
         self._open_speech_sample_rate_hz = None
         self._open_speech_channels = 1

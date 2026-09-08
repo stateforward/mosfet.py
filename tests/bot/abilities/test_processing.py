@@ -1041,6 +1041,78 @@ def test_dispatch_tool_omits_event_with_empty_target_list() -> None:
     assert "anyOf" not in items
 
 
+def test_collect_offered_events_filters_conflicting_schema_targets_and_rejects_mismatch() -> None:
+    class TextData(pydantic.BaseModel):
+        text: str
+
+    class CountData(pydantic.BaseModel):
+        count: int
+
+    text_event = hsm.Event[TextData](
+        name="tests.processing.conflicting_offer",
+        kind=processing.EventKind,
+        schema=TextData,
+    )
+    count_event = hsm.Event[CountData](
+        name="tests.processing.conflicting_offer",
+        kind=processing.EventKind,
+        schema=CountData,
+    )
+
+    class TextActor(hsm.Instance):
+        model: typing.ClassVar[hsm.Model | None] = bot.define(
+            "ConflictingTextActor",
+            hsm.initial(hsm.target("active")),
+            hsm.state("active", hsm.transition(hsm.on(text_event), hsm.effect(_accept_speak_event))),
+        )
+
+    class CountActor(hsm.Instance):
+        model: typing.ClassVar[hsm.Model | None] = bot.define(
+            "ConflictingCountActor",
+            hsm.initial(hsm.target("active")),
+            hsm.state("active", hsm.transition(hsm.on(count_event), hsm.effect(_accept_speak_event))),
+        )
+
+    async def run() -> None:
+        ctx = shared_hsm_context()
+        text_actor = TextActor()
+        count_actor = CountActor()
+        _ = await bot.started(ctx, text_actor, require_model(text_actor.model), hsm.Config(id="text"))
+        _ = await bot.started(ctx, count_actor, require_model(count_actor.model), hsm.Config(id="count"))
+
+        offered, actor_events = processing.collect_offered_events(
+            {"text": text_actor, "count": count_actor}
+        )
+
+        assert offered == (count_event,)
+        assert actor_events == {count_event.name: ("count",)}
+        tool = processing.dispatch_tool(offered, targets_by_event=actor_events)
+        target = object_dict(object_dict(_dispatch_tool_branch(tool)["properties"])["target"])
+        assert target["const"] == "count"
+
+        with pytest.raises(processing.SelectionRejectionError, match="invalid event data"):
+            await processing.dispatch_selected_events(
+                ctx,
+                processing.InputData(
+                    input="conflicting offers",
+                    schemas=offered,
+                    actors={"text": text_actor, "count": count_actor},
+                    actor_events=actor_events,
+                ),
+                (
+                    processing.SelectedEvent(
+                        event=count_event.name,
+                        target="text",
+                        data={"count": 1},
+                    ),
+                ),
+                operation_id="conflicting-offer",
+                source=count_actor,
+            )
+
+    asyncio.run(run())
+
+
 def test_events_from_dispatch_args_fills_unique_target() -> None:
     selections = processing.events_from_dispatch_args(
         {

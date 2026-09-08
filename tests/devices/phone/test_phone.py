@@ -2610,7 +2610,9 @@ async def _phone_in_a_hand(
 
 def _occasion_sources(holder: PhoneHolder) -> list[str | None]:
     return [
-        occasion.data.source_event for occasion in holder.occasions if isinstance(occasion.data, bot.InputEventData)
+        occasion.data.observation.event
+        for occasion in holder.occasions
+        if isinstance(occasion.data, bot.InputEventData) and occasion.data.observation is not None
     ]
 
 
@@ -2663,9 +2665,11 @@ def test_a_phone_tells_whoever_holds_it_that_nobody_answered() -> None:
         for _ in range(10):
             await asyncio.sleep(0)
         reasons = [
-            occasion.data.payload.get("reason")
+            typing.cast(phone_device.NoCallData, occasion.data.observation.data).reason
             for occasion in holder.occasions
-            if isinstance(occasion.data, bot.InputEventData) and occasion.data.payload is not None
+            if isinstance(occasion.data, bot.InputEventData)
+            and occasion.data.observation is not None
+            and occasion.data.observation.event == phone_device.NoCallEvent.name
         ]
         return _occasion_sources(holder), bystander.received, reasons
 

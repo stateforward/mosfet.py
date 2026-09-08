@@ -1,11 +1,10 @@
 """Direct contract tests for host-owned conversation decision inputs."""
 
-from bot.abilities.communication import conversation
-
 import types
-import typing
 
 import bot
+from bot.abilities.communication import conversation
+from bot.abilities.communication.conversation import decision_input
 
 
 def _participated() -> object:
@@ -24,13 +23,15 @@ def test_agent_decision_input_maps_contribution_onto_bot_input() -> None:
 
     assert isinstance(decision.input, bot.InputEventData)
     assert decision.input.target_device == "phone"
-    assert decision.input.source_event == "bot.ability.conversation.turn_detector"
-    assert typing.cast(dict[str, object], decision.input.payload) == {
-        "conversation_ref": "conv-1",
-        "participant_ref": "caller",
-        "stimulus_kind": "phone.ringing",
-        "perception_modality": "audio",
-    }
+    assert decision.input.observation == bot.StimulusData(
+        event="bot.ability.conversation.turn_detector",
+        data=decision_input.ContributionData(
+            conversation_ref="conv-1",
+            participant_ref="caller",
+            stimulus_kind="phone.ringing",
+            perception_modality="audio",
+        ),
+    )
     assert decision.actors == {}
     assert decision.actor_events == {}
 

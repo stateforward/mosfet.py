@@ -246,13 +246,14 @@ def configure(
     ``BOT_OTEL_DISABLED`` is one of ``1`` / ``true`` / ``yes`` / ``on``
     (case-insensitive).
 
-    **Development security note:** when enabled, this writes raw text-generator
-    request payloads (system/user prompts, tools) to a local JSONL file for
-    debugging. Files are created with mode ``0o600``. Paths from ``log_file`` /
-    ``BOT_OTEL_LOG_FILE`` must resolve under the process working directory
-    (symlink escapes are rejected). Opt out with ``BOT_OTEL_DISABLED`` or
-    ``enabled=False`` when prompts must not hit disk. See ``EXCEPTIONS.md`` for
-    the PY-LOG-002 exception.
+    **Development security note:** generator request payloads (system/user
+    prompts, tools) are captured only when ``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD``
+    is set; without it the log body carries low-cardinality counts, never prompt
+    or tool content. Enable OTEL is opt-out via ``BOT_OTEL_DISABLED`` /
+    ``enabled=False``. Files are created with mode ``0o600``. Paths from
+    ``log_file`` / ``BOT_OTEL_LOG_FILE`` must resolve under the process working
+    directory (symlink escapes are rejected). See ``EXCEPTIONS.md`` for the
+    PY-LOG-002 exception.
 
     Process-global ``_RUNTIME`` is the enablement SoT (see module docstring);
     ``set_logger_provider`` is install-only. ``configure()`` is the synchronized

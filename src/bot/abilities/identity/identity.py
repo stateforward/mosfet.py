@@ -339,7 +339,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
                 ),
             )
             return
-        if not isinstance(recognized, recognition.OutputData):
+        if type(recognized) is not recognition.OutputData:
             _ = hsm.dispatch(
                 ctx,
                 instance,

@@ -73,6 +73,15 @@ def _set_attribute(element: ElementTree.Element, name: str, value: str, budget: 
     element.set(name, value)
 
 
+def _excluded_field_names(level: object) -> frozenset[str]:
+    """Read a model-level exclusion marker as a bounded string set."""
+
+    raw = getattr(level, "__model_facing_excluded_fields__", ())
+    if not isinstance(raw, collections.abc.Collection):
+        return frozenset()
+    return frozenset(name for name in typing.cast(collections.abc.Collection[object], raw) if isinstance(name, str))
+
+
 def _snake_case(name: str) -> str:
     # Shared helper lives on conversation; a top-level import would cycle
     # cognition -> communication -> cognition through the package inits.
@@ -119,8 +128,8 @@ def _set_event_attributes(element: ElementTree.Element, event: object, budget: _
             _set_attribute(element, f"{_STIMULUS_PREFIX}:event", event_name, budget)
         for attribute in ("id", "source", "target"):
             carried = getattr(event, attribute, None)
-            if carried:
-                _set_attribute(element, f"{_STIMULUS_PREFIX}:{attribute}", carried, budget)
+        if carried:
+            _set_attribute(element, f"{_STIMULUS_PREFIX}:{attribute}", typing.cast(str, carried), budget)
         return
     if isinstance(event, hsm.Event):
         _set_attribute(element, f"{_STIMULUS_PREFIX}:event", event.name, budget)
@@ -150,7 +159,7 @@ def _model_element(
             if isinstance(serialized, collections.abc.Mapping)
             else typing.cast(collections.abc.Mapping[str, object], event.event_json_value(model))
         )
-        payload = getattr(model, "data", None)
+        payload = typing.cast(object, getattr(model, "data", None))
         if isinstance(payload, pydantic.BaseModel):
             return _model_element(
                 payload,
@@ -174,9 +183,7 @@ def _model_element(
         else typing.cast(dict[str, object], event.event_json_value(model))
     )
     excluded_fields = frozenset(
-        name
-        for level in _payload_ancestry(type(model))
-        for name in getattr(level, "__model_facing_excluded_fields__", frozenset())
+        name for level in _payload_ancestry(type(model)) for name in _excluded_field_names(level)
     )
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None

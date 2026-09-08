@@ -7,8 +7,8 @@ import typing
 import uuid
 
 import hsm
+import bot
 from bot.define import define
-from bot.events import RebootEvent, RebootEventData
 
 from bot.protocols import attachment
 import pydantic
@@ -187,6 +187,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
+    _attachment_group: attachment.Group | None
     input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
     cancel_event: typing.ClassVar[hsm.Event[typing.Any] | None] = CancelEvent
@@ -1061,7 +1062,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> bool:
         del ctx
         return (
-            isinstance(event.data, RebootEventData)
+            isinstance(event.data, bot.RebootEventData)
             and event.source == hsm.id(instance._reflection)
             and event.target == hsm.id(instance)
         )
@@ -1118,7 +1119,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_accept_ignore),
             ),
             hsm.transition(
-                hsm.on(RebootEvent),
+                hsm.on(bot.RebootEvent),
                 hsm.guard(_is_reflection_reboot),
                 hsm.effect(_forward_reflection_reboot),
                 hsm.target("/Cognition/rebooting"),
@@ -1155,7 +1156,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_accept_ignore),
             ),
             hsm.transition(
-                hsm.on(RebootEvent),
+                hsm.on(bot.RebootEvent),
                 hsm.guard(_is_reflection_reboot),
                 hsm.effect(_forward_reflection_reboot),
                 hsm.target("/Cognition/rebooting"),

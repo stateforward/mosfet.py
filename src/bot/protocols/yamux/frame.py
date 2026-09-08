@@ -65,9 +65,9 @@ class FrameData:
         # Declared contract requires enums; coerce helpers stay on the decode path
         # (decode_frame coerces wire ints before constructing). Rejecting ints here
         # keeps the frozen dataclass free of post-init mutation workarounds.
-        if not isinstance(self.frame_type, FrameType):
+        if type(self.frame_type) is not FrameType:
             raise ProtocolError(f"Unsupported Yamux frame type {self.frame_type!r}.")
-        if not isinstance(self.flags, Flag):
+        if type(self.flags) is not Flag:
             raise ProtocolError(f"Unsupported Yamux flag bits {self.flags!r}.")
         frame_type = self.frame_type
         flags = self.flags

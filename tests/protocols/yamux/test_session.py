@@ -11,12 +11,14 @@ from bot.protocols.yamux.events import (
     GoAwayEvent,
     OpenStreamEvent,
     PingEvent,
+    ResetStreamEvent,
     SendDataEvent,
     CloseStreamData,
     GoAwayData,
     OpenStreamData,
     PingData,
     ReceiveDataFrameData,
+    ResetStreamData,
     SendData,
 )
 from bot.protocols.yamux.frame import (
@@ -28,6 +30,7 @@ from bot.protocols.yamux.frame import (
 )
 from bot.protocols.yamux.session import ReadStream, Session, event_from_frame
 from bot.protocols.yamux.session import SessionSnapshot
+from bot.protocols.yamux.session import _RETAINED_TERMINAL_STREAMS
 from bot.protocols.yamux.stream import StreamState
 from tests.hsm_model import choice_transitions, transition_map
 
@@ -757,3 +760,29 @@ def test_yamux_session_projects_frames_to_typed_events() -> None:
     assert event.data.stream_id == 1
     assert event.data.flags == int(Flag.FIN)
     assert event.data.payload == b"x"
+
+
+def test_yamux_session_retires_finished_streams_once_window_is_exceeded() -> None:
+    async def run() -> None:
+        session = Session(role="client")
+        _ = await bot.started(None, session, session.model)
+
+        stream_ids: list[int] = []
+        for index in range(_RETAINED_TERMINAL_STREAMS + 1):
+            stream_id = 1 + index * 2
+            stream_ids.append(stream_id)
+            await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
+            await session.dispatch(
+                session.context(),
+                ResetStreamEvent.with_data(ResetStreamData(stream_id=stream_id)),
+            )
+
+        snapshot = session.take_snapshot()
+        retained = [stream_id for stream_id in stream_ids if stream_id in snapshot.streams]
+        assert len(retained) == _RETAINED_TERMINAL_STREAMS
+        assert 1 not in snapshot.streams
+        assert 3 in snapshot.streams
+        assert stream_ids[-1] in snapshot.streams
+        assert all(snapshot.streams[stream_id].lifecycle is StreamState.RESET for stream_id in retained)
+
+    asyncio.run(run())

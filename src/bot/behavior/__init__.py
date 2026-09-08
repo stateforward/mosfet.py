@@ -36,8 +36,13 @@ if typing.TYPE_CHECKING:
     from .compiler import build
     from .diagnostic import Checked, Diagnostic, Level, Report, Stage
     from .instance import Instance, check, start
+    from . import runtime as runtime
     from .seed import Seed
     from .schema import JsonSchema
+    from . import storage as storage
+    from .storage import behavior_table as behavior_table
+    from .storage import behavior_trigger_table as behavior_trigger_table
+    from .verify import verify_apply as verify_apply
     from .source import (
         Source,
         EventContract,
@@ -139,7 +144,7 @@ def __getattr__(name: str) -> object:
     }:
         value: object = module
     else:
-        value = getattr(module, name)
+        value = typing.cast(object, getattr(module, name))
     globals()[name] = value
     return value
 

@@ -437,11 +437,11 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     )
                     return
                 raise
-            except Exception as error:
+            except Exception:
                 failure = events.FailedData(
                     actor=phase.actor,
                     kind=events.FailureKind.DISPATCH,
-                    message=f"{type(instance).__name__} member attach failed: {error}",
+                    message=f"{type(instance).__name__} member attach failed.",
                 )
                 # Prefer Attachment._actor_id: hsm.id can fail mid-stop (hsm 1.3.2+).
                 member_id = Attachment._actor_id(member)
@@ -583,11 +583,11 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     )
                     return
                 raise
-            except Exception as error:
+            except Exception:
                 failure = events.FailedData(
                     actor=phase.actor,
                     kind=events.FailureKind.DISPATCH,
-                    message=f"{type(instance).__name__} member detach failed: {error}",
+                    message=f"{type(instance).__name__} member detach failed.",
                 )
                 if reply is not None:
                     _ = hsm.Instance.dispatch(
@@ -777,7 +777,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             instance._op_failure = events.FailedData(
                 actor=phase.actor,
                 kind=events.FailureKind.ROLLBACK,
-                message=f"{type(instance).__name__} rollback failed: {failure.message}",
+                message=f"{type(instance).__name__} rollback failed.",
             )
             instance._op_fallback = True
 
@@ -822,7 +822,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             instance._op_failure = events.FailedData(
                 actor=phase.actor,
                 kind=events.FailureKind.ROLLBACK,
-                message=f"{type(instance).__name__} detach recovery failed: {failure.message}",
+                message=f"{type(instance).__name__} detach recovery failed.",
             )
 
     @staticmethod
@@ -1105,8 +1105,10 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     continue
                 assert model is not None
                 try:
-                    _ = await bot.started(ctx, member, model)
-                except Exception as error:
+                    # Members must outlive the request that attaches them: parent them under the
+                    # group's owning context, not the caller's transient ``ctx`` (HSM-CONTEXT-001).
+                    _ = await bot.started(self.context(), member, model)
+                except Exception:
                     reply_to = data.actor if data.reply_to is None else data.reply_to
                     await hsm.dispatch(
                         ctx,
@@ -1116,7 +1118,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                                 events.FailedData(
                                     actor=data.actor,
                                     kind=events.FailureKind.INITIALIZATION,
-                                    message=f"Attachment Group member start failed: {error}",
+                                    message="Attachment Group member start failed.",
                                 )
                             ),
                             id=event.id,

@@ -2763,6 +2763,8 @@ name = "stateforward-bot"
 source = { editable = "../../" }
 dependencies = [
     { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-sdk" },
     { name = "pydantic" },
     { name = "sqlalchemy" },
     { name = "starlark-go" },
@@ -2772,6 +2774,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "opentelemetry-api", specifier = ">=1.37.0,<2.0.0" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.37.0,<2.0.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.37.0,<2.0.0" },
     { name = "pydantic", specifier = ">=2.10.0,<3.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0,<3.0.0" },
     { name = "starlark-go", specifier = ">=1.0.1,<2.0.0" },

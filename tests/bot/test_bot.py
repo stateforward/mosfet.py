@@ -1468,8 +1468,7 @@ def test_bot_events_use_pydantic_schemas() -> None:
     # reported with neither; the body resolves the device from the envelope source.
     assert "required" not in input_schema
     input_properties = typing.cast(collections.abc.Mapping[str, object], input_schema["properties"])
-    assert "source_event" in input_properties
-    assert "payload" in input_properties
+    assert "observation" in input_properties
     # An occasion is ingress, never a model tool: a bot cannot select having a moment.
     assert bot.InputEvent.kind == hsm.EventKind
     assert bot.InputEvent.kind != event_contract.EventKind
@@ -1504,19 +1503,14 @@ def test_bot_input_priority_is_bounded() -> None:
         _ = bot.InputEventData(target_device="phone", priority=11)
 
 
-def test_bot_input_can_carry_modeled_source_event_payload() -> None:
+def test_bot_input_can_carry_typed_observation() -> None:
     data = bot.InputEventData(
         target_device="phone",
         priority=0,
-        source_event="phone.incoming_call",
-        payload={"call_id": "call-123"},
+        observation=bot.StimulusData(event="phone.incoming_call", data=HappeningData(situation="call-123")),
     )
 
-    assert data.source_event == "phone.incoming_call"
-    assert data.payload == {"call_id": "call-123"}
-
-    with pytest.raises(ValueError):
-        _ = bot.InputEventData(target_device="phone", priority=0, source_event="")
+    assert data.observation == bot.StimulusData(event="phone.incoming_call", data=HappeningData(situation="call-123"))
 
 
 def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
@@ -2477,7 +2471,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
     # Then it finds out. The far end hanging up and its own answer landing on nothing are both
     # facts about the world that now come back to it — neither used to reach it at all, which
     # is how a bot could go on believing it had answered a call that had already ended.
-    assert [turn.input.source_event for turn in calls[1:] if isinstance(turn.input, bot.InputEventData)] == [
+    assert [turn.input.observation.event for turn in calls[1:] if isinstance(turn.input, bot.InputEventData) and turn.input.observation] == [
         phone_device.HungUpEvent.name,
         phone_device.NoCallEvent.name,
     ]
@@ -4699,9 +4693,14 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
     stimulus = turns[0].input
     assert isinstance(stimulus, bot.InputEventData)
     # What happened rode along; what to do about it did not.
-    assert stimulus.source_event == HappeningEvent.name
-    assert stimulus.payload == {"situation": "became one thing"}
-    assert set(bot.InputEventData.model_fields) == {"target_device", "priority", "source_event", "payload"}
+    assert stimulus.observation == bot.StimulusData(
+        event=HappeningEvent.name,
+        data=HappeningData(situation="became one thing"),
+        id="",
+        source="",
+        target="",
+    )
+    assert set(bot.InputEventData.model_fields) == {"target_device", "priority", "observation"}
     # Doing nothing twice is not a failure, and the body is left exactly where it started.
     assert failures == []
     assert state == "/Bot/inactive"
@@ -4844,8 +4843,20 @@ def test_body_handles_device_reports_in_arrival_order_regardless_of_priority() -
     assert len(turns) == 2
     assert isinstance(turns[0].input, bot.InputEventData)
     assert isinstance(turns[1].input, bot.InputEventData)
-    assert turns[0].input.payload == {"situation": "background thought"}
-    assert turns[1].input.payload == {"situation": "urgent ring"}
+    assert turns[0].input.observation == bot.StimulusData(
+        event=HappeningEvent.name,
+        data=HappeningData(situation="background thought"),
+        id="",
+        source="",
+        target="",
+    )
+    assert turns[1].input.observation == bot.StimulusData(
+        event=HappeningEvent.name,
+        data=HappeningData(situation="urgent ring"),
+        id="",
+        source="",
+        target="",
+    )
 
 
 class _OutputTap(ProbeAbility):

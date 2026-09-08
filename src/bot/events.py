@@ -6,7 +6,7 @@ from bot import event
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import PlainSerializer
 
-T = typing.TypeVar("T")
+T = typing.TypeVar("T", default=typing.Any, covariant=True)
 
 
 class StimulusData(pydantic.BaseModel, typing.Generic[T]):
@@ -47,7 +47,7 @@ class StimulusData(pydantic.BaseModel, typing.Generic[T]):
     )
 
     @classmethod
-    def from_event(cls, event: hsm.Event[T]) -> typing.Self:
+    def from_event(cls, event: hsm.Event[T]) -> "StimulusData[T]":
         """Capture an event's typed envelope and payload at emission time."""
 
         data = event.data
@@ -129,8 +129,12 @@ class InputEventData(pydantic.BaseModel):
                 {
                     "target_device": "device-a",
                     "priority": 0,
-                    "source_event": "environment.sound",
-                    "payload": {"kind": "knock"},
+                    "observation": {
+                        "event": "device.phone.ringing",
+                        "data": {"call_id": "call-123"},
+                        "id": "call-123",
+                        "source": "phone-1",
+                    },
                 }
             ],
         },
@@ -156,23 +160,20 @@ class InputEventData(pydantic.BaseModel):
         ),
         examples=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     )
-    source_event: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description=(
-            "Modeled event name that caused this input, when the runtime knows it. Cognition may use this as "
-            "decision context, but the source device still owns the event semantics and lifecycle."
-        ),
-        examples=["environment.sound"],
-    )
-    payload: dict[str, object] | None = pydantic.Field(
+    observation: StimulusData[object] | None = pydantic.Field(
         default=None,
         description=(
-            "JSON-serializable payload from the source event, when needed for cognition to choose a typed output. "
-            "Do not include raw audio, text transcripts, credentials, provider-specific blobs, or high-cardinality "
-            "diagnostic data."
+            "Typed product that caused this input. It preserves the producing event's concrete payload and envelope "
+            "provenance without reducing the observation to an event-name string and untyped JSON bag."
         ),
-        examples=[{"kind": "knock"}],
+        examples=[
+            {
+                "event": "device.phone.ringing",
+                "data": {"call_id": "call-123"},
+                "id": "call-123",
+                "source": "phone-1",
+            }
+        ],
     )
 
 

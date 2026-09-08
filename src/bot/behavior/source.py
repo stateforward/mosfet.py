@@ -3,6 +3,7 @@
 from . import schema
 
 import io
+import abc
 import json
 import re
 import select
@@ -12,6 +13,7 @@ import threading
 import time
 import tokenize
 import typing
+from typing import override
 
 import hsm
 import pydantic
@@ -670,14 +672,19 @@ def _encode_worker_payload(payload: dict[str, object]) -> bytes:
     return encoded
 
 
+def _write_stream(stream: typing.BinaryIO, payload: bytes) -> None:
+    written = stream.write(payload)
+    if written < 0:
+        raise SourceError("binary stream write reported a negative byte count.")
+    stream.flush()
+
+
 def _write_worker_payload(payload: dict[str, object]) -> None:
-    sys.stdout.buffer.write(_encode_worker_payload(payload))
-    sys.stdout.buffer.flush()
+    _write_stream(typing.cast(typing.BinaryIO, sys.stdout.buffer), _encode_worker_payload(payload))
 
 
 def _write_worker_ready() -> None:
-    sys.stdout.buffer.write(SOURCE_WORKER_READY)
-    sys.stdout.buffer.flush()
+    _write_stream(typing.cast(typing.BinaryIO, sys.stdout.buffer), SOURCE_WORKER_READY)
 
 
 def _source_worker_main() -> None:
@@ -730,44 +737,56 @@ def _restore_model_tree(value: object) -> object:
     return restored
 
 
-class _WorkerConnection:
-    def send_bytes(self, buffer: bytes) -> None:
+class _WorkerConnection(abc.ABC):
+    @abc.abstractmethod
+    def send_bytes(self, _buffer: bytes) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def wait_ready(self, *, timeout: float) -> None:
         raise NotImplementedError
 
-    def poll(self, timeout: float = 0.0) -> bool:
+    @abc.abstractmethod
+    def poll(self, _timeout: float = 0.0) -> bool:
         raise NotImplementedError
 
-    def recv_bytes(self, maxlength: int | None = None) -> bytes:
+    @abc.abstractmethod
+    def recv_bytes(self, _maxlength: int | None = None) -> bytes:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def close(self) -> None:
         raise NotImplementedError
 
 
-class _WorkerProcess:
+class _WorkerProcess(abc.ABC):
+    @abc.abstractmethod
     def start(self) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def is_alive(self) -> bool:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def terminate(self) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def kill(self) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def join(self, timeout: float | None = None) -> None:
         raise NotImplementedError
 
 
-class _WorkerContext:
+class _WorkerContext(abc.ABC):
+    @abc.abstractmethod
     def Pipe(self, *, duplex: bool) -> tuple[_WorkerConnection, _WorkerConnection]:
         raise NotImplementedError
 
+    @abc.abstractmethod
     def Process(
         self,
         *,
@@ -780,20 +799,21 @@ class _WorkerContext:
 class _ParentStdioConnection(_WorkerConnection):
     def __init__(self) -> None:
         self._process: subprocess.Popen[bytes] | None = None
-        self._closed = False
+        self._closed: bool = False
 
     def bind(self, *, process: subprocess.Popen[bytes]) -> None:
         self._process = process
 
+    @override
     def send_bytes(self, buffer: bytes) -> None:
         process = self._process
         stdin = None if process is None else process.stdin
         if process is None or stdin is None:
             raise SourceError("isolated Starlark source evaluation failed before returning a result.")
-        stdin.write(buffer)
-        stdin.flush()
+        _write_stream(typing.cast(typing.BinaryIO, stdin), buffer)
         stdin.close()
 
+    @override
     def wait_ready(self, *, timeout: float) -> None:
         process = self._process
         stdout = None if process is None else process.stdout
@@ -807,7 +827,10 @@ class _ParentStdioConnection(_WorkerConnection):
             ready, _, _ = select.select((stdout,), (), (), remaining)
             if not ready:
                 if process.poll() is not None:
-                    leftover = stdout.read(SOURCE_MAX_RESULT_BYTES - len(buffer))
+                    leftover: bytes | None = typing.cast(
+                        bytes | None,
+                        stdout.read(SOURCE_MAX_RESULT_BYTES - len(buffer)),
+                    )
                     if leftover:
                         buffer.extend(leftover)
                     break
@@ -827,13 +850,16 @@ class _ParentStdioConnection(_WorkerConnection):
                 payload_value: object = typing.cast(object, json.loads(payload.decode("utf-8")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload_value = None
-            if isinstance(payload_value, dict) and payload_value.get("ok") is not True:
-                message = payload_value.get("error")
-                raise SourceError(
-                    message if isinstance(message, str) else "isolated Starlark worker did not become ready."
-                )
+            if isinstance(payload_value, dict):
+                payload_map = typing.cast(dict[str, object], payload_value)
+                if payload_map.get("ok") is not True:
+                    message = payload_map.get("error")
+                    raise SourceError(
+                        message if isinstance(message, str) else "isolated Starlark worker did not become ready."
+                    )
         raise _ready_timeout()
 
+    @override
     def poll(self, timeout: float = 0.0) -> bool:
         process = self._process
         stdout = None if process is None else process.stdout
@@ -842,6 +868,7 @@ class _ParentStdioConnection(_WorkerConnection):
         ready, _, _ = select.select((stdout,), (), (), timeout)
         return bool(ready)
 
+    @override
     def recv_bytes(self, maxlength: int | None = None) -> bytes:
         process = self._process
         stdout = None if process is None else process.stdout
@@ -856,7 +883,10 @@ class _ParentStdioConnection(_WorkerConnection):
             ready, _, _ = select.select((stdout,), (), (), remaining)
             if not ready:
                 if process.poll() is not None:
-                    leftover = stdout.read(limit - total)
+                    leftover: bytes | None = typing.cast(
+                        bytes | None,
+                        stdout.read(limit - total),
+                    )
                     if leftover:
                         chunks.append(leftover)
                     break
@@ -868,6 +898,7 @@ class _ParentStdioConnection(_WorkerConnection):
             total += len(chunk)
         return b"".join(chunks)
 
+    @override
     def close(self) -> None:
         if self._closed:
             return
@@ -884,29 +915,35 @@ class _ParentStdioConnection(_WorkerConnection):
 
 
 class _ChildStdioConnection(_WorkerConnection):
+    @override
     def send_bytes(self, buffer: bytes) -> None:
         del buffer
 
+    @override
     def wait_ready(self, *, timeout: float) -> None:
         del timeout
 
+    @override
     def poll(self, timeout: float = 0.0) -> bool:
         del timeout
         return False
 
+    @override
     def recv_bytes(self, maxlength: int | None = None) -> bytes:
         del maxlength
         return b""
 
+    @override
     def close(self) -> None:
         return
 
 
 class _CleanInterpreterProcess(_WorkerProcess):
     def __init__(self, *, parent: _ParentStdioConnection) -> None:
-        self._parent = parent
+        self._parent: _ParentStdioConnection = parent
         self._process: subprocess.Popen[bytes] | None = None
 
+    @override
     def start(self) -> None:
         process = subprocess.Popen(
             (sys.executable, "-m", "bot.behavior.source"),
@@ -917,20 +954,24 @@ class _CleanInterpreterProcess(_WorkerProcess):
         self._process = process
         self._parent.bind(process=process)
 
+    @override
     def is_alive(self) -> bool:
         process = self._process
         return process is not None and process.poll() is None
 
+    @override
     def terminate(self) -> None:
         process = self._process
         if process is not None and process.poll() is None:
             process.terminate()
 
+    @override
     def kill(self) -> None:
         process = self._process
         if process is not None and process.poll() is None:
             process.kill()
 
+    @override
     def join(self, timeout: float | None = None) -> None:
         process = self._process
         if process is None:
@@ -948,12 +989,14 @@ class _CleanInterpreterContext(_WorkerContext):
     def __init__(self) -> None:
         self._parent: _ParentStdioConnection | None = None
 
+    @override
     def Pipe(self, *, duplex: bool) -> tuple[_WorkerConnection, _WorkerConnection]:
         del duplex
         parent = _ParentStdioConnection()
         self._parent = parent
         return parent, _ChildStdioConnection()
 
+    @override
     def Process(
         self,
         *,

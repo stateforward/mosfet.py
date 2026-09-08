@@ -3,7 +3,6 @@ from bot.abilities import ability, decoding
 from bot.abilities import processing
 from bot.abilities.hearing import voice
 from bot.abilities.listening import interpretation
-from bot import events
 from bot.abilities.communication.conversation import turn_detector
 from bot.abilities.communication.conversation import memory as conversation_memory
 from bot.abilities.identity import value
@@ -102,7 +101,7 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
         media_type="audio/pcm",
         source_ids=frozenset({"caller"}),
     )
-    parent = events.StimulusData[interpretation.SpeechData](
+    parent = bot.StimulusData[interpretation.SpeechData](
         event="bot.ability.listening.speech.output",
         data=speech,
     )
@@ -174,7 +173,7 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
             source_ids=frozenset({"caller"}),
         )
         input_data = conversation.TurnData(
-            parent=events.StimulusData[interpretation.SpeechData](
+            parent=bot.StimulusData[interpretation.SpeechData](
                 event="bot.ability.listening.speech.output",
                 data=speech,
             ),

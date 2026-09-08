@@ -292,7 +292,7 @@ def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any
     if item.data is None:
         raw: dict[str, object] = {}
     elif isinstance(item.data, collections.abc.Mapping):
-        raw = dict(item.data)
+        raw = dict(typing.cast("collections.abc.Mapping[str, object]", item.data))
     else:
         raise TypeError(f"Reflection inventory selection data must be a mapping, got {type(item.data).__name__}.")
     if item.event == CreateEvent.name:
@@ -376,6 +376,7 @@ def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | No
 
 
 class Reflection(processing.Processing):
+    _attachment_group: attachment.Group | None
     """Post-output ability: recall → select → revise or break → store."""
 
     instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS

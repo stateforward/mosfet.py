@@ -290,13 +290,14 @@ def _normalize_conversation_targets(
 ) -> tuple[ConversationTarget, ...]:
     if conversation is None:
         return ()
-    if isinstance(conversation, ability.Ability):
-        targets = (conversation,)
-    elif isinstance(conversation, collections.abc.Sequence):
-        targets = tuple(conversation)
+    match = typing.cast(object, conversation)
+    if isinstance(match, ability.Ability):
+        targets: collections.abc.Sequence[ConversationTarget] = (typing.cast(ConversationTarget, conversation),)
+    elif isinstance(match, collections.abc.Sequence):
+        targets = typing.cast("collections.abc.Sequence[ConversationTarget]", conversation)
     else:
         raise TypeError("Speaking conversation targets must be Ability instances.")
-    if any(not isinstance(target, ability.Ability) for target in targets):
+    if any(not isinstance(typing.cast(object, target), ability.Ability) for target in targets):
         raise TypeError("Speaking conversation targets must be Ability instances.")
     return tuple(dict.fromkeys(targets))
 
@@ -330,11 +331,6 @@ def _has_speak_completed(ctx: hsm.Context, instance: "Speaking", event: hsm.Even
 def _has_speak_failure(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
-
-
-def _has_encoded_speech(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, _EncodedData)
 
 
 class Speaking(ability.Ability[InputData, OutputData]):

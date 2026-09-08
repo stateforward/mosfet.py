@@ -444,7 +444,7 @@ def _selections_from_output(
 
     selections: list[processing.SelectedEvent] = []
     for item in output:
-        raw = item.data if item.data is not None else {}
+        raw: object = item.data if item.data is not None else {}
         selections.append(
             processing.SelectedEvent(
                 event=item.event,
@@ -994,7 +994,7 @@ class Intuition(processing.Processing):
         if instructions is not None and not instructions.strip():
             raise ValueError("instructions must not be blank when provided.")
         # Empty default is intentional: system channel is only the per-turn world XML when present.
-        ability.Ability.__init__(self)
+        super(processing.Processing, self).__init__()
         self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._confidence_tuner = confidence_tuner or ConfidenceTuner(floor=confidence_floor)

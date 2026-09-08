@@ -20,6 +20,7 @@ import collections.abc
 import contextlib
 import functools
 import re
+import typing
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace
@@ -164,8 +165,8 @@ def operation(
             # Not every failure raises. A guard that declines, a chunk that is dropped, a stage
             # that reports by dispatching a typed failure event all leave the block cleanly after
             # calling record_failure; overwriting the outcome here would report them as successes.
-            recorded = getattr(active, "attributes", None)
-            if isinstance(recorded, collections.abc.Mapping) and recorded.get(_OUTCOME_ATTR) == Failed:
+            recorded = typing.cast("dict[str, object] | None", getattr(active, "attributes", None))
+            if recorded is not None and recorded.get(_OUTCOME_ATTR) == Failed:
                 return
             active.set_attribute(_OUTCOME_ATTR, Ok)
 

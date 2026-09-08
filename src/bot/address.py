@@ -61,10 +61,26 @@ def unregister_instance(instance: hsm.Instance, path: str | None = None) -> None
             unregister(key)
 
 
+def _discard_stale_private(path: str) -> None:
+    """Drop a private marker only for a registration that is no longer live."""
+
+    if path in _PRIVATE and _REGISTRY.get(path) is None:
+        _PRIVATE.discard(path)
+
+
 def mark_private(path: str) -> None:
-    """Mark ``path`` as a private-scope registration (excluded from broadcast)."""
+    """Mark ``path`` as a private-scope registration (excluded from broadcast).
+
+    The marker is tied to the registered instance's lifetime: it is removed when
+    the registration is explicitly unregistered, and also when the registered
+    instance is collected, so a reused path cannot stay silently hidden under a
+    marker left by an actor that is no longer live.
+    """
 
     _PRIVATE.add(path)
+    instance = _REGISTRY.get(path)
+    if instance is not None:
+        _ = weakref.finalize(instance, _discard_stale_private, path)
 
 
 def is_private(path: str) -> bool:

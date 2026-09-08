@@ -10,7 +10,7 @@ import pathlib
 # hatch/vendor trees outside each provider's src/ are excluded).
 _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {
     # for-key iteration over telemetry metadata maps (not coordination keys).
-    "abilities/processing.py": {"operation:iteration": 1},
+    "abilities/processing.py": {},
 }
 
 

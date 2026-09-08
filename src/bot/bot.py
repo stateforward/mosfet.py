@@ -949,11 +949,10 @@ class Bot(hsm.Instance, abc.ABC):
     def _complete_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
         # Keep the turn capability live until ProcessingCompleted is matched so that private
         # terminal still carries exact request-id correlation (same RTC as the output match).
-        focus_candidates: tuple[str, ...] = ()
-        if instance._focused_device is not None:
-            focus_candidates = (instance._focused_device,)
-        elif instance._devices:
-            focus_candidates = (next(iter(instance._devices)),)
+        # The per-turn candidate set was computed when this turn's cognition input was built
+        # (attention_bias_for_turn); report exactly what cognition received, never re-derive it
+        # from whatever the body happens to currently have focused.
+        focus_candidates = instance._processing_focus_candidates
         completed = events.ProcessingCompletedEventData(output=event.data, focus_candidates=focus_candidates)
         _ = instance.dispatch(
             ctx,

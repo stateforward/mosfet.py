@@ -52,17 +52,21 @@ def _encode_content(value: object) -> JsonValue:
     if isinstance(value, bytearray):
         return _tagged("bytearray", base64.b64encode(bytes(value)).decode("ascii"))
     if isinstance(value, list):
-        return _tagged("list", [_encode_content(item) for item in value])
+        items: list[object] = typing.cast(list[object], value)
+        return _tagged("list", [_encode_content(item) for item in items])
     if isinstance(value, tuple):
-        return _tagged("tuple", [_encode_content(item) for item in value])
+        tuple_items = typing.cast(tuple[object, ...], value)
+        return _tagged("tuple", [_encode_content(item) for item in tuple_items])
     if isinstance(value, (set, frozenset)):
-        encoded = [_encode_content(item) for item in value]
+        contents: set[object] | frozenset[object] = typing.cast(set[object] | frozenset[object], value)
+        encoded = [_encode_content(item) for item in contents]
         encoded.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
         tag = "frozenset" if isinstance(value, frozenset) else "set"
         return _tagged(tag, encoded)
     if isinstance(value, collections.abc.Mapping):
+        mapping = typing.cast(collections.abc.Mapping[object, object], value)
         encoded_items: list[JsonValue] = []
-        for key, item in value.items():
+        for key, item in mapping.items():
             encoded_items.append([_encode_content(key), _encode_content(item)])
         encoded_items.sort(
             key=lambda item: json.dumps(
@@ -74,23 +78,24 @@ def _encode_content(value: object) -> JsonValue:
         )
         return _tagged("mapping", encoded_items)
     raise TypeError(
-        "conversation memory content must be JSON-compatible or contain only bytes, bytearray, "
-        "lists, tuples, sets, frozensets, and mappings."
+        "conversation memory content must be JSON-compatible or contain only bytes, bytearray, lists, tuples, sets, frozensets, and mappings."
     )
 
 
 def _decode_content(value: object) -> object:
     if isinstance(value, list):
-        return [_decode_content(item) for item in value]
+        items = typing.cast(list[object], value)
+        return [_decode_content(item) for item in items]
     if not isinstance(value, dict):
         return value
 
-    tag = value.get(_CONTENT_TAG)
+    mapping = typing.cast(collections.abc.Mapping[object, object], value)
+    tag = typing.cast(object, mapping.get(_CONTENT_TAG))
     if tag is None:
-        return {key: _decode_content(item) for key, item in value.items()}
-    if not isinstance(tag, str) or set(value) != {_CONTENT_TAG, "value"}:
+        return {key: _decode_content(item) for key, item in mapping.items()}
+    if not isinstance(tag, str) or set(mapping.keys()) != {_CONTENT_TAG, "value"}:
         raise ValueError("invalid conversation memory content envelope.")
-    tagged_value = value["value"]
+    tagged_value = mapping.get("value")
     if tag == "bytes":
         if not isinstance(tagged_value, str):
             raise ValueError("encoded conversation memory bytes must be base64 text.")
@@ -108,7 +113,8 @@ def _decode_content(value: object) -> object:
     if tag in {"list", "tuple", "set", "frozenset"}:
         if not isinstance(tagged_value, list):
             raise ValueError("encoded conversation memory sequence must contain a list.")
-        decoded = [_decode_content(item) for item in tagged_value]
+        tagged_items = typing.cast(list[object], tagged_value)
+        decoded = [_decode_content(item) for item in tagged_items]
         if tag == "list":
             return decoded
         if tag == "tuple":
@@ -120,13 +126,17 @@ def _decode_content(value: object) -> object:
     if tag == "mapping":
         if not isinstance(tagged_value, list):
             raise ValueError("encoded conversation memory mapping must contain item pairs.")
+        tagged_pairs = typing.cast(list[object], tagged_value)
         decoded_mapping: dict[object, object] = {}
-        for pair in tagged_value:
-            if not isinstance(pair, list) or len(pair) != 2:
+        for pair in tagged_pairs:
+            if not isinstance(pair, list):
                 raise ValueError("encoded conversation memory mapping contains an invalid item.")
-            key = _decode_content(pair[0])
+            pair_items = typing.cast(list[object], pair)
+            if len(pair_items) != 2:
+                raise ValueError("encoded conversation memory mapping contains an invalid item.")
+            key = _decode_content(pair_items[0])
             try:
-                decoded_mapping[key] = _decode_content(pair[1])
+                decoded_mapping[key] = _decode_content(pair_items[1])
             except TypeError as error:
                 raise ValueError("encoded conversation memory mapping contains an unhashable key.") from error
         return decoded_mapping
@@ -201,7 +211,7 @@ class Memory(pydantic.BaseModel):
     @classmethod
     def _validate_content(cls, value: object) -> object:
         try:
-            _encode_content(value)
+            _ = _encode_content(value)
         except TypeError as error:
             raise ValueError(str(error)) from error
         return value
@@ -237,8 +247,11 @@ class Memory(pydantic.BaseModel):
     def from_json(cls, serialized: str) -> "Memory":
         """Deserialize and validate one safe four-field memory payload."""
 
-        decoded = json.loads(serialized)
-        if not isinstance(decoded, dict) or set(decoded) != _PAYLOAD_FIELDS:
+        decoded_value = typing.cast(object, json.loads(serialized))
+        if not isinstance(decoded_value, dict):
+            raise ValueError("conversation memory JSON must contain exactly the four payload fields.")
+        decoded = typing.cast(dict[str, object], decoded_value)
+        if set(decoded) != set(_PAYLOAD_FIELDS):
             raise ValueError("conversation memory JSON must contain exactly the four payload fields.")
         decoded["content"] = _decode_content(decoded["content"])
         return cls.model_validate(decoded)

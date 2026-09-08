@@ -72,6 +72,7 @@ def _has_interpretation_failure(ctx: hsm.Context, instance: "Listening", event: 
 
 
 class Listening(ability.Ability[SoundData, cognition.InputData]):
+    _attachment_group: attachment.Group | None
     """Sensory ability that may turn environment sound into ``cognition.InputEvent``.
 
     Public input is ``environment.sound``; the success terminal is cognitive input whose stimulus

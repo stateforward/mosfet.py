@@ -122,24 +122,43 @@ async def _apply_once(
     ctx = hsm.Context()
     _ = await bot.started(ctx, owner, _TerminalOwner.model_for(behavior.output_event, behavior.failed_event))
     owner_id = hsm.id(owner)
-    _ = await behavior.attach(
-        ctx,
-        dataclasses.replace(
-            attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
-            source=owner_id,
-        ),
-    )
-    resolved_operation_id = operation_id if operation_id else uuid.uuid4().hex
-    input_event = dataclasses.replace(
-        behavior.input_event.with_data(input_data),
-        id=event_id or resolved_operation_id,
-        metadata=dict(metadata),
-        source=source or owner_id,
-        target=target or hsm.id(behavior),
-    )
-    _ = await hsm.dispatch(ctx, behavior, input_event)
-    output = await asyncio.wait_for(owner.result, timeout=timeout)
-    return output, resolved_operation_id, owner_id
+    attached = False
+    try:
+        _ = await behavior.attach(
+            ctx,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+                source=owner_id,
+            ),
+        )
+        attached = True
+        resolved_operation_id = operation_id if operation_id else uuid.uuid4().hex
+        input_event = dataclasses.replace(
+            behavior.input_event.with_data(input_data),
+            id=event_id or resolved_operation_id,
+            metadata=dict(metadata),
+            source=source or owner_id,
+            target=target or hsm.id(behavior),
+        )
+        _ = await hsm.dispatch(ctx, behavior, input_event)
+        output = await asyncio.wait_for(owner.result, timeout=timeout)
+        return output, resolved_operation_id, owner_id
+    finally:
+        if attached:
+            try:
+                await behavior.detach(
+                    ctx,
+                    dataclasses.replace(
+                        attachment.DetachEvent.with_data(attachment.DetachData(actor=owner, reply_to=owner)),
+                        source=owner_id,
+                        target=hsm.id(behavior),
+                    ),
+                )
+            except Exception:
+                # Tear down is best-effort for a dry-run diagnostic; the behavior outcome
+                # is authoritative, but the owner must still be released below.
+                pass
+        _ = await hsm.stop(owner, ctx)
 
 
 def _live_binding_values(
@@ -206,7 +225,7 @@ def _run_coroutine(coro: collections.abc.Awaitable[object]) -> object:
     """Run ``coro`` whether or not a loop is already running (HSM effects are sync)."""
 
     try:
-        asyncio.get_running_loop()
+        _ = asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(typing.cast(collections.abc.Coroutine[typing.Any, typing.Any, object], coro))
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

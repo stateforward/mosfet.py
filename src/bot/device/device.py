@@ -64,10 +64,10 @@ class ObservationData(pydantic.BaseModel):
     """Bot-agnostic device observation for body/environment elevation.
 
     What the device became, stated plainly and asking for nothing. The device stamps
-    what happened (``source_event`` + JSON ``payload``) and how insistent it is
-    (``priority``); it never names what the bot should do. Body/environment owns the
-    explicit elevation of this typed event into ``bot.input`` — devices never
-    construct body events and never route on event names.
+    the original event as a typed product and how insistent it is (``priority``); it
+    never names what the bot should do. Body/environment owns the explicit elevation
+    of this typed event into ``bot.input`` — devices never construct body events and
+    never route on event names.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -77,7 +77,12 @@ class ObservationData(pydantic.BaseModel):
                 "Device-domain observation: a state change felt by whoever holds the device. "
                 "Elevated to bot.input at the body/environment boundary."
             ),
-            "examples": [{"priority": 5, "source_event": "test.device.happening", "payload": {"situation": "changed"}}],
+            "examples": [
+                {
+                    "priority": 5,
+                    "observation": {"event": "test.device.happening", "data": {"situation": "changed"}},
+                }
+            ],
         },
     )
 
@@ -92,23 +97,12 @@ class ObservationData(pydantic.BaseModel):
         ),
         examples=[0, 5, 10],
     )
-    source_event: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
+    observation: bot.StimulusData[object] = pydantic.Field(
         description=(
-            "Modeled device event name that caused this observation, when the runtime knows it. "
-            "Carried as data for cognition context, never branched on for routing."
+            "Complete typed product emitted by the device event that caused this observation. "
+            "Its envelope preserves source, target, and correlation provenance."
         ),
-        examples=["test.device.happening"],
-    )
-    payload: dict[str, object] | None = pydantic.Field(
-        default=None,
-        description=(
-            "JSON-serializable payload from the source event, when needed for cognition to choose a typed output. "
-            "Do not include raw audio, text transcripts, credentials, provider-specific blobs, or high-cardinality "
-            "diagnostic data."
-        ),
-        examples=[{"situation": "changed"}],
+        examples=[{"event": "test.device.happening", "data": {"situation": "changed"}}],
     )
 
 
@@ -257,6 +251,12 @@ class Device(hsm.Instance, attachment.Attachment):
             used_names.add(unique_name)
             model = hsm.redefine(base_model, unique_name)
             if lifecycle.is_started(peripheral):
+                # A peripheral powered by this device must already live in this device's scope.
+                # Re-registering a machine that is started in another environment would leave it
+                # broadcast- and teardown-invisible to the owning device (HSM-CONTEXT-001).
+                if not scope.contains(peripheral):
+                    message_start = f"{type(peripheral).__name__} is already started in another environment"
+                    raise RuntimeError(f"{message_start}; a device cannot power a peripheral from a different scope.")
                 _ = bot.register(peripheral, model, owner=owner_name)
                 continue
             _ = await bot.started(scope, peripheral, model, owner=owner_name)
@@ -279,12 +279,11 @@ class Device(hsm.Instance, attachment.Attachment):
         vision are what the environment carries, because those are what a room actually
         carries; everything else about a device is felt only by whoever is holding it.
 
-        The report says *what happened* and never what to do about it. It carries the source
-        event name and its payload as typed device-domain data, and there is deliberately no
-        hint, suggestion, or requested action: the bot is the one that decides whether a change
-        is worth acting on, and doing nothing is a legitimate answer. Body/environment owns the
-        explicit elevation of this typed observation into ``bot.input`` — devices never
-        construct body events.
+        The report says *what happened* and never what to do about it. It carries the original
+        event as a typed device-domain product, and there is deliberately no hint, suggestion,
+        or requested action: the bot is the one that decides whether a change is worth acting
+        on, and doing nothing is a legitimate answer. Body/environment owns the explicit
+        elevation of this typed observation into ``bot.input`` — devices never construct body events.
 
         Reserved for state changes. Never call this per media frame, per audio chunk, or per
         sample: streams already have their own path, and a per-frame report would defer without
@@ -293,15 +292,6 @@ class Device(hsm.Instance, attachment.Attachment):
 
         from bot.environment import elevate_device_observation_to_input
 
-        payload: dict[str, object] | None = None
-        data = event.data
-        if isinstance(data, pydantic.BaseModel):
-            try:
-                payload = data.model_dump(mode="json")
-            except (pydantic.ValidationError, ValueError, TypeError):
-                # A payload that will not serialize is not worth bricking the device over; the
-                # bot still gets the occasion and the source event name that produced it.
-                payload = None
         owners = tuple(self._attachments)
         if not owners:
             # Nowhere to feel it: an unattached device reports to nobody (same as before —
@@ -312,8 +302,7 @@ class Device(hsm.Instance, attachment.Attachment):
             ObservationEvent.with_data(
                 ObservationData(
                     priority=priority,
-                    source_event=event.name,
-                    payload=payload,
+                    observation=bot.StimulusData.from_event(event),
                 )
             ),
             id=event.id or uuid.uuid4().hex,

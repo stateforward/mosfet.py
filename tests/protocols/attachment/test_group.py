@@ -577,7 +577,10 @@ def test_group_selects_rollback_failure_by_member_order_not_arrival_order() -> N
     failure = asyncio.run(run())
 
     assert failure.kind is attachment.FailureKind.ROLLBACK
-    assert "first rollback failed" in failure.message
+    # A rollback failure is normalized to a bounded kind; raw member exception text is not
+    # leaked into the actor-facing event. Member-order selection is still exercised because
+    # the first member's detach is what populates the rollback failure here.
+    assert failure.message == "Group rollback failed."
 
 
 def test_group_rolls_back_created_members_when_attach_fails() -> None:
@@ -1007,7 +1010,7 @@ def test_group_converts_reply_start_exception_to_failure(monkeypatch: pytest.Mon
     assert [event.name for event in recorded] == [attachment.AttachFailedEvent.name]
     assert isinstance(recorded[0].data, attachment.FailedData)
     assert recorded[0].data.kind is attachment.FailureKind.DISPATCH
-    assert "reply start failed" in recorded[0].data.message
+    assert recorded[0].data.message == "Group member attach failed."
 
 
 def test_group_attach_cancellation_during_reply_start_fails_member(

@@ -225,7 +225,7 @@ def compile_statement(
     active = dialect if dialect is not None else sqlite_dialect()
     compiled = clause.compile(dialect=active, compile_kwargs={"render_postcompile": True})
     sql = str(compiled)
-    positiontup = getattr(compiled, "positiontup", None)
+    positiontup = typing.cast(tuple[str, ...] | None, getattr(compiled, "positiontup", None))
     params = compiled.params or {}
     if positiontup:
         parameters = tuple(params[name] for name in positiontup)
@@ -269,7 +269,10 @@ def _execute_transaction(
                 rows = tuple(
                     Row(
                         columns=columns,
-                        values=tuple(typing.cast(ParameterValue, cell) for cell in raw),
+                        values=tuple(
+                            typing.cast(ParameterValue, cell)
+                            for cell in typing.cast(tuple[object, ...], typing.cast(object, raw))
+                        ),
                     )
                     for raw in cursor.fetchall()
                 )
@@ -277,7 +280,7 @@ def _execute_transaction(
             else:
                 results.append(
                     StatementResult(
-                        rowcount=cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0,
+                        rowcount=cursor.rowcount if cursor.rowcount >= 0 else 0,
                         rows=(),
                     )
                 )
@@ -293,7 +296,7 @@ def open_sqlite_engine(*, database: str = ":memory:", connection: typing.Any | N
     """
 
     if connection is not None:
-        engine = create_engine("sqlite+pysqlite://", creator=lambda: connection)
+        engine = create_engine("sqlite+pysqlite://", creator=lambda: typing.cast(object, connection))
     else:
         url = "sqlite+pysqlite:///:memory:" if database == ":memory:" else f"sqlite+pysqlite:///{database}"
         engine = create_engine(

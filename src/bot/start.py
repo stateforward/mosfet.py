@@ -138,6 +138,9 @@ def _register_address(instance: hsm.Instance, ctx: hsm.Context | None) -> None:
     """Register the started instance's runtime address. Never raises.
 
     The path is the environment's identity plus the actor's: ``/<env-id>/<actor-id>``.
+    Only actors that are actually under an Environment scope register. A bare
+    ``hsm.Context`` has no environment and therefore no addressable environment id;
+    registering one would fabricate an identity the actor does not belong to.
     Private scopes inherit their parent environment's environment segment — visibility
     is decided at dispatch, not by hiding the address — so a private actor stays
     addressable by explicit dispatch and invisible to environment broadcast.
@@ -146,8 +149,18 @@ def _register_address(instance: hsm.Instance, ctx: hsm.Context | None) -> None:
     try:
         if ctx is None:
             return
-        environment = Environment.from_context(ctx)
+        environment = Environment.reachable(ctx)
+        if environment is None:
+            return
         path = f"{environment.scope_path}/{hsm.id(instance)}"
+        existing = address.resolve(path)
+        if existing is not None and existing is not instance:
+            # A stale registration must not shadow a restarted actor. Only a genuinely live
+            # actor at the same path is an addressing bug; a stopped one is replaced so the
+            # new actor becomes resolvable.
+            if lifecycle.is_started(existing):
+                raise RuntimeError(f"address {path} is already registered to a live instance.")
+            address.unregister(path)
         address.register(path, instance)
         if scope.is_private(ctx):
             address.mark_private(path)
@@ -220,6 +233,7 @@ def register(
         component=type(instance).__name__,
         stage="register",
     ) as active:
+        _register_address(instance, instance.context())
         outcomes = _register(instance, resolved_model, owner, instance.context(), clear_owner)
         _record(active, *outcomes)
         return outcomes

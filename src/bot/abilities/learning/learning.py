@@ -738,6 +738,7 @@ def _require_memory_runtime_input(
 
 
 class Learning(ability.Ability[InputData, OutputData]):
+    _attachment_group: attachment.Group | None
     """Decode lesson material, ground runtime input in memory, revise into inventory."""
 
     instructions: typing.ClassVar[str] = GENERATE_INSTRUCTIONS

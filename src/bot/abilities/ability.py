@@ -894,26 +894,27 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             if not lifecycle.is_started(self):
                 data = event.data
                 assert isinstance(data, attachment.DetachData)
-                reply_to = data.reply_to if data.reply_to is not None else data.actor
-                if reply_to is not None:
-                    reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""
-                    await hsm.dispatch(
-                        ctx,
-                        reply_to,
-                        dataclasses.replace(
-                            attachment.DetachFailedEvent.with_data(
-                                attachment.FailedData(
-                                    actor=data.actor,
-                                    kind=attachment.FailureKind.DISPATCH,
-                                    message=f"{type(self).__name__} is stopped or not started; detach refused.",
-                                )
-                            ),
-                            id=event.id,
-                            source=event.source or "",
-                            target=reply_id,
-                            metadata=dict(event.metadata),
+                reply_to: hsm.Instance | None = data.reply_to
+                if reply_to is None:
+                    reply_to = data.actor
+                reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""
+                await hsm.dispatch(
+                    ctx,
+                    reply_to,
+                    dataclasses.replace(
+                        attachment.DetachFailedEvent.with_data(
+                            attachment.FailedData(
+                                actor=data.actor,
+                                kind=attachment.FailureKind.DISPATCH,
+                                message=f"{type(self).__name__} is stopped or not started; detach refused.",
+                            )
                         ),
-                    )
+                        id=event.id,
+                        source=event.source or "",
+                        target=reply_id,
+                        metadata=dict(event.metadata),
+                    ),
+                )
                 return
             await hsm.dispatch(ctx, self, event)
 
@@ -1001,9 +1002,10 @@ async def run_terminal_operation(
     if not isinstance(instances, collections.abc.MutableMapping):
         raise RuntimeError("Terminal operation child must be started in an addressable HSM scope.")
     child_id = hsm.id(child)
+    instance_map = typing.cast(dict[typing.Hashable, object], instances)
     operation_scope = hsm.Context(
         parent=ctx,
-        values={hsm.Keys.Instances: instances},
+        values={hsm.Keys.Instances: instance_map},
     )
     result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
 

@@ -27,6 +27,7 @@ def _reset_telemetry(
     bot.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
+    monkeypatch.delenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
@@ -39,8 +40,9 @@ def _reset_telemetry(
     bot.telemetry.reset()
 
 
-def test_record_generator_request_body_contains_messages() -> None:
+def test_record_generator_request_body_contains_messages(monkeypatch: pytest.MonkeyPatch) -> None:
     log_path = pathlib.Path("generator.jsonl")
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     assert bot.telemetry.configure(log_file=log_path) is True
     messages = [
         {"role": "system", "content": "You are helpful."},
@@ -64,8 +66,25 @@ def test_record_generator_request_body_contains_messages() -> None:
     assert payload["body"]["tools"][0]["function"]["name"] == "pass"
 
 
-def test_record_generator_request_attributes_lack_raw_content() -> None:
+def test_record_generator_request_without_opt_in_omits_prompt_content() -> None:
+    log_path = pathlib.Path("no-capture.jsonl")
+    assert bot.telemetry.configure(log_file=log_path) is True
+    secret = "UNIQUE_SENSITIVE_PROMPT_SHOULD_NOT_PERSIST"
+    record_generator_request(
+        provider="openai_compat",
+        model="gpt-test",
+        messages=[{"role": "user", "content": secret}],
+        tools=(),
+    )
+    _force_flush()
+    payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert secret not in json.dumps(payload["body"])
+    assert payload["body"]["capture"] == "disabled"
+
+
+def test_record_generator_request_attributes_lack_raw_content(monkeypatch: pytest.MonkeyPatch) -> None:
     log_path = pathlib.Path("attrs.jsonl")
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     assert bot.telemetry.configure(log_file=log_path) is True
     secret = "UNIQUE_RAW_MESSAGE_CONTENT_SHOULD_NOT_BE_AN_ATTRIBUTE"
     record_generator_request(
@@ -107,10 +126,13 @@ def test_record_generator_request_noop_when_disabled() -> None:
     assert not log_path.exists()
 
 
-def test_record_generator_request_truncates_deeply_nested_messages() -> None:
+def test_record_generator_request_truncates_deeply_nested_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``_jsonable`` recursion is bounded (depth 32); past that a truncation marker is emitted."""
 
     log_path = pathlib.Path("deep.jsonl")
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     assert bot.telemetry.configure(log_file=log_path) is True
     nested: object = "leaf"
     for _ in range(40):

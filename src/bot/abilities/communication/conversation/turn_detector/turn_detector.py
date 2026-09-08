@@ -307,6 +307,7 @@ def _has_silence(ctx: hsm.Context, instance: "TurnDetector", event: hsm.Event[ty
 
 
 class TurnDetector(ability.Ability[object, TurnCompleteData]):
+    _attachment_group: attachment.Group | None
     """Participant-owned turn lifecycle and content assembler."""
 
     owned_model: typing.ClassVar[hsm.Model]

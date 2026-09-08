@@ -19,7 +19,7 @@ import pydantic_core
 #
 # This is a stateforward.bot concern, not an HSM one: the owning domain is ``abilities.processing``,
 # which builds each turn's tool menu from live topology and refuses selections the target never
-# offered. It is defined here rather than there because ``bot.events``, ``bot.behavior``, and
+# offered. It is defined here rather than there because body events, ``bot.behavior``, and
 # ``abilities.speaking`` all stamp events and all cycle on importing ``processing``; this module is a
 # leaf. Import it as ``processing.EventKind`` wherever that does not cycle.
 #
@@ -195,7 +195,12 @@ def _event_json_value(
         value_id = _enter_json_value(value, active)
         try:
             if isinstance(value, pydantic.RootModel):
-                return _event_json_value(value.root, depth=depth + 1, active=active, budget=budget)
+                return _event_json_value(
+                    typing.cast(object, value.root),
+                    depth=depth + 1,
+                    active=active,
+                    budget=budget,
+                )
             model_type = type(value)
             field_names = tuple(name for name, field in model_type.model_fields.items() if field.exclude is not True)
             computed_names = tuple(model_type.model_computed_fields)
@@ -277,7 +282,8 @@ def _event_json_value(
         finally:
             active.remove(value_id)
     if isinstance(value, bytes | bytearray | memoryview):
-        budget.consume_scalar(value)
+        binary = typing.cast("bytes | bytearray | memoryview", value)
+        budget.consume_scalar(binary)
         return _OMIT
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("event JSON numbers must be finite")
@@ -569,8 +575,7 @@ def _validate_safe_json_schema_pattern(pattern: str, *, path: str) -> None:
                             variable_quantifiers.append("bounded repeat")
                         if upper > _MAX_JSON_SCHEMA_BOUNDED_REPEAT:
                             raise ValueError(
-                                f"unsafe JSON schema pattern at {path}: bounded repeat exceeds "
-                                f"{_MAX_JSON_SCHEMA_BOUNDED_REPEAT}"
+                                f"unsafe JSON schema pattern at {path}: bounded repeat exceeds {_MAX_JSON_SCHEMA_BOUNDED_REPEAT}"
                             )
                     index = end
         index += 1
@@ -622,7 +627,8 @@ def _validate_local_ref_graph(root: collections.abc.Mapping[str, object]) -> Non
         if depth > _MAX_JSON_SCHEMA_DEPTH:
             raise ValueError(f"JSON schema exceeds maximum depth of {_MAX_JSON_SCHEMA_DEPTH}")
         if isinstance(value, collections.abc.Mapping):
-            node_id = id(value)
+            node = typing.cast(object, value)
+            node_id = id(node)
             if node_id in active_nodes:
                 raise ValueError("JSON schema contains a cycle")
             active_nodes.add(node_id)
@@ -643,7 +649,8 @@ def _validate_local_ref_graph(root: collections.abc.Mapping[str, object]) -> Non
                 active_nodes.remove(node_id)
             return
         if isinstance(value, list | tuple):
-            node_id = id(value)
+            node = typing.cast(object, value)
+            node_id = id(node)
             if node_id in active_nodes:
                 raise ValueError("JSON schema contains a cycle")
             active_nodes.add(node_id)

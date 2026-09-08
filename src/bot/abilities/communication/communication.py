@@ -219,6 +219,7 @@ def _normalize_catalog(
 
 
 class Communication(ability.Ability[TurnData, object]):
+    _attachment_group: attachment.Group | None
     """Route communication ingress to the active Conversation; forward its products.
 
     Topology (behavior under Ability lifecycle ``attached``):

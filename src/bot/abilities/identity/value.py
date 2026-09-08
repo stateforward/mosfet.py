@@ -40,7 +40,7 @@ def normalize_identity(value: object, *, field_name: str = "identity") -> Identi
         raise ValueError(f"{field_name} embedding vectors must not be empty.")
 
     normalized_vector: list[float] = []
-    components: list[object] = list(value)
+    components: list[object] = list(typing.cast("collections.abc.Iterable[object]", value))
     if len(components) > MAX_EMBEDDING_DIMENSION:
         raise ValueError(
             f"{field_name} embedding dimension {len(components)} exceeds the maximum of {MAX_EMBEDDING_DIMENSION}."

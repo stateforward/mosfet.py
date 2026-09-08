@@ -2,7 +2,7 @@ from .. import processing
 
 import typing
 
-TEmbedded = typing.TypeVar("TEmbedded")
+TEmbedded: typing.TypeAlias = object
 
 
 def carry_input_context(

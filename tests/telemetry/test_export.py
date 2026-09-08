@@ -43,7 +43,8 @@ def _reset_telemetry(
     bot.telemetry.reset()
 
 
-def test_export_writes_generator_request_with_mode_600() -> None:
+def test_export_writes_generator_request_with_mode_600(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     log_path = pathlib.Path("otel-logs.jsonl")
     assert bot.telemetry.configure(log_file=log_path) is True
     record_generator_request(
@@ -122,9 +123,12 @@ def test_export_rejects_replaced_parent_symlink_outside_cwd(tmp_path: pathlib.Pa
     assert list(outside.iterdir()) == []
 
 
-def test_export_stays_in_configure_cwd_after_chdir(tmp_path: pathlib.Path) -> None:
+def test_export_stays_in_configure_cwd_after_chdir(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Configure under A, chdir to B, emit — writes stay under A; B stays empty."""
 
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     root_a = tmp_path / "configure-root"
     root_b = tmp_path / "divert"
     root_a.mkdir()

@@ -12,7 +12,7 @@ Import body primitives from the package root and abilities under ``bot.abilities
     phone.RingingEvent
 
 Do not import a bare ``events`` package as a domain namespace. Ability/device events live on
-their domain package; body control events are re-exported here from ``bot.events``.
+their domain package; body control events are re-exported directly here.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ __path__ = extend_path(__path__, __name__)
 __version__ = "0.1.0"
 
 # Body control events first so ability packages can `import bot` without cycles.
-from bot.events import (
+from .events import (
     ActivateEvent,
     ActivateEventData,
     ActivatingDoneEvent,

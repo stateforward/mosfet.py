@@ -532,7 +532,7 @@ def _publish_local_audio_uplink(
             instance,
             _LocalAudioPublishFailedEvent.with_data(
                 _LocalAudioPublishFailedData(
-                    message=str(error) or type(error).__name__,
+                    message="Local audio chunk publish failed.",
                     media_type=data.media_type,
                     chunk_bytes=len(data.audio),
                 )
@@ -1022,6 +1022,18 @@ class PhoneService(hsm.Instance):
         self._presence_left_callback = on_participant_disconnected
         self._presence_bound = True
 
+    def _unbind_room_presence(self) -> None:
+        """Stop observing participant departure so a stopped service cannot receive callbacks."""
+
+        if not self._presence_bound:
+            return
+        self._presence_bound = False
+        callback = self._presence_left_callback
+        self._presence_left_callback = None
+        room = self._room
+        if room is not None and callback is not None:
+            room.off("participant_disconnected", callback)
+
     def _bind_room_signaling(self, room: RoomHandle) -> None:
         """Answer the four call-setup methods for as long as this phone is on the room.
 
@@ -1137,7 +1149,10 @@ class PhoneService(hsm.Instance):
                     response_timeout=self._setup_timeout.total_seconds(),
                 )
             except rtc.RpcError as error:
-                raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
+                raise PhoneServiceError(
+                    "LiveKit phone signaling RPC failed.",
+                    failure_kind=signaling.failure_kind(error),
+                ) from error
 
     def _ensure_media(self) -> tuple[AudioBridge[typing.Any], RoomAudioTrackPath]:
         if self._bridge is not None and self._track_path is not None:
@@ -1249,7 +1264,10 @@ class PhoneService(hsm.Instance):
             )
         except rtc.RpcError as error:
             self._call_peer_identity = None
-            raise PhoneServiceError(str(error), failure_kind=signaling.failure_kind(error)) from error
+            raise PhoneServiceError(
+                "LiveKit phone call setup failed.",
+                failure_kind=signaling.failure_kind(error),
+            ) from error
 
     async def answer_call(self, request: phone.AnswerRequestData) -> None:
         """Answer a call, and tell the caller so their phone stops ringing and connects.
@@ -1347,6 +1365,7 @@ class PhoneService(hsm.Instance):
         """Disconnect room audio from the underlying LiveKit room."""
 
         _, track_path = self._ensure_media()
+        self._unbind_room_presence()
         self._unbind_room_signaling()
         await track_path.disconnect_room(track_path.context())
 
@@ -1358,6 +1377,7 @@ class PhoneService(hsm.Instance):
         # Ingress opens when attach holds a target ref; clear on stop so SDK callbacks
         # cannot deliver after the service is stopped (only detach effect cleared it before).
         self._attached_phone_target_ref = None
+        self._unbind_room_presence()
         self._unbind_room_signaling()
         if bot.lifecycle.is_started(self):
             await hsm.Instance.stop(self, ctx)
@@ -1878,6 +1898,7 @@ class PhoneService(hsm.Instance):
     @staticmethod
     def _unbind_signaling(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
+        instance._unbind_room_presence()
         instance._unbind_room_signaling()
 
     @staticmethod

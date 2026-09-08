@@ -205,24 +205,28 @@ def event_for_data(
 ) -> hsm.Event[CreateData] | hsm.Event[ChangeData] | hsm.Event[BreakData]:
     """Build the HSM event for a behavior create/change/break payload."""
 
-    if isinstance(data, CreateData):
-        return CreateEvent.with_data(data)
-    if isinstance(data, ChangeData):
-        return ChangeEvent.with_data(data)
-    if isinstance(data, BreakData):
-        return BreakEvent.with_data(data)
+    event_type = type(data)
+    if event_type is CreateData:
+        return CreateEvent.with_data(typing.cast(CreateData, data))
+    if event_type is ChangeData:
+        return ChangeEvent.with_data(typing.cast(ChangeData, data))
+    if event_type is BreakData:
+        return BreakEvent.with_data(typing.cast(BreakData, data))
     raise TypeError(f"Unsupported behavior event payload: {type(data)!r}")
 
 
 def data_from_event(event: hsm.Event[typing.Any]) -> CreateData | ChangeData | BreakData | None:
     """Extract create/change/break payload from a behavior inventory event; else None."""
 
-    if isinstance(event.data, CreateData):
-        return event.data
-    if isinstance(event.data, ChangeData):
-        return event.data
-    if isinstance(event.data, BreakData):
-        return event.data
+    data = event.data
+    payload = typing.cast(object, data)
+    event_type = type(payload)
+    if event_type is CreateData:
+        return typing.cast(CreateData, payload)
+    if event_type is ChangeData:
+        return typing.cast(ChangeData, payload)
+    if event_type is BreakData:
+        return typing.cast(BreakData, payload)
     return None
 
 

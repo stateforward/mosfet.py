@@ -329,46 +329,46 @@ class Stream(hsm.Instance):
         return instance._is_terminal()
 
     @staticmethod
-    def _reject_send(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_send(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure(
             "Yamux stream is not writable or send window is exhausted."
         )
 
     @staticmethod
-    def _reject_receive(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_receive(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure(
             "Yamux stream is not readable or receive window is exhausted."
         )
 
     @staticmethod
-    def _reject_send_window_update(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_send_window_update(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream send window cannot be updated.")
 
     @staticmethod
-    def _reject_receive_window_grant(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_receive_window_grant(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream receive window cannot be granted.")
 
     @staticmethod
-    def _reject_local_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_local_fin(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream local writes are already closed.")
 
     @staticmethod
-    def _reject_remote_fin(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_remote_fin(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream remote writes are already closed.")
 
     @staticmethod
-    def _reject_reset(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_reset(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream is terminal.")
 
     @staticmethod
-    def _reject_acknowledge(ctx: hsm.Context, instance: "Stream", event: hsm.Event[typing.Any]) -> None:
+    def _reject_acknowledge(ctx: hsm.Context, instance: "Stream", _event: hsm.Event[typing.Any]) -> None:
         del ctx
         instance._operation_failure = _StreamOperationFailure("Yamux stream is not awaiting acknowledgement.")
 

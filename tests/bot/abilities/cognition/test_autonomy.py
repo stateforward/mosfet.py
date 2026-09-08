@@ -339,13 +339,13 @@ def test_behavior_input_payload_omits_bytes_from_base_model_stimulus() -> None:
     """Learned behavior input uses the canonical projection for non-event Pydantic stimuli."""
 
     cognition_input = cognition.InputData(
-        stimulus=bot.InputEventData(payload={"audio": b"raw-audio"}),
+        stimulus=bot.InputEventData(observation=bot.StimulusData(event="test.audio", data={"audio": b"raw-audio"})),
     )
     payload = autonomy_module.behavior_input_payload(cognition_input)
 
     assert isinstance(payload, collections.abc.Mapping)
     payload_mapping = typing.cast(collections.abc.Mapping[str, object], payload)
-    nested_value = payload_mapping.get("payload")
+    nested_value = payload_mapping.get("observation")
     assert isinstance(nested_value, collections.abc.Mapping)
     nested = typing.cast(collections.abc.Mapping[str, object], nested_value)
     assert "audio" not in nested

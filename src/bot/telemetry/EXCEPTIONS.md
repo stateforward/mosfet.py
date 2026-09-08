@@ -8,9 +8,9 @@ Documented per [CORE-EXC-001](../../../rules/core.rules.md#core-exc-001-must-doc
 | --- | --- |
 | Violated rule | [`rules/python.rules.md#PY-LOG-002`](../../../rules/python.rules.md#py-log-002-should-use-stable-structured-logs) — logs MUST NOT include secrets or unredacted sensitive payloads |
 | Owner | stateforward.bot maintainers |
-| Rationale | The OTEL goal requires seeing exact text-generator messages (system/user content, tools) during local development. The JSONL file exporter writes full request bodies to disk for that purpose. This is not a production collector path. |
-| Risk tests | Opt-out (`BOT_OTEL_DISABLED` / `enabled=False`); cwd confinement on configure; file mode `0o600`; symlink / `O_NOFOLLOW` open rejection (`tests/telemetry/`) |
-| Expiration | When local file export is removed, made opt-in-only for non-dev, or replaced by a redacting production exporter |
+| Rationale | The OTEL goal allows seeing exact text-generator messages (system/user content, tools) during local development when the runtime opts in. The JSONL file exporter may write full request bodies only under that explicit opt-in; the default omits prompt/tool content. This is not a production collector path. |
+| Risk tests | Payload capture opt-in (`BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`); enablement opt-out (`BOT_OTEL_DISABLED` / `enabled=False`); cwd confinement on configure; file mode `0o600`; symlink / `O_NOFOLLOW` open rejection (`tests/telemetry/`) |
+| Expiration | When local file export is removed, or replaced by a redacting production exporter |
 | Removal plan | Delete the `JsonlFileLogRecordExporter` path (and default-on configure wiring), flip the default to disabled, and remove this exception entry |
 
 The span file (`otel-spans.jsonl`) shares the same confined, `O_NOFOLLOW`, `0o600`

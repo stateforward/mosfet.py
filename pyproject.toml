@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "opentelemetry-api>=1.37.0,<2.0.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.37.0,<2.0.0",
+  "opentelemetry-sdk>=1.37.0,<2.0.0",
   "pydantic>=2.10.0,<3.0.0",
   "stateforward-hsm>=1.3.7,<1.4",
   "starlark-go>=1.0.1,<2.0.0",
@@ -33,6 +35,8 @@ path = "src/bot/__init__.py"
 members = ["src/providers/*"]
 
 [tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
   "live: hits real external providers (requires API keys; skipped by default in CI without keys)",

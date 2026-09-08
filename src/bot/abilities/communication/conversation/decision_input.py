@@ -18,6 +18,46 @@ from ... import processing
 import collections.abc
 import typing
 
+import pydantic
+
+
+class PerceptionLike(typing.Protocol):
+    """Structural view of the perception carried by a participated turn."""
+
+    modality: str
+
+
+class ParticipationLike(typing.Protocol):
+    """Structural view of the participation carried by a participated turn."""
+
+    conversation_ref: str
+    participant_ref: str
+    perception: PerceptionLike
+
+
+class StimulusLike(typing.Protocol):
+    """Structural view of the stimulus carried by a participated turn."""
+
+    kind: str
+
+
+class ParticipatedTurn(typing.Protocol):
+    """Structural boundary for conversation-owned participated-turn payloads."""
+
+    participation: ParticipationLike
+    stimulus: StimulusLike
+
+
+class ContributionData(pydantic.BaseModel):
+    """Typed conversation product supplied to the bot input boundary."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    conversation_ref: str = pydantic.Field(min_length=1)
+    participant_ref: str = pydantic.Field(min_length=1)
+    stimulus_kind: str = pydantic.Field(min_length=1)
+    perception_modality: str = pydantic.Field(min_length=1)
+
 
 class DecisionInputFactory(typing.Protocol):
     """Build the processing decision input for one participated conversation turn.
@@ -60,18 +100,20 @@ def agent_conversation_decision_input(
     - ``stimulus.kind``
     """
 
-    contribution = typing.cast(typing.Any, participated).participation
-    stimulus = typing.cast(typing.Any, participated).stimulus
+    contribution = typing.cast(ParticipatedTurn, participated).participation
+    stimulus = typing.cast(ParticipatedTurn, participated).stimulus
     host_input = bot.InputEventData(
         target_device=target_device,
         priority=0,
-        source_event="bot.ability.conversation.turn_detector",
-        payload={
-            "conversation_ref": contribution.conversation_ref,
-            "participant_ref": contribution.participant_ref,
-            "stimulus_kind": stimulus.kind,
-            "perception_modality": contribution.perception.modality,
-        },
+        observation=bot.StimulusData(
+            event="bot.ability.conversation.turn_detector",
+            data=ContributionData(
+                conversation_ref=contribution.conversation_ref,
+                participant_ref=contribution.participant_ref,
+                stimulus_kind=stimulus.kind,
+                perception_modality=contribution.perception.modality,
+            ),
+        ),
     )
     actor_map = dict(actors or {})
     schemas, actor_events = processing.collect_offered_events(actor_map)
@@ -85,5 +127,6 @@ def agent_conversation_decision_input(
 
 __all__ = [
     "DecisionInputFactory",
+    "ContributionData",
     "agent_conversation_decision_input",
 ]

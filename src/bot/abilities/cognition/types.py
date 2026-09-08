@@ -6,8 +6,8 @@ import collections.abc
 import typing
 
 import hsm
+import bot
 from bot import event
-from bot import events
 import pydantic
 
 # Model-facing deliberate (System-2) handoff event name. Reasoning owns the event; intuition
@@ -209,13 +209,9 @@ class FailureData(ability.FailureData):
     )
 
 
-OUTPUT_SCHEMA_CONTRACT = typing.cast(
-    pydantic.TypeAdapter[OutputData],
-    pydantic.TypeAdapter(OutputData),
-)
+OUTPUT_SCHEMA_CONTRACT = pydantic.TypeAdapter(OutputData)
 OPTIONAL_OUTPUT_SCHEMA_CONTRACT = typing.cast(
-    pydantic.TypeAdapter[OutputData | None],
-    pydantic.TypeAdapter(OutputData | None),
+    "pydantic.TypeAdapter[OutputData | None]", pydantic.TypeAdapter(OutputData | None)
 )
 OUTPUT_SCHEMA = typing.cast(dict[str, object], OUTPUT_SCHEMA_CONTRACT.json_schema())
 OPTIONAL_OUTPUT_SCHEMA = typing.cast(
@@ -229,7 +225,7 @@ def is_output(value: object) -> typing.TypeGuard[OutputData]:
 
     if not isinstance(value, tuple):
         return False
-    return all(isinstance(item, EventData) for item in value)
+    return all(isinstance(item, EventData) for item in typing.cast(tuple[object, ...], value))
 
 
 def attention_selection_error(
@@ -248,16 +244,16 @@ def attention_selection_error(
     attention policy of its own.
     """
 
-    if selection.event == events.FocusDeviceEvent.name:
+    if selection.event == bot.FocusDeviceEvent.name:
         if selection.target is not None and selection.target != "bot":
             return "Processing selected focus_device outside available device candidates."
-        data = events.FocusDeviceEventData.model_validate(selection.data or {})
+        data = bot.FocusDeviceEventData.model_validate(selection.data or {})
         if enforce_candidates and data.device not in focus_candidates:
             return "Processing selected focus_device outside available device candidates."
         if configured_device_names and data.device not in configured_device_names:
             return "Processing selected focus_device outside available device candidates."
         return None
-    if selection.event == events.ClearFocusEvent.name:
+    if selection.event == bot.ClearFocusEvent.name:
         if selection.target not in (None, "bot"):
             return "Processing selected clear_focus for a non-bot target."
         if not focused_device:
@@ -310,7 +306,7 @@ def attention_bias_for_turn(
     """
 
     focus = focused_device if focused_device is not None and focused_device in device_names else None
-    if isinstance(stimulus, events.InputEventData):
+    if isinstance(stimulus, bot.InputEventData):
         target_reference: str | None = stimulus.target_device
         if target_reference is None and envelope_source:
             target_reference = device_source_refs.get(envelope_source)

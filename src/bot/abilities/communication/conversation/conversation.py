@@ -23,6 +23,7 @@ import datetime
 import typing
 import uuid
 
+from typing import override
 import hsm
 import bot
 import pydantic
@@ -30,7 +31,6 @@ from pydantic.config import JsonDict, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 
 from bot import event
-from bot import events
 from bot.abilities import cognition
 from bot.abilities.listening import interpretation
 from bot import telemetry
@@ -104,7 +104,7 @@ class TurnData(pydantic.BaseModel):
 
     __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
-    parent: SkipJsonSchema[events.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
+    parent: SkipJsonSchema[bot.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
         default=None,
         description=(
             "The exact Listening speech event and typed payload admitted by SpeechHeard. "
@@ -271,9 +271,11 @@ class Message(pydantic.BaseModel):
             if isinstance(value, (bytes, bytearray, memoryview)):
                 return True
             if isinstance(value, dict):
-                return any(contains_media(item) for item in value.values())
+                media_items = typing.cast(dict[str, object], value).values()
+                return any(contains_media(item) for item in media_items)
             if isinstance(value, list | tuple):
-                return any(contains_media(item) for item in value)
+                media_items = typing.cast(list[object] | tuple[object, ...], value)
+                return any(contains_media(item) for item in media_items)
             return False
 
         if contains_media(raw_value):
@@ -325,7 +327,7 @@ class Messages(pydantic.BaseModel):
 
     __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
-    parent: events.StimulusData[TurnData] | None = pydantic.Field(
+    parent: bot.StimulusData[TurnData] | None = pydantic.Field(
         default=None,
         description="The exact typed inbound event that caused this history emission, when one exists.",
     )
@@ -479,7 +481,7 @@ class RoutedInputData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
-    parent: events.StimulusData[TurnData]
+    parent: bot.StimulusData[TurnData]
 
 
 RoutedInputEvent = hsm.Event[RoutedInputData](
@@ -522,7 +524,7 @@ class _InputWorkData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[TurnData]
-    input_parent: events.StimulusData[TurnData] | None = None
+    input_parent: bot.StimulusData[TurnData] | None = None
 
 
 class _InputCancelledData(pydantic.BaseModel):
@@ -562,7 +564,7 @@ class _TurnOperationCompletedData(pydantic.BaseModel):
     )
 
     input: pydantic.SkipValidation[TurnData]
-    input_parent: events.StimulusData[TurnData] | None = None
+    input_parent: bot.StimulusData[TurnData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     turns: tuple[turn_detector.TurnCompleteData, ...] = pydantic.Field(min_length=1)
@@ -575,7 +577,7 @@ class _TurnFailedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: pydantic.SkipValidation[TurnData]
-    input_parent: events.StimulusData[TurnData] | None = None
+    input_parent: bot.StimulusData[TurnData] | None = None
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     failure: FailureData
@@ -695,7 +697,7 @@ def _identity_collection_score(
 def _maximum_identity_assignment(
     scores: list[list[float | None]],
     *,
-    forbidden: collections.abc.Set[tuple[int, int]] = frozenset(),
+    forbidden: collections.abc.Set[tuple[int, int]] | None = None,
 ) -> tuple[float, tuple[int, ...]] | None:
     """Return a deterministic maximum-weight perfect assignment in O(n³).
 
@@ -704,6 +706,8 @@ def _maximum_identity_assignment(
     than a known optimum without enumerating permutations.
     """
 
+    if forbidden is None:
+        forbidden = frozenset()
     size = len(scores)
     if size == 0 or any(len(row) != size for row in scores):
         return None
@@ -830,13 +834,13 @@ def _model_safe_content(content: object) -> MessageContent:
         return None
     if isinstance(content, dict):
         projected: dict[str, MessageContent] = {}
-        for key, item in content.items():
-            if not isinstance(key, str):
-                continue
+        projection_items = typing.cast(dict[str, object], content)
+        for key, item in projection_items.items():
             projected[key] = _model_safe_content(item)
         return typing.cast(MessageContent, projected)
     if isinstance(content, list | tuple):
-        return [_model_safe_content(item) for item in content]
+        projection_items = typing.cast(list[object] | tuple[object, ...], content)
+        return [_model_safe_content(item) for item in projection_items]
     return None
 
 
@@ -998,7 +1002,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _encoding: encoding_module.Encoding[typing.Any, str | bytes] | None
     _memory: ability.Ability[typing.Any, typing.Any] | None
     _history: list[Message]
-    _history_parent: events.StimulusData[TurnData] | None
+    _history_parent: bot.StimulusData[TurnData] | None
 
     def __init__(
         self,
@@ -1325,7 +1329,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
                 instance,
                 dataclasses.replace(
                     _InputWorkEvent.with_data(
-                        _InputWorkData(input=data, input_parent=events.StimulusData.from_event(event))
+                        _InputWorkData(input=data, input_parent=bot.StimulusData.from_event(event))
                     ),
                     id=operation_id,
                     source=event.source or hsm.id(instance),
@@ -1396,7 +1400,8 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     continue
                 try:
                     await hsm.stop(detector, instance.context())
-                    instance._detectors.pop(detector_key, None)
+                    if detector_key in instance._detectors:
+                        del instance._detectors[detector_key]
                     stopped_keys.add(detector_key)
                 except BaseException as error:
                     cleanup_failures.append(f"failed to stop detector {detector_key[1]!r}: {error}")
@@ -1454,13 +1459,11 @@ class Conversation(ability.Ability[TurnData, Messages]):
                 detector = participant.detector or instance._detectors.get(detector_key)
                 if detector is None:
                     detector = instance._turn_detector_factory(relationship_ref, participant.track_ref)
-                    if not isinstance(detector, turn_detector.TurnDetector):
-                        raise TypeError("turn_detector_factory must return a TurnDetector.")
                     operation_detectors[detector_key] = detector
                     provisional_detector_keys.add(detector_key)
                     # This child must outlive this activity; the parent Conversation
                     # context is its lifetime, never the activity context ``ctx``.
-                    await bot.started(instance.context(), detector, detector.owned_model)
+                    _ = await bot.started(instance.context(), detector, detector.owned_model)
                     # The detector is owned by Conversation's context and is
                     # coordinated through one-shot directed operations.
                     ready_operation_id = f"{operation_id}:ready:{participant.track_ref}"
@@ -1585,9 +1588,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
                         or terminal.data.participant_ref != participant.track_ref
                     ):
                         raise RuntimeError(
-                            "Turn detector returned an unrelated completion: "
-                            f"id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} "
-                            f"expected_name={detector.output_event.name!r} data={terminal.data!r}"
+                            f"Turn detector returned an unrelated completion: id={terminal.id!r} source={terminal.source!r} name={terminal.name!r} expected_name={detector.output_event.name!r} data={terminal.data!r}"
                         )
                     terminals.append(terminal.data)
                     active_turn_detector_keys.discard(detector_key)
@@ -1651,7 +1652,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         except asyncio.CancelledError:
             task = asyncio.current_task()
             if not committed and task is not None and task.cancelling() > 0:
-                await rollback(stop_all=True, remove_relationship=True)
+                _ = await rollback(stop_all=True, remove_relationship=True)
             raise
         except Exception as error:
             if stage == "turn_detector" and processing_track_ref is not None:
@@ -1997,6 +1998,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
 
     @classmethod
+    @override
     def define_lifecycle_model(
         cls,
         name: str,

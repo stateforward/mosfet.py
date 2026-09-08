@@ -885,6 +885,12 @@ def _lower_element(
     raise ValueError(f"Unsupported behavior hsm element kind: {kind}.")
 
 
+def _is_element_of_kind(value: object, kind: str) -> typing.TypeGuard[dict[str, object]]:
+    """Narrow untyped model tuples while validating their element kind."""
+
+    return isinstance(value, dict) and typing.cast(dict[str, object], value).get("kind") == kind
+
+
 def _lower_state_elements(
     elements: tuple[object, ...],
     *,
@@ -895,8 +901,7 @@ def _lower_state_elements(
     guarded_indices = {
         index
         for index, raw_element in enumerate(elements)
-        if isinstance(raw_element, dict)
-        and raw_element.get("kind") == "transition"
+        if _is_element_of_kind(raw_element, "transition")
         and _guard_callback(typing.cast(tuple[object, ...], raw_element["elements"])) is not None
     }
     if not guarded_indices:
@@ -916,7 +921,7 @@ def _lower_state_elements(
     ready_elements: list[hsm.Element] = []
     structural_elements: list[hsm.Element] = []
     consumed: set[int] = set()
-    has_nested_state = any(isinstance(item, dict) and item.get("kind") == "state" for item in elements)
+    has_nested_state = any(_is_element_of_kind(item, "state") for item in elements)
     initial_target = _initial_target(elements)
     ready_path = f"{state_path}/guard_ready"
     history_path = f"{state_path}/guard_history"
@@ -1036,27 +1041,25 @@ def _lower_state_elements(
                 )
                 if handles_input:
                     failed_body = (*failed_body, hsm.effect(Behavior.queue_apply_settlement))
+                defer_triggers = tuple(trigger for trigger in candidate_elements if _is_element_of_kind(trigger, "on"))
+                defer_event_refs = [event_ref for trigger in defer_triggers for event_ref in _event_refs(trigger)]
+                defers: tuple[hsm.Element, ...] = (
+                    (
+                        hsm.defer(
+                            *(
+                                _lower_event_ref(event_ref, event_objects=event_objects)
+                                for event_ref in defer_event_refs
+                            )
+                        ),
+                    )
+                    if defer_event_refs
+                    else ()
+                )
                 structural_elements.append(
                     hsm.state(
                         f"guard_candidate_{candidate_index}",
                         hsm.entry(Behavior.request_guard(candidate_id, candidate_callback)),
-                        *(
-                            (
-                                hsm.defer(
-                                    *(
-                                        _lower_event_ref(event_ref, event_objects=event_objects)
-                                        for trigger in candidate_elements
-                                        if isinstance(trigger, dict) and trigger.get("kind") == "on"
-                                        for event_ref in _event_refs(typing.cast(dict[str, object], trigger))
-                                    )
-                                ),
-                            )
-                            if any(
-                                isinstance(trigger, dict) and trigger.get("kind") == "on"
-                                for trigger in candidate_elements
-                            )
-                            else ()
-                        ),
+                        *defers,
                         hsm.transition(
                             hsm.on(_guard_outcome_event(candidate_id, _GuardEvaluationAcceptedEvent.name)),
                             *accepted_body,
@@ -1112,18 +1115,18 @@ def _lower_transition_body(
         if isinstance(item, dict)
         and (item_spec := typing.cast(dict[str, object], item)).get("kind") not in {"on", "after", "guard"}
     )
-    if any(isinstance(item, dict) and item.get("kind") == "target" for item in elements):
+    if any(_is_element_of_kind(item, "target") for item in elements):
         return body
     return (*body, hsm.target(default_target))
 
 
 def _initial_target(elements: tuple[object, ...]) -> str | None:
     for raw_element in elements:
-        if not isinstance(raw_element, dict) or raw_element.get("kind") != "initial":
-            continue
-        for child in typing.cast(tuple[object, ...], raw_element.get("elements", ())):
-            if isinstance(child, dict) and child.get("kind") == "target":
-                return typing.cast(str, child.get("path"))
+        if _is_element_of_kind(raw_element, "initial"):
+            element = raw_element
+            for child in typing.cast(tuple[object, ...], element.get("elements", ())):
+                if _is_element_of_kind(child, "target"):
+                    return typing.cast(str, child.get("path"))
     return None
 
 
@@ -1187,21 +1190,19 @@ def _callback_names(element: dict[str, object]) -> tuple[str, ...]:
 
 
 def _root_initial_transition_elements(model: dict[str, object]) -> tuple[object, ...]:
-    for child in typing.cast(tuple[object, ...], model.get("elements", ())):
-        if not isinstance(child, dict):
-            continue
-        childspec = typing.cast(dict[str, object], child)
-        if childspec.get("kind") != "initial":
-            continue
-        return typing.cast(tuple[object, ...], childspec.get("elements", ()))
+    model_elements = typing.cast(tuple[object, ...], model.get("elements", ()))
+    for child in model_elements:
+        if _is_element_of_kind(child, "initial"):
+            childspec = child
+            return typing.cast(tuple[object, ...], childspec.get("elements", ()))
     raise ValueError("Behavior model must declare a root initial target for generated failure recovery.")
 
 
 def _root_initial_callbacks(model: dict[str, object]) -> tuple[str, ...]:
     callbacks: list[str] = []
     for element in _root_initial_transition_elements(model):
-        if isinstance(element, dict) and element.get("kind") == "effect":
-            callbacks.extend(_callback_names(typing.cast(dict[str, object], element)))
+        if _is_element_of_kind(element, "effect"):
+            callbacks.extend(_callback_names(element))
     return tuple(callbacks)
 
 
@@ -1210,18 +1211,16 @@ def _failure_recovery_elements(model: dict[str, object]) -> tuple[object, ...]:
     guarded_paths = {
         f"/{typing.cast(str, model['name'])}/{typing.cast(str, child['name'])}"
         for child in typing.cast(tuple[object, ...], model.get("elements", ()))
-        if isinstance(child, dict)
-        and child.get("kind") == "state"
+        if _is_element_of_kind(child, "state")
         and any(
-            isinstance(state_element, dict)
-            and state_element.get("kind") == "transition"
+            _is_element_of_kind(state_element, "transition")
             and _guard_callback(typing.cast(tuple[object, ...], state_element["elements"])) is not None
             for state_element in typing.cast(tuple[object, ...], child.get("elements", ()))
         )
     }
     return tuple(
-        {**element, "path": f"{element['path']}/guard_ready"}
-        if isinstance(element, dict) and element.get("kind") == "target" and element.get("path") in guarded_paths
+        {**typed_element, "path": f"{typed_element['path']}/guard_ready"}
+        if _is_element_of_kind(element, "target") and (typed_element := element).get("path") in guarded_paths
         else element
         for element in elements
     )
@@ -1235,7 +1234,7 @@ def _without_initial_callbacks(element: dict[str, object]) -> dict[str, object]:
         "elements": tuple(
             child
             for child in typing.cast(tuple[object, ...], element.get("elements", ()))
-            if not isinstance(child, dict) or child.get("kind") != "effect"
+            if not _is_element_of_kind(child, "effect")
         ),
     }
 

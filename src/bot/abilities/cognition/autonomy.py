@@ -16,6 +16,7 @@ import collections.abc
 import asyncio
 import dataclasses
 import datetime
+import logging
 import typing
 
 import hsm
@@ -36,6 +37,8 @@ from bot.telemetry import span
 from . import episodes
 from . import input
 from . import types
+
+_LOG = logging.getLogger(__name__)
 
 _AUTONOMY_ID_MARKER = ":autonomy:"
 _BEHAVIOR_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
@@ -435,14 +438,7 @@ class _BehaviorOperation(processing.Operation):
     """Behavior-owned operation actor controlled only through typed lifecycle events."""
 
     @classmethod
-    def model_for(
-        cls,
-        *,
-        behavior: ability.Ability[typing.Any, typing.Any],
-        owner: "_CandidateRun",
-        operation_id: str,
-        metadata: dict[str, object],
-    ) -> hsm.Model:
+    def model_for(cls, *, owner: "_CandidateRun", operation_id: str, metadata: dict[str, object]) -> hsm.Model:
         async def start_activity(
             ctx: hsm.Context,
             instance: _BehaviorOperation,
@@ -635,7 +631,6 @@ class _CandidateRun(hsm.Instance):
                 behavior.context(),
                 operation_manager,
                 _BehaviorOperation.model_for(
-                    behavior=behavior,
                     owner=instance,
                     operation_id=behavior_operation_id,
                     metadata=metadata,
@@ -1422,9 +1417,9 @@ def behavior_input_payload(cognition_input: input.InputData) -> object:
         else {"event": payload_value}
     )
     if cognition_input.focus is not None:
-        _ = payload.setdefault("focus", cognition_input.focus)
+        payload["focus"] = cognition_input.focus
     if cognition_input.focus_candidates:
-        _ = payload.setdefault("focus_candidates", list(cognition_input.focus_candidates))
+        payload["focus_candidates"] = list(cognition_input.focus_candidates)
     return payload
 
 
@@ -1455,13 +1450,15 @@ def _coerce_behavior_output(data: object) -> processing.Events | None:
             return None
         return _coerce_behavior_output(result.output)
     if isinstance(data, processing.OutputData):
-        return data.events if data.handled else None
+        if not data.handled or not data.events:
+            return None
+        return data.events
     if isinstance(data, processing.SelectedEvent):
         return (data,)
     selections = processing.coerce_event_selections(data)
     if selections is None:
         return None
-    return selections
+    return selections or None
 
 
 def _candidate_dispatch_trust(origin: CandidateOrigin) -> processing.DispatchTrust:
@@ -1696,13 +1693,14 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         instance: "Autonomy",
         event: hsm.Event[typing.Any],
     ) -> None:
-        del ctx, instance
         failure = (
             event.data
             if isinstance(event.data, ability.FailureData)
             else ability.FailureData(message="Autonomy behavior load failed.")
         )
-        raise RuntimeError(f"Autonomy behavior load failed: {failure.message}")
+        _LOG.warning("Autonomy behavior load failed; continuing without learned behaviors. %s", failure.message)
+        instance._behaviors = ()
+        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
 
     @staticmethod
     def _detach_on_detach(
@@ -2030,7 +2028,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             else:
                 program = candidate.factory()
                 input_adapter = candidate.input_adapter
-            if not isinstance(program, ability.Ability):
+            if not isinstance(typing.cast(object, program), ability.Ability):
                 raise TypeError("Autonomy behavior factory must return an Ability.")
         except Exception as error:
             failure = _CandidateStartFailureData(

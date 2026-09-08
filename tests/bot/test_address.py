@@ -237,3 +237,36 @@ def test_environments_do_not_leak_through_registry() -> None:
     assert f"{first_prefix}/{hsm.id(thing_one)}" in first_paths
     assert f"{second_prefix}/{hsm.id(thing_two)}" in second_paths
     assert not (first_paths & second_paths)
+
+
+def test_bare_context_does_not_fabricate_an_address() -> None:
+    """A bare hsm.Context is not an Environment, so no address is invented for it."""
+
+    import asyncio
+
+    async def run() -> _Thing:
+        thing = _Thing()
+        await _started(hsm.Context(), thing, _Thing.model)
+        return thing
+
+    thing = asyncio.run(run())
+    assert all(value is not thing for _, value in address.under_prefix("/"))
+
+
+def test_register_refreshes_a_torn_down_address() -> None:
+    """``bot.register`` re-establishes the actor's address after explicit teardown."""
+
+    import asyncio
+
+    async def run() -> tuple[str, _Thing]:
+        environment = Environment()
+        thing = _Thing()
+        await _started(environment, thing, _Thing.model)
+        path = address.environment_path(environment.environment_id, hsm.id(thing))
+        address.unregister(path)
+        assert address.resolve(path) is None
+        bot.register(thing, typing.cast(hsm.Model, _Thing.model))
+        return path, thing
+
+    path, thing = asyncio.run(run())
+    assert address.resolve(path) is thing

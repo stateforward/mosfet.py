@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections.abc
 import dataclasses
 import enum
+import os
 import typing
 
 from opentelemetry._logs import SeverityNumber
@@ -18,6 +19,22 @@ _STAGE = "request"
 # Bound recursive walks in ``_jsonable`` (nested mappings/sequences/dataclasses).
 _MAX_JSONABLE_DEPTH = 32
 _JSONABLE_TRUNCATED = "<truncated:max-depth>"
+# Sensitive generator request content (system/user prompts, tools) is never persisted unless the
+# owning runtime explicitly opts in. Telemetry is opt-in for payloads, not a side effect of
+# configuring OTEL export (PY-LOG-002).
+_CAPTURE_PAYLOAD_ENV = "BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD"
+_CAPTURE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _payload_capture_enabled() -> bool:
+    raw = os.environ.get(_CAPTURE_PAYLOAD_ENV, "").strip().lower()
+    return raw in _CAPTURE_VALUES
+
+
+def _size(value: object) -> int | None:
+    if isinstance(value, collections.abc.Sized):
+        return len(value)
+    return None
 
 
 def _pydantic_model_dump(value: object) -> AnyValue | None:
@@ -72,8 +89,10 @@ def record_generator_request(
 ) -> None:
     """Emit an OTEL log for a text-generator request.
 
-    Payload (messages/tools) is placed in the log record body only. Attributes
-    stay low-cardinality: component, provider, optional model, and stage.
+    Payload (messages/tools) is placed in the log record body only when the runtime
+    explicitly opts in via ``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD``. Without that opt-in the
+    record carries low-cardinality request metadata (counts), never prompt/tool content.
+    Attributes stay low-cardinality: component, provider, optional model, and stage.
 
     Emission is a no-op until an application boundary calls ``configure()``.
     This library does not auto-install a LoggerProvider. When ``configure()``
@@ -98,10 +117,18 @@ def record_generator_request(
     if model is not None:
         attributes["model"] = model
 
-    body: dict[str, AnyValue] = {
-        "messages": _jsonable(messages),
-        "tools": _jsonable(tools),
-    }
+    body: dict[str, AnyValue]
+    if _payload_capture_enabled():
+        body = {
+            "messages": _jsonable(messages),
+            "tools": _jsonable(tools),
+        }
+    else:
+        body = {
+            "capture": "disabled",
+            "message_count": _size(messages) if _size(messages) is not None else 0,
+            "tool_count": _size(tools) if _size(tools) is not None else 0,
+        }
     logger = provider_instance.get_logger(_LOGGER_NAME)
     logger.emit(
         # PY-TYPE-003: body values are already AnyValue; emit()'s body param

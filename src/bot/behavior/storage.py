@@ -16,6 +16,7 @@ Autonomy loads only ``status=ACTIVE`` rows.
 
 from __future__ import annotations
 
+import collections.abc
 import datetime
 import json
 import typing
@@ -101,12 +102,12 @@ def _parse_examples(raw: object) -> tuple[str, ...]:
     if not isinstance(raw, str):
         return ()
     try:
-        value = json.loads(raw)
+        value = typing.cast("object", json.loads(raw))
     except json.JSONDecodeError:
         return ()
     if not isinstance(value, list):
         return ()
-    return tuple(item for item in value if isinstance(item, str))
+    return tuple(item for item in typing.cast("list[object]", value) if isinstance(item, str))
 
 
 def _optional_text(raw: object) -> str | None:
@@ -307,15 +308,15 @@ def mark_broken(instance: Instance, *, reason: str | None = None, at: str | None
 
 
 def instances_from_behavior_results(
-    behavior_rows: typing.Sequence[typing.Mapping[str, object]],
-    trigger_rows: typing.Sequence[typing.Mapping[str, object]],
+    behavior_rows: collections.abc.Sequence[collections.abc.Mapping[str, object]],
+    trigger_rows: collections.abc.Sequence[collections.abc.Mapping[str, object]],
 ) -> tuple[Instance, ...]:
     """Build ``Instance`` values from SELECT result row mappings."""
 
     triggers_by_name: dict[str, list[str]] = {}
     for row in trigger_rows:
         behavior_name = row.get("behavior_name")
-        trigger = row.get("trigger")
+        trigger: object | None = row.get("trigger")
         if isinstance(behavior_name, str) and isinstance(trigger, str):
             triggers_by_name.setdefault(behavior_name, []).append(trigger)
 

@@ -92,6 +92,23 @@ class Environment(hsm.Context):
             revived._id = scope._id
         return revived
 
+    @classmethod
+    def reachable(cls, context: hsm.Context) -> "Environment | None":
+        """Resolve the live Environment owning ``context`` without fabricating one.
+
+        Returns ``None`` when ``context`` is not under an Environment scope at all
+        (for example a bare ``hsm.Context``), so callers can skip environment-scoped
+        registration instead of inventing an identity for an actor in no environment.
+        Unlike :meth:`from_context`, it never synthesizes a new Environment.
+        """
+
+        if isinstance(context, cls):
+            return context
+        scope = context.value(_Scope)
+        if isinstance(scope, cls):
+            return scope
+        return None
+
     @property
     def environment_id(self) -> str:
         """This environment's stable identity segment: ``<id>`` in ``/<id>/<actor-id>``.
@@ -290,10 +307,9 @@ def elevate_device_observation_to_input(
     """Elevate one typed device observation into body ``bot.input`` for ``owner``.
 
     Explicit boundary contract owned by environment: body and cognition consume the
-    elevated ``bot.input`` form, never device event names. Coordinates via typed
-    payload (device ``ObservationData``) — every observation elevates
-    unconditionally; the ``source_event`` string rides along as cognition context
-    data and is never branched on for routing. Producers stamp identity and
+    elevated ``bot.input`` form, never device event names. Coordinates via the typed
+    device ``ObservationData.observation`` product — every observation elevates
+    unconditionally and is never branched on for routing. Producers stamp identity and
     provenance at emission (observation ``id``/``source``/``metadata``); this
     preserves them onto the elevated envelope with ``target`` addressed to ``owner``.
     No attachment/device tree walk: the caller passes the explicit ``owner``.
@@ -303,17 +319,16 @@ def elevate_device_observation_to_input(
 
     data = observation.data
     assert isinstance(data, ObservationData)
-    from bot import events as bot_events
+    import bot
 
     _ = hsm.dispatch(
         ctx,
         owner,
         dataclasses.replace(
-            bot_events.InputEvent.with_data(
-                bot_events.InputEventData(
+            bot.InputEvent.with_data(
+                bot.InputEventData(
                     priority=data.priority,
-                    source_event=data.source_event,
-                    payload=data.payload,
+                    observation=data.observation,
                 )
             ),
             id=observation.id or uuid.uuid4().hex,

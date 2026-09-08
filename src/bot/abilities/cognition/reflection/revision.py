@@ -418,6 +418,7 @@ def _revision_input(write: ChangeWriteInput) -> InputData:
 
 
 class Revision(processing.Processing):
+    _attachment_group: attachment.Group | None
     """Create or change one behavior through typed author, validate, retry, and persist states."""
 
     instructions: typing.ClassVar[str] = CHANGE_INSTRUCTIONS
