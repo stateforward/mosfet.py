@@ -67,7 +67,9 @@ async def run_sms_chat_bot() -> int:
         if text.strip():
             message = events.SMSMessageData(text=text)
             phone.receive(message)
-            await body.reply(message)
+            reply = await body.reply(message)
+            if reply is not None:
+                print(f"Bot> {reply.text}", flush=True)
 
 
 def main() -> int:

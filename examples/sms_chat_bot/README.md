@@ -1,27 +1,28 @@
 SMS chat-bot example
 ====================
 
-A minimal SMS chat surface:
+The example intentionally has a small SMS chat surface:
 
-* `SMSPhone` handles incoming and outgoing SMS as its own state machine.
-* `SMSChatBotBody` uses the real `TextGeneration` ability through
-  `ability.run_terminal_operation`.
-* `TextGenerationProvider` builds the provider-backed generation ability.
-
-Event flow:
-
-1. An `SMSMessageEvent` moves the body from `idle` to `generating`.
-2. The `generating` activity calls the attached `TextGeneration` with a typed input event.
-3. Only a real output terminal emits `SMSMessageSentEvent` to the phone.
-4. A failure terminal returns the body to `idle`; it sends no SMS and no fallback answer.
-5. Body terminals are operation correlated, so a late or duplicate terminal from an old turn
-   cannot overwrite a later turn.
+* `SMSPhone` owns incoming and outgoing message histories. It is a small SMS state surface,
+  not itself an HSM state machine.
+* `SMSChatBotBody` turns an `SMSMessageData` into one provider-backed reply through
+  `bot.abilities.language.text.TextGenerator`.
+* The runner constructs that `TextGenerator` from `bot.providers.openai_compat.ChatClient`
+  using `BOT_OPENAI_API_KEY` (or `OPENAI_API_KEY`), `BOT_OPENAI_MODEL`, and
+  `BOT_OPENAI_BASE_URL`.
+* On successful generation with non-empty output, `SMSChatBotBody` calls `SMSPhone.send`.
+* On generation failure or empty output, no SMS is sent: there are no retries and no
+  fallback replies.
+* `SMSMessageData` is the phone-domain `SmsTextData` from `bot.devices.phone`. The example
+  has no `SMSMessageEvent`, `SMSMessageSentEvent`, or idle/generating HSM flow.
 
 Run it:
 
 ```bash
 uv run --project examples/sms_chat_bot sms-chat-bot
 ```
+
+A successful reply prints with a `Bot> ` prefix.
 
 Set `BOT_OPENAI_API_KEY` (or `OPENAI_API_KEY`) plus `BOT_OPENAI_MODEL` and
 `BOT_OPENAI_BASE_URL` in either the repo root `.env` or this example's `.env`.

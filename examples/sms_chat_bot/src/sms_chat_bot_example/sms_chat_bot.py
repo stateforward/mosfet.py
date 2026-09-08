@@ -19,8 +19,8 @@ class SMSChatBotBody:
         self.phone = phone
         self.reply_generator = reply_generator
 
-    async def reply(self, message: events.SMSMessageData) -> None:
-        """Send one provider-backed SMS reply, or no reply if generation fails."""
+    async def reply(self, message: events.SMSMessageData) -> events.SMSMessageData | None:
+        """Send one provider-backed SMS reply and return it, or None if generation fails."""
         try:
             output = await self.reply_generator.generate(
                 text_generation.InputData(
@@ -36,4 +36,6 @@ class SMSChatBotBody:
         except Exception:
             return
         if output.content:
-            self.phone.send(events.SMSMessageData(text=output.content))
+            outgoing_message = events.SMSMessageData(text=output.content)
+            self.phone.send(outgoing_message)
+            return outgoing_message
