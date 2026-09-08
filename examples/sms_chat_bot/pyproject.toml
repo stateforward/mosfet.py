@@ -5,14 +5,16 @@ description = "SMS exchange example: an SMS phone device and a text reply bot."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.bot",
+  "bot-provider-openai-compat",
 ]
 
 [project.scripts]
-sms-chat-bot = "sms_chat_bot_example:main"
-sms-chat-bot-example = "sms_chat_bot_example:main"
+sms-chat-bot = "sms_chat_bot_example.main:main"
+sms-chat-bot-example = "sms_chat_bot_example.main:main"
 
 [tool.uv.sources]
 stateforward-bot = { path = "../..", editable = true }
+bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 
 [dependency-groups]
 dev = [
@@ -42,6 +44,8 @@ include = ["src"]
 extraPaths = [
   "src",
   "../../src",
+  "../../src/providers/openai_compat/src/",
   "../..",
 ]
 pythonVersion = "3.13"
+reportMissingTypeStubs = false
