@@ -8,13 +8,6 @@ import hsm
 from .events import SMSMessageData, SMSMessageEvent, SMSMessageSentEvent
 
 
-class _MessageOwner(typing.Protocol):
-    """Message store boundary read by the phone's event handlers."""
-
-    messages: list[SMSMessageData]
-    sent_messages: list[SMSMessageData]
-
-
 def phone_model() -> hsm.Model:
     """Define the SMS phone model."""
     return hsm.define(
