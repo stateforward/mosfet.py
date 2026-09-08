@@ -1,10 +1,17 @@
 """Local runner for the SMS chat bot example."""
 
-import pathlib
+from __future__ import annotations
 
-from .events import SMSMessageData
+import pathlib
+import asyncio
+
+import hsm
+
+from bot.protocols import attachment
+
+from . import events
 from .phone import SMSPhone
-from .generation import ReplyProvider
+from .generation import TextGenerationProvider
 from .sms_chat_bot import SMSChatBotBody
 
 
@@ -17,30 +24,41 @@ _DEFAULT_ENV_PATHS = (
 )
 
 
-def main() -> int:
-    """Run the offline SMS chat bot example from .env credentials."""
+async def run_sms_chat_bot() -> int:
+    """Run one event-native SMS chat exchange from .env credentials."""
 
-    reply_policy = ReplyProvider.from_values(_load_env())
+    ctx = hsm.Context()
     phone = SMSPhone()
+    generation = TextGenerationProvider.from_values(_load_env())
+    body = SMSChatBotBody(phone=phone, text_generation=generation)
+    surface = hsm.Group(phone, body)
 
-    body = SMSChatBotBody(phone=phone, reply_policy=reply_policy)
+    assert isinstance(generation.model, hsm.Model)
+    _ = await hsm.started(ctx, phone, phone.model)
+    _ = await hsm.started(ctx, generation, generation.model)
+    _ = await hsm.started(ctx, body, body.model)
+
+    _ = await generation.attach(
+        ctx,
+        attachment.AttachEvent.with_data(attachment.AttachData(actor=body)),
+    )
 
     while True:
         try:
-            text = input("You> ")
+            text = await asyncio.to_thread(input, "You> ")
         except EOFError:
             return 0
         if not text.strip():
             continue
+        message = events.SMSMessageData(text=text)
+        _ = await hsm.dispatch(ctx, surface, events.SMSMessageEvent.with_data(message))
 
-        message = SMSMessageData(text=text)
-        phone.messages.append(message)
-        reply = body.reply_policy.reply(message.text)
-        body.replies.append(reply)
 
-        outgoing = SMSMessageData(text=reply)
-        phone.sent_messages.append(outgoing)
-        print(outgoing.text, flush=True)
+def main() -> int:
+    """Run the offline SMS chat bot example from .env credentials."""
+
+    return asyncio.run(run_sms_chat_bot())
+
 
 def _load_env() -> dict[str, str]:
     """Read provider values from the repo root .env then the example-local .env."""

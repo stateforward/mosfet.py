@@ -4,8 +4,18 @@ SMS chat-bot example
 A minimal SMS chat surface:
 
 * `SMSPhone` handles incoming and outgoing SMS as its own state machine.
-* `SMSChatBotBody` turn-stores user messages and sends replies through the same phone surface.
-* `ReplyProvider` drives replies through `bot-provider-openai-compat`.
+* `SMSChatBotBody` uses the real `TextGeneration` ability through
+  `ability.run_terminal_operation`.
+* `TextGenerationProvider` builds the provider-backed generation ability.
+
+Event flow:
+
+1. An `SMSMessageEvent` moves the body from `idle` to `generating`.
+2. The `generating` activity calls the attached `TextGeneration` with a typed input event.
+3. Only a real output terminal emits `SMSMessageSentEvent` to the phone.
+4. A failure terminal returns the body to `idle`; it sends no SMS and no fallback answer.
+5. Body terminals are operation correlated, so a late or duplicate terminal from an old turn
+   cannot overwrite a later turn.
 
 Run it:
 

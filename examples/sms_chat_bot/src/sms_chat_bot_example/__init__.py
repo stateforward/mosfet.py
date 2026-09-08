@@ -1,8 +1,6 @@
 """Minimal SMS phone surface and chatbot body example."""
 
-from .generation import ReplyProvider
+from . import generation
 
 
-__all__ = [
-    "ReplyProvider",
-]
+__all__ = ["generation"]

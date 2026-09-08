@@ -1,8 +1,7 @@
-"""Reply policies for the SMS chatbot example."""
+"""Provider construction for the event-native SMS generation ability."""
 
 from __future__ import annotations
 
-import asyncio
 import collections.abc
 import dataclasses
 
@@ -16,31 +15,19 @@ _DEFAULT_PROVIDER_NAME = "sms_chat_bot"
 
 
 @dataclasses.dataclass(frozen=True)
-class ReplyProvider:
-    """Reply policy backed by a provider-neutral text generator."""
+class TextGenerationProvider:
+    """Build the OpenAI-compatible text generation ability."""
 
     generator: text_generation.TextGenerator
 
-    def reply(self, text: str) -> str:
-        """Compose one message as one user turn."""
-
-        input_data = text_generation.InputData(
-            messages=(text_generation.TextMessage(role=text_generation.TextRole.USER, content=text),),
-        )
-        return asyncio.run(self._reply(input_data))
-
-    async def _reply(self, input_data: text_generation.InputData) -> str:
-        output = await self.generator.generate(input_data)
-        return output.content
-
     @classmethod
-    def from_values(cls, env: collections.abc.Mapping[str, str]) -> "ReplyProvider":
-        """Build the OpenAI-compatible provider from provider env values."""
+    def from_values(cls, env: collections.abc.Mapping[str, str]) -> text_generation.TextGeneration:
+        """Build the OpenAI-compatible `TextGeneration` ability from provider env values."""
 
         api_key = _env_first(env, "BOT_OPENAI_API_KEY", "OPENAI_API_KEY")
         if not api_key:
             raise ValueError("Set BOT_OPENAI_API_KEY or OPENAI_API_KEY to run the SMS chat bot.")
-        return cls(
+        return text_generation.TextGeneration(
             generator=OpenAITextGenerator(
                 client=OpenAIChatClient(
                     model=_env_first(env, "BOT_OPENAI_MODEL", "OPENAI_MODEL") or _DEFAULT_OPENAI_MODEL,
@@ -59,3 +46,5 @@ def _env_first(env: collections.abc.Mapping[str, str], *names: str) -> str | Non
         if value:
             return value
     return None
+
+__all__ = ["TextGenerationProvider"]
