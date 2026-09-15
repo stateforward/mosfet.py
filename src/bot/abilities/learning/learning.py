@@ -33,6 +33,7 @@ from ..cognition.reflection import revision
 import asyncio
 import dataclasses
 import datetime
+import logging
 import typing
 import uuid
 
@@ -45,6 +46,8 @@ from sqlalchemy import select
 from bot.behavior import ChangeData, CreateData
 from bot.protocols import attachment
 from bot.telemetry import observer
+
+_LOG = logging.getLogger(__name__)
 
 _GENERATE_EVENT_NAME = "bot.ability.learning.generate"
 # Durable memory query tag for stored turns (same tag writers use when inserting episodes).
@@ -724,11 +727,11 @@ def _groundable_turns(prior_turns: tuple[RememberedTurn, ...]) -> tuple[Remember
     return tuple(turn for turn in prior_turns if turn.stimulus_name)
 
 
-def _require_memory_runtime_input(
+def _require_runtime_input_grounding(
     generate: GenerateData,
     prior_turns: tuple[RememberedTurn, ...],
     recent_events: tuple[stm.ObservedEvent, ...] = (),
-) -> GenerateData:
+) -> tuple[GenerateData, tuple[str, ...]]:
     """Bind runtime_input to grounded evidence; refuse when stimulus is unknown.
 
     Grounding precedence: remembered turns vouch for stimulus identity and expected
@@ -737,17 +740,23 @@ def _require_memory_runtime_input(
     final stimulus_name. An observation can ground the stimulus on its own, but then no
     expected selection exists — selections come from remembered output, never from
     perception. Nothing is invented when neither source knows the stimulus.
+
+    Returns the grounded generate plus the register entries whose payload carried the
+    evidence (empty when grounding leaned on memory alone); the caller reinforces those
+    entries so used signals outlive arrival churn.
     """
 
     groundable = _groundable_turns(prior_turns)
     face = generate.runtime_input
     observed_payload: dict[str, object] | None = None
+    observed_id: str | None = None
     for observed in recent_events:
         if observed.stimulus_name == face.stimulus_name and observed.payload:
             observed_payload = dict(observed.payload)
+            observed_id = observed.stm_id
             break
     if not groundable:
-        if observed_payload is not None:
+        if observed_payload is not None and observed_id is not None:
             # Register-only grounding: real observed payload, stimulus identity from the
             # lesson's claimed name, and no expected selection (memory was silent).
             preferred = RuntimeInputData(
@@ -756,7 +765,7 @@ def _require_memory_runtime_input(
                 focus=face.focus,
                 focus_candidates=face.focus_candidates,
             )
-            return generate.model_copy(update={"runtime_input": preferred})
+            return generate.model_copy(update={"runtime_input": preferred}), (observed_id,)
         raise TypeError(_no_stimulus_message(prior_turns, recent_events))
     same_stimulus = tuple(turn for turn in groundable if turn.stimulus_name == face.stimulus_name)
     with_output = tuple(turn for turn in groundable if turn.output)
@@ -780,7 +789,13 @@ def _require_memory_runtime_input(
         expected_data=grounded.expected_data if grounded.expected_data is not None else face.expected_data,
         expected_reason=grounded.expected_reason or face.expected_reason,
     )
-    return generate.model_copy(update={"runtime_input": preferred})
+    # Reinforcement ids exist only when the observation's payload actually carried the evidence.
+    used_ids: tuple[str, ...]
+    if observed_payload is not None and final_payload is observed_payload and observed_id is not None:
+        used_ids = (observed_id,)
+    else:
+        used_ids = ()
+    return generate.model_copy(update={"runtime_input": preferred}), used_ids
 
 
 class Learning(ability.Ability[InputData, OutputData]):
@@ -801,7 +816,7 @@ class Learning(ability.Ability[InputData, OutputData]):
     _select_processing: processing.Processing
     _revision: revision.Revision
     _memory: memory.Memory
-    _stm_events: stm.StmEventMemory | None
+    _stm_memory: stm.StmMemory | None
 
     @staticmethod
     def _child_id(instance: "Learning", suffix: str) -> str:
@@ -995,9 +1010,9 @@ class Learning(ability.Ability[InputData, OutputData]):
             )
             return
         recent_events: tuple[stm.ObservedEvent, ...] = ()
-        if instance._stm_events is not None:
+        if instance._stm_memory is not None:
             try:
-                recent_events = instance._stm_events.recent(limit=_RECENT_EVENT_LIMIT)
+                recent_events = instance._stm_memory.recent(limit=_RECENT_EVENT_LIMIT)
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -1158,7 +1173,7 @@ class Learning(ability.Ability[InputData, OutputData]):
             return
         operation_id = select_input.operation_id
         try:
-            generate = _require_memory_runtime_input(
+            generate, reinforced_ids = _require_runtime_input_grounding(
                 _coerce_generate(completion.output),
                 select_input.prior_turns,
                 select_input.recent_events,
@@ -1177,6 +1192,14 @@ class Learning(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
+        # Reconsolidation: the entries whose payload carried this grounding outlive arrival
+        # churn. Reinforcement is best-effort perception upkeep — losing the touch must not
+        # fail a lesson that already grounded (same boundary discipline as the body's record).
+        if reinforced_ids and instance._stm_memory is not None:
+            try:
+                _ = instance._stm_memory.reinforce(reinforced_ids)
+            except Exception as error:
+                _LOG.warning("Learning event register reinforcement failed: %r", error)
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1676,7 +1699,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         decoder: decoding.Decoder[InputData, DecodedData],
         processor: processing.Processor | revision.ProcessorFactory,
         memory: memory.Memory,
-        stm_events: stm.StmEventMemory | None = None,
+        stm_memory: stm.StmMemory | None = None,
     ) -> None:
         super().__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
@@ -1687,7 +1710,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         )
         self._revision = revision.Revision(processor=leaf, memory=memory)
         self._memory = memory
-        self._stm_events = stm_events
+        self._stm_memory = stm_memory
         self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,

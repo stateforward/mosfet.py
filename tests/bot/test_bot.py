@@ -591,7 +591,7 @@ class AbilityAgent(Bot):
         input: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
         output: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
         acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
-        stm_events: memory.StmEventMemory | None = None,
+        stm_memory: memory.StmMemory | None = None,
     ) -> None:
         super().__init__(
             devices=devices,
@@ -599,7 +599,7 @@ class AbilityAgent(Bot):
             input=input,
             output=output,
             acquired_abilities=acquired_abilities,
-            stm_events=stm_events,
+            stm_memory=stm_memory,
         )
         self.actions = []
         self.failures = []
@@ -2101,10 +2101,10 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
 def test_bot_records_environment_stimuli_in_stm_register() -> None:
     """Admitted environment stimuli land in the short-term register, grounded as observed."""
 
-    async def run() -> tuple[memory.StmEventMemory, memory.ObservedEvent | None]:
-        register = memory.StmEventMemory()
+    async def run() -> tuple[memory.StmMemory, memory.ObservedEvent | None]:
+        register = memory.StmMemory()
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(), stm_events=register)
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(), stm_memory=register)
         _ = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)

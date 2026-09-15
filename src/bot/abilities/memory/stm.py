@@ -1,14 +1,15 @@
-"""Short-term memory event register: bounded rolling record of admitted stimuli.
+"""Short-term memory register: bounded rolling record of admitted stimuli.
 
-The register is a sensory working memory at the event layer, not a durable memory stream.
-One row per admitted environment stimulus, written immediately, evicted by count in the
+The register is sensory short-term memory at the event layer, not a durable memory stream.
+One row per admitted environment stimulus, written immediately, evicted by capacity in the
 same transaction. It grounds actors (e.g. Learning) in the actual signal the bot received:
 name, envelope identity, and a bounded scalar payload projection. Raw media, long text, and
 nested structures are dropped by the projection, never stored.
 
-Capacity is a fixed invariant enforced at every write (insert + eviction in one apply);
-staleness is a recall policy (injected recency window) so an idle bot never grounds a
-lesson in an ancient observation.
+Retention is access-reinforced (reconsolidation discipline): grounding an entry stamps its
+access time, and both recall and eviction read the effective clock max(created_at,
+last_accessed_at) — how recently the entry *mattered*, not only when it arrived. Capacity
+remains a fixed count invariant enforced at every write; the recency window is a read-policy.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from . import store
 import collections.abc
 import datetime
 import json
+import logging
 import math
 import typing
 import uuid
@@ -26,8 +28,11 @@ import uuid
 import hsm
 import pydantic
 from sqlalchemy import delete
+from sqlalchemy import func
 from sqlalchemy import insert
 from sqlalchemy import select
+from sqlalchemy import update
+from sqlalchemy.sql.elements import ColumnElement
 
 # Identifier-like projection bound: stimulus payload fields are identifiers, enum-like
 # kinds, and short scalars. Long strings read as prose and are dropped, never truncated.
@@ -39,11 +44,19 @@ _DEFAULT_CAPACITY = 64
 _MAX_LIMIT = 256
 _DEFAULT_RECENCY_WINDOW = datetime.timedelta(minutes=5)
 
+_LOG = logging.getLogger(__name__)
+
 
 def _utc_text(moment: datetime.datetime) -> str:
     """Microsecond UTC ISO text so lexicographic ordering matches chronological ordering."""
 
     return moment.astimezone(datetime.timezone.utc).isoformat()
+
+
+def _effective_time(table: typing.Any) -> ColumnElement[typing.Any]:
+    """The clock retention reads: last access when reinforced, else admission."""
+
+    return func.coalesce(table.c.last_accessed_at, table.c.created_at)
 
 
 class RecordData(pydantic.BaseModel):
@@ -54,7 +67,7 @@ class RecordData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Short-term register record. stimulus_name is the admitted event name; payload "
+                "Short-term memory record. stimulus_name is the admitted event name; payload "
                 "carries only bounded identifier-like scalar projections of the stimulus data."
             ),
             "examples": [
@@ -123,29 +136,36 @@ def _require_projection_field(key: object, value: object) -> None:
 
 
 class ObservedEvent(pydantic.BaseModel):
-    """One register row read back for grounding, newest first when queried."""
+    """One register entry read back for grounding, ordered by the effective clock."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Recent stimulus observed by the bot's event register. payload mirrors what the "
+                "Recent stimulus the bot's short-term memory observed. payload mirrors what the "
                 "admitted environment stimulus looked like as bounded scalar fields; selections "
-                "are never part of it."
+                "are never part of it. stm_id is the handle access reinforcement stamps."
             ),
             "examples": [
                 {
+                    "stm_id": "6b6f1d7a2c5440eab91c9f8e33a74a10",
                     "stimulus_name": "environment.sound",
                     "payload": {"kind": "knock", "source": "device-a"},
                     "event_id": "turn-1",
                     "source": "device-a",
                     "created_at": "2026-07-07T12:00:00.123456+00:00",
+                    "last_accessed_at": None,
                 }
             ],
         },
     )
 
+    stm_id: str = pydantic.Field(
+        min_length=1,
+        description="Register entry handle; access reinforcement stamps this id.",
+        examples=["6b6f1d7a2c5440eab91c9f8e33a74a10"],
+    )
     stimulus_name: str = pydantic.Field(
         min_length=1,
         description="Name of the admitted stimulus event.",
@@ -174,6 +194,13 @@ class ObservedEvent(pydantic.BaseModel):
         min_length=1,
         description="Admission time as UTC ISO text with timezone semantics.",
         examples=["2026-07-07T12:00:00.123456+00:00"],
+    )
+    last_accessed_at: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Access time stamped when grounding used this entry, as UTC ISO text. Effective "
+            "recency is max(created_at, last_accessed_at)."
+        ),
     )
 
 
@@ -243,13 +270,15 @@ def _optional_text(value: store.ParameterValue | object | None) -> str | None:
     return value if isinstance(value, str) else None
 
 
-class StmEventMemory(store.MemoryStore):
-    """Short-term memory of admitted stimuli: fixed-capacity rolling event register.
+class StmMemory(store.MemoryStore):
+    """Short-term memory of admitted stimuli: capacity-bounded, access-reinforced.
 
-    Public surface is two direct primitives (same role as ``MemoryStore.execute``):
+    Public surface is three direct primitives (same role as ``MemoryStore.execute``):
     ``record`` writes one stimulus projection and evicts beyond capacity inside one
-    transaction; ``recent`` reads newest-first entries inside the injected recency
-    window. The inherited generic transaction surface stays available for maintenance.
+    transaction; ``recent`` reads entries inside the recency window ordered by the
+    effective clock; ``reinforce`` stamps access times on entries grounding relied on,
+    so used signals outlive arrival churn. The inherited generic transaction surface
+    stays available for maintenance.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = store.InputData
@@ -282,7 +311,7 @@ class StmEventMemory(store.MemoryStore):
         """Write one admitted stimulus projection and evict beyond capacity in one transaction."""
 
         data = _event_record(event)
-        insert_clause = insert(schema.stm_events_table).values(
+        insert_clause = insert(schema.stm_memory_table).values(
             stm_id=uuid.uuid4().hex,
             stimulus_name=data.stimulus_name,
             payload_json=json.dumps(data.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
@@ -291,15 +320,29 @@ class StmEventMemory(store.MemoryStore):
             target=data.target,
             created_at=_utc_text(self._clock()),
         )
-        evict_clause = delete(schema.stm_events_table).where(
-            schema.stm_events_table.c.stm_id.not_in(
-                select(schema.stm_events_table.c.stm_id)
-                .order_by(schema.stm_events_table.c.created_at.desc(), schema.stm_events_table.c.stm_id.desc())
+        evict_clause = delete(schema.stm_memory_table).where(
+            schema.stm_memory_table.c.stm_id.not_in(
+                select(schema.stm_memory_table.c.stm_id)
+                .order_by(_effective_time(schema.stm_memory_table).desc(), schema.stm_memory_table.c.stm_id.desc())
                 .limit(self._capacity)
             )
         )
         _ = self.execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
         return data
+
+    def reinforce(self, stm_ids: tuple[str, ...]) -> int:
+        """Stamp the effective clock on entries that just carried evidence (reconsolidation)."""
+
+        if not stm_ids:
+            raise ValueError("reinforce requires at least one register entry id.")
+        access_clause = (
+            update(schema.stm_memory_table)
+            .where(schema.stm_memory_table.c.stm_id.in_(stm_ids))
+            .values(last_accessed_at=_utc_text(self._clock()))
+        )
+        output = self.execute(store.InputData(statements=store.compile_statements(access_clause)))
+        _ = output.results[0].rowcount
+        return output.results[0].rowcount
 
     def recent(
         self,
@@ -307,35 +350,37 @@ class StmEventMemory(store.MemoryStore):
         *,
         limit: int = _DEFAULT_CAPACITY,
     ) -> tuple[ObservedEvent, ...]:
-        """Newest-first register entries inside the recency window, optionally per stimulus."""
+        """Effective-clock recency order, optionally per stimulus, inside the window."""
 
         if limit < 1 or limit > _MAX_LIMIT:
             raise ValueError(f"limit must be between 1 and {_MAX_LIMIT}.")
         cutoff = _utc_text(self._clock() - self._recency_window)
-        clause = (
-            select(
-                schema.stm_events_table.c.stimulus_name,
-                schema.stm_events_table.c.payload_json,
-                schema.stm_events_table.c.event_id,
-                schema.stm_events_table.c.source,
-                schema.stm_events_table.c.target,
-                schema.stm_events_table.c.created_at,
-            )
-            .where(schema.stm_events_table.c.created_at >= cutoff)
-            .order_by(schema.stm_events_table.c.created_at.desc(), schema.stm_events_table.c.stm_id.desc())
-            .limit(limit)
-        )
+        effective = _effective_time(schema.stm_memory_table)
+        clause = select(
+            schema.stm_memory_table.c.stm_id,
+            schema.stm_memory_table.c.stimulus_name,
+            schema.stm_memory_table.c.payload_json,
+            schema.stm_memory_table.c.event_id,
+            schema.stm_memory_table.c.source,
+            schema.stm_memory_table.c.target,
+            schema.stm_memory_table.c.created_at,
+            schema.stm_memory_table.c.last_accessed_at,
+        ).where(effective >= cutoff)
         if stimulus_name is not None:
-            clause = clause.where(schema.stm_events_table.c.stimulus_name == stimulus_name)
+            clause = clause.where(schema.stm_memory_table.c.stimulus_name == stimulus_name)
+        clause = clause.order_by(effective.desc(), schema.stm_memory_table.c.stm_id.desc()).limit(limit)
         output = self.execute(store.InputData(statements=store.compile_statements(clause)))
         rows = tuple(row.as_mapping() for row in output.results[0].rows)
         return tuple(self._observed_from_row(row) for row in rows)
 
     @staticmethod
     def _observed_from_row(row: dict[str, store.ParameterValue]) -> ObservedEvent:
+        stm_id = row.get("stm_id")
         stimulus_name = row.get("stimulus_name")
         payload_json = row.get("payload_json")
         created_at = row.get("created_at")
+        if not isinstance(stm_id, str) or not stm_id:
+            raise ValueError("register row is missing stm_id.")
         if not isinstance(stimulus_name, str) or not stimulus_name:
             raise ValueError("register row is missing stimulus_name.")
         if not isinstance(created_at, str) or not created_at:
@@ -347,12 +392,14 @@ class StmEventMemory(store.MemoryStore):
         except ValueError as error:
             raise ValueError(f"register row payload_json is not valid JSON: {error}") from error
         return ObservedEvent(
+            stm_id=stm_id,
             stimulus_name=stimulus_name,
             payload=_projection_payload_from_json(payload),
             event_id=_optional_text(row.get("event_id")),
             source=_optional_text(row.get("source")),
             target=_optional_text(row.get("target")),
             created_at=created_at,
+            last_accessed_at=_optional_text(row.get("last_accessed_at")),
         )
 
 
@@ -360,5 +407,5 @@ __all__ = [
     "MAX_PROJECTION_TEXT_LENGTH",
     "ObservedEvent",
     "RecordData",
-    "StmEventMemory",
+    "StmMemory",
 ]

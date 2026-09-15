@@ -337,7 +337,7 @@ class Bot(hsm.Instance, abc.ABC):
         processing_timeout: datetime.timedelta | None = None,
         deactivation_timeout: datetime.timedelta | None = None,
         attachment_timeout: datetime.timedelta | None = None,
-        stm_events: memory.StmEventMemory | None = None,
+        stm_memory: memory.StmMemory | None = None,
     ) -> None:
         super().__init__()
         if processing_timeout is not None and processing_timeout <= datetime.timedelta():
@@ -365,7 +365,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._input = tuple(input)
         self._output = tuple(output)
         self._acquired_abilities = tuple(acquired_abilities)
-        self._stm_events: memory.StmEventMemory | None = stm_events
+        self._stm_memory: memory.StmMemory | None = stm_memory
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
 
     async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
@@ -640,12 +640,12 @@ class Bot(hsm.Instance, abc.ABC):
             # whose abilities dropped everything. The count is the difference.
             active.set_attribute("bot.stimulus.name", event.name)
             active.set_attribute("bot.ability.input.count", len(instance._input))
-            if instance._stm_events is not None:
+            if instance._stm_memory is not None:
                 # Registration is perception machinery, not interpretation: record what was admitted,
                 # never what it meant. The register is best-effort at this boundary — a peripheral
                 # storage failure must not block admitting the stimulus (body reflex floor).
                 try:
-                    _ = instance._stm_events.record(event)
+                    _ = instance._stm_memory.record(event)
                 except Exception as error:
                     _LOG.warning("Bot stimulus register record failed: %r", error)
             for ability in instance._input:

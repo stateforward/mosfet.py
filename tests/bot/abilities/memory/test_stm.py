@@ -1,4 +1,4 @@
-"""StmEventMemory: bounded rolling register of admitted environment stimuli."""
+"""StmMemory: bounded, access-reinforced short-term memory of admitted stimuli."""
 
 from bot.abilities import memory
 from bot.abilities.memory import stm
@@ -54,7 +54,7 @@ class _SensoryPayload(pydantic.BaseModel):
 
 def test_register_bounds_capacity_to_newest_entries() -> None:
     clock = _ControlledClock()
-    register = memory.StmEventMemory(capacity=2, clock=clock)
+    register = memory.StmMemory(capacity=2, clock=clock)
 
     for mark in "one", "two", "three", "four":
         _ = register.record(_notable_event(mark))
@@ -66,7 +66,7 @@ def test_register_bounds_capacity_to_newest_entries() -> None:
 
 def test_register_recent_orders_newest_first_and_filters_by_name() -> None:
     clock = _ControlledClock()
-    register = memory.StmEventMemory(clock=clock)
+    register = memory.StmMemory(clock=clock)
 
     _ = register.record(_notable_event("ring-1"))
     _advance(clock, 1.0)
@@ -86,7 +86,7 @@ def test_register_recent_orders_newest_first_and_filters_by_name() -> None:
 
 def test_register_recency_window_excludes_stale_observations() -> None:
     clock = _ControlledClock()
-    register = memory.StmEventMemory(recency_window=datetime.timedelta(minutes=10), clock=clock)
+    register = memory.StmMemory(recency_window=datetime.timedelta(minutes=10), clock=clock)
 
     _ = register.record(_notable_event("first"))
     assert [entry.payload["source"] for entry in register.recent(limit=16)] == ["first"]
@@ -101,7 +101,7 @@ def test_register_recency_window_excludes_stale_observations() -> None:
 
 
 def test_register_projection_keeps_bounded_scalars_only() -> None:
-    register = memory.StmEventMemory()
+    register = memory.StmMemory()
 
     long_id = "d" * (stm.MAX_PROJECTION_TEXT_LENGTH + 1)
     sound = _sound_event(
@@ -125,7 +125,7 @@ def test_register_projection_keeps_bounded_scalars_only() -> None:
 
 
 def test_register_records_envelope_identity() -> None:
-    register = memory.StmEventMemory()
+    register = memory.StmMemory()
     event = _notable_event("device-b")
     enveloped = dataclasses.replace(event, id="turn-1", source="device-b", target="bot")
 
@@ -147,20 +147,20 @@ def test_register_survives_restart_on_file_backed_store(tmp_path: pathlib.Path) 
     database = str(tmp_path / "register.db")
     dom_id = uuid.uuid4().hex
 
-    writer = memory.StmEventMemory(database=database)
+    writer = memory.StmMemory(database=database)
     _ = writer.record(_notable_event(dom_id))
 
-    reopened = memory.StmEventMemory(database=database)
+    reopened = memory.StmMemory(database=database)
     recent = reopened.recent(limit=16)
     assert [entry.payload["source"] for entry in recent] == [dom_id]
 
 
 def test_register_rejects_invalid_configuration() -> None:
     with pytest.raises(ValueError):
-        memory.StmEventMemory(capacity=0)
+        memory.StmMemory(capacity=0)
     with pytest.raises(ValueError):
-        memory.StmEventMemory(recency_window=datetime.timedelta(0))
-    register = memory.StmEventMemory()
+        memory.StmMemory(recency_window=datetime.timedelta(0))
+    register = memory.StmMemory()
     with pytest.raises(ValueError):
         _ = register.recent(limit=0)
     with pytest.raises(ValueError):
@@ -170,3 +170,51 @@ def test_register_rejects_invalid_configuration() -> None:
 def test_register_record_data_rejects_unbounded_text() -> None:
     with pytest.raises(ValueError):
         memory.RecordData(stimulus_name="environment.sound", payload={"note": "z" * 64})
+
+
+def test_register_reinforcement_extends_retention_beyond_arrival() -> None:
+    """Access-stamped entries outlive arrival churn: reconsolidation, not recency-of-ingress."""
+
+    clock = _ControlledClock()
+    register = memory.StmMemory(capacity=2, recency_window=datetime.timedelta(hours=24), clock=clock)
+
+    _ = register.record(_notable_event("used"))
+    _advance(clock, 6 * 60)
+    _ = register.record(_notable_event("churn"))
+    # A grounding pass touches the entry it used, one minute after churn arrived, so the
+    # access stamp strictly outranks churn's arrival stamp (no tie on the effective clock).
+    # Grounding selects by evidence, not by slot: pick the row whose payload is the used signal.
+    _advance(clock, 60)
+    matches = [entry for entry in register.recent("environment.sound", limit=10) if entry.payload["source"] == "used"]
+    _ = register.reinforce((matches[0].stm_id,))
+    _advance(clock, 5 * 60)
+    _ = register.record(_notable_event("latest"))
+
+    # Capacity 2: eviction keeps the top two by effective clock — the reinforced "used"
+    # entry (accessed just before the last churn) survives; the untouched churn entry dies.
+    recent = register.recent(limit=16)
+    assert [entry.payload["source"] for entry in recent] == ["latest", "used"]
+
+
+def test_register_reinforced_entry_stays_visible_to_effective_recency() -> None:
+    """A touched ancient entry is still recallable — access recency, not arrival recency."""
+
+    clock = _ControlledClock()
+    register = memory.StmMemory(recency_window=datetime.timedelta(minutes=10), clock=clock)
+
+    _ = register.record(_notable_event("old-signal"))
+    entry_id = register.recent("environment.sound", limit=10)[0].stm_id
+    _advance(clock, 20 * 60)
+    # Twenty minutes past admission and outside the ten-minute window: invisible.
+    assert register.recent("environment.sound", limit=10) == ()
+    # Reinforcing the entry makes it accessible again through its access recency.
+    _ = register.reinforce((entry_id,))
+    recent = register.recent("environment.sound", limit=10)
+    assert [entry.payload["source"] for entry in recent] == ["old-signal"]
+    assert recent[0].last_accessed_at is not None
+    assert recent[0].stm_id == entry_id
+
+def test_register_reinforce_rejects_empty_ids() -> None:
+    register = memory.StmMemory()
+    with pytest.raises(ValueError):
+        _ = register.reinforce(())
