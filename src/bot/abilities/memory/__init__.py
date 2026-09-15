@@ -15,6 +15,7 @@ from . import (
     payload,
     schema,
     short_term,
+    stm,
     store,
 )
 from bot.abilities.memory.associative import AssociativeMemory
@@ -45,7 +46,8 @@ from bot.abilities.memory.memory import (
     StatementResult,
     memory_model,
 )
-from bot.abilities.memory.schema import memory_table, metadata
+from bot.abilities.memory.schema import STM_EVENTS_TABLE, memory_table, metadata, stm_events_table
+from bot.abilities.memory.stm import ObservedEvent, RecordData, StmEventMemory
 from bot.abilities.memory.store import compile_statement, compile_statements
 from bot.abilities.memory.payload import (
     DecodeData,
@@ -67,6 +69,7 @@ from bot.abilities.memory.store import (
 
 __all__ = [
     "MEMORY_TABLE",
+    "STM_EVENTS_TABLE",
     "AssociativeMemory",
     "CandidateData",
     "DecodeData",
@@ -93,10 +96,13 @@ __all__ = [
     "MemoryRecord",
     "MemoryStore",
     "MemoryVector",
+    "ObservedEvent",
     "OutputData",
     "ParameterValue",
+    "RecordData",
     "Row",
     "ShortTermMemory",
+    "StmEventMemory",
     "SourceData",
     "Statement",
     "StatementResult",
@@ -113,5 +119,7 @@ __all__ = [
     "payload",
     "schema",
     "short_term",
+    "stm",
+    "stm_events_table",
     "store",
 ]

@@ -1,9 +1,10 @@
-"""Learning: decode a lesson, ground runtime input in memory, then author a behavior.
+"""Learning: decode a lesson, ground runtime input in evidence, then author a behavior.
 
 Unlike Reflection (one live turn), Learning starts from external material. It does **not** import
-peer ability packages to learn event contracts. The only source of live-input knowledge is memory:
-recalled remembered turns supply stimulus_name, focus, and prior selections. If memory cannot name
-a stimulus, Learning fails closed.
+peer ability packages to learn event contracts. Ground truth for live-input knowledge is evidence
+from two sources: remembered turns in memory (stimulus_name, focus, and prior selections) and the
+bot's event register (recent admitted stimuli with bounded payload projections). If neither can
+name the claimed stimulus, Learning fails closed.
 
 Topology (children attached; never call child private methods)::
 
@@ -20,6 +21,7 @@ from .. import ability
 from .. import decoding
 from .. import memory
 from .. import processing
+from ..memory import stm
 
 # Revision's InputData still requires cognition-shaped turn fields. These imports exist only for
 # that authoring handoff — Learning never uses them to discover peer ability event contracts.
@@ -48,17 +50,23 @@ _GENERATE_EVENT_NAME = "bot.ability.learning.generate"
 # Durable memory query tag for stored turns (same tag writers use when inserting episodes).
 _REMEMBERED_TURN_QUERY = "cognitive_episode"
 
+# Register recall bound for grounding: enough recent stimuli to cover the signals the bot
+# actually received in the last window while keeping the model-facing select input small.
+_RECENT_EVENT_LIMIT = 32
+
 GENERATE_INSTRUCTIONS = (
     "You are the Learning generate step. Input is decoded lesson material (decoded.text, optional "
-    "decoded.kind) plus prior_turns recalled from memory (real past turns).\n"
-    "Honesty: runtime_input must be grounded in prior_turns. Use a turn's stimulus_name, "
-    "focus, focus_candidates, and a selection from turn.output as expected_event/target/data/reason. "
-    "Prefer the most recent turn that fits the lesson. You may only add payload fields that fit "
-    "that known stimulus (memory stores stimulus_name and output, not full raw media). Do not invent "
-    "a stimulus_name, device API, or expected event that is not supported by prior_turns.\n"
-    "If prior_turns is empty or has no usable stimulus_name, Learning will fail closed — do not "
-    "pretend to know the live input. Learning does not consult other abilities for event contracts; "
-    "memory is the only ground truth.\n"
+    "decoded.kind) plus prior_turns recalled from memory (real past turns) and recent_events "
+    "observed by the bot's event register (real admitted stimuli).\n"
+    "Honesty: runtime_input must be grounded in evidence. stimulus_name, focus, focus_candidates, "
+    "and a selection from prior_turns supply the stimulus identity and expected selection. "
+    "recent_events (same stimulus) supply what the live payload looks like — a real example for "
+    "runtime_input.payload. Prefer the most recent evidence that fits the lesson. Do not invent "
+    "a stimulus_name, device API, expected event, or payload field that is not supported by "
+    "prior_turns or recent_events.\n"
+    "If prior_turns names no stimulus and recent_events has no matching observation, Learning will "
+    "fail closed — do not pretend to know the live input. Learning does not consult other abilities "
+    "for event contracts; memory and the event register are the only ground truth.\n"
     "Inventory: inventory_event is bot.behavior.create or bot.behavior.change. Triggers derive from "
     "runtime_input.stimulus_name (plus optional extra_triggers). Set reason to the decoded lesson "
     "text. Omit source — Revision authors Starlark later. Exactly one "
@@ -66,21 +74,23 @@ GENERATE_INSTRUCTIONS = (
 )
 
 
-def _no_stimulus_message(prior_turns: tuple["RememberedTurn", ...]) -> str:
+def _no_stimulus_message(prior_turns: tuple["RememberedTurn", ...], recent_events: tuple[stm.ObservedEvent, ...]) -> str:
     """Fail-closed refusal that names what recall actually returned.
 
     Recall succeeded here — the operator must be able to tell "memory is empty" from "memory has
     turns but none record a stimulus_name", and neither from a recall error (raised separately).
     """
 
-    if not prior_turns:
+    if not prior_turns and not recent_events:
         return (
             "Learning cannot determine the input stimulus: memory recall returned no remembered "
-            "turns. Refuse to invent runtime_input; store real turns first."
+            "turns and the event register returned no recent observations. Refuse to invent "
+            "runtime_input; store real turns or admit real stimuli first."
         )
     return (
-        f"Learning cannot determine the input stimulus: {len(prior_turns)} remembered turn(s) "
-        "recalled but none record a stimulus_name. Refuse to invent runtime_input."
+        f"Learning cannot determine the input stimulus: {len(prior_turns)} remembered turn(s) and "
+        f"{len(recent_events)} recent event(s) ground nothing — none record a usable stimulus_name. "
+        "Refuse to invent runtime_input."
     )
 
 
@@ -405,6 +415,13 @@ class SelectInput(pydantic.BaseModel):
         default=(),
         description="Remembered turns recalled from memory before generate (sole input ground truth).",
     )
+    recent_events: tuple[stm.ObservedEvent, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Recent stimuli observed by the bot's event register (newest first). A matching "
+            "recent event is a real example of the live payload for runtime_input."
+        ),
+    )
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
 
@@ -432,6 +449,7 @@ class _DecodedEventData(pydantic.BaseModel):
     turn: InputData
     decoded: DecodedData
     prior_turns: tuple[RememberedTurn, ...] = ()
+    recent_events: tuple[stm.ObservedEvent, ...] = ()
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
 
@@ -709,24 +727,52 @@ def _groundable_turns(prior_turns: tuple[RememberedTurn, ...]) -> tuple[Remember
 def _require_memory_runtime_input(
     generate: GenerateData,
     prior_turns: tuple[RememberedTurn, ...],
+    recent_events: tuple[stm.ObservedEvent, ...] = (),
 ) -> GenerateData:
-    """Bind runtime_input to remembered turns; refuse when stimulus is unknown."""
+    """Bind runtime_input to grounded evidence; refuse when stimulus is unknown.
+
+    Grounding precedence: remembered turns vouch for stimulus identity and expected
+    selections; a matching register observation vouches for the live payload shape. A
+    payload from the register replaces the invented example only when it matches the
+    final stimulus_name. An observation can ground the stimulus on its own, but then no
+    expected selection exists — selections come from remembered output, never from
+    perception. Nothing is invented when neither source knows the stimulus.
+    """
 
     groundable = _groundable_turns(prior_turns)
-    if not groundable:
-        raise TypeError(_no_stimulus_message(prior_turns))
     face = generate.runtime_input
+    observed_payload: dict[str, object] | None = None
+    for observed in recent_events:
+        if observed.stimulus_name == face.stimulus_name and observed.payload:
+            observed_payload = dict(observed.payload)
+            break
+    if not groundable:
+        if observed_payload is not None:
+            # Register-only grounding: real observed payload, stimulus identity from the
+            # lesson's claimed name, and no expected selection (memory was silent).
+            preferred = RuntimeInputData(
+                stimulus_name=face.stimulus_name,
+                payload=observed_payload,
+                focus=face.focus,
+                focus_candidates=face.focus_candidates,
+            )
+            return generate.model_copy(update={"runtime_input": preferred})
+        raise TypeError(_no_stimulus_message(prior_turns, recent_events))
     same_stimulus = tuple(turn for turn in groundable if turn.stimulus_name == face.stimulus_name)
     with_output = tuple(turn for turn in groundable if turn.output)
     candidates = same_stimulus or with_output or groundable
     grounded = _grounded_from_turn(candidates[-1])
     if grounded is None:
-        raise TypeError(_no_stimulus_message(prior_turns))
+        raise TypeError(_no_stimulus_message(prior_turns, recent_events))
     # Memory is authoritative for stimulus identity and expected selection; the example payload
+    # is grounded in the register's observation of that same stimulus when one exists, else it
     # stays the model's, already bounded to live-stimulus shape by RuntimeInputData validation.
+    final_payload = observed_payload if observed_payload is not None else face.payload
+    if observed_payload is not None and grounded.stimulus_name != face.stimulus_name:
+        final_payload = face.payload
     preferred = RuntimeInputData(
         stimulus_name=grounded.stimulus_name,
-        payload=face.payload,
+        payload=final_payload,
         focus=grounded.focus if grounded.focus is not None else face.focus,
         focus_candidates=grounded.focus_candidates or face.focus_candidates,
         expected_event=grounded.expected_event or face.expected_event,
@@ -755,6 +801,7 @@ class Learning(ability.Ability[InputData, OutputData]):
     _select_processing: processing.Processing
     _revision: revision.Revision
     _memory: memory.Memory
+    _stm_events: stm.StmEventMemory | None
 
     @staticmethod
     def _child_id(instance: "Learning", suffix: str) -> str:
@@ -924,8 +971,8 @@ class Learning(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
-        # Memory first: only source of live-input knowledge (no peer ability inventory).
-        # A recall failure is not "nothing is remembered" — surface it as its own typed failure.
+        # Memory first for selections; the event register for live payload shape. A recall
+        # failure is not "nothing is remembered" — surface it as its own typed failure.
         try:
             prior_turns = _recall_prior_turns(instance._memory)
         except Exception as error:
@@ -947,6 +994,29 @@ class Learning(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
+        recent_events: tuple[stm.ObservedEvent, ...] = ()
+        if instance._stm_events is not None:
+            try:
+                recent_events = instance._stm_events.recent(limit=_RECENT_EVENT_LIMIT)
+            except Exception as error:
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _StageFailedEvent.with_data(
+                            _StageFailedData(
+                                failure=ability.FailureData(message=f"Learning event register recall failed: {error}"),
+                                operation_id=operation_id,
+                                generation=generation,
+                            )
+                        ),
+                        id=operation_id,
+                        source=hsm.id(instance),
+                        target=hsm.id(instance),
+                        metadata=dict(event.metadata),
+                    ),
+                )
+                return
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -956,6 +1026,7 @@ class Learning(ability.Ability[InputData, OutputData]):
                         turn=turn,
                         decoded=decoded,
                         prior_turns=prior_turns,
+                        recent_events=recent_events,
                         operation_id=operation_id,
                         generation=generation,
                     )
@@ -989,6 +1060,7 @@ class Learning(ability.Ability[InputData, OutputData]):
                 turn=data.turn,
                 decoded=data.decoded,
                 prior_turns=data.prior_turns,
+                recent_events=data.recent_events,
                 operation_id=data.operation_id,
                 generation=data.generation,
             ),
@@ -1089,6 +1161,7 @@ class Learning(ability.Ability[InputData, OutputData]):
             generate = _require_memory_runtime_input(
                 _coerce_generate(completion.output),
                 select_input.prior_turns,
+                select_input.recent_events,
             )
         except Exception as error:
             _ = hsm.dispatch(
@@ -1603,6 +1676,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         decoder: decoding.Decoder[InputData, DecodedData],
         processor: processing.Processor | revision.ProcessorFactory,
         memory: memory.Memory,
+        stm_events: stm.StmEventMemory | None = None,
     ) -> None:
         super().__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
@@ -1613,6 +1687,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         )
         self._revision = revision.Revision(processor=leaf, memory=memory)
         self._memory = memory
+        self._stm_events = stm_events
         self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,

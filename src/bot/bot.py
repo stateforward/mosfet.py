@@ -1,4 +1,5 @@
 from bot.abilities import cognition
+from bot.abilities import memory
 from bot.abilities import processing
 from bot.abilities.communication.conversation import conversation
 
@@ -7,6 +8,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import logging
 import typing
 import uuid
 import weakref
@@ -27,6 +29,8 @@ from bot.telemetry import control
 from bot.telemetry import observer
 from bot.telemetry import span
 from bot.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
+
+_LOG = logging.getLogger(__name__)
 
 _DEFAULT_BOT_PROCESSING_TIMEOUT = datetime.timedelta(minutes=5)
 _DEFAULT_BOT_DEACTIVATION_TIMEOUT = datetime.timedelta(minutes=5)
@@ -333,6 +337,7 @@ class Bot(hsm.Instance, abc.ABC):
         processing_timeout: datetime.timedelta | None = None,
         deactivation_timeout: datetime.timedelta | None = None,
         attachment_timeout: datetime.timedelta | None = None,
+        stm_events: memory.StmEventMemory | None = None,
     ) -> None:
         super().__init__()
         if processing_timeout is not None and processing_timeout <= datetime.timedelta():
@@ -360,6 +365,7 @@ class Bot(hsm.Instance, abc.ABC):
         self._input = tuple(input)
         self._output = tuple(output)
         self._acquired_abilities = tuple(acquired_abilities)
+        self._stm_events: memory.StmEventMemory | None = stm_events
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
 
     async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
@@ -634,6 +640,14 @@ class Bot(hsm.Instance, abc.ABC):
             # whose abilities dropped everything. The count is the difference.
             active.set_attribute("bot.stimulus.name", event.name)
             active.set_attribute("bot.ability.input.count", len(instance._input))
+            if instance._stm_events is not None:
+                # Registration is perception machinery, not interpretation: record what was admitted,
+                # never what it meant. The register is best-effort at this boundary — a peripheral
+                # storage failure must not block admitting the stimulus (body reflex floor).
+                try:
+                    _ = instance._stm_events.record(event)
+                except Exception as error:
+                    _LOG.warning("Bot stimulus register record failed: %r", error)
             for ability in instance._input:
                 # Stamped on the way out: the ability handles this on its own task, where the
                 # ambient context is bring-up's, not this stimulus's.

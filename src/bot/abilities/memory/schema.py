@@ -16,6 +16,9 @@ from sqlalchemy import func
 # Logical table name (dialect-neutral identifier).
 MEMORY_TABLE = "bot_memory"
 
+# Logical table name for the short-term memory event register (dialect-neutral identifier).
+STM_EVENTS_TABLE = "bot_stm_events"
+
 metadata = MetaData()
 
 memory_table = Table(
@@ -44,8 +47,29 @@ from bot.behavior import storage  # noqa: E402, F401
 
 _ = storage.behavior_table
 
+# Short-term memory event register: one row per admitted environment stimulus. Payload
+# projections are bounded scalar fields only (identifier-like values, never media or prose);
+# capacity is enforced by the recording ability, not by the schema.
+stm_events_table = Table(
+    STM_EVENTS_TABLE,
+    metadata,
+    Column("stm_id", Text, primary_key=True),
+    Column("stimulus_name", Text, nullable=False),
+    Column("payload_json", Text, nullable=False, server_default="{}"),
+    Column("event_id", Text, nullable=True),
+    Column("source", Text, nullable=True),
+    Column("target", Text, nullable=True),
+    # Written by the recording ability with microsecond UTC precision so lexicographic
+    # ordering matches chronological ordering across dialects that store this as text.
+    Column("created_at", Text, nullable=False),
+    Index("bot_stm_events_recent_idx", "stimulus_name", "created_at"),
+    Index("bot_stm_events_created_idx", "created_at"),
+)
+
 __all__ = [
     "MEMORY_TABLE",
+    "STM_EVENTS_TABLE",
     "memory_table",
     "metadata",
+    "stm_events_table",
 ]

@@ -591,6 +591,7 @@ class AbilityAgent(Bot):
         input: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
         output: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
         acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
+        stm_events: memory.StmEventMemory | None = None,
     ) -> None:
         super().__init__(
             devices=devices,
@@ -598,6 +599,7 @@ class AbilityAgent(Bot):
             input=input,
             output=output,
             acquired_abilities=acquired_abilities,
+            stm_events=stm_events,
         )
         self.actions = []
         self.failures = []
@@ -2094,6 +2096,49 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     # Listening has no visual transition; fan-out must not feed raw visual into cognition.
     assert calls == []
     assert state.endswith("/active/unfocused")
+
+
+def test_bot_records_environment_stimuli_in_stm_register() -> None:
+    """Admitted environment stimuli land in the short-term register, grounded as observed."""
+
+    async def run() -> tuple[memory.StmEventMemory, memory.ObservedEvent | None]:
+        register = memory.StmEventMemory()
+        ability = IgnoreAbility()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=(), stm_events=register)
+        _ = await start_bot_with_devices(active_bot)
+        sound = SoundEvent.with_data(
+            SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        )
+        await active_bot.dispatch(active_bot.context(), sound)
+        recent = register.recent("environment.sound", limit=10)
+        return register, recent[0] if recent else None
+
+    _, observed = asyncio.run(run())
+    assert observed is not None
+    assert observed.stimulus_name == "environment.sound"
+    # Identity-like scalars are kept; media bytes are dropped by the projection.
+    assert observed.payload["sample_rate_hz"] == 48_000
+    assert observed.payload["channels"] == 1
+    assert observed.payload["media_type"] == "audio/pcm"
+    assert "audio" not in observed.payload
+
+
+def test_bot_without_register_admits_stimuli_normally() -> None:
+    """The register is optional: compositions without one behave exactly as before."""
+
+    async def run() -> str:
+        ability = IgnoreAbility()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=())
+        _ = await start_bot_with_devices(active_bot)
+        sound = SoundEvent.with_data(
+            SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        )
+        await active_bot.dispatch(active_bot.context(), sound)
+        return active_bot.state() or ""
+
+    state = asyncio.run(run())
+    # The stimulus was admitted through the fan-out without the register attached.
+    assert state.startswith("/Bot/active"), state
 
 
 def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:

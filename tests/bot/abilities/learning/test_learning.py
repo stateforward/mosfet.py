@@ -231,6 +231,127 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
     assert output.behavior.name == "AnswerIncomingRing"
 
 
+def _seed_register_knock(register: memory.StmEventMemory) -> None:
+    event = hsm.Event[object](name="environment.sound", schema=object).with_data(
+        {"kind": "phone.ringing", "call_id": "incoming-call"}
+    )
+    _ = register.record(dataclasses.replace(event, id="turn-1", source="phone", target="bot"))
+
+
+def _selection_with_invented_payload() -> processing.Events:
+    """Generate selection whose payload is invented (not observed) and whose expectation is wrong.
+
+    Grounding must replace the invented payload from real evidence and discard the invented
+    expectation when no remembered turn vouches for it.
+    """
+
+    return (
+        processing.SelectedEvent(
+            event=learning.GenerateEvent.name,
+            data={
+                "event": learning.GenerateEvent.name,
+                "inventory_event": "bot.behavior.create",
+                "name": "AnswerIncomingRing",
+                "reason": "When the phone rings, answer it.",
+                "lesson_kind": "instruction",
+                "runtime_input": {
+                    "stimulus_name": "environment.sound",
+                    "payload": {"kind": "invented"},
+                    "focus": "phone",
+                    "focus_candidates": ["phone"],
+                    "expected_event": "bot.focus_device",
+                    "expected_data": {"device": "phone"},
+                },
+            },
+            reason="When the phone rings, answer it.",
+        ),
+    )
+
+
+def _ring_write() -> behavior.ChangeData:
+    return behavior.ChangeData(
+        name="AnswerIncomingRing",
+        triggers=("environment.sound",),
+        reason="When the phone rings, answer it.",
+        source=ANSWER_RING_BEHAVIOR_SOURCE,
+    )
+
+
+def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
+    """No remembered turns, but the register observed the stimulus: payload comes from perception.
+
+    Register-only grounding vouches for the live payload but never for a selection, so the
+    invented expected_* fields are dropped rather than authored into standing behavior.
+    """
+
+    async def run() -> learning.OutputData:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        register = memory.StmEventMemory()
+        _seed_register_knock(register)
+        processor = LearningTestProcessor(
+            selection=_selection_with_invented_payload(),
+            write=_ring_write(),
+        )
+        ability = Learning(
+            decoder=TextDecoder(),
+            processor=processor,
+            memory=store,
+            stm_events=register,
+        )
+        return await dispatch_ability_for_test(
+            ability,
+            None,
+            learning.InputData(content="When the phone rings, answer it."),
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
+        )
+
+    output = asyncio.run(run())
+    assert output.runtime_input.stimulus_name == "environment.sound"
+    # The invented payload is replaced by what the register actually observed on that stimulus.
+    assert output.runtime_input.payload == {"kind": "phone.ringing", "call_id": "incoming-call"}
+    # Focus survives from the lesson turn; selections do not (only remembered output vouches).
+    assert output.runtime_input.focus == "phone"
+    assert output.runtime_input.expected_event is None
+    assert output.runtime_input.expected_data is None
+    assert output.behavior.name == "AnswerIncomingRing"
+
+
+def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
+    """Memory vouches for stimulus identity and selection; the register vouches for the payload."""
+
+    async def run() -> learning.OutputData:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        _seed_ring_episode(store)
+        register = memory.StmEventMemory()
+        _seed_register_knock(register)
+        processor = LearningTestProcessor(
+            selection=_selection_with_invented_payload(),
+            write=_ring_write(),
+        )
+        ability = Learning(
+            decoder=TextDecoder(),
+            processor=processor,
+            memory=store,
+            stm_events=register,
+        )
+        return await dispatch_ability_for_test(
+            ability,
+            None,
+            learning.InputData(content="When the phone rings, answer it."),
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
+        )
+
+    output = asyncio.run(run())
+    assert output.runtime_input.payload == {"kind": "phone.ringing", "call_id": "incoming-call"}
+    # Expected selection still comes from the remembered episode, not from perception.
+    assert output.runtime_input.expected_event == "phone.answer_call"
+    assert output.runtime_input.expected_target == "phone"
+    assert output.runtime_input.expected_data == {"call_id": "from-memory"}
+    assert output.behavior.name == "AnswerIncomingRing"
+
+
 def _seed_ring_episode(store: memory.Memory) -> None:
     episode = episodes.CognitiveEpisode(
         focus="phone",
