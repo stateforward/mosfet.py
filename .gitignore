@@ -21,3 +21,11 @@ web/test-results/
 web/playwright-report/
 web/blob-report/
 web/playwright/.cache/
+
+# Agent workspace state (task comments, goal scripts, lane ledgers, test dumps)
+.agents/
+.goals/
+.pi-subagents/
+goal/
+comments/
+test-results/
