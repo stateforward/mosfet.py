@@ -23,14 +23,20 @@ import time
 import typing
 
 import hsm
+from bot import abilities
+from bot import telemetry
+from bot.telemetry import span
 from multiprocessing.connection import Connection
 from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from starlark_go import Starlark, configure_starlark
 
-from bot import abilities
-from bot import telemetry
-from bot.telemetry import span
+# Process-start serialization: the warm worker boots the shared forkserver; a callback
+# worker that forks while that bootstrap is still running dies with the interpreter's
+# "bootstrapping phase" failure, which surfaced as an E0008 apply timeout. All starts in
+# this module hold one lock so bootstraps never race. Starts are cheap once the server
+# exists, so the lock costs nothing after warm.
+_FORK_LOCK = threading.Lock()
 
 CALLBACK_EVALUATION_SECONDS = 2.0
 CALLBACK_WARMUP_SECONDS = 10.0
@@ -523,7 +529,8 @@ def _run_callback_process(request: dict[str, object], *, deadline: float) -> _Wo
     response: bytes | None = None
     timed_out = False
     try:
-        process.start()
+        with _FORK_LOCK:
+            process.start()
         started = True
         child_connection.close()
         parent_connection.send_bytes(encoded_request)
@@ -631,7 +638,8 @@ def _warm_callback_process() -> None:
     context = _evaluation_context()
     process_factory = typing.cast(typing.Callable[..., BaseProcess], getattr(context, "Process"))
     process = process_factory(target=_callback_warm_worker)
-    process.start()
+    with _FORK_LOCK:
+        process.start()
     process.join(timeout=_remaining_seconds(deadline))
     if process.is_alive():
         process.terminate()

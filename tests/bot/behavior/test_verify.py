@@ -68,3 +68,69 @@ def test_verify_apply_allows_selection_naming_a_different_call_id_than_the_live_
     )
 
     assert checked.ok, checked.report.render()
+
+
+def test_racing_warm_and_callback_fork_survives_forkserver_bootstrap() -> None:
+    """Forkserver bootstrapping never races a concurrent process start in this module.
+
+    The warm worker boots the shared forkserver; a callback worker forking while that
+    bootstrap runs dies with the interpreter's "bootstrapping phase" failure, which
+    surfaced as flaky E0008 apply timeouts during Revision dry-runs (observed live
+    inside the composed bot where several verifies ran back to back).
+    """
+
+    import concurrent.futures
+
+    from bot.behavior import runtime as behavior_runtime
+
+    source = """
+input_event = hsm.event(
+    name = "bot.behavior.test_verify.race.input",
+    schema = {"type": "object", "additionalProperties": True},
+    description = "Live behavior input.",
+)
+output_event = hsm.event(
+    name = "bot.behavior.test_verify.race.output",
+    schema = {"type": "object"},
+    description = "Live behavior output.",
+)
+
+def emit_selection(event):
+    hsm.dispatch(output_event, {"event": "phone.answer_call"})
+
+behavior = hsm.define(
+    "RaceProbeBehavior",
+    hsm.initial(hsm.target("/RaceProbeBehavior/idle")),
+    hsm.state(
+        "idle",
+        hsm.transition(hsm.on(input_event), hsm.effect("emit_selection")),
+    ),
+)
+""".strip()
+
+    failures: list[BaseException] = []
+    callback_runtime = behavior_runtime.CallbackRuntime(source="", declared_events={})
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        warm = pool.submit(callback_runtime.warm)
+        checks = [
+            pool.submit(
+                verify.verify_apply,
+                source,
+                input_data={"kind": "phone.ringing"},
+            )
+            for _ in range(2)
+        ]
+        try:
+            _ = warm.result(timeout=60)
+        except BaseException as error:  # noqa: BLE001 — the test asserts on any failure text
+            failures.append(error)
+        for check in checks:
+            try:
+                _ = check.result(timeout=60)
+            except BaseException as error:  # noqa: BLE001
+                failures.append(error)
+
+    for failure in failures:
+        message = str(failure)
+        assert "bootstrapping phase" not in message, message
+        assert "warmup exceeded" not in message, message
