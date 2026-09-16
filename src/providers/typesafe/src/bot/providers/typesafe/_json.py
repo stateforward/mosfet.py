@@ -12,6 +12,7 @@ import collections.abc
 import datetime
 import typing
 
+import dataclasses
 import pydantic
 
 JSONValue = str | int | float | bool | None
@@ -28,6 +29,8 @@ def jsonable(value: object) -> JSONValue | list[typing.Any] | dict[str, typing.A
         return value
     if isinstance(value, pydantic.BaseModel):
         return jsonable(value.model_dump(mode="json"))
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return jsonable(dataclasses.asdict(value))
     if isinstance(value, dict):
         mapping = typing.cast("dict[typing.Any, typing.Any]", value)
         return {str(key): jsonable(item) for key, item in mapping.items()}

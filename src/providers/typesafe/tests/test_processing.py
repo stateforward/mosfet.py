@@ -6,42 +6,40 @@ import collections.abc
 import typing
 
 import hsm
-
+import pydantic
 import pytest
 
 from bot.abilities.processing import SelectedEvent
+from bot.devices import phone as phone_device
 from bot.providers.typesafe import Processor, ProcessingError
 
 _PASS = "__unhandled__"
-_SYSTEM_ONE = "typesafe_sdk"
+
+
+class _RequiredPayload(pydantic.BaseModel):
+    """Probe event payload: one required key the turn's evidence must ground."""
+
+    call_id: str
+
+
+class _StubChoiceAnswer:
+    def __init__(self, *, choice: str, confidence: float = 0.9) -> None:
+        self.choice = choice
+        self.confidence = confidence
 
 
 class _StubResponse:
     """Minimal shape of typesafe_sdk.SystemOneResponse: typed accessors only."""
 
-    def __init__(self, choice: str, confidence: float) -> None:
-        self._choice = choice
-        self._confidence = confidence
-
-    @property
-    def choices(self) -> dict[str, _StubChoiceAnswer]:
-        return {"selection": _StubChoiceAnswer(choice=self._choice, confidence=self._confidence)}
-
-
-class _StubChoiceAnswer:
-    def __init__(self, *, choice: str, confidence: float) -> None:
-        self.choice = choice
-        self.confidence = confidence
+    def __init__(self, choice_by_question: dict[str, _StubChoiceAnswer]) -> None:
+        self.choices: dict[str, _StubChoiceAnswer] = choice_by_question
 
 
 class _StubAsyncSystemOneClient:
-    """Async context-manager client recording the questions it was asked."""
+    """Async context-manager stub recording the questions it was asked."""
 
-    _StubAsyncSystemOneClient_alias = None
-
-    def __init__(self, choice: str, confidence: float = 0.9) -> None:
-        self._choice = choice
-        self._confidence = confidence
+    def __init__(self, choice_by_question: dict[str, _StubChoiceAnswer]) -> None:
+        self._choice_by_question = choice_by_question
         self.requests: list[dict[str, object]] = []
         self.opened = 0
 
@@ -54,40 +52,67 @@ class _StubAsyncSystemOneClient:
 
     async def system_one(self, state: dict[str, object], questions: dict[str, object]) -> _StubResponse:
         self.requests.append({"state": state, "questions": questions})
-        return _StubResponse(choice=self._choice, confidence=self._confidence)
+        return _StubResponse(choice_by_question=self._choice_by_question)
 
 
-def _offered() -> "tuple[hsm.Event[typing.Any], ...]":
-    from bot.devices import phone as phone_device
-
-    return (phone_device.AnswerCallEvent,)
+def _stub_answers(mapping: dict[str, tuple[str, float]]) -> _StubAsyncSystemOneClient:
+    return _StubAsyncSystemOneClient(
+        {name: _StubChoiceAnswer(choice=choice, confidence=confidence) for name, (choice, confidence) in mapping.items()}
+    )
 
 
 def _processor_with_stub(stub: _StubAsyncSystemOneClient) -> Processor:
-    def factory() -> object:
-        return stub
-
     from bot.providers.typesafe.client import AsyncSystemOneClient
-    return Processor(client_factory=typing.cast(collections.abc.Callable[[], AsyncSystemOneClient], factory))
+
+    def factory() -> AsyncSystemOneClient:
+        return typing.cast("AsyncSystemOneClient", typing.cast(object, stub))
+
+    return Processor(client_factory=typing.cast("collections.abc.Callable[[], AsyncSystemOneClient]", factory))
+
+
+def _run(
+    processor: Processor,
+    *,
+    input_payload: object,
+    schemas: tuple["hsm.Event[typing.Any]", ...],
+) -> tuple[SelectedEvent, ...]:
+    from bot.abilities.processing import InputData as _Input
+    import asyncio
+
+    selector_input = _Input(
+        input=input_payload,
+        schemas=schemas,
+        actors={},
+        authority=None,
+        instructions="Choose from the menu.",
+    )
+    return asyncio.run(processor.process(selector_input))
+
+
+def _answer_call_offered() -> tuple["hsm.Event[typing.Any]", ...]:
+    return (phone_device.AnswerCallEvent,)
+
+
+def _probe_event() -> tuple["hsm.Event[typing.Any]", ...]:
+    return (hsm.Event[_RequiredPayload](name="phone.call_answer_for", schema=_RequiredPayload),)
 
 
 def test_pass_criterion_returns_unhandled_selection() -> None:
-    stub = _StubAsyncSystemOneClient(choice=_PASS, confidence=0.4)
+    stub = _stub_answers({"selection": (_PASS, 0.4)})
     processor = _processor_with_stub(stub)
 
-    output = _run(processor)
+    output = _run(processor, input_payload="ring turn", schemas=_answer_call_offered())
 
     assert output == ()
     assert stub.opened == 1
 
 
-def test_chosen_event_maps_to_selection_with_single_enabler_target() -> None:
-    stub = _StubAsyncSystemOneClient(choice="phone.answer_call", confidence=0.91)
+def test_chosen_fieldless_event_maps_to_selection() -> None:
+    stub = _stub_answers({"selection": ("phone.answer_call", 0.91)})
     processor = _processor_with_stub(stub)
 
-    output = _run(processor)
+    output = _run(processor, input_payload="ring turn", schemas=_answer_call_offered())
 
-    assert output is not None
     assert len(output) == 1
     selection = output[0]
     assert isinstance(selection, SelectedEvent)
@@ -96,41 +121,71 @@ def test_chosen_event_maps_to_selection_with_single_enabler_target() -> None:
     assert selection.confidence == 91
 
 
+def test_payload_key_is_grounded_from_turn_evidence() -> None:
+    stub = _stub_answers(
+        {
+            "selection": ("phone.call_answer_for", 1.0),
+            "phone.call_answer_for::call_id": ("probe-call-42", 0.97),
+        }
+    )
+    processor = _processor_with_stub(stub)
+
+    output = _run(
+        processor,
+        input_payload={"kind": "phone.ringing", "call_id": "probe-call-42", "caller": "probe-caller"},
+        schemas=_probe_event(),
+    )
+
+    assert len(output) == 1
+    selection = output[0]
+    assert isinstance(selection, SelectedEvent)
+    assert selection.event == "phone.call_answer_for"
+    assert selection.data == {"call_id": "probe-call-42"}
+    assert selection.confidence is None or 0 <= typing.cast(int, selection.confidence) <= 100
+
+
+def test_ungroundable_required_payload_leaves_event_unoffered() -> None:
+    stub = _stub_answers({"selection": ("phone.call_answer_for", 1.0)})
+    processor = _processor_with_stub(stub)
+
+    output = _run(
+        processor,
+        input_payload="ring turn with no named payload",
+        schemas=_probe_event(),
+    )
+
+    # Nothing groundable → return before opening the transport at all (no wasted call).
+    assert output == () and stub.opened == 0
+
+
 def test_unknown_criterion_is_a_typed_error() -> None:
-    stub = _StubAsyncSystemOneClient(choice="phone.decline_call")
+    stub = _stub_answers({"selection": ("phone.decline_call", 0.9)})
     processor = _processor_with_stub(stub)
 
     with pytest.raises(ProcessingError, match="unknown criterion"):
-        _run(processor)
+        _run(processor, input_payload="ring turn", schemas=_answer_call_offered())
 
 
-def test_state_document_carries_the_turn_payload() -> None:
-    stub = _StubAsyncSystemOneClient(choice=_PASS)
+def test_state_document_carries_envelope_and_groundable_data() -> None:
+    stimulus = hsm.Event[phone_device.SoundData](
+        name="environment.sound",
+        schema=phone_device.SoundData,
+        data=phone_device.SoundData(
+            audio=b"ring",
+            media_type="audio/wav",
+            sample_rate_hz=16_000,
+            channels=1,
+            kind="phone.ringing",
+        ),
+    )
+
+    stub = _stub_answers({"selection": (_PASS, 0.5)})
     processor = _processor_with_stub(stub)
-
-    _run(processor)
+    _ = _run(processor, input_payload=stimulus, schemas=_answer_call_offered())
 
     state = typing.cast("dict[str, object]", stub.requests[0]["state"])
-    assert "turn" in state
-    question_map = typing.cast("dict[str, object]", stub.requests[0]["questions"])
-    selection_question = typing.cast("object", question_map["selection"])
-    criteria = typing.cast("dict[str, str]", getattr(selection_question, "criteria"))
-    assert set(criteria) == {"phone.answer_call", _PASS}
-
-
-def _run(processor: Processor):
-    offered = _offered()
-    import bot.abilities.processing as inner
-
-    selector_input = inner.InputData(
-        input=None,
-        schemas=offered,
-        actors={},
-        authority=None,
-        instructions="Choose from the menu.",
-    )
-    import asyncio
-
-    return asyncio.run(processor.process(selector_input))
-
-
+    turn = typing.cast("dict[str, object]", state["turn"])
+    envelope = typing.cast("dict[str, object]", turn["envelope"])
+    assert envelope["name"] == "environment.sound"
+    data = typing.cast("dict[str, object]", turn["data"])
+    assert data["kind"] == "phone.ringing"

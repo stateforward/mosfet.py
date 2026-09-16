@@ -2,20 +2,24 @@
 
 The mapping is structural, not behavioral:
 
-- **state** is the turn's model-facing payload (`input.model_facing_payload()`), which is
-  exactly the turn as a model may see it — stimulus with envelope, nothing added.
-- **questions** are one Choice per call: criteria are the offered event names (schema
-  description as each label's wording) plus one reserved pass criterion. The pass criterion
-  is the modeled host affordance — an explicit no-op selection (e.g. cognition ignore) when
-  the host enables one, otherwise the processor's own unhandled return that cascades the
-  turn. Multi-select and payload authoring are out of this tier's contract: System One does
-  not call tools and cannot write payload fields.
+- **state** is the turn as the model may see it: the stimulus envelope (name, data) as a
+  structured JSON document. System One evaluates structure, so the live event data rides
+  as JSON instead of a serialized text template.
+- The **event menu** is one Choice per turn: criteria are the offered event names (schema
+  descriptions as labels) and the docs-prescribed pass criterion ("add
+  `other`/`none of the above` if coverage uncertain").
+- **Payload fields are filled by selection over supplied options** — never authored. For
+  each offered event's required payload keys, candidate values are derived mechanically
+  from the turn's own evidence (the stimulus data mapping, then the schema's own enum
+  options); each key gets its own Choice whose criteria are the candidate values
+  themselves, so the answer label *is* the payload value and can never leave the menu
+  ("Your code never has to recover a value from generated prose"). An event with a
+  required key that has no grounded candidates is left unoffered — fail-closed at the
+  menu, not at dispatch. Candidate questions ride the same request: the primitives docs
+  batch independent questions and adding questions barely changes response time.
 - **confidence** is the SDK's own ChoiceAnswer confidence, normalized through the shared
   `processing.normalize_confidence`, so the host's escalate policy sees the same scale as
   every other provider.
-- **payloads stay None.** A chosen event whose schema requires model-authored payload keys
-  is dispatched with `data=None`; the host's dispatch validation is the honest boundary —
-  typed rejection, then the host's cascade. This provider never fabricates payload fields.
 
 The client is an injected dependency (same role as `ChatClient` in `openai_compat`), opened
 per turn as an async context so the SDK's transport lifecycle stays inside the call.
@@ -24,10 +28,13 @@ per turn as an async context so the SDK's transport lifecycle stays inside the c
 from __future__ import annotations
 
 from .client import AsyncSystemOneClient, SystemOneError
+from . import _json as _json_adapter
 from bot.abilities import processing
 
 import collections.abc
 import typing
+
+import pydantic
 
 _RESERVED_PASS_CRITERION = "__unhandled__"
 _DEFAULT_PASS_WORDING = "None of these: leave the turn unhandled."
@@ -35,6 +42,10 @@ _SELECTION_INSTRUCTIONS = (
     "Choose the single criterion that answers this turn from the bot's own peripheral "
     "transducers: the criterion text names the situation. Choose the pass criterion when "
     "none offered fits."
+)
+_PAYLOAD_KEY_INSTRUCTIONS = (
+    "Fill one payload field for the selected event: the criteria are the exact values the "
+    "evidence offers. Pick the value the turn supports."
 )
 
 
@@ -60,6 +71,66 @@ def _single_enabler(
     return None
 
 
+def _stimulus_document(stimulus: object) -> dict[str, typing.Any]:
+    """The stimulus envelope as structured state: name plus live event data."""
+
+    name = getattr(stimulus, "name", None)
+    if isinstance(name, str):
+        data = getattr(stimulus, "data", None)
+        return {"envelope": {"name": name}, "data": _data_document(data)}
+    return {"data": _data_document(stimulus)}
+
+
+def _data_document(data: object) -> typing.Any:
+    return _json_adapter.jsonable(data)
+
+
+def _payload_required_keys(event: processing.Event[typing.Any]) -> tuple[str, ...]:
+    schema_base = getattr(event, "schema", None)
+    if not isinstance(schema_base, type) or not issubclass(schema_base, pydantic.BaseModel):
+        return ()
+    return tuple(name for name, field in schema_base.model_fields.items() if field.is_required())
+
+
+def _schema_enum_options(event: processing.Event[typing.Any], key: str) -> tuple[typing.Any, ...]:
+    schema_base = getattr(event, "schema", None)
+    if not isinstance(schema_base, type) or not issubclass(schema_base, pydantic.BaseModel):
+        return ()
+    field = schema_base.model_fields.get(key)
+    if field is None:
+        return ()
+    adapter = pydantic.TypeAdapter(field.annotation)
+    schema = typing.cast("dict[str, typing.Any]", adapter.json_schema())
+    enum = schema.get("enum")
+    if isinstance(enum, collections.abc.Sequence) and not isinstance(enum, str):
+        return tuple(item for item in enum if item is not None)
+    return ()
+
+
+def _candidate_values(
+    event: processing.Event[typing.Any],
+    key: str,
+    stimulus_data: typing.Any,
+) -> tuple[typing.Any, ...]:
+    """Candidate values for one payload key, derived mechanically from bot evidence.
+
+    Sources, in order: the stimulus data mapping (the value the turn itself carries), then
+    the schema's own enum options. Nothing is invented; nothing is recovered from prose.
+    """
+
+    candidates: list[typing.Any] = []
+    if isinstance(stimulus_data, dict):
+        value = stimulus_data.get(key)
+        if value is not None:
+            candidates.append(value)
+    candidates.extend(_schema_enum_options(event, key))
+    return tuple(candidates)
+
+
+class PayloadGroundingError(ProcessingError):
+    """A chosen event required a payload key with no grounded candidates."""
+
+
 class Processor(processing.Processor):
     """System One label-tier selection: one Choice over the offered event menu."""
 
@@ -80,10 +151,7 @@ class Processor(processing.Processor):
         pass_wording: str = _DEFAULT_PASS_WORDING,
     ) -> None:
         if client_factory is not None:
-
-            def resolved_factory() -> AsyncSystemOneClient:
-                return client_factory()
-
+            resolved_factory = client_factory
         elif client is not None:
             resolved = client
 
@@ -108,49 +176,116 @@ class Processor(processing.Processor):
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
-        offered = tuple(
-            event
-            for event in input.schemas
-            if event.name and not processing.is_deliberative_handoff_schema(getattr(event, "schema", None))
-        )
-        if not offered:
+        stimulus_document = _stimulus_document(input.input)
+        stimulus_data = stimulus_document.get("data")
+        groundable: dict[str, processing.Event[typing.Any]] = {}
+        for event in input.schemas:
+            if not event.name or processing.is_deliberative_handoff_schema(getattr(event, "schema", None)):
+                continue
+            if not self._groundable(event, stimulus_data):
+                continue
+            groundable[event.name] = event
+        if not groundable:
             return ()
-        criteria: dict[str, str] = {event.name: _event_wording(event) for event in offered}
-        criteria[_RESERVED_PASS_CRITERION] = self._pass_wording
+
+        question_map: dict[str, typing.Any] = {}
         import typesafe_sdk
 
-        question_map = {
-            "selection": typesafe_sdk.Choice(
-                instructions=input.instructions or _SELECTION_INSTRUCTIONS,
-                criteria=criteria,
-            ),
+        event_criteria: dict[str, str] = {
+            name: _event_wording(event) for name, event in groundable.items()
         }
-        state = {"turn": input.model_facing_payload()}
+        event_criteria[_RESERVED_PASS_CRITERION] = self._pass_wording
+        question_map["selection"] = typesafe_sdk.Choice(
+            instructions=input.instructions or _SELECTION_INSTRUCTIONS,
+            criteria=event_criteria,
+        )
+
+        payload_key_specs: dict[str, tuple[str, str]] = {}
+        for name, event in groundable.items():
+            for key in _payload_required_keys(event):
+                question_name = f"{name}::{key}"
+                wording = _payload_key_wording(name, key)
+                question_map[question_name] = typesafe_sdk.Choice(
+                    instructions=wording + " " + _PAYLOAD_KEY_INSTRUCTIONS,
+                    criteria={str(candidate): wording for candidate in self._payload_candidates(event, key, stimulus_data)},
+                )
+                payload_key_specs[question_name] = (name, key)
+
+        state_document = {"turn": stimulus_document}
         try:
             async with self._client_factory() as client:
-                response = await client.system_one(state=state, questions=question_map)
+                response = await client.system_one(state=state_document, questions=question_map)
         except SystemOneError as error:
             raise ProcessingError(f"TypeSafe system_one call failed: {error}") from error
-        choice_answer = response.choices["selection"]
-        chosen = choice_answer.choice
+
+        chosen = response.choices["selection"].choice
         if chosen == _RESERVED_PASS_CRITERION:
             return ()
-        if not any(event.name == chosen for event in offered):
+        event = groundable.get(chosen)
+        if event is None:
             raise ProcessingError(f"TypeSafe selected unknown criterion {chosen!r}.")
-        target = _single_enabler(chosen, input.actor_events)
-        confidence = processing.normalize_confidence(choice_answer.confidence)
-        return (
-            processing.SelectedEvent(
-                event=chosen,
-                target=target,
-                data=None,
-                reason=None,
-                confidence=confidence,
-            ),
+
+        data: dict[str, object] = {}
+        for question_name, (name, key) in payload_key_specs.items():
+            if name != chosen:
+                continue
+            answer = response.choices[question_name].choice
+            expected_candidates = self._payload_candidates(event, key, stimulus_data)
+            if answer not in expected_candidates:
+                raise PayloadGroundingError(
+                    f"TypeSafe selected unknown {key!r} value for {name}: {answer!r}."
+                )
+            data[key] = answer
+
+        confidence = processing.normalize_confidence(response.choices["selection"].confidence)
+        selected_event = dataclasses_replace_selection(
+            event=chosen,
+            target=_single_enabler(chosen, input.actor_events),
+            data=data or None,
+            confidence=confidence,
         )
+        return selected_event
+
+    def _groundable(
+        self,
+        event: processing.Event[typing.Any],
+        stimulus_data: typing.Any,
+    ) -> bool:
+        """True when every required payload key has mechanically derived candidates."""
+
+        for key in _payload_required_keys(event):
+            if not self._payload_candidates(event, key, stimulus_data):
+                return False
+        return True
+
+    def _payload_candidates(
+        self,
+        event: processing.Event[typing.Any],
+        key: str,
+        stimulus_data: typing.Any,
+    ) -> tuple[typing.Any, ...]:
+        return _candidate_values(event, key, stimulus_data)
+
+
+def _payload_key_wording(event_name: str, key: str) -> str:
+    return f"Which value fills {key!r} for {event_name}?"
+
+
+
+def dataclasses_replace_selection(
+    *,
+    event: str,
+    target: str | None,
+    data: object,
+    confidence: int | None,
+) -> processing.Events:
+    return (
+        processing.SelectedEvent(event=event, target=target, data=data, reason=None, confidence=confidence),
+    )
 
 
 __all__ = [
+    "PayloadGroundingError",
     "ProcessingError",
     "Processor",
 ]
