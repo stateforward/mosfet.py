@@ -122,18 +122,6 @@ def _mercury_processor(config: AppConfig) -> OpenAIProcessor:
     """Deliberative work on the same live Mercury endpoint the fast tier uses."""
 
     cognition_config = config.cognition
-    client = _openai_client(
-        cognition_config.intuition_model,
-        cognition_config.intuition_api_key,
-        cognition_config.intuition_base_url,
-    )
-    return OpenAIProcessor(client=client, provider="learning_e2e_mercury")
-
-
-def _mercury_processor(config: AppConfig) -> OpenAIProcessor:
-    """Deliberative work on the same live Mercury endpoint the fast tier uses."""
-
-    cognition_config = config.cognition
     return OpenAIProcessor(
         client=_openai_client(
             cognition_config.intuition_model,
