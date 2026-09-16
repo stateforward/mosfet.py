@@ -152,7 +152,7 @@ def test_build_processing_input_records_multi_actor_enablers() -> None:
             assert isinstance(properties, dict)
             event_schema = properties["event"]
             assert isinstance(event_schema, dict)
-            if event_schema.get("const") == bot.FocusDeviceEvent.name:
+            if event_schema.get("enum") == [bot.FocusDeviceEvent.name]:
                 target_schema = properties["target"]
                 assert isinstance(target_schema, dict)
                 focus_target_enum = target_schema.get("enum")

@@ -19,12 +19,12 @@ The mapping is structural, not behavioral:
   required key that has no grounded candidates is left unoffered — fail-closed at the
   menu, not at dispatch. Candidate questions ride the same request: the primitives docs
   batch independent questions and adding questions barely changes response time.
-- **confidence** rides the SDK's ChoiceAnswer confidence normalized through the shared
-  `processing.normalize_confidence`, so the host's escalate policy sees the same scale as
-  every other provider. Multi-select is caller policy per the choice primitive: a
-  composition may pass `dispatch_threshold`, in which case every offered event whose
-  probability clears the threshold dispatches (the reserved pass criterion is excluded)
-  and each winner's confidence is its own probability on the shared scale.
+- **every groundable event rides the response**, each with its own per-event confidence
+  from the choice distribution (normalized on the shared scale). The reserved pass
+  criterion is never returned. Dispatch policy is host-owned: intuition's composition
+  confidence gate (and escalate policy) applies here, provider-agnostic.
+- **payloads ground per event**: each groundable event's payload-key questions ride the
+  same batch, so every returned event carries its grounded payload data.
 
 The client is an injected dependency (same role as `ChatClient` in `openai_compat`), opened
 per turn as an async context so the SDK's transport lifecycle stays inside the call.
@@ -145,7 +145,6 @@ class Processor(processing.Processor):
     _api_key: str | None
     _model: str | None
     _pass_wording: str
-    _dispatch_threshold: float | None
 
     def __init__(
         self,
@@ -156,7 +155,6 @@ class Processor(processing.Processor):
         model: str | None = None,
         timeout: float | None = None,
         pass_wording: str = _DEFAULT_PASS_WORDING,
-        dispatch_threshold: float | None = None,
     ) -> None:
         if client_factory is not None:
             resolved_factory = client_factory
@@ -176,14 +174,11 @@ class Processor(processing.Processor):
             def resolved_factory() -> AsyncSystemOneClient:
                 return AsyncSystemOneClient(timeout=timeout)
 
-        if dispatch_threshold is not None and not 0.0 <= dispatch_threshold <= 1.0:
-            raise ValueError("dispatch_threshold must be within [0.0, 1.0].")
         self._client_factory = resolved_factory
         self._timeout = timeout
         self._api_key = api_key
         self._model = model
         self._pass_wording = pass_wording
-        self._dispatch_threshold = dispatch_threshold
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
@@ -259,44 +254,30 @@ class Processor(processing.Processor):
                 )
             data[key] = answer
 
-        winner = response.choices["selection"]
-        # The caller-side policy from the docs: the event menu's dispositions are the
-        # distribution; a composition passes a dispatch threshold to fire several events
-        # from one turn. Default is single-winner, the reflex default.
-        anchors: list[str]
-        if self._dispatch_threshold is None:
-            anchors = [winner.choice]
-        else:
-            anchors = [
-                criterion
-                for criterion, prob in winner.probabilities.items()
-                if prob >= self._dispatch_threshold and criterion != _RESERVED_PASS_CRITERION
-            ]
-        anchors = [item for item in anchors if item in groundable]
-        confidences = {
-            criterion: processing.normalize_confidence(winner.probabilities.get(criterion, 0.0))
-            for criterion in anchors
-        }
+        # Every groundable event rides the response with its per-event confidence; the
+        # reserved pass criterion never dispatches. Dispatch policy (winners vs
+        # threshold-filtering) is host-owned — intuition's composition confidence gate.
         selections_out: list[processing.SelectedEvent] = []
-        for criterion in anchors:
+        for name, event in groundable.items():
             data: dict[str, object] = {}
-            for question_name, (name, key) in payload_key_specs.items():
-                if name != criterion:
+            for question_name, (owner, key) in payload_key_specs.items():
+                if owner != name:
                     continue
                 answer = response.choices[question_name].choice
-                expected_candidates = self._payload_candidates(groundable[criterion], key, stimulus_data)
+                expected_candidates = self._payload_candidates(event, key, stimulus_data)
                 if answer not in expected_candidates:
                     raise PayloadGroundingError(
                         f"TypeSafe selected unknown {key!r} value for {name}: {answer!r}."
                     )
                 data[key] = answer
+            probability = response.choices["selection"].probabilities.get(name, 0.0)
             selections_out.append(
                 processing.SelectedEvent(
-                    event=criterion,
-                    target=_single_enabler(criterion, input.actor_events),
+                    event=name,
+                    target=_single_enabler(name, input.actor_events),
                     data=data or None,
                     reason=None,
-                    confidence=confidences[criterion],
+                    confidence=processing.normalize_confidence(probability),
                 )
             )
         return tuple(selections_out)

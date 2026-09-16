@@ -139,6 +139,7 @@ class _InvocationCompletedData(pydantic.BaseModel):
     confidence: int | None
     attempt: int = pydantic.Field(ge=0, le=2)
     previous_normalized: str | None = None
+    event_confidences: tuple[int | None, ...] | None = None
 
 
 class _DispatchPlanData(pydantic.BaseModel):
@@ -322,12 +323,17 @@ class ConfidenceTuner:
         return float(confidence) < self.threshold()
 
 
-def _events_as_output(value: object) -> tuple[types.OutputData | None, int | None]:
-    """Coerce event selections and lift patched per-event confidence (min aggregate)."""
+def _events_as_output(value: object) -> tuple[types.OutputData | None, int | None, tuple[int | None, ...] | None]:
+    """Coerce event selections; return (product, min aggregate, per-event confidences).
+
+    The per-event numbers ride the invoke frame for the host's own policy (a composition
+    confidence gate reads them at classify); the model-facing EventData envelope stays
+    clean — host-computed values never enter a model-facing contract.
+    """
 
     selections = processing.coerce_event_selections(value, patch=EventPatch)
     if selections is None:
-        return None, None
+        return None, None, None
     product = types.OUTPUT_SCHEMA_CONTRACT.validate_python(
         tuple(
             {
@@ -339,31 +345,33 @@ def _events_as_output(value: object) -> tuple[types.OutputData | None, int | Non
             for item in selections
         )
     )
-    return product, processing.selection_confidence(selections)
+    per_event = tuple(item.confidence for item in selections)
+    return product, processing.selection_confidence(selections), per_event
 
 
-def _product_from_processor_output(output: object) -> tuple[types.OutputData | None, int | None]:
-    """Return (event product, optional confidence) without applying escalate policy."""
+def _product_from_processor_output(
+    output: object,
+) -> tuple[types.OutputData | None, int | None, tuple[int | None, ...] | None]:
+    """Return (event product, min aggregate confidence, per-event confidences)."""
 
     if isinstance(output, processing.Result):
         result = typing.cast(processing.Result[object], output)
         if not result.is_handled:
-            return None, None
+            return None, None, None
         return _product_from_processor_output(result.output)
     if output is None:
-        return None, None
+        return None, None, None
     if isinstance(output, OutputData):
         # Envelope has no confidence; only explicit unhandled (result is None) vs product.
         if output.result is None:
-            return None, None
-        return output.result, processing.selection_confidence(
-            processing.coerce_event_selections(output.result, patch=EventPatch) or ()
-        )
+            return None, None, None
+        product, aggregate, per_event = _events_as_output(output.result)
+        return product, aggregate, per_event
     if types.is_output(output):
-        return output, None
-    events, confidence = _events_as_output(output)
+        return output, None, None
+    events, aggregate, per_event = _events_as_output(output)
     if events is not None:
-        return events, confidence
+        return events, aggregate, per_event
     raise TypeError("Intuition processor produced output that does not match a cognitive output schema.")
 
 
@@ -486,6 +494,7 @@ class Intuition(processing.Processing):
     _processor: processing.Processor
     _instructions: str
     _confidence_tuner: ConfidenceTuner
+    _confidence_gate: int | None
 
     @staticmethod
     def _has_intuition_input(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
@@ -636,7 +645,7 @@ class Intuition(processing.Processing):
             metadata = dict(event.metadata)
             try:
                 raw = await instance._processor.process(input)
-                product, confidence = _product_from_processor_output(raw)
+                product, confidence, event_confidences = _product_from_processor_output(raw)
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -662,6 +671,7 @@ class Intuition(processing.Processing):
                             confidence=confidence,
                             attempt=attempt,
                             previous_normalized=previous_normalized,
+                            event_confidences=event_confidences,
                         )
                     ),
                     id=operation_id,
@@ -712,15 +722,33 @@ class Intuition(processing.Processing):
             if product is None or len(product) == 0:
                 terminal: types.OutputData | None = None
                 selections: types.OutputData = ()
-            elif escalate or any(
-                _is_deliberative_input_event(item.event, {schema.name: schema for schema in data.input.schemas})
-                for item in product
-            ):
-                selections = _environment_actions(product, current_input=data.input)
-                terminal = None
             else:
-                selections = product
-                terminal = product
+                gate = instance._confidence_gate
+                if gate is not None and data.event_confidences is not None:
+                    product_before_gate = len(product)
+                    per_event = data.event_confidences
+                    kept = tuple(
+                        (item, conf)
+                        for item, conf in zip(product, per_event, strict=True)
+                        if conf is None or conf >= gate
+                    )
+                    product = tuple(item for item, _ in kept)
+                    active.set_attribute("bot.before_gate.count", product_before_gate)
+                    active.set_attribute("bot.after_gate.count", len(product))
+                if len(product) == 0:
+                    # The gate dropped everything: the turn is an explicit unhandled cascade,
+                    # never a handled-empty selection (the pass-criterion lesson).
+                    selections = ()
+                    terminal = None
+                elif escalate or any(
+                    _is_deliberative_input_event(item.event, {schema.name: schema for schema in data.input.schemas})
+                    for item in product
+                ):
+                    selections = _environment_actions(product, current_input=data.input)
+                    terminal = None
+                else:
+                    selections = product
+                    terminal = product
             active.set_attribute("bot.selection.count", len(selections))
             active.set_attribute("bot.cognition.escalated", terminal is None)
             if selections and data.input.actors:
@@ -987,9 +1015,12 @@ class Intuition(processing.Processing):
         instructions: str | None = None,
         confidence_floor: int = _DEFAULT_CONFIDENCE_FLOOR,
         confidence_tuner: ConfidenceTuner | None = None,
+        confidence_gate: int | None = None,
     ) -> None:
         if not 0 <= confidence_floor <= 100:
             raise ValueError("confidence_floor must be an integer between 0 and 100.")
+        if confidence_gate is not None and not 0 <= confidence_gate <= 100:
+            raise ValueError("confidence_gate must be None or an integer between 0 and 100.")
         resolved = type(self).instructions if instructions is None else instructions
         if instructions is not None and not instructions.strip():
             raise ValueError("instructions must not be blank when provided.")
@@ -998,6 +1029,7 @@ class Intuition(processing.Processing):
         self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._confidence_tuner = confidence_tuner or ConfidenceTuner(floor=confidence_floor)
+        self._confidence_gate = confidence_gate
 
 
 InputEvent = Intuition.input_event

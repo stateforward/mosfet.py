@@ -427,14 +427,14 @@ def _selection_item_branch(
     patch: SchemaPatch | None = None,
     targets: collections.abc.Sequence[str] = (),
 ) -> dict[str, object]:
-    """One anyOf branch: const event name + projected event payload schema as ``data``.
+    """One anyOf branch: enum-pinned event name + projected event payload schema as ``data``.
 
     Payload required/description/examples come only from the event (and optional patch) models.
     Nested model ``$defs``/``$ref`` from Pydantic are closed via ``embeddable_json_schema`` so
     document-root ``#/$defs/…`` refs remain valid after this branch is nested under ``dispatch``.
 
     ``target`` is stamped from live topology keys that enable this event this turn:
-    single enabler → JSON Schema ``const`` (required); multiple → ``enum`` of those keys
+    single or multiple enablers → ``enum`` of those keys (one value pins the single case)
     (required). Free-form target strings are never offered. Domain event payloads stay free of
     routing target.
     """
@@ -468,14 +468,11 @@ def _selection_item_branch(
     data_required = _object_schema_required_names(data_schema)
     item_required = ["event", "data"] if data_required else ["event"]
 
-    #"event" carries const AND a matching single-value enum: the const pins exact JSON-Schema
-    # semantics for providers that support it (OpenAI family), while the enum expresses the
-    # same single legal value for providers whose function-calling subset mishandles const
-    # inside anyOf (Gemini family). One legal value; no provider invents a short alias.
+    # Single-dialect pinning: a one-value enum is equivalent to const and reads the same
+    # across every provider's tool subset. The caller supplies the only legal value.
     properties: dict[str, object] = {
         "event": {
             "type": "string",
-            "const": event.name,
             "enum": [event.name],
         },
         "data": data_schema,
@@ -488,7 +485,6 @@ def _selection_item_branch(
     if len(legal_targets) == 1:
         properties["target"] = {
             "type": "string",
-            "const": legal_targets[0],
             "enum": [legal_targets[0]],
             "description": (
                 "Actor that receives this event. Fixed for this turn because only one actor "
@@ -539,7 +535,7 @@ def dispatch_tool(
     ``#/$defs/…`` refs under the tool parameters document.
 
     ``targets_by_event`` maps event name → actor keys that enable it this turn (from live
-    ``enabled_call_events``). Branches stamp ``target`` as ``const`` or ``enum`` from that map.
+    ``enabled_call_events``). Branches stamp ``target`` as ``enum`` from that map.
     Events with an empty target list in the map are omitted (not offerable without a receiver).
     """
 
@@ -598,7 +594,7 @@ def dispatch_tool(
                 "type": "array",
                 "description": (
                     "All events necessary for the input this turn. Each item is one offered "
-                    "event branch (const name + that event's data schema). Include every action "
+                    "event branch (enum-pinned name + that event's data schema). Include every action "
                     "required together; empty array selects none."
                 ),
                 "items": item_schema,
@@ -1097,7 +1093,7 @@ class InputData(pydantic.BaseModel):
         repr=False,
         description=(
             "Event name → sorted actor keys that enable that event this turn (live "
-            "enabled_call_events snapshot). Used to stamp dispatch-tool target const/enum and "
+            "enabled_call_events snapshot). Used to stamp dispatch-tool target enum and "
             "to fill unique omitted targets at parse. Dispatch delivery still validates against "
             "declared call events on the actor model."
         ),

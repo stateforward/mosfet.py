@@ -298,3 +298,67 @@ def test_intuition_bounds_alternating_selection_rejections() -> None:
 
     assert len(processor.calls) == 3
     assert all("input_value" not in (call.instructions or "") for call in processor.calls)
+
+def test_confidence_gate_drops_low_confidence_and_cascades() -> None:
+    """A composition confidence gate drops below-floor per-event selections.
+
+    All selections dropped: the turn is an explicit unhandled cascade (None output),
+    never a handled-empty selection. High-confidence survivors still dispatch.
+    """
+
+    async def run() -> object:
+        ctx = shared_hsm_context()
+        actor = _SelectionActor()
+        assert actor.model is not None
+        _ = await bot.started(ctx, actor, actor.model)
+        ability = intuition.Intuition(
+            processor=_SequenceProcessor(_selection_gate(value="low", confidence=20)),
+            confidence_gate=70,
+        )
+        return await dispatch_ability_for_test(
+            ability,
+            ctx,
+            _selection_input(actor, operation_id="gate-cascade"),
+        )
+
+    completed = asyncio.run(run())
+    assert isinstance(completed, types.CompletionData)
+    assert completed.output is None
+
+
+def test_confidence_gate_passes_high_confidence_survivors() -> None:
+    async def run() -> object:
+        ctx = shared_hsm_context()
+        actor = _SelectionActor()
+        _ = await bot.started(ctx, actor, actor.model)
+        ability = intuition.Intuition(
+            processor=_SequenceProcessor(_selection_gate(value="solid", confidence=99)),
+            confidence_gate=95,
+        )
+        return await dispatch_ability_for_test(
+            ability,
+            ctx,
+            _selection_input(actor, operation_id="gate-pass"),
+        )
+
+    completed = asyncio.run(run())
+    assert isinstance(completed, types.CompletionData)
+    assert completed.output == (
+        types.EventData(
+            event=_SelectionEvent.name,
+            target="target",
+            data={"value": "solid"},
+            reason=None,
+        ),
+    )
+
+
+def _selection_gate(*, value: object, confidence: int) -> processing.Events:
+    return (
+        processing.SelectedEvent(
+            event=_SelectionEvent.name,
+            target="target",
+            data={"value": value},
+            confidence=confidence,
+        ),
+    )

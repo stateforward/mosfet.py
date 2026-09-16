@@ -972,12 +972,12 @@ def test_dispatch_tool_is_single_function_with_events_array() -> None:
     parameters = _nested_dict(function, "parameters")
     assert parameters["required"] == ["events"]
     items = _nested_dict(parameters, "properties", "events", "items")
-    # Per-event anyOf branches carry const name + full data schema (required fields).
+    # Per-event anyOf branches carry the enum-pinned name + full data schema (required fields).
     assert "anyOf" in items
     branches = items["anyOf"]
     assert isinstance(branches, list) and len(branches) == 1
     branch = branches[0]
-    assert branch["properties"]["event"]["const"] == "bot.behavior.answer_greeting.output"
+    assert branch["properties"]["event"]["enum"] == ["bot.behavior.answer_greeting.output"]
     data_schema = branch["properties"]["data"]
     assert data_schema["properties"]["text"]["type"] == "string"
     assert "text" in data_schema.get("required", [])
@@ -997,7 +997,9 @@ def _dispatch_tool_branch(tool: dict[str, object], *, index: int = 0) -> dict[st
     return object_dict(branches[index])
 
 
-def test_dispatch_tool_single_enabler_stamps_const_target() -> None:
+def test_dispatch_tool_single_enabler_stamps_pinned_target() -> None:
+    """Single enabler: the target enum pins the one legal actor for this turn."""
+
     tool = processing.dispatch_tool(
         (_BEHAVIOR_OUTPUT_EVENT,),
         patch=_ConfidencePatch,
@@ -1007,15 +1009,11 @@ def test_dispatch_tool_single_enabler_stamps_const_target() -> None:
     target_schema = object_dict(branch["properties"])["target"]
     target = object_dict(target_schema)
     assert target["type"] == "string"
-    assert target["const"] == "behavior"
-    # The enum mirrors the single legal value: providers whose function-calling subset
-    # mishandles const inside anyOf (Gemini family) need the same pin expressed as enum.
     assert target["enum"] == ["behavior"]
     assert isinstance(target["description"], str)
     required = branch["required"]
     assert isinstance(required, list) and "target" in required
-    # Free-form string target is gone; the enum is the single legal value, not a menu.
-    assert target["enum"] == [target["const"]]
+    # Free-form string target is gone; a one-value enum is the pin (no const/enum duplication).
     examples = branch.get("examples")
     if isinstance(examples, list) and examples:
         assert object_dict(examples[0]).get("target") == "behavior"
@@ -1091,7 +1089,8 @@ def test_collect_offered_events_filters_conflicting_schema_targets_and_rejects_m
         assert actor_events == {count_event.name: ("count",)}
         tool = processing.dispatch_tool(offered, targets_by_event=actor_events)
         target = object_dict(object_dict(_dispatch_tool_branch(tool)["properties"])["target"])
-        assert target["const"] == "count"
+        # One-item enum pins the single legal value; free-form targets are gone.
+        assert target["enum"] == ["count"]
 
         with pytest.raises(processing.SelectionRejectionError, match="invalid event data"):
             await processing.dispatch_selected_events(
@@ -1170,7 +1169,7 @@ def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
     items = _nested_dict(parameters, "properties", "events", "items")
     branches = items["anyOf"]
     assert isinstance(branches, list)
-    by_name = {branch["properties"]["event"]["const"]: branch["properties"]["data"] for branch in branches}
+    by_name = {branch["properties"]["event"]["enum"][0]: branch["properties"]["data"] for branch in branches}
     dial_data = by_name["phone.dial"]
     assert json_schema_is_embeddable(dial_data)
     assert "$defs" not in dial_data
