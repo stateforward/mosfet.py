@@ -54,6 +54,7 @@ CHANGE_INSTRUCTIONS = (
     "Set triggers to the stimulus names that should propose the behavior. "
     "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
     "Starlark only: no Python docstrings, type annotations, or imports; callbacks are def name(event): ...\n"
+    "Format the source as real multi-line Starlark (newlines are required syntax).\n"
     "If diagnostics is present, prior source failed validation: revise `source` to clear every error "
     "(use code, stage, message, and help). failed_source is the rejected program when provided. "
     "Repeating the same diagnostic message after a fix ends change; change the source so messages clear.\n\n"
@@ -417,6 +418,46 @@ def _revision_input(write: ChangeWriteInput) -> InputData:
     )
 
 
+def _evidence_trigger_names(write: ChangeWriteInput) -> tuple[str, ...]:
+    """Stimulus names the bot's own evidence can vouch for this authoring request."""
+
+    names: list[str] = []
+    turn_stimulus = episodes.stimulus_name(write.cognition_input.stimulus)
+    if turn_stimulus:
+        names.append(turn_stimulus)
+    for episode in write.prior_episodes:
+        if episode.stimulus_name:
+            names.append(episode.stimulus_name)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return tuple(ordered)
+
+
+def _grounded_triggers(write: ChangeWriteInput, written: ChangeData) -> tuple[str, ...]:
+    """Keep model-authored triggers only when the bot can vouch for that stimulus.
+
+    Triggers the model invents are a hallucination landing in inventory — the e2e caught
+    `phone.incoming_call`, a name no bot ever sees as a stimulus, authored ACTIVE-shaped and
+    never firing. Evidence-backed triggers pass; an all-invented set is replaced by the
+    observed stimulus name; with no evidence at all the write keeps no trigger at all
+    (a behavior that can never fire beats one that fires on a fiction).
+    """
+
+    evidence = _evidence_trigger_names(write)
+    if not written.triggers:
+        return tuple(written.triggers)
+    grounded = tuple(trigger for trigger in written.triggers if trigger in evidence)
+    if grounded:
+        return grounded
+    if evidence:
+        return evidence[:1]
+    return ()
+
+
 class Revision(processing.Processing):
     _attachment_group: attachment.Group | None
     """Create or change one behavior through typed author, validate, retry, and persist states."""
@@ -720,6 +761,7 @@ class Revision(processing.Processing):
         try:
             written = _coerce_change(completion.output)
             existing = _load_behavior(instance._memory, write.existing_behavior.name)
+            written = written.model_copy(update={"triggers": _grounded_triggers(write, written)})
             checked = _check(write, written)
             inventory = _inventory_instance(written, checked.value, existing)
             data = _CheckedData(

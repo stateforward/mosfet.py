@@ -1008,11 +1008,14 @@ def test_dispatch_tool_single_enabler_stamps_const_target() -> None:
     target = object_dict(target_schema)
     assert target["type"] == "string"
     assert target["const"] == "behavior"
+    # The enum mirrors the single legal value: providers whose function-calling subset
+    # mishandles const inside anyOf (Gemini family) need the same pin expressed as enum.
+    assert target["enum"] == ["behavior"]
     assert isinstance(target["description"], str)
     required = branch["required"]
     assert isinstance(required, list) and "target" in required
-    # Free-form string target is gone.
-    assert "enum" not in target
+    # Free-form string target is gone; the enum is the single legal value, not a menu.
+    assert target["enum"] == [target["const"]]
     examples = branch.get("examples")
     if isinstance(examples, list) and examples:
         assert object_dict(examples[0]).get("target") == "behavior"

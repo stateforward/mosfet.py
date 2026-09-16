@@ -235,3 +235,106 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
     assert output.applied.name == "AnswerIncomingRing"
     assert output.applied.triggers == ("environment.sound",)
     assert output.applied.description == "Answer an incoming ring."
+
+
+def _change_intent():
+    return behavior.ChangeData(
+        name="HandlePhoneCall",
+        triggers=("environment.sound",),
+        description=None,
+        reason="the bot learned that calls should be answered",
+    )
+
+
+def _change_written(*, triggers: tuple[str, ...]) -> behavior.ChangeData:
+    return behavior.ChangeData(
+        name="HandlePhoneCall",
+        triggers=triggers,
+        description=None,
+        reason="authored by the model",
+        source="behavior = hsm.define('HandlePhoneCall')",
+    )
+
+
+def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
+    """A model-invented trigger the bot can never experience must not reach inventory.
+
+    The e2e caught a learned behavior authored with trigger `phone.incoming_call` — a name
+    no bot ever sees as a stimulus — landing ACTIVE-shaped and never firing. Grounding
+    keeps evidence-backed triggers, replaces invented ones with the observed stimulus
+    name, and never invents a name when evidence is absent.
+    """
+
+    from bot.abilities.cognition import episodes as episodes_module
+    from bot.abilities.cognition import input as cognition_input
+    from bot.abilities.cognition.reflection.revision import ChangeWriteInput, _grounded_triggers
+    from bot.environment import SoundData, SoundEvent
+
+    stimulus = SoundEvent.with_data(
+        SoundData(audio=b"ring-bytes", media_type="audio/wav", sample_rate_hz=16_000, channels=1)
+    )
+    write = ChangeWriteInput(
+        cognition_input=cognition_input.InputData(
+            stimulus=stimulus,
+            abilities=(),
+            actors={},
+            focus=None,
+            focus_candidates=(),
+        ),
+        cognition_output=(),
+        prior_episodes=(
+            episodes_module.CognitiveEpisode(
+                focus=None,
+                focus_candidates=(),
+                stimulus_name="environment.sound",
+                output=(),
+            ),
+        ),
+        intent=_change_intent(),
+        existing_behavior=behavior.Instance(
+            name="HandlePhoneCall",
+            source="",
+            triggers=(),
+            description="",
+        ),
+        operation_id="ops",
+        generation="gen",
+        attempt=0,
+    )
+    invented = _change_written(triggers=("phone.incoming_call",))
+    assert _grounded_triggers(write, invented) == ("environment.sound",)
+
+    # Evidence-backed triggers pass through untouched.
+    honest = _change_written(triggers=("environment.sound",))
+    assert _grounded_triggers(write, honest) == ("environment.sound",)
+
+    # With names on both sides, only the evidence-backed survive.
+    wild = _change_written(triggers=("phone.incoming_call", "environment.sound", "kitchen.chimney_sweep"))
+    assert _grounded_triggers(write, wild) == ("environment.sound",)
+
+    # With no turn or episode evidence beyond the write itself, nothing can be proven:
+    # the invented trigger keeps nothing.
+    evidenceless_write = ChangeWriteInput(
+        cognition_input=cognition_input.InputData(
+            stimulus=SoundEvent.with_data(
+                SoundData(audio=b"ring-bytes", media_type="audio/wav", sample_rate_hz=16_000, channels=1),
+            ),
+            abilities=(),
+            actors={},
+            focus=None,
+            focus_candidates=(),
+        ),
+        cognition_output=(),
+        prior_episodes=(),
+        intent=_change_intent(),
+        existing_behavior=behavior.Instance(
+            name="HandlePhoneCall",
+            source="",
+            triggers=(),
+            description="",
+        ),
+        operation_id="ops",
+        generation="gen",
+        attempt=0,
+    )
+    assert _grounded_triggers(evidenceless_write, invented) == ("environment.sound",)

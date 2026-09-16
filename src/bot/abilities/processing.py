@@ -468,10 +468,15 @@ def _selection_item_branch(
     data_required = _object_schema_required_names(data_schema)
     item_required = ["event", "data"] if data_required else ["event"]
 
+    #"event" carries const AND a matching single-value enum: the const pins exact JSON-Schema
+    # semantics for providers that support it (OpenAI family), while the enum expresses the
+    # same single legal value for providers whose function-calling subset mishandles const
+    # inside anyOf (Gemini family). One legal value; no provider invents a short alias.
     properties: dict[str, object] = {
         "event": {
             "type": "string",
             "const": event.name,
+            "enum": [event.name],
         },
         "data": data_schema,
         "reason": {
@@ -484,6 +489,7 @@ def _selection_item_branch(
         properties["target"] = {
             "type": "string",
             "const": legal_targets[0],
+            "enum": [legal_targets[0]],
             "description": (
                 "Actor that receives this event. Fixed for this turn because only one actor "
                 "enables it in the live topology."
