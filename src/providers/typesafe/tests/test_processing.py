@@ -97,13 +97,22 @@ def _probe_event() -> tuple["hsm.Event[typing.Any]", ...]:
     return (hsm.Event[_RequiredPayload](name="phone.call_answer_for", schema=_RequiredPayload),)
 
 
-def test_pass_criterion_returns_unhandled_selection() -> None:
+def test_pass_criterion_declines_unhandled_not_handled_empty() -> None:
+    """Pass means `Result.unhandled()`: the explicit decline the host cascades on.
+
+    An empty selection tuple would read as a handled turn with no actions (consumed,
+    never escalated) — the pass criterion is an explicit decline to reasoning instead.
+    """
+
+    from bot.abilities.cognition import intuition as cognition_intuition
+
     stub = _stub_answers({"selection": (_PASS, 0.4)})
     processor = _processor_with_stub(stub)
 
     output = _run(processor, input_payload="ring turn", schemas=_answer_call_offered())
 
-    assert output == ()
+    assert isinstance(output, cognition_intuition.OutputData)
+    assert output.result is None
     assert stub.opened == 1
 
 

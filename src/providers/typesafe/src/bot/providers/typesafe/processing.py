@@ -6,8 +6,10 @@ The mapping is structural, not behavioral:
   structured JSON document. System One evaluates structure, so the live event data rides
   as JSON instead of a serialized text template.
 - The **event menu** is one Choice per turn: criteria are the offered event names (schema
-  descriptions as labels) and the docs-prescribed pass criterion ("add
-  `other`/`none of the above` if coverage uncertain").
+  descriptions as labels) together with the docs-prescribed pass criterion ("add
+  `other`/`none of the above` if coverage uncertain") that maps to the typed explicit
+  decline (`Result.unhandled()`), which the host cascades to deliberative reasoning —
+  not a handled-empty selection.
 - **Payload fields are filled by selection over supplied options** — never authored. For
   each offered event's required payload keys, candidate values are derived mechanically
   from the turn's own evidence (the stimulus data mapping, then the schema's own enum
@@ -30,6 +32,7 @@ from __future__ import annotations
 from .client import AsyncSystemOneClient, SystemOneError
 from . import _json as _json_adapter
 from bot.abilities import processing
+from bot.abilities.cognition import intuition as cognition_intuition
 
 import collections.abc
 import typing
@@ -220,7 +223,18 @@ class Processor(processing.Processor):
 
         chosen = response.choices["selection"].choice
         if chosen == _RESERVED_PASS_CRITERION:
-            return ()
+            # Explicit unhandled, not a handled-empty selection: the pass criterion means
+            # "none offered fits." Intuition's own envelope shape for that is
+            # OutputData(result=None), which the host reads as unhandled and cascades to
+            # deliberative reasoning. An empty selection tuple would lie — it is a handled
+            # turn with no actions (consumed, never escalated).
+            # Cast note: the intuition envelope is the runtime-declared shape for an
+            # unhandled turn (_product_from_processor_output accepts OutputData), while the
+            # abstract Processor protocol still declares Events only. The double cast marks
+            # that protocol gap as intentional at this one boundary.
+            envelope = cognition_intuition.OutputData(result=None, reason=self._pass_wording)
+            return typing.cast("processing.Events", typing.cast(object, envelope))
+
         event = groundable.get(chosen)
         if event is None:
             raise ProcessingError(f"TypeSafe selected unknown criterion {chosen!r}.")
