@@ -1,0 +1,47 @@
+[project]
+name = "bot-provider-typesafe"
+dynamic = ["version"]
+description = "TypeSafe AI label-tier selection provider (system_one Choice/Score/Noul) for stateforward.bot."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "typesafe-sdk>=0.6.0,<1.0.0",
+  "stateforward.bot>=0.1.0,<0.2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3,<10.0.0",
+  "ruff~=0.11.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+exclude = ["src/bot/__init__.pyi"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bot"]
+
+[tool.hatch.version]
+path = "src/bot/providers/typesafe/__init__.py"
+
+[tool.uv.sources]
+stateforward-bot = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "live: hits the real TypeSafe provider (requires TYPESAFE_API_KEY; skipped by default without keys)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.basedpyright]
+reportImportCycles = false
+include = ["src", "tests"]
+extraPaths = ["src", "../../../src", "../../..", "src/bot/providers/typesafe"]
+pythonVersion = "3.13"
