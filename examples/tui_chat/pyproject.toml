@@ -1,0 +1,27 @@
+[project]
+name = "bot-example-tui-chat"
+version = "0.1.0"
+description = "toad TUI surface for the SMS chat bot example (ACP agent over stdio)."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "bot-example-sms-chat-bot",
+  "bot-provider-openai-compat",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3,<10.0.0",
+  "ruff~=0.11.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tui_chat"]
+
+[tool.uv.sources]
+bot-example-sms-chat-bot = { path = "../sms_chat_bot", editable = true }
+bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
