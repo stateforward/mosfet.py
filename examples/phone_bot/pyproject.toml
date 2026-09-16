@@ -8,6 +8,7 @@ dependencies = [
   "bot-provider-openai-compat",
   "bot-provider-livekit",
   "bot-provider-sqlite-memory",
+  "bot-provider-typesafe",
   "bot-provider-gemini",
   "bot-provider-mlx-audio",
   "bot-provider-pyannote",
@@ -19,6 +20,7 @@ phone-bot-example = "phone_bot_example:main"
 mint-livekit-token = "phone_bot_example.token_cli:main"
 
 [tool.uv.sources]
+bot-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
 stateforward-bot = { path = "../..", editable = true }
 bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 bot-provider-livekit = { path = "../../src/providers/livekit", editable = true }

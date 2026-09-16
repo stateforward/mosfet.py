@@ -75,10 +75,33 @@ _RECALL_LIMIT = 50
 # own key. Which available provider the slow tier uses, not a behavior.
 _REASONING_PROVIDER_ENV = "LEARNING_E2E_REASONING_PROVIDER"
 _GEMINI_MODEL_ENV = "LEARNING_E2E_GEMINI_MODEL"
+_INTUITION_PROVIDER_ENV = "LEARNING_E2E_INTUITION_PROVIDER"
 
 
 def _openai_client(model: str, api_key: str | None, base_url: str) -> OpenAIChatClient:
     return OpenAIChatClient(model=model, api_key=api_key or "", base_url=base_url)
+
+
+def _typesafe_intuition(config: AppConfig) -> object:
+    _provider_src = pathlib.Path(__file__).resolve().parents[2] / "src" / "providers" / "typesafe" / "src"
+    if str(_provider_src) not in sys.path:
+        sys.path.insert(0, str(_provider_src))
+    from bot.providers.typesafe import Processor as TypesafeProcessor
+
+    api_key = os.environ.get("TYPESAFE_API_KEY") or _env_key_loader()
+    return TypesafeProcessor(api_key=api_key, timeout=30)
+
+
+def _env_key_loader() -> str | None:
+    if pathlib.Path(".env").exists():
+        for line in pathlib.Path(".env").read_text().splitlines():
+            if line.startswith("TYPESAFEAPIKEY"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _mercury_intuition(config: AppConfig) -> OpenAIProcessor:
+    return _intuition_processor(config)
 
 
 def _intuition_processor(config: AppConfig) -> OpenAIProcessor:
@@ -199,9 +222,14 @@ def _unseeded_cognition(config: AppConfig, store: memory_abilities.Memory) -> co
     and reflection share the memory the pipeline writes to.
     """
 
+    intuition_processor: object = (
+        typing.cast(typing.Any, _mercury_intuition(config))
+        if os.environ.get(_INTUITION_PROVIDER_ENV) != "typesafe"
+        else _typesafe_intuition(config)
+    )
     return cognition.Cognition(
         autonomy=cognition.Autonomy(memory=store),
-        intuition=cognition.Intuition(processor=_intuition_processor(config)),
+        intuition=cognition.Intuition(processor=intuition_processor),
         reasoning=cognition.Reasoning(processor=_deliberate_processor(config), memory=store),
         reflection=cognition.Reflection(processor=_deliberate_processor(config), memory=store),
     )

@@ -19,9 +19,15 @@ JSONValue = str | int | float | bool | None
 
 
 def jsonable(value: object) -> JSONValue | list[typing.Any] | dict[str, typing.Any]:
-    """Convert a caller object to the system_one state shape or raise ValueError."""
+    """Convert a caller object to the system_one state shape or raise ValueError.
 
-    if value is None or isinstance(value, str | int | bool):
+    Label-tier state discipline: bytes and media drop (the state document is a compact
+    judgment input, not a media payload — serialized base64 once blew the request budget),
+    and strings longer than 40 characters drop rather than truncate (identifiers and
+    kinds stay; prose does not belong in a label-tier document).
+    """
+
+    if value is None or isinstance(value, int | bool):
         return value
     if isinstance(value, float):
         if value != value or value in (float("inf"), float("-inf")):
@@ -38,6 +44,8 @@ def jsonable(value: object) -> JSONValue | list[typing.Any] | dict[str, typing.A
         items = typing.cast("collections.abc.Iterable[typing.Any]", value)
         return [jsonable(item) for item in items]
     if isinstance(value, str):
+        if len(value) > 40:
+            return None
         return value
     if isinstance(value, datetime.datetime | datetime.date | datetime.time):
         return value.isoformat()
