@@ -20,7 +20,9 @@ Distribution: `stateforward.bot` ⟶ `import bot`. Deterministic execution runs 
 > compiled reflexes first, then a fast model, then a deep model — and only pays for chips
 > when no cheaper path fires. And it is *teachable*: you tell it what to do in plain
 > English and it compiles your lesson into a deterministic state machine, stored in
-> durable memory to run without you, without tokens, without drift.
+> durable memory to run without you, without tokens, without drift. And even assembly is
+> on the same schedule: today you wire the anatomy in code — when this ships, bots
+> assemble themselves. You unbox one, teach it, and let it loose.
 
 ---
 
@@ -201,7 +203,8 @@ uv run --project examples/phone_bot phone-bot --json
 uv run --project examples/phone_bot python examples/phone_bot/learning_phone_bot.py
 ```
 
-Wire the body and the mind with real, typed contracts:
+Today, assembly happens in code — real, typed contracts. That is scaffolding, not the
+product; when this ships, bots assemble themselves:
 
 ```python
 import bot
@@ -213,7 +216,9 @@ from bot.environment import Environment, SoundEvent, space # physics
 from bot.providers.openai_compat import ChatClient         # mind transport
 ```
 
-…then attach provider components, acquire abilities, and start the bot. See
+…then attach provider components, acquire abilities, and start the bot. Every seam
+above — device, provider, ability — is a typed contract a bot will exercise on its own
+behalf; what you assemble today is today's test of that, not tomorrow's API. See
 `examples/` for complete, runnable compositions — each example is its own `uv` package so
 example-only dependencies never leak into core.
 
@@ -261,5 +266,11 @@ See [docs/release.md](docs/release.md) for versioning and CI publishing notes.
 
 Experimental, pre-1.0, under active development — but not a prototype: typed contracts,
 a strict typechecker, OpenTelemetry contract, and provider isolation are enforced, and
-the examples above are lived-in proofs, not demos. Build an anatomy, teach it something,
-and watch it never pay for tokens on a known situation again.
+the examples above are lived-in proofs, not demos.
+
+One direction is already fixed: **bots that assemble themselves.** Composition-in-code
+exists to harden the seams — devices, abilities, providers, teaching — as typed
+contracts a bot can exercise on its own behalf. When this ships, you unbox a bot, teach
+it, and never wire the body; what you assemble today is how those seams get tested.
+Build an anatomy in the meantime, teach it something, and watch it never pay for tokens
+on a known situation again.
