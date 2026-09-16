@@ -131,6 +131,7 @@ class _Agent:
 
                 _ = os.environ.setdefault(key, value)
 
+
     # --- protocol surface (methods the toad client requests) -----------------
 
     async def initialize(
