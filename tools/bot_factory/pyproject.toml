@@ -1,7 +1,7 @@
 [project]
-name = "bot-example-playground-tui"
+name = "botbot-tui"
 version = "0.1.0"
-description = "The bot's TUI playground: toad widgets + the SMS chat bot, native Textual."
+description = "botbot: the bot that builds the bots, over ACP + the toad TUI widget family."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -14,29 +14,32 @@ dependencies = [
   "xdg-base-dirs>=6.0.2",
   "typing-extensions==4.15.0",
   "packaging==26.2",
-  "bashlex==0.18",
-  "pathspec==1.1.1",
-  "pyperclip==1.11.0",
-  "watchdog==6.0.0",
-  "psutil==7.2.2",
-  "aiosqlite==0.22.1",
-  "bot-example-sms-chat-bot",
-  "bot-provider-openai-compat",
+  "stateforward.bot>=0.1.0,<0.2.0",
+  "bot-provider-openai-compat>=0.1.0,<0.2.0",
+  "bot-provider-typesafe>=0.1.0,<0.2.0",
 ]
 
 [dependency-groups]
-dev = [
-  "pytest>=9.0.3,<10.0.0",
-  "ruff~=0.11.13",
-]
+dev = []
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/playground"]
+packages = ["src/botbot"]
+
+[tool.hatch.version]
+path = "src/botbot/__init__.py"
 
 [tool.uv.sources]
-bot-example-sms-chat-bot = { path = "../../sms_chat_bot", editable = true }
-bot-provider-openai-compat = { path = "../../../src/providers/openai_compat", editable = true }
+bot = { path = "../../..", editable = true }
+bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
+bot-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
+
+[project.scripts]
+botbot = "botbot.botbot:main"
+
+[tool.basedpyright]
+include = ["src"]
+pythonVersion = "3.14"
