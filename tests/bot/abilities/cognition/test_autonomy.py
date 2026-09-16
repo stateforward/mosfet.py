@@ -644,7 +644,10 @@ def test_usage_inventory_changes_only_after_persistence_completion(
 
         def observe_inventory(data: memory.InputData) -> memory.OutputData:
             inventory = typing.cast(tuple[behavior.Instance, ...], vars(autonomy)["_behaviors"])
-            observed_counts.append(inventory[0].used_count)
+            # Only writes carry the update; the per-turn inventory refresh reads may observe
+            # any snapshot without changing this write-order assertion.
+            if not data.statements[0].sql.lstrip().upper().startswith("SELECT"):
+                observed_counts.append(inventory[0].used_count)
             return original_execute(data)
 
         monkeypatch.setattr(store, "execute", observe_inventory)
@@ -916,3 +919,56 @@ def test_autonomy_without_installed_behavior_leaves_ring_unhandled() -> None:
     assert isinstance(output, cognition.types.CompletionData)
     # Unhandled: no selections (or empty). Deliberative stages own answer policy when no behavior matches.
     assert output.output is None or output.output == ()
+
+
+def test_autonomy_match_preparation_rereads_learned_inventory_from_memory() -> None:
+    """Behaviors authored after Autonomy's attach are matched on the next turn.
+
+    Learned inventory refreshes from the injected Memory inside the match-preparation step,
+    so a bot that just learned a behavior (Learning or Reflection) can run it on the next
+    event without re-attaching. A failed refresh keeps the last snapshot instead of
+    dropping the matcher.
+    """
+
+    source = inspect.getsource(autonomy_module.Autonomy)
+    assert "instance._memory.execute(_behavior_select_input())" in source
+
+    async def run() -> tuple[tuple[str, ...], bool]:
+        store = memory.Memory()
+        instance = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, instance)
+
+        # Learn AFTER attach, the way Learning does mid-lifetime.
+        installed = behavior.Instance(
+            name="LateLearned",
+            source="",
+            triggers=("environment.sound",),
+            description="",
+        )
+        installed = behavior_storage.mark_active(installed)
+        _ = store.execute(
+            memory.InputData(
+                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)),
+            )
+        )
+
+        turn = cognition.types.TurnData(
+            input=cognition.input.InputData(
+                stimulus=SoundEvent.with_data(
+                    SoundData(audio=b"ring-bytes", media_type="audio/wav", sample_rate_hz=16_000, channels=1)
+                ),
+                abilities=(),
+                actors={},
+                focus=None,
+                focus_candidates=(),
+            ),
+            operation_id="match-refresh-probe",
+            generation="match-refresh-gen",
+        )
+        _ = await dispatch_ability_for_test(instance, ctx, turn, timeout=8.0)
+        return tuple(item.name for item in vars(instance)["_behaviors"])
+
+    names = asyncio.run(run())
+    # The authored row is in the matcher's inventory for the next turn, via the refresh read.
+    assert "LateLearned" in names, names

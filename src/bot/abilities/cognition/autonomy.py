@@ -1,9 +1,11 @@
 """Autonomy: practiced automatic behavior invocation before deliberative abilities.
 
 Outside deliberative ``Processing``. On attach, loads learned Starlark behaviors from
-memory and retains injected trusted native seeds. Each turn matches both by stimulus
-trigger and runs the chosen Ability/HSM through one attach, input, terminal, and detach
-lifecycle. Only materialization and input adaptation differ between the two sources.
+memory and retains injected trusted native seeds. Each turn re-reads the learned
+inventory from memory (behaviors authored mid-lifetime are usable immediately) and
+matches both sources by stimulus trigger, then runs the chosen Ability/HSM through one
+attach, input, terminal, and detach lifecycle. Only materialization and input adaptation
+differ between the two sources.
 """
 
 from __future__ import annotations
@@ -1815,10 +1817,23 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
 
     @staticmethod
     def _prepare_match(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
-        """Snapshot the complete behavior inventory inside the owner's RTC step."""
+        """Snapshot the complete behavior inventory inside the owner's RTC step.
+
+        Learned inventory is re-read from the injected Memory each turn: behaviors authored
+        after Autonomy's attach (by Learning or Reflection in the same bot lifetime) are
+        otherwise invisible until re-attach, and the procedural tier must react to what the
+        bot just learned. Seed descriptors always ride along. A failed re-read keeps the
+        last snapshot (an inventory refresh failure is not a reason to drop the matcher).
+        """
 
         turn = event.data
         assert isinstance(turn, types.TurnData)
+        if instance._memory is not None:
+            try:
+                output = instance._memory.execute(_behavior_select_input())
+                instance._behaviors = _behaviors_from_memory_output(output)
+            except Exception as error:
+                _LOG.warning("Autonomy learned-inventory refresh failed; using the last snapshot. %s", error)
         inventory: tuple[BehaviorCandidate, ...] = (*instance._seeded_behaviors, *instance._behaviors)
         _ = hsm.dispatch(
             ctx,
