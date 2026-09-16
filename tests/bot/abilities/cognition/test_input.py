@@ -9,6 +9,7 @@ import xml.etree.ElementTree
 import bot
 import bot.lifecycle
 from bot.abilities import processing
+from bot.abilities.ability import Effort
 from bot.abilities.cognition import input as cognition_input
 from bot.abilities.cognition import types
 from bot.device import Device
@@ -26,6 +27,21 @@ def _accept_focus(
     event: hsm.Event[typing.Any],
 ) -> None:
     del ctx, instance, event
+
+
+class _EffortProbeActor(hsm.Instance):
+    """Probe actor carrying an Ability effort rating over model-offerable events."""
+
+    effort = Effort.M
+
+    model: typing.ClassVar[hsm.Model | None] = bot.define(
+        "EffortProbeActor",
+        hsm.initial(hsm.target("/EffortProbeActor/active")),
+        hsm.state(
+            "active",
+            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_focus)),
+        ),
+    )
 
 
 class _FocusBotActor(hsm.Instance):
@@ -366,3 +382,44 @@ def test_build_processing_input_without_devices_leaves_instructions_unset() -> N
         cognition_input.InputData(stimulus=bot.InputEventData(target_device="phone", priority=0))
     )
     assert built.instructions is None
+
+def test_frame_filters_over_effort_ceiling() -> None:
+    """Stage capacity filters effort-rated actors from the frame offer.
+
+    Intuition's ceiling is S: the M-effort probe actor drops from the offered schemas
+    (the authoring-tier boundary). With no ceiling, every actor stays offered — and
+    when ceiling unbounded (reasoning default), keep-all. The Device stays offered:
+    it has no effort rating (peripheral transducer).
+    """
+
+    async def run() -> None:
+        probe = _EffortProbeActor()
+        ctx = shared_hsm_context()
+        assert probe.model is not None
+        _ = await bot.started(ctx, probe, probe.model)
+        probe_input = cognition_input.InputData(
+            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            actors={"probe": probe, "phone": Device()},
+            focus_candidates=("phone",),
+        )
+        intuition_frame = cognition_input.build_processing_input(
+            probe_input,
+            max_effort=Effort.S,
+        )
+        names_intuition = {event.name for event in intuition_frame.schemas}
+        assert bot.FocusDeviceEvent.name not in names_intuition
+
+        reasoning_frame = cognition_input.build_processing_input(
+            probe_input,
+            max_effort=None,
+        )
+        names_reasoning = {event.name for event in reasoning_frame.schemas}
+        assert bot.FocusDeviceEvent.name in names_reasoning
+
+        # Device without effort rating: never filtered.
+        assert any(
+            actor is not None and key == "phone" or key == "probe"
+            for key, actor in reasoning_frame.actors.items()
+        )
+
+    asyncio.run(run())

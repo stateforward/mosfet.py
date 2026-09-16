@@ -18,6 +18,7 @@ Starlark is authored only by the injected processor through Revision — never h
 from __future__ import annotations
 
 from .. import ability
+from ..ability import Effort
 from .. import decoding
 from .. import memory
 from .. import processing
@@ -805,6 +806,8 @@ def _require_runtime_input_grounding(
 
 
 class Learning(ability.Ability[InputData, OutputData]):
+    # Authoring standing behavior is deliberate-tier work: never offered on the reflex arc.
+    effort: typing.ClassVar[Effort] = Effort.M
     _attachment_group: attachment.Group | None
     """Decode lesson material, ground runtime input in memory, revise into inventory."""
 

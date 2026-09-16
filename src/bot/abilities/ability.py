@@ -1,6 +1,7 @@
 import asyncio
 import collections.abc
 import dataclasses
+import enum
 import datetime
 import typing
 import uuid
@@ -19,6 +20,31 @@ from bot.telemetry import observer
 TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
 _DataType = type[object] | tuple[type[object], ...] | None
+
+
+class Effort(enum.StrEnum):
+    """Cognitive effort rating of one ability, as t-shirt sizes.
+
+    Stages declare the maximum effort they can afford; an ability is offered at a stage
+    when its effort is within that ceiling. The scale is ordered so compositions compare
+    t-shirts directly (XS < S < M < L < XL). Default for every ability is XS: playable at
+    any tier, keeping existing compositions unchanged until an effort is declared.
+    """
+
+    XS = "xs"
+    S = "s"
+    M = "m"
+    L = "l"
+    XL = "xl"
+
+
+_EFFORT_ORDER: dict[Effort, int] = {effort: rank for rank, effort in enumerate(Effort)}
+
+
+def effort_within(candidate: Effort, ceiling: Effort | None) -> bool:
+    """True when `candidate` effort fits a stage ceiling: None ceiling is unbounded."""
+
+    return ceiling is None or _EFFORT_ORDER[candidate] <= _EFFORT_ORDER[ceiling]
 
 
 def _private_instance_scope(parent: hsm.Context) -> hsm.Context:
@@ -205,6 +231,9 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
+    # Cognitive effort rating: stages declare ceilings; the frame builder drops abilities
+    # beyond them (see Effort). Default XS: every cognition tier offers the ability.
+    effort: typing.ClassVar[Effort] = Effort.XS
     _composite_attachment_terminal_event: typing.ClassVar[hsm.Event[_CompositeAttachmentTerminalData]] = (
         _CompositeAttachmentTerminalEvent
     )

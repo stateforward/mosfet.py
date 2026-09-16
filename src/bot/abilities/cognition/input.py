@@ -15,6 +15,7 @@ from __future__ import annotations
 import bot
 from .. import ability
 from .. import processing
+from ..ability import Effort, effort_within
 
 import collections.abc
 import typing
@@ -107,6 +108,7 @@ def build_processing_input(
     *,
     extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
     authority: hsm.Instance | None = None,
+    max_effort: Effort | None = None,
 ) -> processing.InputData:
     """Build the deliberative input and callable schemas for one cognition turn.
 
@@ -126,6 +128,14 @@ def build_processing_input(
     actors: dict[str, hsm.Instance] = dict(cognition_input.actors)
     if extra_actors:
         actors.update(extra_actors)
+    if max_effort is not None:
+        # Stage capacity: abilities beyond the stage's effort ceiling drop from this frame's
+        # offer (and from its dispatch map). Default None keeps every actor byte-identical.
+        actors = {
+            key: actor
+            for key, actor in actors.items()
+            if effort_within(getattr(actor, "effort", Effort.XS), max_effort)
+        }
     if authority is not None and not any(actor is authority for actor in actors.values()):
         # Host call surface (ignore, …) comes from Cognition's snapshot, not a schema allowlist.
         actors = {**actors, "cognition": authority}

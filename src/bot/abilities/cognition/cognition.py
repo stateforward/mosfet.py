@@ -1,4 +1,5 @@
 from .. import ability
+from ..ability import Effort
 from .. import processing
 
 import dataclasses
@@ -249,8 +250,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
     def _build_processing_input(
         instance: "Cognition",
         cognition_input: InputData,
+        *,
+        max_effort: Effort | None = None,
     ) -> processing.InputData:
-        return input.build_processing_input(cognition_input, authority=instance)
+        return input.build_processing_input(cognition_input, authority=instance, max_effort=max_effort)
 
     @staticmethod
     def _turn(
@@ -371,7 +374,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         assert is_input(data)
         operation_id = event.id if event.id else None
         try:
-            input = Cognition._build_processing_input(instance, data)
+            input = Cognition._build_processing_input(
+                instance, data, max_effort=instance._intuition.effort_ceiling()
+            )
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -543,7 +548,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
             )
             return
         try:
-            input = Cognition._build_processing_input(instance, cognition_input)
+            input = Cognition._build_processing_input(
+                instance,
+                cognition_input,
+                max_effort=instance._intuition.effort_ceiling(),
+            )
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -687,7 +696,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 )
                 return
             try:
-                input = Cognition._build_processing_input(instance, cognition_input)
+                input = Cognition._build_processing_input(
+                    instance,
+                    cognition_input,
+                    max_effort=instance._reasoning.effort_ceiling(),
+                )
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,

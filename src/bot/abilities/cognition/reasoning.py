@@ -1,5 +1,6 @@
 import bot
 from .. import ability
+from ..ability import Effort
 from .. import memory
 from .. import processing
 
@@ -395,6 +396,7 @@ class Reasoning(processing.Processing):
     _processor: processing.Processor
     _instructions: str
     _memory: memory.Memory | None
+    _max_effort: Effort | None
 
     @staticmethod
     async def _initialize_activity(
@@ -1007,12 +1009,18 @@ class Reasoning(processing.Processing):
         hsm.observe(observer),
     )
 
+    def effort_ceiling(self) -> Effort | None:
+        """The stage's effort ceiling, read by the host when building the deliberate frame."""
+
+        return self._max_effort
+
     def __init__(
         self,
         *,
         processor: ReasoningProcessor,
         instructions: str | None = None,
         memory: memory.Memory | None = None,
+        max_effort: Effort | None = None,
     ) -> None:
         resolved = type(self).instructions if instructions is None else instructions
         if instructions is not None and not instructions.strip():
@@ -1023,6 +1031,7 @@ class Reasoning(processing.Processing):
         self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._memory = memory
+        self._max_effort = max_effort
 
 
 InputEvent = Reasoning.input_event

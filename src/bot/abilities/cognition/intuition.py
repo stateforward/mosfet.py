@@ -1,4 +1,5 @@
 from .. import ability
+from ..ability import Effort
 from .. import processing
 
 import dataclasses
@@ -18,6 +19,7 @@ from . import types
 
 # Absolute floor used only during tuner warmup (few samples). After warmup the
 # threshold is mean - k_sigma * std, floored by a soft minimum. Scale is 0–100.
+_DEFAULT_MAX_EFFORT = Effort.S
 _DEFAULT_CONFIDENCE_FLOOR = 35
 _DEFAULT_TUNER_ALPHA = 0.08
 _DEFAULT_TUNER_K_SIGMA = 1.0
@@ -495,6 +497,7 @@ class Intuition(processing.Processing):
     _instructions: str
     _confidence_tuner: ConfidenceTuner
     _confidence_gate: int | None
+    _max_effort: Effort | None
 
     @staticmethod
     def _has_intuition_input(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
@@ -1008,6 +1011,11 @@ class Intuition(processing.Processing):
         hsm.observe(observer),
     )
 
+    def effort_ceiling(self) -> Effort | None:
+        """The stage's effort ceiling, read by the host when building the reflex frame."""
+
+        return self._max_effort
+
     def __init__(
         self,
         *,
@@ -1016,6 +1024,7 @@ class Intuition(processing.Processing):
         confidence_floor: int = _DEFAULT_CONFIDENCE_FLOOR,
         confidence_tuner: ConfidenceTuner | None = None,
         confidence_gate: int | None = None,
+        max_effort: Effort | None = _DEFAULT_MAX_EFFORT,
     ) -> None:
         if not 0 <= confidence_floor <= 100:
             raise ValueError("confidence_floor must be an integer between 0 and 100.")
@@ -1030,6 +1039,7 @@ class Intuition(processing.Processing):
         self._processor = processor
         self._confidence_tuner = confidence_tuner or ConfidenceTuner(floor=confidence_floor)
         self._confidence_gate = confidence_gate
+        self._max_effort = max_effort
 
 
 InputEvent = Intuition.input_event
