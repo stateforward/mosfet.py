@@ -23,9 +23,16 @@ class _RequiredPayload(pydantic.BaseModel):
 
 
 class _StubChoiceAnswer:
-    def __init__(self, *, choice: str, confidence: float = 0.9) -> None:
+    def __init__(
+        self,
+        *,
+        choice: str,
+        confidence: float = 0.9,
+        probabilities: "dict[str, float] | None" = None,
+    ) -> None:
         self.choice = choice
         self.confidence = confidence
+        self.probabilities = probabilities if probabilities is not None else {choice: confidence}
 
 
 class _StubResponse:
@@ -55,7 +62,7 @@ class _StubAsyncSystemOneClient:
         return _StubResponse(choice_by_question=self._choice_by_question)
 
 
-def _stub_answers(mapping: dict[str, tuple[str, float]]) -> _StubAsyncSystemOneClient:
+def _stub_answers(mapping: dict[str, tuple[str, float]]) -> _StubAsyncSystemOneClient:  # noqa: E731
     return _StubAsyncSystemOneClient(
         {name: _StubChoiceAnswer(choice=choice, confidence=confidence) for name, (choice, confidence) in mapping.items()}
     )
@@ -198,3 +205,95 @@ def test_state_document_carries_envelope_and_groundable_data() -> None:
     assert envelope["name"] == "environment.sound"
     data = typing.cast("dict[str, object]", turn["data"])
     assert data["kind"] == "phone.ringing"
+
+
+def test_dispatch_threshold_fires_multiple_groundable_events() -> None:
+    """Caller policy from the choice primitive: the distribution drives multi-dispatch.
+
+    With `dispatch_threshold` set, every offered event whose probability clears it is
+    dispatched; the reserved pass criterion is excluded even if it clears the bar; and
+    each winner's confidence is its own probability on the shared 0-100 scale.
+    """
+
+    import hsm as _hsm_mod
+    from bot.abilities.processing import InputData as _Input
+    import asyncio
+
+    class _SecondPayload(pydantic.BaseModel):
+        call_id: str
+
+    answer_event = phone_device.AnswerCallEvent
+    probe_event = _hsm_mod.Event[_RequiredPayload](name="phone.call_answer_for", schema=_RequiredPayload)
+    stub = _StubAsyncSystemOneClient(
+        {
+            "selection": _StubChoiceAnswer(
+                choice="phone.answer_call",
+                confidence=0.44,
+                probabilities={
+                    "phone.answer_call": 0.58,
+                    "phone.call_answer_for": 0.36,
+                    _PASS: 0.06,
+                },
+            ),
+            "phone.call_answer_for::call_id": _StubChoiceAnswer(choice="probe-call-42", confidence=1.0),
+        }
+    )
+    from bot.providers.typesafe.client import AsyncSystemOneClient
+
+    processor = Processor(
+        client_factory=lambda: typing.cast("AsyncSystemOneClient", typing.cast(object, stub)),
+        dispatch_threshold=0.35,
+    )
+
+    selector_input = _Input(
+        input={"kind": "phone.ringing", "call_id": "probe-call-42"},
+        schemas=(answer_event, probe_event),
+        actors={},
+        authority=None,
+        instructions=None,
+    )
+    output = asyncio.run(processor.process(selector_input))
+
+    assert [item.event for item in output] == ["phone.answer_call", "phone.call_answer_for"]
+    assert [item.confidence for item in output] == [58, 36]
+    grounded = [item for item in output if item.event == "phone.call_answer_for"]
+    assert grounded and grounded[0].data == {"call_id": "probe-call-42"}
+
+
+def test_dispatch_threshold_excludes_pass_criterion() -> None:
+    """The pass criterion never dispatches above a threshold: an argmax pass is an
+    unhandled turn (the winner branch wins before the threshold reads), and even a
+    sub-argmax pass above the threshold stays excluded from the anchors list."""
+
+    from bot.abilities.processing import InputData as _Input
+    from bot.abilities.cognition import intuition as cognition_intuition
+    import asyncio
+
+    stub = _StubAsyncSystemOneClient(
+        {
+            "selection": _StubChoiceAnswer(
+                choice=_PASS,
+                confidence=0.8,
+                probabilities={_PASS: 0.55, "phone.answer_call": 0.45},
+            ),
+        }
+    )
+    from bot.providers.typesafe.client import AsyncSystemOneClient
+
+    processor = Processor(
+        client_factory=lambda: typing.cast("AsyncSystemOneClient", typing.cast(object, stub)),
+        dispatch_threshold=0.3,
+    )
+
+    selector_input = _Input(
+        input="ring turn",
+        schemas=_answer_call_offered(),
+        actors={},
+        authority=None,
+        instructions=None,
+    )
+    output = asyncio.run(processor.process(selector_input))
+
+    # pass is the argmax -> explicit unhandled envelope; answer_call (0.45) never dispatches
+    assert isinstance(output, cognition_intuition.OutputData)
+    assert output.result is None
