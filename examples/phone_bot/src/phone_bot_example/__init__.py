@@ -897,6 +897,8 @@ class PhoneBot(Bot):
         speaking: speaking.Speaking | None = None,
         conversation: ExampleConversation | None = None,
         memory: memory.Memory | None = None,
+        stm_memory: memory.StmMemory | None = None,
+        extra_acquired: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
     ) -> None:
         self._label = label
         self._runtime_model = hsm.redefine(type(self).model, label)
@@ -935,7 +937,8 @@ class PhoneBot(Bot):
             output=(self._speaking,),
             # Communication is bot-acquired and owns Conversation lifecycle. Memory is attached
             # under Reflection only (Ability attachment is exclusive; do not double-attach).
-            acquired_abilities=(self._communication,),
+            acquired_abilities=(self._communication, *extra_acquired),
+            stm_memory=stm_memory,
         )
         self._outputs = []
         self._failures = []

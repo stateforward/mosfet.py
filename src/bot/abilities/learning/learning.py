@@ -129,11 +129,15 @@ class InputData(pydantic.BaseModel):
         frozen=True,
         ser_json_bytes="base64",
         val_json_bytes="base64",
-        extra="forbid",
+        # Input-boundary leniency: live models sometimes carry the selection envelope's own
+        # field (reason) inside data. Unknown keys are dropped, and content stays required
+        # and validated, so a lesson is never lost to an unrelated extra field.
+        extra="ignore",
         json_schema_extra={
             "description": (
                 "Learning input payload. A decoder turns content into DecodedData; generate synthesizes "
-                "a runtime input and inventory intent for Revision."
+                "a runtime input and inventory intent for Revision. data carries content (required) and "
+                "optionally media_type; other keys are discarded rather than failing the selection."
             ),
         },
     )
@@ -142,7 +146,9 @@ class InputData(pydantic.BaseModel):
         description=(
             "The instruction to learn from, exactly as it arrived: the words that were actually said or "
             "written to the bot, as text, or the undecoded bytes they came in. This is the only material "
-            "the lesson is read out of, so a rule that was never given is not learned by writing it here."
+            "the lesson is read out of, so a rule that was never given is not learned by writing it here. "
+            "The data for this event must contain exactly content (and optionally media_type); reason "
+            "belongs on the selection envelope itself, never inside data."
         ),
     )
     media_type: str | None = pydantic.Field(
@@ -1711,10 +1717,12 @@ class Learning(ability.Ability[InputData, OutputData]):
         self._revision = revision.Revision(processor=leaf, memory=memory)
         self._memory = memory
         self._stm_memory = stm_memory
+        # Memory is an injected collaborator, not an attached child: compositions share one
+        # store (Reflection owns its exclusive attachment; Autonomy and Reasoning execute it
+        # directly), so Learning follows the same convention. One exclusive attach per store.
         self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,
-            self._memory,
         )
 
 
