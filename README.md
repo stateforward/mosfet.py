@@ -1,67 +1,93 @@
-# Bot
+# mosfet
 
-**Bot is a bot.** Not a chatbot in a trench coat whispering “I’m totally a robot.” A software animal with a body, senses, a mind that actually *picks*, and a memory that does not yeet your lesson into the void because someone “tightened the prompt.”
+**low effort, high power software robots**
 
-**Bot builds bots.** You say the thing. It grows the thing. You do not scaffold a repo, invent twelve packages, or marry three vendor SDKs in a ceremony nobody asked to attend. Code is still legal. Code is also not the plot.
+A MOSFET is the part that drives every robot ever built: a tiny voltage on the gate
+switches a lot of current. Almost no input, all of the output. That's the deal here.
+You say a thing once, the world moves every time after.
 
-**Bot’s bots learn.** Talk like a human. It keeps it like a machine. Your sentence becomes a compiled, deterministic state machine in *its* brain, not a sticky note taped to an LLM that is already thinking about lunch.
+You talk to **mosfet**. It builds you a bot. You teach that bot in plain words, the way you'd teach anyone, and the lesson sticks. Next time the thing happens, the bot just does it.
 
-That’s the product. If you came here for a manifesto about “agentic workflows,” the door is behind you and it squeaks on purpose.
+That's the product. Not a prompt you babysit. Not an agent you program. A thing that learns what you want, then keeps it.
 
 ---
 
-> Silicon Valley’s big idea: **an LLM in a `while True`.** Every sneeze costs tokens. Every Tuesday the personality changes. New behavior? Edit the prompt. Sacrifice a goat. Ship. Watch it answer the phone like a Shakespeare understudy who just discovered cocaine.
+Nobody wants to program their agents. Nobody wants a part-time job as Prompt Janitor because GPT-Whatever-Just-Shipped is cheaper, smarter, moodier, and now "answer the phone" means a haiku and then silence.
+
+They want something that learns. Like anyone else they bother teaching.
+
+So the phone rings, and your bot sits there.
+
+> ```
+>  ☎  *ring*
 >
-> **A Bot is built like a robot because it is one.** Ears in a real room. Hands on real hardware. A reflex floor it cannot “align” its way out of. Compiled skills first. Cheap model second. Fancy model last, and only if the cheap stuff shrugged. You teach it in English. Then it stops asking the cloud for permission to exist.
+>  ⬡  ...
+> ```
 >
-> **Perceive. Decide. Act.** You supply anatomy and teachers. You do not write a choose-your-own-adventure where every branch is `if ring: answer()`. If a creature in that body could have done something else, **the bot chooses.** Capability, not choreography. If that sentence makes your fingers itch for a hardcoded policy, drink water. Touch grass. Do not open `body.py`.
+> **It heard it. It thought about it. It did nothing.** Fine. Nobody told it that mattered.
+
+> ```
+>  👤  hey, every time the phone rings, answer it
+>
+>  ⬡  the ring from a minute ago? got it.
+>     ✓ learned · answer_rings
+> ```
+>
+> **You corrected it once, out loud.** It pinned that to the ring it actually heard.
+
+> ```
+>  ☎  *ring*
+>
+>  ⬡  "Hello?"
+> ```
+>
+> **Reflex.** No tokens. No "let me think." No invoice because a telephone made a noise.
+
+The order is the point. You configured nothing up front. The bot had to *encounter* a ring
+before the word meant anything, and your correction landed on the thing it perceived, not
+on a string you typed at it. That's why the rule sticks instead of sitting in a prompt
+hoping to match someday.
+
+A prompt re-decides every time. A latch doesn't. Once it flips, it stays flipped, and holding it there draws nothing.
+
+A better model can show up tomorrow. Use it for the stuff the bot still has to *think* about. What you already told it stays told. Bye bye, rewrite-the-prompt-every-release.
 
 ---
 
-## How a Bot learns (no, you don’t “just prompt it”)
+Gate voltage is the whole interface. You don't machine the transistor, you don't rewire the board, you put a small signal on one pin and the power does what you meant. The bar is **so easy a baby could do it.** If you need YAML, a system prompt, or a two-week tune-up, we already failed.
 
-1. **Life happens.** Phone rings. Human yaps. Reality continues its little crime spree.
-2. **You talk.** *“When the phone rings, make sure you answer it.”* Words. Dirty, beautiful words. Not a YAML incantation named `on_ring_v3_final_FINAL`.
-3. **It checks the tape.** Lesson meets what it actually heard and saw. If it can’t ground it, it fails in public instead of hallucinating a TED Talk and calling it agency.
-4. **It compiles.** Sandboxed state machine. Durable memory. Your mouth → behavior. No fine-tune. No “we’ll add it to the system prompt in Q3.” No redeploy conga line.
-5. **It just does it.** Next ring: skill fires. Zero model. Zero tokens. Zero invoice that looks like you rented a GPU cluster to notice a telephone.
+You don't open a project. You don't wire providers. You talk to mosfet.
 
-The loop that teaches a bot is the same loop that *builds* bots. “Bot that builds bots” is not a sequel. It’s this joke, told all the way to the punchline.
+| | | |
+|---|---|---|
+| **1** | **Make a bot.** | Ask. Get one. |
+| **2** | **Poke it.** | Ring it. Listen. Break it. |
+| **3** | **Teach it.** | Correct it in your own words. Watch the rule stick. |
+| **4** | **Tell us when it sucks.** | If mosfet ships a dud, say so. We can take it. |
 
----
+It asks for a number, a key, a voice in the conversation. You hand it over. You do not excavate `final.env.bak.reallythisone`. Each bot keeps its own mind. It gets cheaper as it gets smarter, because it stops paying rent to remember something you already said.
 
-## Living with one (it’s uncomfortably like a roommate)
-
-Somebody dials a real number. It rings. Like phones. Remember phones?
-
-Busy tone in the earpiece if the universe ghosts you. What it does about that is **its** problem. You don’t get a callback from the README.
-
-It doesn’t talk over itself. Its ear hears its own mouth, which is more self-awareness than most Slack channels. Interrupt it mid-thought and it handles it, because interruption is a sense, not a stack trace that says `ContextOverflowError: lol`.
-
-Needs a key? A voice? A vendor handshake? **It asks.** In the conversation. Like a person who has not been spiritually destroyed by twelve `.env` files and a wiki page last edited during the Obama administration. You hand it the secret. It keeps the secret. It does not spray credentials into logs like a fountain of bad decisions.
+A learned rule is a DIP switch, not a prompt. You set it once by hand, it holds with no power, and you can see it and flip it back. Same board, same idea: the expensive part runs once, the switch keeps the answer.
 
 ---
 
-## When this ships, the product is insultingly small
+### The bill we're writing ourselves
 
-- **Ask for a bot.** It assembles one. Devices, providers, anatomy. You are not the glue.
-- **It asks for the stuff.** Keys, access, a voice. You give them like a grown-up. Not like an archaeologist of `prod.secrets.local.bak.reallythisone`.
-- **You teach.** It keeps. Permanently. “Permanent” meaning *tomorrow*, not *until the context window starts sobbing*.
-- **Each bot has a mind.** Skills live in the bot, not in your prompt graveyard.
-- **It gets cheaper as it gets smarter.** A bot that already knows the bit does not Venmo the GPU gods every time a phone dares to ring. That’s not branding. That’s the receipt.
+Four claims. If one breaks, we broke it:
 
-You can still write code for the cursed leftover teaching can’t reach. That’s the emergency exit. The plan is fewer emergencies. The people who wanted to live in the emergency exit will be insufferable about this. Correct.
+| Claim | Means |
+|---|---|
+| **Told once, told forever** | Swap the model. The lesson survives. |
+| **Learning makes it cheaper** | A learned rule is not a token spend. Costs go *down* over time, not up. |
+| **Each bot keeps its own mind** | No shared brain, no cross-contamination, no "why does my bot know that." |
+| **The teaching is the interface** | If the answer to "how do I change this" is ever "edit a file," we failed. |
 
----
+Yes, there's a Python library under here, the same way there's a board under the gate pin. There's a library under your microwave too, and you have never once imported it. Code is still allowed ([development](docs/development.md), [examples](examples/README.md)), and if that's your idea of a good time, go nuts. It's a door marked *staff only*, not the front one.
 
-## Status (the honest bit, said like a threat)
+Most people just wanted Siri, since 2011, to take the note, make the call, learn the house rules, and not forget next week because someone shipped a new adjective.
 
-Experimental. Under construction. Not a slide deck. In `examples/` there are bots that answer **actual phones**, hear lessons in a **actual room**, and then keep the behavior like they meant it. They ring. They do not “demo well in Figma.”
+Talk to mosfet.
 
-The destination is not a vibe. You show up knowing nothing. You say what you want. You hand it what it asks for. You let it be a bot.
-
-A bot that builds bots. Bots that learn.
-
-That’s the whole carnival.
-
-If you are still hunting for the agent loop: it isn’t lost. We didn’t invite it.
+```
+mosfet
+```
