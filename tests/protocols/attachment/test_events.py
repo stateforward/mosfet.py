@@ -3,7 +3,7 @@
 import hsm
 import datetime
 
-from bot.protocols import attachment
+from mosfet.protocols import attachment
 from tests.type_helpers import object_dict
 
 

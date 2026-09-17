@@ -5,7 +5,7 @@ import json
 import pytest
 from livekit import rtc
 
-from bot.providers.livekit import signaling
+from mosfet.providers.livekit import signaling
 
 
 def test_the_four_methods_are_the_whole_vocabulary() -> None:

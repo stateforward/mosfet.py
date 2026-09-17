@@ -8,13 +8,13 @@ import queue as queue_module
 import threading
 import typing
 
-import bot.telemetry
+import mosfet.telemetry
 import hsm
 import pytest
 from opentelemetry import _logs, trace
 
-from bot.telemetry import span
-from bot.telemetry.configure import span_file, tracer_provider
+from mosfet.telemetry import span
+from mosfet.telemetry.configure import span_file, tracer_provider
 
 
 def _flush() -> None:
@@ -43,7 +43,7 @@ def _reset_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> collections.abc.Iterator[None]:
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
     monkeypatch.delenv("BOT_OTEL_SPAN_FILE", raising=False)
@@ -61,11 +61,11 @@ def _reset_telemetry(
     monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
     monkeypatch.setattr(trace, "set_tracer_provider", _noop_set_tracer_provider)
     yield
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
 
 
 def test_configure_exports_spans_to_local_jsonl() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert span_file() == pathlib.Path("otel-spans.jsonl").resolve()
 
     with span.operation(
@@ -93,12 +93,12 @@ def test_configure_exports_spans_to_local_jsonl() -> None:
 
 
 def test_span_file_honours_override() -> None:
-    assert bot.telemetry.configure(span_file="traces/spans.jsonl") is True
+    assert mosfet.telemetry.configure(span_file="traces/spans.jsonl") is True
     assert span_file() == (pathlib.Path("traces") / "spans.jsonl").resolve()
 
 
 def test_disabled_configure_exports_no_spans() -> None:
-    assert bot.telemetry.configure(enabled=False) is False
+    assert mosfet.telemetry.configure(enabled=False) is False
     assert span_file() is None
     with span.operation(
         "bot.test.operation",
@@ -128,7 +128,7 @@ class _KindedError(Exception):
 
 
 def test_operation_records_normalized_failure_kind() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with pytest.raises(_KindedError):
         with span.operation(
             "bot.test.operation",
@@ -149,7 +149,7 @@ def test_operation_records_normalized_failure_kind() -> None:
 
 
 def test_operation_falls_back_to_snake_cased_exception_type() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with pytest.raises(ValueError):
         with span.operation(
             "bot.test.operation",
@@ -192,7 +192,7 @@ def _trace_ids(records: list[dict[str, object]]) -> dict[str, str]:
 def test_bind_is_safe_through_to_thread() -> None:
     """``asyncio.to_thread`` already copies the context; binding must not break that."""
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
 
     def work() -> None:
         with span.operation(
@@ -221,7 +221,7 @@ def test_bind_is_safe_through_to_thread() -> None:
 def test_unbound_thread_hop_detaches_into_a_new_trace() -> None:
     """The failure this mechanism exists to prevent, pinned so it stays visible."""
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
 
     def work() -> None:
         with span.operation(
@@ -249,7 +249,7 @@ def test_unbound_thread_hop_detaches_into_a_new_trace() -> None:
 def test_long_lived_worker_thread_needs_binding_per_item() -> None:
     """The mlx-style hop: one worker started at bring-up, items handed over later."""
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     queue: queue_module.Queue[collections.abc.Callable[[], None] | None] = queue_module.Queue()
 
     def consume() -> None:
@@ -292,7 +292,7 @@ def test_long_lived_worker_thread_needs_binding_per_item() -> None:
 
 
 def test_bind_reattaches_context_in_a_dedicated_worker_thread() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
 
     def work() -> None:
         with span.operation(
@@ -320,7 +320,7 @@ def test_bind_reattaches_context_in_a_dedicated_worker_thread() -> None:
 def test_bind_restores_the_worker_thread_context() -> None:
     """Attach/detach must be balanced so a pooled thread is not left contaminated."""
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     observed: list[bool] = []
 
     def work() -> None:
@@ -355,7 +355,7 @@ def test_bind_restores_the_worker_thread_context() -> None:
 
 
 def test_inject_context_round_trips_across_a_process_boundary() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     event = hsm.Event[None](name="bot.test.crossing")
 
     with span.operation(
@@ -364,14 +364,14 @@ def test_inject_context_round_trips_across_a_process_boundary() -> None:
         component="telemetry.test",
         stage="emit",
     ) as emitting:
-        carried = bot.telemetry.inject_context(event)
+        carried = mosfet.telemetry.inject_context(event)
         emitted_trace_id = emitting.get_span_context().trace_id
 
     assert "traceparent" in carried.metadata
     assert event.metadata == {}
 
     # Receiving process: no active context, only the serialized carrier.
-    received = bot.telemetry.event_context(carried)
+    received = mosfet.telemetry.event_context(carried)
     with span.operation(
         "bot.test.receive",
         scope="bot.telemetry.test",
@@ -383,9 +383,9 @@ def test_inject_context_round_trips_across_a_process_boundary() -> None:
 
 
 def test_inject_context_without_an_active_span_is_a_noop() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     event = hsm.Event[None](name="bot.test.crossing")
-    assert bot.telemetry.inject_context(event) is event
+    assert mosfet.telemetry.inject_context(event) is event
 
 
 def test_operation_keeps_a_recorded_failure_on_clean_exit() -> None:
@@ -396,7 +396,7 @@ def test_operation_keeps_a_recorded_failure_on_clean_exit() -> None:
     non-exception failure look like a success — which is most of them in this codebase.
     """
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with span.operation(
         "bot.test.operation",
         scope="bot.telemetry.test",
@@ -412,7 +412,7 @@ def test_operation_keeps_a_recorded_failure_on_clean_exit() -> None:
 
 
 def test_record_current_failure_marks_the_enclosing_operation() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with span.operation(
         "bot.test.operation",
         scope="bot.telemetry.test",
@@ -427,7 +427,7 @@ def test_record_current_failure_marks_the_enclosing_operation() -> None:
 
 
 def test_operation_still_closes_ok_without_a_recorded_failure() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with span.operation(
         "bot.test.operation",
         scope="bot.telemetry.test",
@@ -447,7 +447,7 @@ def test_unstamped_event_stays_in_the_ambient_trace() -> None:
     the point the caller's span is the answer.
     """
 
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     event = hsm.Event[None](name="bot.test.in_process")
     assert event.metadata == {}
 
@@ -462,13 +462,13 @@ def test_unstamped_event_stays_in_the_ambient_trace() -> None:
             scope="bot.telemetry.test",
             component="telemetry.test",
             stage="observed",
-            context=bot.telemetry.event_context(event),
+            context=mosfet.telemetry.event_context(event),
         ) as observed:
             assert observed.get_span_context().trace_id == parent.get_span_context().trace_id
 
 
 def test_operation_records_cancellation_as_its_own_outcome() -> None:
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with pytest.raises(asyncio.CancelledError):
         with span.operation(
             "bot.test.operation",

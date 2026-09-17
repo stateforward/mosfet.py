@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.devices import audio as audio_device
+from mosfet.devices import audio as audio_device
 
 import asyncio
 import collections.abc
@@ -10,7 +10,7 @@ import typing
 
 import pytest
 
-from bot.providers.livekit import pcm_batch
+from mosfet.providers.livekit import pcm_batch
 
 
 @dataclasses.dataclass

@@ -7,12 +7,12 @@ import collections.abc
 import typing
 
 import hsm
-import bot
-import bot.lifecycle
+import mosfet
+import mosfet.lifecycle
 
-from bot.devices import audio
-from bot.devices import phone as phone_device
-from bot.environment import Environment
+from mosfet.devices import audio
+from mosfet.devices import phone as phone_device
+from mosfet.environment import Environment
 from tests.hsm_instance_state import phone_firmware
 
 
@@ -64,8 +64,8 @@ def test_receiver_forwards_only_current_call_service_audio() -> None:
         # No call yet: service audio for an unknown call goes nowhere.
         before_call = await forwarded_count("call-1")
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
-        assert bot.lifecycle.is_started(speaker)
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        assert mosfet.lifecycle.is_started(speaker)
         await firmware.event_recorder().receive(
             phone.context(),
             phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),

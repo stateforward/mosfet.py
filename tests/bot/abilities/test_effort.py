@@ -4,7 +4,7 @@ import hsm
 import typing
 
 
-from bot.abilities.ability import Effort, Ability, effort_within
+from mosfet.abilities.ability import Effort, Ability, effort_within
 
 
 def test_effort_scale_is_ordered() -> None:
@@ -19,11 +19,11 @@ def test_ability_default_effort_is_xs() -> None:
 
 
 def test_ability_effort_overridable_per_class() -> None:
-    import bot
+    import mosfet
 
     class _EffortfulAbility(Ability):
         effort = Effort.L
-        submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+        submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
             "_EffortfulAbility",
             hsm.initial(hsm.target("idle")),
             hsm.state("idle"),

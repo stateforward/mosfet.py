@@ -7,8 +7,8 @@ from google.genai import errors as genai_errors
 
 import hsm
 
-from bot.providers.gemini import ChatClient
-from bot.providers.gemini import client as gemini_client
+from mosfet.providers.gemini import ChatClient
+from mosfet.providers.gemini import client as gemini_client
 
 
 @dataclasses.dataclass

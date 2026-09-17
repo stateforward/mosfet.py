@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import bot.abilities.language.text as text_generation
+import mosfet.abilities.language.text as text_generation
 
 from . import events
 from .phone import SMSPhone

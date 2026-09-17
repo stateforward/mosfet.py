@@ -1,93 +1,87 @@
-# mosfet
+# stateforward.mosfet
 
-**low effort, high power software robots**
+`stateforward.mosfet` is an event-driven Python runtime for software robots: bots that
+perceive an environment, decide what to do, and act. Lifecycle, coordination, retries, and
+timeouts are modeled as hierarchical state machines rather than written as ad-hoc async
+control flow.
 
-A MOSFET is the part that drives every robot ever built: a tiny voltage on the gate
-switches a lot of current. Almost no input, all of the output. That's the deal here.
-You say a thing once, the world moves every time after.
+This is the Python implementation. It belongs to
+[stateforward/mosfet](https://github.com/stateforward/mosfet).
 
-You talk to **mosfet**. It builds you a bot. You teach that bot in plain words, the way you'd teach anyone, and the lesson sticks. Next time the thing happens, the bot just does it.
+Install:
 
-That's the product. Not a prompt you babysit. Not an agent you program. A thing that learns what you want, then keeps it.
-
----
-
-Nobody wants to program their agents. Nobody wants a part-time job as Prompt Janitor because GPT-Whatever-Just-Shipped is cheaper, smarter, moodier, and now "answer the phone" means a haiku and then silence.
-
-They want something that learns. Like anyone else they bother teaching.
-
-So the phone rings, and your bot sits there.
-
-> ```
->  ☎  *ring*
->
->  ⬡  ...
-> ```
->
-> **It heard it. It thought about it. It did nothing.** Fine. Nobody told it that mattered.
-
-> ```
->  👤  hey, every time the phone rings, answer it
->
->  ⬡  the ring from a minute ago? got it.
->     ✓ learned · answer_rings
-> ```
->
-> **You corrected it once, out loud.** It pinned that to the ring it actually heard.
-
-> ```
->  ☎  *ring*
->
->  ⬡  "Hello?"
-> ```
->
-> **Reflex.** No tokens. No "let me think." No invoice because a telephone made a noise.
-
-The order is the point. You configured nothing up front. The bot had to *encounter* a ring
-before the word meant anything, and your correction landed on the thing it perceived, not
-on a string you typed at it. That's why the rule sticks instead of sitting in a prompt
-hoping to match someday.
-
-A prompt re-decides every time. A latch doesn't. Once it flips, it stays flipped, and holding it there draws nothing.
-
-A better model can show up tomorrow. Use it for the stuff the bot still has to *think* about. What you already told it stays told. Bye bye, rewrite-the-prompt-every-release.
-
----
-
-Gate voltage is the whole interface. You don't machine the transistor, you don't rewire the board, you put a small signal on one pin and the power does what you meant. The bar is **so easy a baby could do it.** If you need YAML, a system prompt, or a two-week tune-up, we already failed.
-
-You don't open a project. You don't wire providers. You talk to mosfet.
-
-| | | |
-|---|---|---|
-| **1** | **Make a bot.** | Ask. Get one. |
-| **2** | **Poke it.** | Ring it. Listen. Break it. |
-| **3** | **Teach it.** | Correct it in your own words. Watch the rule stick. |
-| **4** | **Tell us when it sucks.** | If mosfet ships a dud, say so. We can take it. |
-
-It asks for a number, a key, a voice in the conversation. You hand it over. You do not excavate `final.env.bak.reallythisone`. Each bot keeps its own mind. It gets cheaper as it gets smarter, because it stops paying rent to remember something you already said.
-
-A learned rule is a DIP switch, not a prompt. You set it once by hand, it holds with no power, and you can see it and flip it back. Same board, same idea: the expensive part runs once, the switch keeps the answer.
-
----
-
-### The bill we're writing ourselves
-
-Four claims. If one breaks, we broke it:
-
-| Claim | Means |
-|---|---|
-| **Told once, told forever** | Swap the model. The lesson survives. |
-| **Learning makes it cheaper** | A learned rule is not a token spend. Costs go *down* over time, not up. |
-| **Each bot keeps its own mind** | No shared brain, no cross-contamination, no "why does my bot know that." |
-| **The teaching is the interface** | If the answer to "how do I change this" is ever "edit a file," we failed. |
-
-Yes, there's a Python library under here, the same way there's a board under the gate pin. There's a library under your microwave too, and you have never once imported it. Code is still allowed ([development](docs/development.md), [examples](examples/README.md)), and if that's your idea of a good time, go nuts. It's a door marked *staff only*, not the front one.
-
-Most people just wanted Siri, since 2011, to take the note, make the call, learn the house rules, and not forget next week because someone shipped a new adjective.
-
-Talk to mosfet.
-
+```bash
+pip install stateforward.mosfet
 ```
-mosfet
+
+Import:
+
+```python
+import mosfet
 ```
+
+## The shape of a bot
+
+A bot is a **body** and a **cognition**.
+
+The body owns lifetime, environment-facing I/O, and stimulus fan-out. It hands cognition an
+explicit turn. It does not interpret stimuli or decide what matters. Cognition owns
+interpretation, behavior selection, and dispatch. Nothing sits in between deciding on the
+bot's behalf.
+
+```python
+import mosfet
+from mosfet.abilities import cognition, listening, speaking
+
+
+class Assistant(mosfet.Bot):
+    """Hears, thinks, answers. Devices attach at the body; cognition selects."""
+
+    _listening: listening.Listening
+    _speaking: speaking.Speaking
+
+    def __init__(self, *, cognition: cognition.Cognition) -> None:
+        super().__init__()
+        ...
+```
+
+`Bot` is abstract: a concrete bot declares the abilities it composes and the devices it
+attaches. See [`examples/`](examples/README.md) for complete programs, including a phone bot
+that answers a real call over LiveKit.
+
+## Pieces
+
+- **Abilities** are the composition unit: typed input, output, and failure events, with
+  optional nested abilities. Hearing, listening, speaking, vision, memory, learning.
+- **Devices** are environment-facing and bot-agnostic. A phone rings; it does not decide
+  that ringing matters.
+- **Providers** own transport and SDKs. Core sees provider-neutral IDs, payloads, and
+  failure kinds. Eleven ship here, from LiveKit to local MLX audio.
+- **Behaviors** are learned event-only programs, compiled from Starlark and stored, so a
+  rule the bot was taught costs nothing to run again.
+
+Every stateful concern is modeled with
+[`stateforward-hsm`](https://github.com/stateforward/hsm.py).
+
+## Package name, event names
+
+The import package is `mosfet`. The events are `bot.*`, because they name what a bot did,
+not what library emitted them:
+
+```python
+import mosfet
+
+mosfet.InputEvent    # canonical event name: bot.input
+```
+
+That split is deliberate and load-bearing. Event names are the wire contract.
+
+## Development
+
+[`docs/development.md`](docs/development.md) has the test, lint, and type-check commands.
+[`AGENTS.md`](AGENTS.md) is the engineering contract this repository is held to; it is
+worth reading before a first change.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

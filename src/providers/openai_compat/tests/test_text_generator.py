@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.abilities.language import text
+from mosfet.abilities.language import text
 
 import asyncio
 import collections.abc
@@ -9,7 +9,7 @@ import pathlib
 
 import pytest
 
-from bot.providers.openai_compat import TextGenerationError, TextGenerator
+from mosfet.providers.openai_compat import TextGenerationError, TextGenerator
 
 
 @dataclasses.dataclass
@@ -608,18 +608,18 @@ def test_text_generator_records_otel_request_when_configured(
 
     import json
 
-    import bot.telemetry
+    import mosfet.telemetry
     from opentelemetry import _logs
 
-    from bot.telemetry.configure import logger_provider
+    from mosfet.telemetry.configure import logger_provider
 
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
 
     log_path = pathlib.Path("openai-compat-generator.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
 
     @dataclasses.dataclass
     class ClientWithModel:

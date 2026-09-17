@@ -13,7 +13,7 @@ import typing
 
 import hsm
 
-from bot.protocols.yamux import (
+from mosfet.protocols.yamux import (
     INITIAL_STREAM_WINDOW,
     OpenStreamEvent,
     PingEvent,

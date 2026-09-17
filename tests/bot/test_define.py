@@ -6,18 +6,18 @@ import importlib
 import hsm
 import pytest
 
-import bot
-from bot.define import topology
+import mosfet
+from mosfet.define import topology
 
-_DEFINE = importlib.import_module("bot.define")
+_DEFINE = importlib.import_module("mosfet.define")
 
 
 def _demo() -> hsm.Model:
-    return bot.define(
+    return mosfet.define(
         "Demo",
-        bot.initial(bot.target("idle")),
-        bot.state("idle", bot.transition(bot.on("go"), bot.target("../run"))),
-        bot.state("run"),
+        mosfet.initial(mosfet.target("idle")),
+        mosfet.state("idle", mosfet.transition(mosfet.on("go"), mosfet.target("../run"))),
+        mosfet.state("run"),
     )
 
 
@@ -30,7 +30,7 @@ def test_define_returns_working_model() -> None:
 
     async def run() -> str:
         demo = Demo()
-        _ = await bot.started(None, demo, model)
+        _ = await mosfet.started(None, demo, model)
         await hsm.dispatch(None, demo, go)
         return demo.state() or ""
 
@@ -53,11 +53,11 @@ def test_topology_includes_idle_run_and_go() -> None:
 
 
 def test_topology_includes_runtime_owner_when_supplied() -> None:
-    owner_model = bot.define("Owner", bot.initial(bot.target("ready")), bot.state("ready"))
-    child_model = bot.define("Child", bot.initial(bot.target("ready")), bot.state("ready"))
+    owner_model = mosfet.define("Owner", mosfet.initial(mosfet.target("ready")), mosfet.state("ready"))
+    child_model = mosfet.define("Child", mosfet.initial(mosfet.target("ready")), mosfet.state("ready"))
 
     async def run() -> str:
-        owner = await bot.started(None, hsm.Instance(), owner_model)
+        owner = await mosfet.started(None, hsm.Instance(), owner_model)
         payload = topology(child_model, owner=owner)
         owner_name = payload.get("owner")
         assert owner_name is not None

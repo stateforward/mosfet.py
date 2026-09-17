@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 
-import bot.abilities
-from bot.providers.mlx_vlm import TextDecoder
+import mosfet.abilities
+from mosfet.providers.mlx_vlm import TextDecoder
 
 
 async def await_text_decoding(output: collections.abc.Awaitable[str]) -> str:
@@ -17,7 +17,7 @@ def test_text_decoder_passes_text_through() -> None:
     output = asyncio.run(await_text_decoding(decoder.decode("Read this note.")))
 
     assert output == "Read this note."
-    assert isinstance(decoder, bot.abilities.Decoder)
+    assert isinstance(decoder, mosfet.abilities.Decoder)
 
 
 def test_text_decoder_is_awaitable() -> None:

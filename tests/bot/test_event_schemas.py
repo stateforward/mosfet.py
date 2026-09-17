@@ -1,13 +1,13 @@
-import bot
-from bot import event
-from bot.abilities.cognition import event as cognition_event
-from bot.abilities import cognition, listening, processing
-from bot.abilities.communication import communication, conversation
-from bot.abilities.communication.conversation import memory as conversation_memory
-from bot.devices import audio
-from bot.devices.phone import events as phone_events
-from bot.environment import SoundData, SoundEvent
-from bot.abilities.hearing import voice
+import mosfet
+from mosfet import event
+from mosfet.abilities.cognition import event as cognition_event
+from mosfet.abilities import cognition, listening, processing
+from mosfet.abilities.communication import communication, conversation
+from mosfet.abilities.communication.conversation import memory as conversation_memory
+from mosfet.devices import audio
+from mosfet.devices.phone import events as phone_events
+from mosfet.environment import SoundData, SoundEvent
+from mosfet.abilities.hearing import voice
 
 import dataclasses
 import importlib
@@ -18,22 +18,22 @@ from tests.type_helpers import object_dict
 
 
 def test_bot_body_events_import_from_agent_domain_without_ability_barrel_cycle() -> None:
-    _ = importlib.import_module("bot.bot")
+    _ = importlib.import_module("mosfet.bot")
 
-    assert bot.ProcessingCompletedEvent.name == "bot.processing.completed"
+    assert mosfet.ProcessingCompletedEvent.name == "bot.processing.completed"
 
 
 def test_bot_completion_events_use_pydantic_schemas() -> None:
-    activating_done_schema = object_dict(bot.ActivatingDoneEvent.schema)
-    activating_failed_schema = object_dict(bot.ActivatingFailedEvent.schema)
+    activating_done_schema = object_dict(mosfet.ActivatingDoneEvent.schema)
+    activating_failed_schema = object_dict(mosfet.ActivatingFailedEvent.schema)
 
-    assert bot.ActivatingDoneEvent.name == "bot.activated"
-    assert activating_done_schema == bot.ActivatingDoneEventData.model_json_schema()
+    assert mosfet.ActivatingDoneEvent.name == "bot.activated"
+    assert activating_done_schema == mosfet.ActivatingDoneEventData.model_json_schema()
     assert activating_done_schema["description"]
     assert activating_done_schema["examples"] == [{}]
 
-    assert bot.ActivatingFailedEvent.name == "bot.activating.failed"
-    assert activating_failed_schema == bot.ActivatingFailedEventData.model_json_schema()
+    assert mosfet.ActivatingFailedEvent.name == "bot.activating.failed"
+    assert activating_failed_schema == mosfet.ActivatingFailedEventData.model_json_schema()
     assert activating_failed_schema["description"]
     assert activating_failed_schema["examples"] == [{}]
 
@@ -90,7 +90,7 @@ def test_speech_model_facing_xml_renders_terminal_event_only() -> None:
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        parent=bot.StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
+        parent=mosfet.StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
     )
 
     xml = processing.InputData(input=listening.SpeechEvent.with_data_and_id(speech, "speech-1")).model_facing_payload()
@@ -118,7 +118,7 @@ def test_response_model_facing_xml_renders_terminal_event_without_causal_ancestr
         channels=1,
         media_type="audio/pcm",
         source_ids=frozenset({"caller"}),
-        parent=bot.StimulusData.from_event(sound_event),
+        parent=mosfet.StimulusData.from_event(sound_event),
     )
     speech_event = dataclasses.replace(
         listening.SpeechEvent.with_data_and_id(speech, "speech-1"), source="listening-1", target="cognition-1"
@@ -128,7 +128,7 @@ def test_response_model_facing_xml_renders_terminal_event_without_causal_ancestr
         target_ids=frozenset(),
         content="hello",
         content_type="text/plain",
-        parent=bot.StimulusData.from_event(speech_event),
+        parent=mosfet.StimulusData.from_event(speech_event),
     )
     communication_event = dataclasses.replace(
         communication.InputEvent.with_data_and_id(input_data, "communication-1"),
@@ -136,7 +136,7 @@ def test_response_model_facing_xml_renders_terminal_event_without_causal_ancestr
         target="conversation-1",
     )
     response = conversation.Messages(
-        parent=bot.StimulusData.from_event(communication_event),
+        parent=mosfet.StimulusData.from_event(communication_event),
         messages=(
             conversation.Message(
                 sequence=0,
@@ -207,7 +207,7 @@ def test_nested_cognition_event_renders_typed_stimulus_without_hsm_metadata() ->
         channels=1,
         media_type="audio/pcm",
         source_ids=frozenset({"caller"}),
-        parent=bot.StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
+        parent=mosfet.StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
     )
     cognition_input = cognition.InputData(
         stimulus=listening.SpeechEvent.with_data_and_id(speech, "speech-1"),

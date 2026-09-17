@@ -20,12 +20,12 @@ def _project_metadata() -> dict[str, object]:
 def test_pyannote_dependency_is_declared() -> None:
     dependencies = _project_metadata()["dependencies"]
     assert isinstance(dependencies, list)
-    assert dependencies == ["pyannote.audio>=4.0.7,<5.0.0", "stateforward.bot"]
+    assert dependencies == ["pyannote.audio>=4.0.7,<5.0.0", "stateforward.mosfet"]
 
 
 def test_package_metadata_points_to_local_version_and_readme() -> None:
     project = _project_metadata()
-    assert project["name"] == "bot-provider-pyannote"
+    assert project["name"] == "mosfet-provider-pyannote"
     assert project["dynamic"] == ["version"]
     assert project["readme"] == "README.md"
     raw_document: object = tomllib.loads((PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
@@ -37,7 +37,7 @@ def test_package_metadata_points_to_local_version_and_readme() -> None:
     assert isinstance(hatch, dict)
     version = typing.cast(dict[str, object], hatch)["version"]
     assert isinstance(version, dict)
-    assert typing.cast(dict[str, object], version)["path"] == "src/bot/providers/pyannote/__init__.py"
+    assert typing.cast(dict[str, object], version)["path"] == "src/mosfet/providers/pyannote/__init__.py"
 
 
 def test_readme_records_exact_dependency() -> None:

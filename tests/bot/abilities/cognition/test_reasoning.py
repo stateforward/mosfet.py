@@ -1,9 +1,9 @@
-from bot.abilities import cognition
-from bot.abilities import ability
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import reasoning as reasoning_module
-from bot.environment import SoundData, SoundEvent
+from mosfet.abilities import cognition
+from mosfet.abilities import ability
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import reasoning as reasoning_module
+from mosfet.environment import SoundData, SoundEvent
 
 import asyncio
 import dataclasses

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from bot import abilities
-import bot
-from bot.abilities import ability
-from bot.abilities import cognition
-from bot.abilities import listening
-from bot.abilities import memory
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities import speaking
+from mosfet import abilities
+import mosfet
+from mosfet.abilities import ability
+from mosfet.abilities import cognition
+from mosfet.abilities import listening
+from mosfet.abilities import memory
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities import speaking
 
-from bot.abilities.hearing import sound as sound_hearing
-from bot.abilities.hearing import speech
-from bot.abilities.hearing import voice
+from mosfet.abilities.hearing import sound as sound_hearing
+from mosfet.abilities.hearing import speech
+from mosfet.abilities.hearing import voice
 
 import argparse
 import asyncio
@@ -26,27 +26,27 @@ import typing
 
 import hsm
 
-from bot import device
-from bot.bot import Bot
+from mosfet import device
+from mosfet.bot import Bot
 
 from . import person
 
-from bot.devices import audio
-from bot.devices import phone as phone_device
-from bot.providers.gemini import ChatClient as GeminiChatClient
-from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
-from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
-from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
-from bot.providers.openai_compat import ChatClient as OpenAIChatClient
-from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.providers.livekit import PhoneService
-from bot.providers.livekit import signaling
-from bot.providers.livekit.audio import PcmWavDecoder
-from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier
-from bot.providers.pyannote import SpeakerEmbeddingInference
-from bot.providers.pyannote import SpeakerEmbeddingInferenceLoader
-from bot.telemetry import observed_event, observed_occurrence
-from bot.environment import Environment, space
+from mosfet.devices import audio
+from mosfet.devices import phone as phone_device
+from mosfet.providers.gemini import ChatClient as GeminiChatClient
+from mosfet.providers.gemini import SpeechDecoder as GeminiSpeechDecoder
+from mosfet.providers.gemini import SpeechEncoder as GeminiSpeechEncoder
+from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
+from mosfet.providers.openai_compat import ChatClient as OpenAIChatClient
+from mosfet.providers.openai_compat import Processor as OpenAIProcessor
+from mosfet.providers.livekit import PhoneService
+from mosfet.providers.livekit import signaling
+from mosfet.providers.livekit.audio import PcmWavDecoder
+from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier
+from mosfet.providers.pyannote import SpeakerEmbeddingInference
+from mosfet.providers.pyannote import SpeakerEmbeddingInferenceLoader
+from mosfet.telemetry import observed_event, observed_occurrence
+from mosfet.environment import Environment, space
 
 _LOG = logging.getLogger("phone_bot_example.hsm")
 
@@ -430,7 +430,7 @@ def _phone_cognition(
     store = memory if memory is not None else _memory()
     # Communication ships a seeded autonomy wire: SpeechEvent → Communication.input.
     # Communication owns routing the admitted turn to its active Conversation.
-    from bot.abilities import communication as communication_ability
+    from mosfet.abilities import communication as communication_ability
 
     # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
     # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
@@ -788,7 +788,7 @@ def _record_phone_bot_output(
     del ctx
     observed = _observed_event(event)
     data = observed.data
-    if isinstance(data, bot.ProcessingCompletedEventData):
+    if isinstance(data, mosfet.ProcessingCompletedEventData):
         instance.record_output(data.output)
 
 
@@ -800,7 +800,7 @@ def _record_phone_bot_failure(
     del ctx
     observed = _observed_event(event)
     data = observed.data
-    if isinstance(data, bot.ProcessingFailedEventData):
+    if isinstance(data, mosfet.ProcessingFailedEventData):
         instance.record_failure(data)
 
 
@@ -860,12 +860,12 @@ class PhoneBot(Bot):
     """Bot with LiveKit phone, input Listening, output Speaking, and optional conversation."""
 
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=600)
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "PhoneBot",
         Bot.model,
         hsm.observe(_log_phone_bot_observation),
-        hsm.observe(bot.ProcessingCompletedEvent, _record_phone_bot_output),
-        hsm.observe(bot.ProcessingFailedEvent, _record_phone_bot_failure),
+        hsm.observe(mosfet.ProcessingCompletedEvent, _record_phone_bot_output),
+        hsm.observe(mosfet.ProcessingFailedEvent, _record_phone_bot_failure),
     )
     _label: str
     _phone: phone_device.Phone
@@ -875,7 +875,7 @@ class PhoneBot(Bot):
     _communication: abilities.Communication
     _memory: memory.Memory
     _outputs: list[cognition.types.OutputData]
-    _failures: list[bot.ProcessingFailedEventData]
+    _failures: list[mosfet.ProcessingFailedEventData]
     _conversation_outputs: list[abilities.Messages]
     _conversation_failures: list[abilities.FailureData]
     _listening_handoffs: list[cognition.InputData]
@@ -966,9 +966,9 @@ class PhoneBot(Bot):
 
         if event.source != hsm.id(self) or event.target != hsm.id(self):
             return
-        if isinstance(event.data, bot.ActivatingDoneEventData):
+        if isinstance(event.data, mosfet.ActivatingDoneEventData):
             self._activation_complete.set()
-        elif isinstance(event.data, bot.ActivatingFailedEventData):
+        elif isinstance(event.data, mosfet.ActivatingFailedEventData):
             self._activation_failed.set()
             self._activation_complete.set()
 
@@ -984,7 +984,7 @@ class PhoneBot(Bot):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData)):
+        if isinstance(event.data, (mosfet.ActivatingDoneEventData, mosfet.ActivatingFailedEventData)):
             self._resolve_activation_lifecycle(event)
         if event.name == self._conversation.output_event.name:
             output = event.data
@@ -1009,7 +1009,7 @@ class PhoneBot(Bot):
     def record_output(self, output: cognition.types.OutputData) -> None:
         self._outputs.append(output)
 
-    def record_failure(self, failure: bot.ProcessingFailedEventData) -> None:
+    def record_failure(self, failure: mosfet.ProcessingFailedEventData) -> None:
         self._failures.append(failure)
 
     def label(self) -> str:
@@ -1044,7 +1044,7 @@ class PhoneBot(Bot):
     def outputs(self) -> tuple[cognition.types.OutputData, ...]:
         return tuple(self._outputs)
 
-    def failures(self) -> tuple[bot.ProcessingFailedEventData, ...]:
+    def failures(self) -> tuple[mosfet.ProcessingFailedEventData, ...]:
         return tuple(self._failures)
 
     def conversation_outputs(self) -> tuple[abilities.Messages, ...]:
@@ -1414,7 +1414,7 @@ async def _say_what_is_typed(environment: Environment, someone: person.Person) -
 def _render_text(summary: dict[str, object]) -> str:
     warnings = "\n".join(f"- {item}" for item in typing.cast(list[str], summary["warnings"]))
     return (
-        "stateforward.bot phone voice-bot example\n"
+        "stateforward.mosfet phone voice-bot example\n"
         f"Status: {summary['status']}\n"
         f"Bot state: {summary['bot_state']}\n"
         f"Cognition: {summary['cognition_client']}\n"

@@ -8,12 +8,12 @@ import importlib
 import hsm
 import pytest
 
-import bot.lifecycle
-from bot.providers.livekit.phone import PhoneService, PhoneServiceError
-from bot.providers.livekit.room_audio import RoomAudioTrackPath
-from bot.environment import Environment
+import mosfet.lifecycle
+from mosfet.providers.livekit.phone import PhoneService, PhoneServiceError
+from mosfet.providers.livekit.room_audio import RoomAudioTrackPath
+from mosfet.environment import Environment
 
-_DEFINE = importlib.import_module("bot.define")
+_DEFINE = importlib.import_module("mosfet.define")
 
 
 class _InspectablePhoneService(PhoneService):
@@ -31,15 +31,15 @@ def test_phone_service_production_stop_unstarts_machine() -> None:
         environment = Environment()
         service = PhoneService()
         target = hsm.Instance()
-        await bot.started(
+        await mosfet.started(
             environment,
             target,
-            bot.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
+            mosfet.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await service.attach(environment, target)
-        after_attach = bot.lifecycle.is_started(service)
+        after_attach = mosfet.lifecycle.is_started(service)
         await hsm.stop(service)
-        after_stop = bot.lifecycle.is_started(service)
+        after_stop = mosfet.lifecycle.is_started(service)
         return after_attach, after_stop
 
     after_attach, after_stop = asyncio.run(run())
@@ -60,8 +60,8 @@ def test_phone_service_direct_stop_clears_owner(monkeypatch: pytest.MonkeyPatch)
         environment = Environment()
         service = PhoneService()
         target = hsm.Instance()
-        target_model = bot.define("StopTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        await bot.started(environment, target, target_model)
+        target_model = mosfet.define("StopTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        await mosfet.started(environment, target, target_model)
         await service.attach(environment, target)
         calls.clear()
 
@@ -91,12 +91,12 @@ def test_phone_service_stop_clears_owner_for_an_independently_stopped_track(
         environment = Environment()
         service = _InspectablePhoneService()
         target = hsm.Instance()
-        target_model = bot.define("StoppedTrackTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        await bot.started(environment, target, target_model)
+        target_model = mosfet.define("StoppedTrackTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        await mosfet.started(environment, target, target_model)
         await service.attach(environment, target)
         track_path = service.track_path()
         await hsm.stop(track_path, environment)
-        assert not bot.lifecycle.is_started(track_path)
+        assert not mosfet.lifecycle.is_started(track_path)
         calls.clear()
 
         await service.stop(environment)
@@ -119,19 +119,19 @@ def test_phone_service_attach_after_stop_restarts_machine() -> None:
         environment = Environment()
         service = PhoneService()
         target = hsm.Instance()
-        await bot.started(
+        await mosfet.started(
             environment,
             target,
-            bot.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
+            mosfet.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await service.attach(environment, target)
-        assert bot.lifecycle.is_started(service) is True
+        assert mosfet.lifecycle.is_started(service) is True
 
         await hsm.stop(service)
-        assert bot.lifecycle.is_started(service) is False
+        assert mosfet.lifecycle.is_started(service) is False
 
         await service.attach(environment, target)
-        assert bot.lifecycle.is_started(service) is True
+        assert mosfet.lifecycle.is_started(service) is True
         await service.detach(environment, target)
 
     asyncio.run(run())
@@ -149,10 +149,10 @@ def test_phone_service_reattach_refreshes_owner_without_restart(monkeypatch: pyt
     async def run() -> tuple[str, str]:
         environment = Environment()
         service = PhoneService()
-        target_model = bot.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        replacement_model = bot.define("ReplacementTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        first_target = await bot.started(environment, hsm.Instance(), target_model)
-        replacement_target = await bot.started(environment, hsm.Instance(), replacement_model)
+        target_model = mosfet.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        replacement_model = mosfet.define("ReplacementTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        first_target = await mosfet.started(environment, hsm.Instance(), target_model)
+        replacement_target = await mosfet.started(environment, hsm.Instance(), replacement_model)
         await service.attach(environment, first_target)
         await service.detach(environment, first_target)
         detached_live_payloads = [
@@ -193,10 +193,10 @@ def test_phone_service_conflicting_attach_does_not_republish_owner(
     async def run() -> None:
         environment = Environment()
         service = PhoneService()
-        first_model = bot.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        second_model = bot.define("SecondTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        first_target = await bot.started(environment, hsm.Instance(), first_model)
-        second_target = await bot.started(environment, hsm.Instance(), second_model)
+        first_model = mosfet.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        second_model = mosfet.define("SecondTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
+        first_target = await mosfet.started(environment, hsm.Instance(), first_model)
+        second_target = await mosfet.started(environment, hsm.Instance(), second_model)
         await service.attach(environment, first_target)
         calls.clear()
 

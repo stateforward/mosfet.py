@@ -1,4 +1,4 @@
-from bot.device import (
+from mosfet.device import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEventData,

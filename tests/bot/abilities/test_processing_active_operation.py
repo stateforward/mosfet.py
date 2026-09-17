@@ -5,18 +5,18 @@ from __future__ import annotations
 import asyncio
 
 import hsm
-import bot
+import mosfet
 
-from bot.abilities import processing
+from mosfet.abilities import processing
 
 
 def test_active_operation_uses_map_membership_not_state() -> None:
     async def run() -> None:
         owner = hsm.Instance()
-        await bot.started(
+        await mosfet.started(
             hsm.Context(),
             owner,
-            bot.define("Owner", hsm.initial(hsm.target("s")), hsm.state("s")),
+            mosfet.define("Owner", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         op = await processing.start_operation(owner, "turn-1")
         assert processing.active_operation(owner, "turn-1") is op

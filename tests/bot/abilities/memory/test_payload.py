@@ -1,4 +1,4 @@
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 
 def test_memory_payload_contract_round_trips_binary_parts_and_vectors() -> None:

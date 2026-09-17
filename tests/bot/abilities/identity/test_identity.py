@@ -16,15 +16,15 @@ from typing import override
 import hsm
 import pytest
 
-import bot
-from bot import abilities
-from bot.abilities import cognition
-from bot.abilities import identity
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import input as cognition_input
-from bot.abilities.hearing import speech
-from bot.environment import Environment, SoundData, SoundEvent
+import mosfet
+from mosfet import abilities
+from mosfet.abilities import cognition
+from mosfet.abilities import identity
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import input as cognition_input
+from mosfet.abilities.hearing import speech
+from mosfet.environment import Environment, SoundData, SoundEvent
 
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
@@ -496,14 +496,14 @@ class CognitionRecorder(abilities.Ability[cognition_input.InputData, object]):
         if isinstance(data, cognition_input.InputData):
             instance.turns.append(data)
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "CognitionRecorder",
         hsm.initial(hsm.target("/CognitionRecorder/idle")),
         hsm.state("idle", hsm.transition(hsm.on(input_event), hsm.effect(_record))),
     )
 
 
-class AddressableBot(bot.Bot):
+class AddressableBot(mosfet.Bot):
     """Minimal body: one input ability and somewhere for its products to land."""
 
     def __init__(

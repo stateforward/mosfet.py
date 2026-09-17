@@ -1,10 +1,10 @@
 import asyncio
 
-import bot
-from bot.abilities import processing
-from bot.abilities.cognition import types
-from bot.device import Device
-from bot.devices.phone import events as phone_events
+import mosfet
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import types
+from mosfet.device import Device
+from mosfet.devices.phone import events as phone_events
 import hsm
 import pytest
 
@@ -14,7 +14,7 @@ def test_dispatch_ignore_only_is_cognition_no_actor_delivery() -> None:
 
     async def run() -> None:
         input = processing.InputData(
-            input=bot.InputEventData(target_device="phone", priority=0),
+            input=mosfet.InputEventData(target_device="phone", priority=0),
             schemas=(types.IgnoreEvent,),
             actors={},
         )
@@ -49,13 +49,13 @@ def test_without_ignore_selections_keeps_environment_actions() -> None:
 def test_typed_focus_candidates_cannot_add_unconfigured_device() -> None:
     async def run() -> None:
         input = processing.InputData(
-            input=bot.InputEventData(target_device="phone", priority=0),
+            input=mosfet.InputEventData(target_device="phone", priority=0),
             actors={"phone": Device()},
         )
         selection = (
             processing.SelectedEvent(
-                event=bot.FocusDeviceEvent.name,
-                data=bot.FocusDeviceEventData(device="ghost").model_dump(mode="json"),
+                event=mosfet.FocusDeviceEvent.name,
+                data=mosfet.FocusDeviceEventData(device="ghost").model_dump(mode="json"),
             ),
         )
         with pytest.raises(RuntimeError, match="outside available device candidates"):
@@ -75,12 +75,12 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
     """Body-owned attention policy: empty candidates reject focus; clear needs live focus stamp."""
 
     focus = processing.SelectedEvent(
-        event=bot.FocusDeviceEvent.name,
-        data=bot.FocusDeviceEventData(device="phone").model_dump(mode="json"),
+        event=mosfet.FocusDeviceEvent.name,
+        data=mosfet.FocusDeviceEventData(device="phone").model_dump(mode="json"),
     )
-    clear = processing.SelectedEvent(event=bot.ClearFocusEvent.name, data={})
+    clear = processing.SelectedEvent(event=mosfet.ClearFocusEvent.name, data={})
     assert (
-        bot.Bot.attention_selection_error(
+        mosfet.Bot.attention_selection_error(
             focus,
             focus_candidates=(),
             configured_device_names=frozenset({"phone"}),
@@ -89,7 +89,7 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
         == "Processing selected focus_device outside available device candidates."
     )
     assert (
-        bot.Bot.attention_selection_error(
+        mosfet.Bot.attention_selection_error(
             clear,
             focus_candidates=("phone",),
             configured_device_names=frozenset({"phone"}),
@@ -99,7 +99,7 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
         == "Processing selected clear_focus with no focused device."
     )
     assert (
-        bot.Bot.attention_selection_error(
+        mosfet.Bot.attention_selection_error(
             clear,
             focus_candidates=("phone",),
             configured_device_names=frozenset({"phone"}),

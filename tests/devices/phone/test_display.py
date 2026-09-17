@@ -1,4 +1,4 @@
-"""Tests for the phone Display peripheral (bot.devices.phone.display)."""
+"""Tests for the phone Display peripheral (mosfet.devices.phone.display)."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import collections.abc
 import typing
 
 import hsm
-import bot
+import mosfet
 
-from bot.device import Device
-from bot.devices.phone import display as display_module
-from bot.environment import Environment
-from bot.protocols import attachment
+from mosfet.device import Device
+from mosfet.devices.phone import display as display_module
+from mosfet.environment import Environment
+from mosfet.protocols import attachment
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 1.0) -> None:
@@ -46,7 +46,7 @@ def test_caller_id_event_sets_caller_id_while_detached() -> None:
 
     async def run() -> str | None:
         display = display_module.Display()
-        _ = await bot.started(None, display, typing.cast(hsm.Model, display.model))
+        _ = await mosfet.started(None, display, typing.cast(hsm.Model, display.model))
         await wait_until(lambda: display.state() == "/Device/detached")
 
         await display.dispatch(
@@ -67,7 +67,7 @@ def test_caller_id_event_sets_caller_id_while_attached() -> None:
         environment = Environment()
         display = display_module.Display()
         controller = hsm.Instance()
-        _ = await bot.started(environment, display, typing.cast(hsm.Model, display.model))
+        _ = await mosfet.started(environment, display, typing.cast(hsm.Model, display.model))
         await display.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: display.state() == "/Device/attached")
 
@@ -92,7 +92,7 @@ def test_caller_id_event_with_none_clears_a_previously_shown_caller() -> None:
 
     async def run() -> tuple[str | None, str | None]:
         display = display_module.Display()
-        _ = await bot.started(None, display, typing.cast(hsm.Model, display.model))
+        _ = await mosfet.started(None, display, typing.cast(hsm.Model, display.model))
         await wait_until(lambda: display.state() == "/Device/detached")
 
         await display.dispatch(

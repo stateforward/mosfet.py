@@ -1,5 +1,5 @@
-from bot import abilities, environment
-from bot.abilities.language import text
+from mosfet import abilities, environment
+from mosfet.abilities.language import text
 
 import asyncio
 import ast
@@ -15,10 +15,10 @@ from typing import override
 import hsm
 import pydantic
 import pytest
-import bot.abilities as abilities_module
-import bot.abilities.ability as ability_module
-import bot.lifecycle
-from bot.protocols import attachment
+import mosfet.abilities as abilities_module
+import mosfet.abilities.ability as ability_module
+import mosfet.lifecycle
+from mosfet.protocols import attachment
 
 from tests.type_helpers import invalid_value, object_dict
 
@@ -97,7 +97,7 @@ def _record_ability_terminal_owner_event(
 
 
 class AbilityTerminalOwner(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "AbilityTerminalOwner",
         hsm.initial(hsm.target("/AbilityTerminalOwner/recording")),
         hsm.state(
@@ -192,7 +192,7 @@ class TerminalOperationAbility(abilities.Ability[TerminalOperationInputData, Ter
         )
         await hsm.dispatch(ctx, self, wrapper.with_data(terminal))
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "TerminalOperationAbility",
         hsm.initial(hsm.target("idle")),
         hsm.state(
@@ -279,7 +279,7 @@ class CompositeAbility(abilities.Ability[object, object]):
         self.hold_terminal = False
         await super().dispatch(ctx, self.held_terminals[-1])
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "CompositeAbility",
         hsm.initial(hsm.target("initializing")),
         hsm.state(
@@ -357,7 +357,7 @@ async def start_terminal_operation_ability(
 ) -> tuple[TerminalOperationAbility, AbilityTerminalOwner]:
     owner = AbilityTerminalOwner()
     child = TerminalOperationAbility()
-    _ = await bot.started(ctx, owner, require_model(owner.model))
+    _ = await mosfet.started(ctx, owner, require_model(owner.model))
     _ = await child.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -397,7 +397,7 @@ async def start_recorded_generation(
 ) -> tuple[hsm.Context, AbilityTerminalOwner]:
     ctx = hsm.Context()
     owner = AbilityTerminalOwner()
-    _ = await bot.started(ctx, owner, require_model(owner.model))
+    _ = await mosfet.started(ctx, owner, require_model(owner.model))
     _ = await generation.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -417,7 +417,7 @@ def test_ability() -> None:
     assert not hasattr(abilities_module, "ability_model")
     assert not hasattr(ability_module, "ability_model")
     assert not hasattr(abilities_module, "ability_use_model")
-    assert importlib.util.find_spec("bot.abilities._event_driven") is None
+    assert importlib.util.find_spec("mosfet.abilities._event_driven") is None
     assert not hasattr(ability, "submit")
     assert not hasattr(ability, "perform")
     assert not hasattr(ability, "use")
@@ -681,7 +681,7 @@ def test_terminal_operation_cancellation_stops_actor_and_late_terminal_isolated(
         _ = canceled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await canceled
-        assert not bot.lifecycle.is_started(canceled_actor)
+        assert not mosfet.lifecycle.is_started(canceled_actor)
 
         active = asyncio.create_task(
             ability_module.run_terminal_operation(
@@ -755,7 +755,7 @@ def test_targeted_terminal_is_delivered_once_without_owner_fallback() -> None:
         ctx = environment.Environment()
         child, owner = await start_terminal_operation_ability(ctx)
         recipient = AbilityTerminalOwner()
-        _ = await bot.started(ctx, recipient, require_model(recipient.model))
+        _ = await mosfet.started(ctx, recipient, require_model(recipient.model))
         terminal = dataclasses.replace(
             child.output_event.with_data(TerminalOperationOutputData(value="targeted")),
             id="targeted",
@@ -798,7 +798,7 @@ def test_targetless_terminal_falls_back_to_attachment_owner_once() -> None:
 
 
 def test_ability_operation_model_helper_is_removed_from_ability_sources() -> None:
-    ability_sources = pathlib.Path("src/bot/abilities").rglob("*.py")
+    ability_sources = pathlib.Path("src/mosfet/abilities").rglob("*.py")
 
     for source_path in ability_sources:
         source = source_path.read_text()
@@ -824,7 +824,7 @@ def test_ability_owner_is_claimed_and_cleared_by_lifecycle_events() -> None:
         child = abilities.Ability[object, object]()
         owner = AbilityTerminalOwner()
 
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         _ = await child.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -859,7 +859,7 @@ def test_composite_ability_waits_for_submodel_readiness_before_reporting_attache
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
 
         _ = await composite.attach(
@@ -889,7 +889,7 @@ def test_composite_ability_rejects_uncorrelated_private_terminal() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         _ = await composite.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -908,7 +908,7 @@ def test_composite_ability_rejects_substituted_reply_identity() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
         _ = await composite.attach(ctx, attachment.AttachEvent.with_data(request))
         composite.hold_terminal = True
@@ -936,7 +936,7 @@ def test_composite_ability_initialization_failure_releases_owner_for_retry() -> 
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         request = attachment.AttachData(actor=owner)
 
         _ = await composite.attach(
@@ -973,7 +973,7 @@ def test_composite_ability_waits_for_private_detach_terminal() -> None:
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
         composite = CompositeAbility()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         attach_request = attachment.AttachData(actor=owner)
         detach_request = attachment.DetachData(actor=owner)
         _ = await composite.attach(
@@ -1021,9 +1021,9 @@ def test_ability_reports_correlated_attachment_success_and_conflict() -> None:
         child = abilities.Ability[object, object]()
         owner = AbilityTerminalOwner()
         other_owner = AbilityTerminalOwner()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
-        _ = await bot.started(ctx, other_owner, require_model(other_owner.model))
-        _ = await bot.started(ctx, child, require_model(child.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, other_owner, require_model(other_owner.model))
+        _ = await mosfet.started(ctx, child, require_model(child.model))
 
         await child.dispatch(
             ctx,
@@ -1077,7 +1077,7 @@ def test_ability_attach_does_not_poll_active_state(monkeypatch: pytest.MonkeyPat
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         ctx = hsm.Context()
         owner = AbilityTerminalOwner()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
 
         _ = await generation.attach(
             ctx,
@@ -1288,14 +1288,14 @@ def test_ability_production_stop_then_attach_restarts() -> None:
     async def run() -> None:
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         ctx, owner = await start_recorded_generation(generation)
-        assert bot.lifecycle.is_started(generation) is True
+        assert mosfet.lifecycle.is_started(generation) is True
         await hsm.stop(generation)
-        assert bot.lifecycle.is_started(generation) is False
+        assert mosfet.lifecycle.is_started(generation) is False
         await generation.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
         )
-        assert bot.lifecycle.is_started(generation) is True
+        assert mosfet.lifecycle.is_started(generation) is True
 
     asyncio.run(run())
 
@@ -1312,7 +1312,7 @@ def test_ability_detach_when_stopped_emits_detach_failed() -> None:
         def record_failure(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
             failures.append(event)
 
-        reply_model = bot.define(
+        reply_model = mosfet.define(
             "DetachReply",
             hsm.initial(hsm.target("s")),
             hsm.state(
@@ -1321,7 +1321,7 @@ def test_ability_detach_when_stopped_emits_detach_failed() -> None:
             ),
         )
         reply = hsm.Instance()
-        await bot.started(ctx, reply, reply_model)
+        await mosfet.started(ctx, reply, reply_model)
         await generation.detach(
             ctx,
             attachment.DetachEvent.with_data(attachment.DetachData(actor=owner, reply_to=reply)),

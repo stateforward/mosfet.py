@@ -39,32 +39,32 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
-import bot
-from bot.abilities import cognition
-from bot.abilities import ability
-from bot.abilities import communication
-from bot.abilities import decoding
-from bot.abilities import encoding
-from bot.abilities import listening
-from bot.abilities import memory
-from bot.abilities import speaking
-from bot.abilities.communication import conversation
-from bot.abilities.hearing import voice
-from bot.bot import Bot
-from bot.providers.gemini import ChatClient as GeminiChatClient
-from bot.providers.gemini import Processor as GeminiProcessor
-from bot.providers.mlx_audio import SpeechDecoder
-from bot.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder
-from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
-from bot.providers.openai_compat import ChatClient as OpenAIChatClient
-from bot.providers.openai_compat import Processor as OpenAIProcessor
-from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier
-from bot.providers.pyannote import SpeakerEmbeddingInference
-from bot.providers.pyannote import SpeakerEmbeddingInferenceLoader
-from bot.devices import audio
-from bot.environment import Environment, SoundData, SoundEvent, space
-from bot.abilities import classifying
-from bot.abilities.communication.conversation import turn_detector
+import mosfet
+from mosfet.abilities import cognition
+from mosfet.abilities import ability
+from mosfet.abilities import communication
+from mosfet.abilities import decoding
+from mosfet.abilities import encoding
+from mosfet.abilities import listening
+from mosfet.abilities import memory
+from mosfet.abilities import speaking
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.hearing import voice
+from mosfet.bot import Bot
+from mosfet.providers.gemini import ChatClient as GeminiChatClient
+from mosfet.providers.gemini import Processor as GeminiProcessor
+from mosfet.providers.mlx_audio import SpeechDecoder
+from mosfet.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder
+from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
+from mosfet.providers.openai_compat import ChatClient as OpenAIChatClient
+from mosfet.providers.openai_compat import Processor as OpenAIProcessor
+from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier
+from mosfet.providers.pyannote import SpeakerEmbeddingInference
+from mosfet.providers.pyannote import SpeakerEmbeddingInferenceLoader
+from mosfet.devices import audio
+from mosfet.environment import Environment, SoundData, SoundEvent, space
+from mosfet.abilities import classifying
+from mosfet.abilities.communication.conversation import turn_detector
 
 # Capture before any local named ``cognition`` shadows the package (constructor param).
 _Cognition = cognition.Cognition
@@ -566,8 +566,8 @@ class _RunRecord:
 
     def __init__(self) -> None:
         self.terminals = _TerminalSubscription[hsm.Event[_RunTerminalData]]()
-        self.completed: list[bot.ProcessingCompletedEventData] = []
-        self.failures: list[bot.ProcessingFailedEventData] = []
+        self.completed: list[mosfet.ProcessingCompletedEventData] = []
+        self.failures: list[mosfet.ProcessingFailedEventData] = []
         self.listening_handoffs: list[cognition.InputData] = []
         self.conversation_failures: list[ability.FailureData] = []
 
@@ -626,7 +626,7 @@ class _RunProgress(hsm.Instance):
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
-        if not isinstance(data, bot.ProcessingCompletedEventData):
+        if not isinstance(data, mosfet.ProcessingCompletedEventData):
             return
         instance._processing_completed_ids.add(event.id)
         selected = isinstance(data.output, tuple) and any(
@@ -770,7 +770,7 @@ class _RunProgress(hsm.Instance):
         del ctx, event
         return instance._processing_timeout
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ListenSpeakRunProgress",
         hsm.initial(hsm.target("tracking")),
         hsm.state(
@@ -781,13 +781,13 @@ class _RunProgress(hsm.Instance):
                 hsm.effect(_record_handoff),
             ),
             hsm.transition(
-                hsm.on(bot.ProcessingCompletedEvent),
+                hsm.on(mosfet.ProcessingCompletedEvent),
                 hsm.guard(_matches_handoff),
                 hsm.effect(_record_processing_completed),
                 hsm.target("../classifying_processing"),
             ),
             hsm.transition(
-                hsm.on(bot.ProcessingFailedEvent),
+                hsm.on(mosfet.ProcessingFailedEvent),
                 hsm.guard(_matches_handoff),
                 hsm.effect(_publish_processing_failed),
                 hsm.target("../done"),
@@ -1041,7 +1041,7 @@ class ListenSpeakBot(Bot):
         instance: "ListenSpeakBot",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if not isinstance(event.data, bot.ProcessingCompletedEventData):
+        if not isinstance(event.data, mosfet.ProcessingCompletedEventData):
             return
         instance._run_record.completed.append(event.data)
         _LOG.info("bot processing completed id=%s selections=%s", event.id, _summarize_selections(event.data.output))
@@ -1064,7 +1064,7 @@ class ListenSpeakBot(Bot):
         instance: "ListenSpeakBot",
         event: hsm.Event[typing.Any],
     ) -> None:
-        if not isinstance(event.data, bot.ProcessingFailedEventData):
+        if not isinstance(event.data, mosfet.ProcessingFailedEventData):
             return
         instance._run_record.failures.append(event.data)
         _LOG.warning("bot processing failed id=%s", event.id)
@@ -1119,7 +1119,7 @@ class ListenSpeakBot(Bot):
     ) -> bool:
         del ctx
         return (
-            isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData))
+            isinstance(event.data, (mosfet.ActivatingDoneEventData, mosfet.ActivatingFailedEventData))
             and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
         )
@@ -1141,7 +1141,7 @@ class ListenSpeakBot(Bot):
     ) -> bool:
         del ctx
         return (
-            isinstance(event.data, bot.DeactivatingDoneEventData)
+            isinstance(event.data, mosfet.DeactivatingDoneEventData)
             and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
         )
@@ -1160,19 +1160,19 @@ class ListenSpeakBot(Bot):
         "ListenSpeakBot",
         hsm.transition(
             hsm.source("active"),
-            hsm.on(bot.ActivatingDoneEvent),
+            hsm.on(mosfet.ActivatingDoneEvent),
             hsm.guard(_is_activation_terminal),
             hsm.effect(_publish_activation_terminal),
         ),
         hsm.transition(
             hsm.source("activation_cleanup"),
-            hsm.on(bot.ActivatingFailedEvent),
+            hsm.on(mosfet.ActivatingFailedEvent),
             hsm.guard(_is_activation_terminal),
             hsm.effect(_publish_activation_terminal),
         ),
         hsm.transition(
             hsm.source("inactive"),
-            hsm.on(bot.DeactivatingDoneEvent),
+            hsm.on(mosfet.DeactivatingDoneEvent),
             hsm.guard(_is_deactivation_terminal),
             hsm.effect(_publish_deactivation_terminal),
         ),
@@ -1183,12 +1183,12 @@ class ListenSpeakBot(Bot):
         ),
         hsm.transition(
             hsm.source("active"),
-            hsm.on(bot.ProcessingCompletedEvent),
+            hsm.on(mosfet.ProcessingCompletedEvent),
             hsm.effect(_record_processing_completed_event),
         ),
         hsm.transition(
             hsm.source("active"),
-            hsm.on(bot.ProcessingFailedEvent),
+            hsm.on(mosfet.ProcessingFailedEvent),
             hsm.effect(_record_processing_failed_event),
         ),
         hsm.transition(
@@ -1209,14 +1209,14 @@ class ListenSpeakBot(Bot):
             hsm.effect(_forward_speaking_terminal),
         ),
         hsm.observe(cognition.InputEvent, _observe_cognition_handoff),
-        hsm.observe(bot.ProcessingCompletedEvent, _observe_processing_completed),
-        hsm.observe(bot.ProcessingFailedEvent, _observe_processing_failed),
+        hsm.observe(mosfet.ProcessingCompletedEvent, _observe_processing_completed),
+        hsm.observe(mosfet.ProcessingFailedEvent, _observe_processing_failed),
         hsm.observe(conversation.FailedEvent, _observe_conversation_failure_transition),
     )
 
     @override
     async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
-        _ = await bot.started(environment, self._run_progress, self._run_progress.model)
+        _ = await mosfet.started(environment, self._run_progress, self._run_progress.model)
         try:
             attached = await super().attach(environment, placement=placement)
             await self.wait_for_activation()
@@ -1272,10 +1272,10 @@ class ListenSpeakBot(Bot):
     def cognition_config(self) -> CognitionConfig:
         return self._cognition_config
 
-    def completed(self) -> tuple[bot.ProcessingCompletedEventData, ...]:
+    def completed(self) -> tuple[mosfet.ProcessingCompletedEventData, ...]:
         return tuple(self._run_record.completed)
 
-    def failures(self) -> tuple[bot.ProcessingFailedEventData, ...]:
+    def failures(self) -> tuple[mosfet.ProcessingFailedEventData, ...]:
         return tuple(self._run_record.failures)
 
     def listening_handoffs(self) -> tuple[cognition.InputData, ...]:
@@ -1293,7 +1293,7 @@ class ListenSpeakBot(Bot):
             terminal = await self._activation_terminals.receive(timeout=self._processing_timeout.total_seconds())
         except TimeoutError as error:
             raise RuntimeError("Timed out waiting for ListenSpeakBot activation.") from error
-        if isinstance(terminal.data, bot.ActivatingFailedEventData):
+        if isinstance(terminal.data, mosfet.ActivatingFailedEventData):
             raise RuntimeError("ListenSpeakBot activation failed.")
 
     def conversation_failures(self) -> tuple[ability.FailureData, ...]:
@@ -1469,7 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
-        print("stateforward.bot listen→cognition (device-free, Gemini cognition)")
+        print("stateforward.mosfet listen→cognition (device-free, Gemini cognition)")
         for key, value in summary.items():
             print(f"  {key}: {value}")
     return 0 if summary.get("status") == "ok" else 1

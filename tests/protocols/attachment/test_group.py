@@ -7,10 +7,10 @@ import datetime
 import typing
 
 import hsm
-import bot
+import mosfet
 import pytest
 
-from bot.protocols import attachment
+from mosfet.protocols import attachment
 
 
 BroadcastEvent = hsm.Event[None](name="attachment.group.test.broadcast")
@@ -50,7 +50,7 @@ class BroadcastRecorder(hsm.Instance, attachment.Attachment):
         del ctx, event
         instance.count += 1
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "AttachmentGroupBroadcastRecorder",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -75,7 +75,7 @@ class LifecycleRecorder(hsm.Instance):
         instance.events.append(event)
         _ = instance.recorded.set()
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "AttachmentGroupLifecycleRecorder",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -113,7 +113,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
     attach_failure_message: str
     detach_failure_message: str
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "TestAttachment",
         hsm.initial(hsm.target("ready")),
         hsm.state("ready"),
@@ -264,7 +264,7 @@ def test_group_members_start_detached() -> None:
     async def run() -> str:
         ctx = hsm.Context()
         group = attachment.Group(TestAttachment(), TestAttachment())
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, group, group.model)
         return group.state()
 
     assert asyncio.run(run()) == "/AttachmentGroup/detached"
@@ -277,9 +277,9 @@ def test_group_uses_the_durable_request_context_for_member_lifecycle() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(group_ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(group_ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
@@ -298,10 +298,10 @@ def test_group_manages_attachment_lifecycle() -> None:
         actor = LifecycleRecorder()
         members = (TestAttachment(), TestAttachment())
         group = attachment.Group(*members)
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         for member in members:
-            _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+            _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -343,10 +343,10 @@ def test_group_attaches_members_concurrently_and_waits_for_every_outcome() -> No
         first = TestAttachment(attach_release=first_release)
         second = TestAttachment(attach_release=second_release)
         group = attachment.Group(first, second)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, second, second.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, second, second.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(
@@ -377,10 +377,10 @@ def test_group_detaches_members_concurrently_and_waits_for_every_outcome() -> No
         first = TestAttachment()
         second = TestAttachment()
         group = attachment.Group(first, second)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, second, second.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, second, second.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -422,10 +422,10 @@ def test_group_waits_for_all_attach_outcomes_before_rolling_back() -> None:
         failing = TestAttachment(fail_attach=True)
         delayed = TestAttachment(attach_release=release)
         group = attachment.Group(failing, delayed)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, delayed, delayed.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, delayed, delayed.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(
@@ -457,10 +457,10 @@ def test_group_selects_attach_failure_by_member_order_not_arrival_order() -> Non
         )
         second = TestAttachment(fail_attach=True, attach_failure_message="second member failed")
         group = attachment.Group(first, second)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, second, second.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, second, second.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(second.attach_finished.wait(), timeout=1)
@@ -488,10 +488,10 @@ def test_group_selects_detach_failure_by_member_order_not_arrival_order() -> Non
         )
         second = TestAttachment(fail_detach=True, detach_failure_message="second member failed")
         group = attachment.Group(first, second)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, second, second.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, second, second.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -520,10 +520,10 @@ def test_group_rolls_back_created_members_concurrently() -> None:
         second = TestAttachment(detach_release=second_release)
         failing = TestAttachment(fail_attach=True)
         group = attachment.Group(first, second, failing)
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         for member in (first, second, failing):
-            _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+            _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(
@@ -560,10 +560,10 @@ def test_group_selects_rollback_failure_by_member_order_not_arrival_order() -> N
         second = TestAttachment(fail_detach=True, detach_failure_message="second rollback failed")
         failing = TestAttachment(fail_attach=True)
         group = attachment.Group(first, second, failing)
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         for member in (first, second, failing):
-            _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+            _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(second.detach_finished.wait(), timeout=1)
@@ -590,10 +590,10 @@ def test_group_rolls_back_created_members_when_attach_fails() -> None:
         first = TestAttachment()
         failing = TestAttachment(fail_attach=True)
         group = attachment.Group(first, failing)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=actor), "group-failure"),
@@ -618,10 +618,10 @@ def test_group_rolls_back_created_members_when_first_member_attach_fails() -> No
         failing = TestAttachment(fail_attach=True)
         unattempted = TestAttachment()
         group = attachment.Group(failing, unattempted)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, unattempted, unattempted.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, unattempted, unattempted.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         return group.state(), actor, failing, unattempted
@@ -643,10 +643,10 @@ def test_group_does_not_roll_back_preexisting_members_after_reattach_failure() -
         existing = TestAttachment()
         failing = TestAttachment()
         group = attachment.Group(existing, failing)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, existing, existing.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, existing, existing.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -676,11 +676,11 @@ def test_group_composes_nested_group_lifecycles() -> None:
         leaves = (TestAttachment(), TestAttachment())
         nested = attachment.Group(*leaves)
         group = attachment.Group(nested)
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         for leaf in leaves:
-            _ = await bot.started(ctx, leaf, leaf.model)
-        _ = await bot.started(ctx, nested, nested.model)
-        _ = await bot.started(ctx, group, group.model)
+            _ = await mosfet.started(ctx, leaf, leaf.model)
+        _ = await mosfet.started(ctx, nested, nested.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -708,11 +708,11 @@ def test_group_concurrently_waits_for_nested_and_direct_members() -> None:
         direct = TestAttachment(attach_release=direct_release)
         nested = attachment.Group(leaf)
         group = attachment.Group(nested, direct)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, leaf, leaf.model)
-        _ = await bot.started(ctx, direct, direct.model)
-        _ = await bot.started(ctx, nested, nested.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, leaf, leaf.model)
+        _ = await mosfet.started(ctx, direct, direct.model)
+        _ = await mosfet.started(ctx, nested, nested.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(
@@ -741,10 +741,10 @@ def test_group_attempts_every_detach_before_reporting_failure() -> None:
         first = TestAttachment()
         failing = TestAttachment(fail_detach=True)
         group = attachment.Group(first, failing)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -768,9 +768,9 @@ def test_group_times_out_detach_and_accepts_a_retry() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(respond_detach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -808,10 +808,10 @@ def test_nested_group_propagates_detach_timeout_and_recovers_for_retry() -> None
         leaf = TestAttachment(respond_detach=False)
         nested = attachment.Group(leaf)
         group = attachment.Group(nested)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, leaf, leaf.model)
-        _ = await bot.started(ctx, nested, nested.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, leaf, leaf.model)
+        _ = await mosfet.started(ctx, nested, nested.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -850,10 +850,10 @@ def test_group_reattaches_removed_members_before_reporting_detach_failure() -> N
         removed = TestAttachment()
         failing = TestAttachment(fail_detach=True)
         group = attachment.Group(removed, failing)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, removed, removed.model)
-        _ = await bot.started(ctx, failing, failing.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, removed, removed.model)
+        _ = await mosfet.started(ctx, failing, failing.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -882,10 +882,10 @@ def test_group_attempts_every_rollback_after_detach_failure() -> None:
         attach_failing = TestAttachment(fail_attach=True)
         members = (first, rollback_failing, attach_failing)
         group = attachment.Group(*members)
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         for member in members:
-            _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+            _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -916,9 +916,9 @@ def test_group_converts_member_attach_exception_to_failure() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(raise_attach=True)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         request = member.attach_calls[0]
@@ -944,8 +944,8 @@ def test_group_converts_member_start_exception_to_correlated_failure(
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, group, group.model)
         started = hsm.started
 
         async def fail_member_start[T: hsm.Instance](
@@ -984,9 +984,9 @@ def test_group_converts_reply_start_exception_to_failure(monkeypatch: pytest.Mon
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         started = hsm.started
 
         async def fail_reply_start[T: hsm.Instance](
@@ -1022,9 +1022,9 @@ def test_group_attach_cancellation_during_reply_start_fails_member(
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(lifetime, actor, actor.model)
-        _ = await bot.started(lifetime, member, member.model)
-        _ = await bot.started(group_lifetime, group, group.model)
+        _ = await mosfet.started(lifetime, actor, actor.model)
+        _ = await mosfet.started(lifetime, member, member.model)
+        _ = await mosfet.started(group_lifetime, group, group.model)
         reply_started = asyncio.Event()
         replies: list[hsm.Instance] = []
         started = hsm.started
@@ -1069,9 +1069,9 @@ def test_group_detach_cancellation_during_reply_start_fails_member(
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(lifetime, actor, actor.model)
-        _ = await bot.started(lifetime, member, member.model)
-        _ = await bot.started(group_lifetime, group, group.model)
+        _ = await mosfet.started(lifetime, actor, actor.model)
+        _ = await mosfet.started(lifetime, member, member.model)
+        _ = await mosfet.started(group_lifetime, group, group.model)
         await group.attach(lifetime, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -1119,9 +1119,9 @@ def test_group_converts_member_detach_exception_to_failure() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(raise_detach=True)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -1152,10 +1152,10 @@ def test_group_converts_rollback_detach_exception_to_failure() -> None:
         rollback_failing = TestAttachment(raise_detach=True)
         attach_failing = TestAttachment(fail_attach=True)
         group = attachment.Group(rollback_failing, attach_failing)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, rollback_failing, rollback_failing.model)
-        _ = await bot.started(ctx, attach_failing, attach_failing.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, rollback_failing, rollback_failing.model)
+        _ = await mosfet.started(ctx, attach_failing, attach_failing.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         request = rollback_failing.detach_calls[0]
@@ -1180,10 +1180,10 @@ def test_group_ignores_foreign_terminal_event() -> None:
         member = TestAttachment(respond_attach=False)
         foreign = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, foreign, foreign.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, foreign, foreign.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
         request = member.attach_calls[0]
@@ -1215,9 +1215,9 @@ def test_group_reply_accepts_only_correlated_member_terminal_event() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(respond_attach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=actor), "attach"))
         _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
         request = member.attach_calls[0]
@@ -1273,10 +1273,10 @@ def test_group_attach_reply_ignores_terminal_for_another_actor() -> None:
         other_actor = LifecycleRecorder()
         member = TestAttachment(respond_attach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, other_actor, other_actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, other_actor, other_actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
         request = member.attach_calls[0]
@@ -1318,9 +1318,9 @@ def test_group_attach_reply_ignores_detach_terminal_event() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(respond_attach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(member.attach_started.wait(), timeout=1)
         request = member.attach_calls[0]
@@ -1370,9 +1370,9 @@ def test_group_detach_reply_ignores_attach_terminal_event() -> None:
         detach_release = asyncio.Event()
         member = TestAttachment(detach_release=detach_release)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -1418,10 +1418,10 @@ def test_group_detach_reply_ignores_terminal_for_another_actor() -> None:
         other_actor = LifecycleRecorder()
         member = TestAttachment(respond_detach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, other_actor, other_actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, other_actor, other_actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -1474,10 +1474,10 @@ def test_group_cancellation_fails_operation_and_finishes_started_reply(blocked: 
             for _ in range(2)
         )
         group = attachment.Group(*members)
-        _ = await bot.started(lifetime, actor, actor.model)
+        _ = await mosfet.started(lifetime, actor, actor.model)
         for member in members:
-            _ = await bot.started(lifetime, member, member.model)
-        _ = await bot.started(group_lifetime, group, group.model)
+            _ = await mosfet.started(lifetime, member, member.model)
+        _ = await mosfet.started(group_lifetime, group, group.model)
         await group.attach(
             lifetime,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)),
@@ -1517,9 +1517,9 @@ def test_group_detach_cancellation_fails_operation_and_finishes_started_reply(bl
         actor = LifecycleRecorder()
         member = TestAttachment(detach_release=asyncio.Event()) if blocked else TestAttachment(respond_detach=False)
         group = attachment.Group(member)
-        _ = await bot.started(lifetime, actor, actor.model)
-        _ = await bot.started(lifetime, member, member.model)
-        _ = await bot.started(group_lifetime, group, group.model)
+        _ = await mosfet.started(lifetime, actor, actor.model)
+        _ = await mosfet.started(lifetime, member, member.model)
+        _ = await mosfet.started(group_lifetime, group, group.model)
         await group.attach(lifetime, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
         _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
         actor.recorded.clear()
@@ -1555,9 +1555,9 @@ def test_group_ignores_stale_public_terminal_event_during_new_operation() -> Non
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=actor), "first-attach"),
@@ -1605,9 +1605,9 @@ def test_group_times_out_when_member_does_not_reply() -> None:
         actor = LifecycleRecorder()
         member = TestAttachment(respond_attach=False)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             attachment.AttachEvent.with_data(
@@ -1632,9 +1632,9 @@ def test_group_member_metadata_cannot_control_completion_correlation() -> None:
         release = asyncio.Event()
         member = TestAttachment(attach_release=release)
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             dataclasses.replace(
@@ -1666,9 +1666,9 @@ def test_group_internal_coordination_does_not_leak_into_event_metadata() -> None
         actor = LifecycleRecorder()
         member = TestAttachment()
         group = attachment.Group(member)
-        _ = await bot.started(ctx, actor, actor.model)
-        _ = await bot.started(ctx, member, member.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, member, member.model)
+        _ = await mosfet.started(ctx, group, group.model)
         await group.attach(
             ctx,
             dataclasses.replace(
@@ -1715,10 +1715,10 @@ def test_group_dispatches_recursively_to_all_attachments() -> None:
         second = BroadcastRecorder()
         nested = attachment.Group(second)
         group = attachment.Group(first, nested)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, second, second.model)
-        _ = await bot.started(ctx, nested, nested.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, second, second.model)
+        _ = await mosfet.started(ctx, nested, nested.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         await group.dispatch(ctx, BroadcastEvent)
         return first.count, second.count
@@ -1768,7 +1768,7 @@ def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination(
             self.received.append(event)
             return super().dispatch(ctx, event)
 
-        model: typing.ClassVar[hsm.Model] = bot.define(
+        model: typing.ClassVar[hsm.Model] = mosfet.define(
             "AttachmentGroupAnyEventRecorder",
             hsm.initial(hsm.target("recording")),
             hsm.state("recording"),
@@ -1778,8 +1778,8 @@ def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination(
         ctx = hsm.Context()
         first = AnyEventRecorder()
         group = attachment.Group(first)
-        _ = await bot.started(ctx, first, first.model)
-        _ = await bot.started(ctx, group, group.model)
+        _ = await mosfet.started(ctx, first, first.model)
+        _ = await mosfet.started(ctx, group, group.model)
 
         forged = dataclasses.replace(BroadcastEvent, name="attachment.group.member.attach.complete")
         await group.dispatch(ctx, forged)

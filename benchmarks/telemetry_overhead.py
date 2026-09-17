@@ -16,8 +16,8 @@ import typing
 
 import hsm
 
-import bot.telemetry.hsm as telemetry_hsm
-from bot.telemetry.configure import configure, logger_provider, reset, tracer_provider
+import mosfet.telemetry.hsm as telemetry_hsm
+from mosfet.telemetry.configure import configure, logger_provider, reset, tracer_provider
 
 _BENCH_LOG_FILE = "otel-bench-logs.jsonl"
 _BENCH_SPAN_FILE = "otel-bench-spans.jsonl"

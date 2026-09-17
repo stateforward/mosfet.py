@@ -14,7 +14,7 @@ import typing
 
 from livekit import rtc
 
-from bot.providers.livekit.audio import AudioBridge, AudioFrameEncoder
+from mosfet.providers.livekit.audio import AudioBridge, AudioFrameEncoder
 
 
 @dataclasses.dataclass(frozen=True)

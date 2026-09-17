@@ -1,7 +1,7 @@
 import collections.abc
 import typing
 
-from bot.event import event_schema_json_schema
+from mosfet.event import event_schema_json_schema
 
 T = typing.TypeVar("T")
 

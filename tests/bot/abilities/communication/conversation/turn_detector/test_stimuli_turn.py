@@ -1,6 +1,6 @@
 """Direct contract tests for turn_detector stimuli and turn-boundary events."""
 
-from bot.abilities.communication.conversation import turn_detector
+from mosfet.abilities.communication.conversation import turn_detector
 
 import pytest
 

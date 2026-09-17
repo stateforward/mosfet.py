@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from bot.abilities import processing
-from bot.abilities.language import text
-from bot.environment import SoundData
-from bot.protocols import attachment
-from bot.providers.openai_compat import Processor, ProcessingError, TextGenerator
+from mosfet.abilities import processing
+from mosfet.abilities.language import text
+from mosfet.environment import SoundData
+from mosfet.protocols import attachment
+from mosfet.providers.openai_compat import Processor, ProcessingError, TextGenerator
 
 import asyncio
 import collections.abc
@@ -15,13 +15,13 @@ import typing
 import uuid
 import weakref
 
-import bot.telemetry
+import mosfet.telemetry
 import hsm
 import pydantic
 import pytest
 from opentelemetry import _logs
 
-from bot.telemetry.configure import logger_provider
+from mosfet.telemetry.configure import logger_provider
 
 
 class _AnswerCallData(pydantic.BaseModel):
@@ -70,7 +70,7 @@ class _ProcessForTestOwner(hsm.Instance):
             message = failure.message if failure is not None and hasattr(failure, "message") else str(failure)
             future.set_exception(RuntimeError(message))
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "ProcessForTestOwner",
         hsm.initial(hsm.target("/ProcessForTestOwner/recording")),
         hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
@@ -96,7 +96,7 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     context = hsm.Context().with_value(hsm.Keys.Instances, weakref.WeakValueDictionary())
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
-    _ = await bot.started(context, owner, owner.model)
+    _ = await mosfet.started(context, owner, owner.model)
     _ = await ability.attach(
         context,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -220,7 +220,7 @@ def test_processor_process_records_otel_wire_payload(
     """Processing → real TextGenerator records instructions / user content / tools in JSONL."""
 
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
 
     def _noop_set_logger_provider(_provider: object) -> None:
@@ -229,7 +229,7 @@ def test_processor_process_records_otel_wire_payload(
     monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
 
     log_path = pathlib.Path("processing-otel.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
 
     instructions = "Select events from schemas for Alice and Bob."
     user_input = "Alice greets Bob"
@@ -294,4 +294,4 @@ def test_processor_process_records_otel_wire_payload(
     assert payload["attributes"]["provider"] == "openai_compat"
     assert payload["attributes"]["stage"] == "request"
     assert user_input not in json.dumps(payload["attributes"])
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()

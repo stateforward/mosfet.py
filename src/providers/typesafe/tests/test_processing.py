@@ -9,9 +9,9 @@ import hsm
 import pydantic
 import pytest
 
-from bot.abilities.processing import SelectedEvent
-from bot.devices import phone as phone_device
-from bot.providers.typesafe import Processor, ProcessingError
+from mosfet.abilities.processing import SelectedEvent
+from mosfet.devices import phone as phone_device
+from mosfet.providers.typesafe import Processor, ProcessingError
 
 _PASS = "__unhandled__"
 
@@ -64,12 +64,15 @@ class _StubAsyncSystemOneClient:
 
 def _stub_answers(mapping: dict[str, tuple[str, float]]) -> _StubAsyncSystemOneClient:  # noqa: E731
     return _StubAsyncSystemOneClient(
-        {name: _StubChoiceAnswer(choice=choice, confidence=confidence) for name, (choice, confidence) in mapping.items()}
+        {
+            name: _StubChoiceAnswer(choice=choice, confidence=confidence)
+            for name, (choice, confidence) in mapping.items()
+        }
     )
 
 
 def _processor_with_stub(stub: _StubAsyncSystemOneClient) -> Processor:
-    from bot.providers.typesafe.client import AsyncSystemOneClient
+    from mosfet.providers.typesafe.client import AsyncSystemOneClient
 
     def factory() -> AsyncSystemOneClient:
         return typing.cast("AsyncSystemOneClient", typing.cast(object, stub))
@@ -83,7 +86,7 @@ def _run(
     input_payload: object,
     schemas: tuple["hsm.Event[typing.Any]", ...],
 ) -> tuple[SelectedEvent, ...]:
-    from bot.abilities.processing import InputData as _Input
+    from mosfet.abilities.processing import InputData as _Input
     import asyncio
 
     selector_input = _Input(
@@ -111,7 +114,7 @@ def test_pass_criterion_declines_unhandled_not_handled_empty() -> None:
     never escalated) — the pass criterion is an explicit decline to reasoning instead.
     """
 
-    from bot.abilities.cognition import intuition as cognition_intuition
+    from mosfet.abilities.cognition import intuition as cognition_intuition
 
     stub = _stub_answers({"selection": (_PASS, 0.4)})
     processor = _processor_with_stub(stub)

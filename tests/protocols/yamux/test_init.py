@@ -1,4 +1,4 @@
-import bot.protocols.yamux as yamux
+import mosfet.protocols.yamux as yamux
 
 
 def test_init_exports_namespace_scoped_public_api() -> None:

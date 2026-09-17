@@ -14,19 +14,19 @@ import typing
 import hsm
 import pytest
 
-import bot
-from bot import behavior
-from bot.abilities import decoding
-from bot.abilities import learning
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import episodes
-from bot.abilities.cognition import reflection
-from bot.abilities.cognition.reflection import revision
-from bot.abilities.cognition import types as cognition_types
-from bot.abilities.learning import Learning
-from bot.abilities.learning import learning as learning_impl
-from bot.protocols import attachment
+import mosfet
+from mosfet import behavior
+from mosfet.abilities import decoding
+from mosfet.abilities import learning
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import episodes
+from mosfet.abilities.cognition import reflection
+from mosfet.abilities.cognition.reflection import revision
+from mosfet.abilities.cognition import types as cognition_types
+from mosfet.abilities.learning import Learning
+from mosfet.abilities.learning import learning as learning_impl
+from mosfet.protocols import attachment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 # One Learning revision performs one isolated Starlark validation with a three-second budget;
@@ -278,7 +278,11 @@ def _ring_write() -> behavior.ChangeData:
 
 
 def _grounded_register_entry(register: memory.StmMemory) -> memory.ObservedEvent:
-    matches = [entry for entry in register.recent("environment.sound", limit=10) if entry.payload.get("kind") == "phone.ringing"]
+    matches = [
+        entry
+        for entry in register.recent("environment.sound", limit=10)
+        if entry.payload.get("kind") == "phone.ringing"
+    ]
     assert matches, "register lost the grounded entry"
     return matches[0]
 
@@ -364,6 +368,8 @@ def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
     grounded = _grounded_register_entry(register)
     assert grounded.last_accessed_at is not None
     assert output.behavior.name == "AnswerIncomingRing"
+
+
 def _seed_ring_episode(store: memory.Memory) -> None:
     episode = episodes.CognitiveEpisode(
         focus="phone",
@@ -536,7 +542,7 @@ class AttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "LearningAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -546,7 +552,7 @@ class AttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(Learning.output_event), hsm.effect(_record)),
             hsm.transition(hsm.on(Learning.failed_event), hsm.effect(_record)),
-            hsm.transition(hsm.on(bot.RebootEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(mosfet.RebootEvent), hsm.effect(_record)),
         ),
     )
 
@@ -566,7 +572,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
     """A stuck teardown reboots with a learning-domain reason, not a cognition one."""
 
     class StubbornProcessing(processing.Processing):
-        submodel = bot.define(
+        submodel = mosfet.define(
             "StubbornLearningProcessing",
             hsm.initial(hsm.target("/StubbornLearningProcessing/waiting")),
             hsm.state(
@@ -597,7 +603,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
         ability.replace_processing(stubborn)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -623,7 +629,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
             ),
         )
         await wait_until(lambda: ability.state().endswith("/rebooting"))
-        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
+        await wait_until(lambda: any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle))
         result = list(owner.lifecycle), ability.state()
         await ability.stop(ability.context())
         connection.close()
@@ -631,9 +637,9 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
 
     lifecycle, state = asyncio.run(run())
 
-    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert len(reboots) == 1
-    assert reboots[0].data == bot.RebootEventData(reason="learning_child_teardown_failed")
+    assert reboots[0].data == mosfet.RebootEventData(reason="learning_child_teardown_failed")
     assert state.endswith("/rebooting")
 
 

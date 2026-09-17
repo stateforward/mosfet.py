@@ -3,7 +3,7 @@ import pathlib
 import tomllib
 import typing
 
-from bot import __version__
+from mosfet import __version__
 from tests.type_helpers import object_dict
 
 
@@ -16,8 +16,8 @@ def test_package_version_is_dynamic() -> None:
 
     assert "version" not in project
     assert project["dynamic"] == ["version"]
-    assert metadata["tool"]["hatch"]["version"]["path"] == "src/bot/__init__.py"
+    assert metadata["tool"]["hatch"]["version"]["path"] == "src/mosfet/__init__.py"
 
 
 def test_version() -> None:
-    assert __version__ == importlib.metadata.version("stateforward.bot")
+    assert __version__ == importlib.metadata.version("stateforward.mosfet")

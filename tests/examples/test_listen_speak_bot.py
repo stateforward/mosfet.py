@@ -1,11 +1,11 @@
-from bot import abilities
-from bot.abilities import cognition
-from bot.abilities import listening
-from bot.abilities.hearing import voice
-from bot.devices import audio
-from bot.environment import Environment, SoundData, SoundEvent
-from bot.protocols import attachment
-from bot.providers import pyannote
+from mosfet import abilities
+from mosfet.abilities import cognition
+from mosfet.abilities import listening
+from mosfet.abilities.hearing import voice
+from mosfet.devices import audio
+from mosfet.environment import Environment, SoundData, SoundEvent
+from mosfet.protocols import attachment
+from mosfet.providers import pyannote
 
 import asyncio
 import collections.abc
@@ -144,7 +144,7 @@ async def _assert_ready(body: _WaitableBot) -> None:
 
 
 def _empty_cognition() -> cognition.Cognition:
-    from bot.abilities import memory, processing
+    from mosfet.abilities import memory, processing
 
     class _EmptyProcessor(processing.Processor):
         @override
@@ -347,9 +347,9 @@ def test_environment_sound_reaches_listening_after_attach(tmp_path: pathlib.Path
 
 
 def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities import speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -368,8 +368,8 @@ def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_pa
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
@@ -413,9 +413,9 @@ def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_pa
 
 
 def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities import speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -434,8 +434,8 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
@@ -499,9 +499,9 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
 
 
 def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_response(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities import speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -519,8 +519,8 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
@@ -547,8 +547,8 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(output=(), focus_candidates=()),
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(output=(), focus_candidates=()),
                     "turn-b",
                 ),
                 source="cognition",
@@ -583,8 +583,8 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
 
 
 def test_listen_speak_run_progress_reports_processing_failure(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities.communication import conversation
+    import mosfet
+    from mosfet.abilities.communication import conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -603,8 +603,8 @@ def test_listen_speak_run_progress_reports_processing_failure(tmp_path: pathlib.
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingFailedEvent.with_data_and_id(
-                    bot.ProcessingFailedEventData(message="processing failed"),
+                mosfet.ProcessingFailedEvent.with_data_and_id(
+                    mosfet.ProcessingFailedEventData(message="processing failed"),
                     turn_id,
                 ),
                 source="cognition",
@@ -618,8 +618,8 @@ def test_listen_speak_run_progress_reports_processing_failure(tmp_path: pathlib.
 
 
 def test_listen_speak_run_progress_accepts_no_response_completion(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities.communication import conversation
+    import mosfet
+    from mosfet.abilities.communication import conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -638,8 +638,8 @@ def test_listen_speak_run_progress_accepts_no_response_completion(tmp_path: path
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(output=(), focus_candidates=()),
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(output=(), focus_candidates=()),
                     turn_id,
                 ),
                 source="cognition",
@@ -653,8 +653,8 @@ def test_listen_speak_run_progress_accepts_no_response_completion(tmp_path: path
 
 
 def test_listen_speak_run_progress_reports_conversation_failure(tmp_path: pathlib.Path) -> None:
-    from bot.abilities import ability
-    from bot.abilities.communication import conversation
+    from mosfet.abilities import ability
+    from mosfet.abilities.communication import conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -687,9 +687,9 @@ def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_pa
     conversation and speaking ports, recorded on public seams.
     """
 
-    import bot
-    from bot.abilities import speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> tuple[int, tuple[object, ...]]:
         body = _test_bot(tmp_path)
@@ -712,8 +712,8 @@ def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_pa
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
@@ -759,14 +759,14 @@ def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_bounda
     pyproject = (root / "examples" / "listen_speak_bot" / "pyproject.toml").read_text(encoding="utf-8")
     readme = (root / "examples" / "listen_speak_bot" / "README.md").read_text(encoding="utf-8")
 
-    assert "bot-provider-mlx-audio" in pyproject
-    assert "bot-provider-pyannote" in pyproject
-    assert "from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
-    assert "from bot.providers.mlx_audio import SpeechDecoder" in source
-    assert "from bot.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder" in source
-    assert "from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
-    assert "from bot.abilities import communication" in source
-    assert "from bot.abilities.communication import conversation" in source
+    assert "mosfet-provider-mlx-audio" in pyproject
+    assert "mosfet-provider-pyannote" in pyproject
+    assert "from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
+    assert "from mosfet.providers.mlx_audio import SpeechDecoder" in source
+    assert "from mosfet.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder" in source
+    assert "from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
+    assert "from mosfet.abilities import communication" in source
+    assert "from mosfet.abilities.communication import conversation" in source
     assert "seeded_behaviors=(communication.speech_heard_seed(),)" in source
     assert "memory=store" in source
     assert 'DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"' in source
@@ -857,7 +857,7 @@ def test_listen_speak_injects_pyannote_classifier_and_emits_source_embedding() -
         from tests.hsm_instance_state import start_ability_tree
 
         await start_ability_tree(None, listening_ability)
-        from bot.environment import SoundData
+        from mosfet.environment import SoundData
 
         await listening_ability.apply(
             SoundData(
@@ -1042,9 +1042,9 @@ def test_say_encoder_preserves_explicit_destination(monkeypatch: pytest.MonkeyPa
 
 
 def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities import speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -1062,8 +1062,8 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
@@ -1113,9 +1113,9 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
 
 
 def test_listen_speak_progress_correlates_speaking_failure_to_selected_operation(tmp_path: pathlib.Path) -> None:
-    import bot
-    from bot.abilities import ability, speaking
-    from bot.abilities.communication import communication, conversation
+    import mosfet
+    from mosfet.abilities import ability, speaking
+    from mosfet.abilities.communication import communication, conversation
 
     async def run() -> None:
         body = _test_bot(tmp_path)
@@ -1133,8 +1133,8 @@ def test_listen_speak_progress_correlates_speaking_failure_to_selected_operation
         await body.dispatch(
             environment,
             _routed_event(
-                bot.ProcessingCompletedEvent.with_data_and_id(
-                    bot.ProcessingCompletedEventData(
+                mosfet.ProcessingCompletedEvent.with_data_and_id(
+                    mosfet.ProcessingCompletedEventData(
                         output=(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,

@@ -1,4 +1,4 @@
-from bot import behavior
+from mosfet import behavior
 
 
 def test_behavior_package_exports_public_domain_api() -> None:

@@ -6,15 +6,15 @@ import asyncio
 import typing
 import xml.etree.ElementTree
 
-import bot
-import bot.lifecycle
-from bot.abilities import processing
-from bot.abilities.ability import Effort
-from bot.abilities.cognition import input as cognition_input
-from bot.abilities.cognition import types
-from bot.device import Device
-from bot.devices import phone as phone_device
-from bot.environment import Environment
+import mosfet
+import mosfet.lifecycle
+from mosfet.abilities import processing
+from mosfet.abilities.ability import Effort
+from mosfet.abilities.cognition import input as cognition_input
+from mosfet.abilities.cognition import types
+from mosfet.device import Device
+from mosfet.devices import phone as phone_device
+from mosfet.environment import Environment
 from tests.bot.abilities.cognition.test_cognition import make_cognition, wait_until
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import device_firmware
@@ -34,12 +34,12 @@ class _EffortProbeActor(hsm.Instance):
 
     effort = Effort.M
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "EffortProbeActor",
         hsm.initial(hsm.target("/EffortProbeActor/active")),
         hsm.state(
             "active",
-            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_focus)),
+            hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_focus)),
         ),
     )
 
@@ -47,13 +47,13 @@ class _EffortProbeActor(hsm.Instance):
 class _FocusBotActor(hsm.Instance):
     """Minimal body stand-in that enables focus via model-offerable topology (not a schema list)."""
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "FocusBotActor",
         hsm.initial(hsm.target("/FocusBotActor/active")),
         hsm.state(
             "active",
-            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_focus)),
-            hsm.transition(hsm.on(bot.ClearFocusEvent), hsm.effect(_accept_focus)),
+            hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_focus)),
+            hsm.transition(hsm.on(mosfet.ClearFocusEvent), hsm.effect(_accept_focus)),
         ),
     )
 
@@ -70,7 +70,7 @@ def test_build_processing_input_offers_ignore_from_cognition_snapshot() -> None:
         assert types.IgnoreEvent.name in offered, f"state={cognition.state()!r} offered={offered!r}"
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
                 actors={"phone": Device()},
                 focus_candidates=("phone",),
             ),
@@ -80,8 +80,8 @@ def test_build_processing_input_offers_ignore_from_cognition_snapshot() -> None:
         assert types.IgnoreEvent.name in names
         assert built.actors["cognition"] is cognition
         # Body attention is not invented when no bot actor topology enables it.
-        assert bot.FocusDeviceEvent.name not in names
-        assert bot.ClearFocusEvent.name not in names
+        assert mosfet.FocusDeviceEvent.name not in names
+        assert mosfet.ClearFocusEvent.name not in names
 
     asyncio.run(run())
 
@@ -91,7 +91,7 @@ def test_build_processing_input_without_authority_does_not_invent_ignore() -> No
 
     built = cognition_input.build_processing_input(
         cognition_input.InputData(
-            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
             actors={"phone": Device()},
         ),
     )
@@ -104,14 +104,14 @@ def test_build_processing_input_does_not_invent_focus_for_non_topology_bot() -> 
 
     built = cognition_input.build_processing_input(
         cognition_input.InputData(
-            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
             actors={"bot": hsm.Instance(), "phone": Device()},
             focus_candidates=("phone",),
         ),
     )
     names = {event.name for event in built.schemas}
-    assert bot.FocusDeviceEvent.name not in names
-    assert bot.ClearFocusEvent.name not in names
+    assert mosfet.FocusDeviceEvent.name not in names
+    assert mosfet.ClearFocusEvent.name not in names
 
 
 def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
@@ -121,22 +121,22 @@ def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
         bot_actor = _FocusBotActor()
         ctx = shared_hsm_context()
         assert bot_actor.model is not None
-        _ = await bot.started(ctx, bot_actor, bot_actor.model)
+        _ = await mosfet.started(ctx, bot_actor, bot_actor.model)
         offered = {event.name for event in processing.enabled_call_events(bot_actor)}
-        assert bot.FocusDeviceEvent.name in offered
-        assert bot.ClearFocusEvent.name in offered
+        assert mosfet.FocusDeviceEvent.name in offered
+        assert mosfet.ClearFocusEvent.name in offered
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
                 actors={"bot": bot_actor, "phone": Device()},
                 focus_candidates=("phone",),
             ),
         )
         names = {event.name for event in built.schemas}
-        assert bot.FocusDeviceEvent.name in names
-        assert bot.ClearFocusEvent.name in names
-        assert built.actor_events[bot.FocusDeviceEvent.name] == ("bot",)
-        assert built.actor_events[bot.ClearFocusEvent.name] == ("bot",)
+        assert mosfet.FocusDeviceEvent.name in names
+        assert mosfet.ClearFocusEvent.name in names
+        assert built.actor_events[mosfet.FocusDeviceEvent.name] == ("bot",)
+        assert built.actor_events[mosfet.ClearFocusEvent.name] == ("bot",)
 
     asyncio.run(run())
 
@@ -149,15 +149,15 @@ def test_build_processing_input_records_multi_actor_enablers() -> None:
         right = _FocusBotActor()
         ctx = shared_hsm_context()
         assert left.model is not None and right.model is not None
-        _ = await bot.started(ctx, left, left.model)
-        _ = await bot.started(ctx, right, right.model)
+        _ = await mosfet.started(ctx, left, left.model)
+        _ = await mosfet.started(ctx, right, right.model)
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
                 actors={"alpha": left, "beta": right},
             ),
         )
-        assert built.actor_events[bot.FocusDeviceEvent.name] == ("alpha", "beta")
+        assert built.actor_events[mosfet.FocusDeviceEvent.name] == ("alpha", "beta")
         tool = processing.dispatch_tool(
             built.schemas,
             targets_by_event=built.actor_events,
@@ -168,7 +168,7 @@ def test_build_processing_input_records_multi_actor_enablers() -> None:
             assert isinstance(properties, dict)
             event_schema = properties["event"]
             assert isinstance(event_schema, dict)
-            if event_schema.get("enum") == [bot.FocusDeviceEvent.name]:
+            if event_schema.get("enum") == [mosfet.FocusDeviceEvent.name]:
                 target_schema = properties["target"]
                 assert isinstance(target_schema, dict)
                 focus_target_enum = target_schema.get("enum")
@@ -219,7 +219,7 @@ def _note_snapshot_attributes(ctx: hsm.Context, instance: hsm.Instance, event: h
 class _SnapshotAttributeDevice(Device):
     """Device whose firmware declares observation attributes from a behavioral state."""
 
-    firmware_model: typing.ClassVar[hsm.Model] = bot.define(
+    firmware_model: typing.ClassVar[hsm.Model] = mosfet.define(
         "SnapshotAttributeFirmware",
         hsm.attribute("current_caller"),
         hsm.attribute("escapade"),
@@ -245,7 +245,7 @@ class _OwnerBotActor(hsm.Instance):
         del ctx, event
         _ = instance.set("owned_devices", dict(instance._owned))
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "OwnerBotActor",
         hsm.attribute("owned_devices"),
         hsm.initial(hsm.target("/OwnerBotActor/active")),
@@ -260,15 +260,15 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
         device = _SnapshotAttributeDevice()
         unowned = Device()
         environment = Environment()
-        _ = await bot.started(environment, device, typing.cast(hsm.Model, device.model))
-        _ = await bot.started(environment, unowned, typing.cast(hsm.Model, unowned.model))
+        _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
+        _ = await mosfet.started(environment, unowned, typing.cast(hsm.Model, unowned.model))
         owner = _OwnerBotActor({"phone": hsm.id(device)})
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         firmware = device_firmware(device)
-        await wait_until(lambda: firmware is not None and bot.lifecycle.is_started(firmware))
+        await wait_until(lambda: firmware is not None and mosfet.lifecycle.is_started(firmware))
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
                 actors={"bot": owner, "phone": device, "speaker": unowned},
             )
         )
@@ -340,12 +340,12 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
     async def run() -> processing.InputData:
         environment = Environment()
         phone = phone_device.Phone()
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
         firmware = device_firmware(phone)
-        await wait_until(lambda: firmware is not None and bot.lifecycle.is_started(firmware))
+        await wait_until(lambda: firmware is not None and mosfet.lifecycle.is_started(firmware))
         await wait_until(lambda: phone.state() == "/Device/detached")
         owner = _OwnerBotActor({"phone": hsm.id(phone)})
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
 
         assert isinstance(firmware, phone_device.Firmware)
         await firmware.event_recorder().receive(
@@ -358,7 +358,7 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
 
         return cognition_input.build_processing_input(
             cognition_input.InputData(
-                stimulus=bot.InputEventData(target_device="phone", priority=0),
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
                 actors={"bot": owner, "phone": phone},
             )
         )
@@ -379,9 +379,10 @@ def test_build_processing_input_without_devices_leaves_instructions_unset() -> N
     """No device actors → no device block, and no instructions invented."""
 
     built = cognition_input.build_processing_input(
-        cognition_input.InputData(stimulus=bot.InputEventData(target_device="phone", priority=0))
+        cognition_input.InputData(stimulus=mosfet.InputEventData(target_device="phone", priority=0))
     )
     assert built.instructions is None
+
 
 def test_frame_filters_over_effort_ceiling() -> None:
     """Stage capacity filters effort-rated actors from the frame offer.
@@ -396,9 +397,9 @@ def test_frame_filters_over_effort_ceiling() -> None:
         probe = _EffortProbeActor()
         ctx = shared_hsm_context()
         assert probe.model is not None
-        _ = await bot.started(ctx, probe, probe.model)
+        _ = await mosfet.started(ctx, probe, probe.model)
         probe_input = cognition_input.InputData(
-            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
             actors={"probe": probe, "phone": Device()},
             focus_candidates=("phone",),
         )
@@ -407,19 +408,18 @@ def test_frame_filters_over_effort_ceiling() -> None:
             max_effort=Effort.S,
         )
         names_intuition = {event.name for event in intuition_frame.schemas}
-        assert bot.FocusDeviceEvent.name not in names_intuition
+        assert mosfet.FocusDeviceEvent.name not in names_intuition
 
         reasoning_frame = cognition_input.build_processing_input(
             probe_input,
             max_effort=None,
         )
         names_reasoning = {event.name for event in reasoning_frame.schemas}
-        assert bot.FocusDeviceEvent.name in names_reasoning
+        assert mosfet.FocusDeviceEvent.name in names_reasoning
 
         # Device without effort rating: never filtered.
         assert any(
-            actor is not None and key == "phone" or key == "probe"
-            for key, actor in reasoning_frame.actors.items()
+            actor is not None and key == "phone" or key == "probe" for key, actor in reasoning_frame.actors.items()
         )
 
     asyncio.run(run())

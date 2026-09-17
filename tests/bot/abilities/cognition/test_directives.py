@@ -1,6 +1,6 @@
-from bot.abilities import memory
-from bot.abilities.cognition import directives
-from bot.abilities.cognition import episodes
+from mosfet.abilities import memory
+from mosfet.abilities.cognition import directives
+from mosfet.abilities.cognition import episodes
 
 from sqlalchemy import select
 

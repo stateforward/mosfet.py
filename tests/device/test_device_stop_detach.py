@@ -6,11 +6,11 @@ import asyncio
 
 import hsm
 
-import bot.lifecycle
+import mosfet.lifecycle
 
-from bot.device import Device
-from bot.protocols import attachment
-from bot.environment import Environment
+from mosfet.device import Device
+from mosfet.protocols import attachment
+from mosfet.environment import Environment
 
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
@@ -19,7 +19,7 @@ def require_model(model: hsm.Model | None) -> hsm.Model:
 
 
 class _EmptyFirmware(hsm.Instance):
-    model = bot.define("EmptyFirmware", hsm.initial(hsm.target("ready")), hsm.state("ready"))
+    model = mosfet.define("EmptyFirmware", hsm.initial(hsm.target("ready")), hsm.state("ready"))
 
 
 class _TestDevice(Device):
@@ -43,27 +43,27 @@ def test_device_stop_then_detach_does_not_dispatch() -> None:
     async def run() -> bool:
         environment = Environment()
         device = _TestDevice()
-        _ = await bot.started(environment, device, require_model(device.model))
-        assert bot.lifecycle.is_started(device) is True
+        _ = await mosfet.started(environment, device, require_model(device.model))
+        assert mosfet.lifecycle.is_started(device) is True
         owner = hsm.Instance()
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment,
             owner,
-            bot.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
+            mosfet.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await device.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
         )
-        await _wait_until(lambda: device.state() == "/Device/attached" or bot.lifecycle.is_started(device))
+        await _wait_until(lambda: device.state() == "/Device/attached" or mosfet.lifecycle.is_started(device))
         await device.stop(environment)
-        assert bot.lifecycle.is_started(device) is False
+        assert mosfet.lifecycle.is_started(device) is False
         # Must not raise RuntimeError("dispatch requires a started HSM").
         await device.detach(
             environment,
             attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)),
         )
-        return bot.lifecycle.is_started(device)
+        return mosfet.lifecycle.is_started(device)
 
     assert asyncio.run(run()) is False
 
@@ -72,18 +72,18 @@ def test_device_reattach_after_stop_requires_restart() -> None:
     async def run() -> None:
         environment = Environment()
         device = _TestDevice()
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         owner = hsm.Instance()
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment,
             owner,
-            bot.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
+            mosfet.define("O", hsm.initial(hsm.target("s")), hsm.state("s")),
         )
         await device.stop(environment)
-        assert bot.lifecycle.is_started(device) is False
+        assert mosfet.lifecycle.is_started(device) is False
         restarted = await device.restart(environment)
         assert restarted is device
-        assert bot.lifecycle.is_started(device) is True
+        assert mosfet.lifecycle.is_started(device) is True
         await device.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

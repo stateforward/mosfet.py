@@ -1,13 +1,13 @@
-from bot import abilities
-import bot
-from bot import behavior as behavior_events
-from bot.abilities import cognition
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import cognition as cognition_module
-from bot.abilities.cognition import reflection as reflection_module
-from bot.behavior import instance as behavior_instance
-from bot.protocols import attachment
+from mosfet import abilities
+import mosfet
+from mosfet import behavior as behavior_events
+from mosfet.abilities import cognition
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import cognition as cognition_module
+from mosfet.abilities.cognition import reflection as reflection_module
+from mosfet.behavior import instance as behavior_instance
+from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -22,7 +22,7 @@ from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_co
 import pydantic
 import pytest
 
-from bot.event import validate_event_data
+from mosfet.event import validate_event_data
 from tests.type_helpers import model_view, object_dict
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -229,8 +229,8 @@ def no_output(reason: str = "") -> cognition.types.OutputData:
 def focus_output(device: str, reason: str) -> cognition.types.OutputData:
     return (
         cognition.types.EventData(
-            event=bot.FocusDeviceEvent.name,
-            data=bot.FocusDeviceEventData(device=device).model_dump(),
+            event=mosfet.FocusDeviceEvent.name,
+            data=mosfet.FocusDeviceEventData(device=device).model_dump(),
             reason=reason,
         ),
     )
@@ -283,7 +283,7 @@ def _as_events(
 
 
 def focus_event_offer() -> hsm.Event[object]:
-    return bot.FocusDeviceEvent
+    return mosfet.FocusDeviceEvent
 
 
 def _accept_focus_event(
@@ -297,12 +297,12 @@ def _accept_focus_event(
 class _BotActor(hsm.Instance):
     """Minimal modeled recipient for cognition selections in unit tests."""
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "BotActor",
         hsm.initial(hsm.target("/BotActor/active")),
         hsm.state(
             "active",
-            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_focus_event)),
+            hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_focus_event)),
         ),
     )
 
@@ -681,7 +681,7 @@ def cognition_input() -> cognition.InputData:
     """Live body context for Cognition ability input (no bot focus/devices)."""
 
     return cognition.InputData(
-        stimulus=bot.InputEventData(target_device="phone", priority=0),
+        stimulus=mosfet.InputEventData(target_device="phone", priority=0),
         abilities=(),
         actors={"bot": _BotActor()},
         focus=None,
@@ -694,7 +694,7 @@ async def started_cognition_input(ctx: hsm.Context) -> cognition.InputData:
     actor = data.actors["bot"]
     assert isinstance(actor, _BotActor)
     assert actor.model is not None
-    _ = await bot.started(ctx, actor, actor.model)
+    _ = await mosfet.started(ctx, actor, actor.model)
     return data
 
 
@@ -705,7 +705,7 @@ def deliberative_input(
     """Deliberative input for nested processors (intuition/reasoning/reflection)."""
 
     return processing.InputData(
-        input=bot.InputEventData(target_device="phone", priority=0),
+        input=mosfet.InputEventData(target_device="phone", priority=0),
         schemas=schemas or (),
         actors={},
     )
@@ -845,7 +845,7 @@ class CognitionAttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "CognitionAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -857,7 +857,7 @@ class CognitionAttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(cognition.CancelledEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(cognition.Cognition.failed_event), hsm.effect(_record)),
-            hsm.transition(hsm.on(bot.RebootEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(mosfet.RebootEvent), hsm.effect(_record)),
         ),
     )
 
@@ -961,13 +961,13 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
         finally:
             connection.close()
         owner = hsm.Instance()
-        owner_model = bot.define(
+        owner_model = mosfet.define(
             "CognitionAttachmentOwner",
             hsm.initial(hsm.target("ready")),
             hsm.state("ready"),
         )
         ctx = hsm.Context()
-        _ = await bot.started(ctx, owner, owner_model)
+        _ = await mosfet.started(ctx, owner, owner_model)
         await minimal.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1020,7 +1020,7 @@ def test_cognition_reports_aggregate_attachment_failure_and_accepts_retry(
         ctx = hsm.Context()
         ability = make_cognition()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1095,7 +1095,7 @@ def test_cognition_detaches_once_through_group_and_can_reattach(
         ctx = hsm.Context()
         owner = CognitionAttachmentOwner()
         ability = make_cognition()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1144,7 +1144,7 @@ def test_cognition_detach_cancels_active_intuition_through_group() -> None:
         ability = make_cognition(intuition_processor=processor)
         ctx = hsm.Context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1190,7 +1190,7 @@ def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
             )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner(ability)
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1258,7 +1258,7 @@ def test_cognition_direct_cancellation_acknowledges_active_child(
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1314,7 +1314,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
                 _ = await processing.start_operation(instance, operation_id)
             await asyncio.Event().wait()
 
-        submodel = bot.define(
+        submodel = mosfet.define(
             "StubbornIntuition",
             hsm.initial(hsm.target("/StubbornIntuition/waiting")),
             hsm.state(
@@ -1344,7 +1344,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1368,7 +1368,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
                 target=hsm.id(ability),
             ),
         )
-        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
+        await wait_until(lambda: any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle))
         instances = ability.context().value(hsm.Keys.Instances)
         operation_keys = (
             tuple(
@@ -1383,9 +1383,9 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
 
     lifecycle, state, operation_keys = asyncio.run(run())
 
-    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert len(reboots) == 1
-    assert reboots[0].data == bot.RebootEventData(reason="cognition_cancel_teardown_failed")
+    assert reboots[0].data == mosfet.RebootEventData(reason="cognition_cancel_teardown_failed")
     assert state.endswith("/rebooting")
     assert operation_keys == ()
 
@@ -1400,7 +1400,7 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
                 _ = await processing.start_operation(instance, operation_id)
             await asyncio.Event().wait()
 
-        submodel = bot.define(
+        submodel = mosfet.define(
             "TimedOutIntuition",
             hsm.initial(hsm.target("/TimedOutIntuition/waiting")),
             hsm.state(
@@ -1427,7 +1427,7 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
         )
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1436,14 +1436,14 @@ def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.Mo
             ability,
             ability.input_event.with_data_and_id(await started_cognition_input(ctx), "timed-out-turn"),
         )
-        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
+        await wait_until(lambda: any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle))
         return list(owner.lifecycle), ability.state()
 
     lifecycle, state = asyncio.run(run())
 
-    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert len(reboots) == 1
-    assert reboots[0].data == bot.RebootEventData(reason="cognition_child_teardown_failed")
+    assert reboots[0].data == mosfet.RebootEventData(reason="cognition_child_teardown_failed")
     assert state.endswith("/rebooting")
 
 
@@ -1454,7 +1454,7 @@ def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() 
         ability = RecordingCognition(intuition_processor=RecordingOutputOperation(no_output("settled")))
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1468,7 +1468,7 @@ def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() 
 
     lifecycle, state = asyncio.run(run())
 
-    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert reboots == []
     assert state.endswith("/idle")
 
@@ -1478,12 +1478,12 @@ def test_cognition_forwards_reflection_reboot_to_bot_owner() -> None:
         ability = make_cognition()
         owner = CognitionAttachmentOwner()
         ctx = hsm.Context()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
         request = dataclasses.replace(
-            bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
+            mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_child_teardown_failed")),
             id="reflection-reboot",
             source=hsm.id(cognition_reflection(ability)),
             target=hsm.id(ability),
@@ -1496,9 +1496,9 @@ def test_cognition_forwards_reflection_reboot_to_bot_owner() -> None:
     lifecycle, state = asyncio.run(run())
 
     assert len(lifecycle) == 1
-    assert lifecycle[0].name == bot.RebootEvent.name
+    assert lifecycle[0].name == mosfet.RebootEvent.name
     assert lifecycle[0].id == "reflection-reboot"
-    assert lifecycle[0].data == bot.RebootEventData(reason="cognition_child_teardown_failed")
+    assert lifecycle[0].data == mosfet.RebootEventData(reason="cognition_child_teardown_failed")
     assert state.endswith("/rebooting")
 
 
@@ -1530,7 +1530,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
         ability = make_cognition(intuition_processor=processor)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1580,7 +1580,7 @@ def test_cognition_ignores_stale_public_child_terminal() -> None:
         ability = RecordingCognition(intuition=intuition, reasoning=reasoning)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         current_input = await started_cognition_input(ctx)
@@ -1724,8 +1724,8 @@ def test_autonomy_cancellation_requires_attachment_owner_and_preserves_token() -
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         intruder = CognitionAttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
-        _ = await bot.started(ctx, intruder, intruder.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, intruder, intruder.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -1947,7 +1947,7 @@ def test_reflection_episode_from_turn_captures_stimulus_and_output() -> None:
     episode = cognition.reflection.episode_from_turn(turn)
 
     assert episode.focus is None
-    assert episode.stimulus_name == bot.InputEvent.name
+    assert episode.stimulus_name == mosfet.InputEvent.name
     assert episode.output == focus_output("phone", "deliberate")
 
 
@@ -2002,7 +2002,7 @@ def test_cognitive_rejects_output_for_unoffered_event() -> None:
 
 def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema() -> None:
     output = cognition.types.EventData(
-        event=bot.FocusDeviceEvent.name,
+        event=mosfet.FocusDeviceEvent.name,
         data={"device": ""},
         reason="invalid focus target",
     )
@@ -2034,7 +2034,7 @@ def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema(
 
 def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offered_schema() -> None:
     output = cognition.types.EventData(
-        event=bot.FocusDeviceEvent.name,
+        event=mosfet.FocusDeviceEvent.name,
         data={"device": ""},
         reason="invalid focus target",
     )
@@ -2100,7 +2100,7 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
 def test_cognitive_output_events_validate_through_typed_schema_contracts() -> None:
     operation_data = {
         "target": "phone",
-        "event": bot.FocusDeviceEvent.name,
+        "event": mosfet.FocusDeviceEvent.name,
         "data": {"device": "phone"},
     }
 
@@ -2313,7 +2313,7 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
     assert result == focus_output("phone", "reasoned focus")
     assert len(intuition_calls) == 1
     assert len(reasoning_calls) == 1
-    assert bot.FocusDeviceEvent.name in {event.name for event in reasoning_calls[0].schemas}
+    assert mosfet.FocusDeviceEvent.name in {event.name for event in reasoning_calls[0].schemas}
     assert len(reflection_calls) == 1
     reflection_input = reflection_calls[0].input
     assert isinstance(reflection_input, cognition.reflection.ProcessorInput)
@@ -2500,7 +2500,7 @@ def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
     result, reasoning_calls, events = asyncio.run(run())
 
     assert cognition.Reasoning.input_event.name not in events
-    assert bot.FocusDeviceEvent.name in events
+    assert mosfet.FocusDeviceEvent.name in events
     assert reasoning_calls == 1
 
 
@@ -2785,7 +2785,7 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         recalled = store.execute(select)
         episodes = cognition.episodes.episodes_from_output(recalled)
 
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
@@ -2874,7 +2874,7 @@ behavior = hsm.define(
                 ),
                 timeout=_revision_host_timeout(validation_passes=2),
             )
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_out = store.execute(
             memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
@@ -2952,7 +2952,7 @@ def test_reflection_change_retries_while_diagnostics_change_without_fixed_budget
             ),
             timeout=_revision_host_timeout(validation_passes=5),
         )
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_out = store.execute(
             memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
@@ -3026,7 +3026,7 @@ behavior = hsm.define(
             ),
             timeout=_revision_host_timeout(validation_passes=2),
         )
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
@@ -3084,7 +3084,7 @@ async def _seed_behavior_record(
 ) -> None:
     """Insert executable behavior into bot_behavior / bot_behavior_trigger tables."""
 
-    from bot.behavior import storage as behavior_storage
+    from mosfet.behavior import storage as behavior_storage
 
     behavior_source = source if source is not None else _ANSWER_RING_BEHAVIOR_SOURCE
     if description:
@@ -3159,7 +3159,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
             ),
             timeout=_revision_host_timeout(validation_passes=1),
         )
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
@@ -3230,7 +3230,7 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
                 cognition_output=focus_output("phone", "break"),
             ),
         )
-        from bot.behavior import storage as behavior_storage
+        from mosfet.behavior import storage as behavior_storage
 
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
@@ -3347,7 +3347,7 @@ behavior = hsm.define(
 
 
 def _ring_stimulus() -> hsm.Event[object]:
-    from bot.environment import SoundData, SoundEvent
+    from mosfet.environment import SoundData, SoundEvent
 
     return SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
 
@@ -3384,7 +3384,7 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
         bot_actor = turn.actors["bot"]
         assert isinstance(bot_actor, _BotActor)
         assert bot_actor.model is not None
-        _ = await bot.started(ctx, bot_actor, bot_actor.model)
+        _ = await mosfet.started(ctx, bot_actor, bot_actor.model)
         _ = await dispatch_ability_for_test(
             ability,
             ctx,
@@ -3400,7 +3400,7 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
     assert len(outputs) == 1
     assert outputs[0] == (
         cognition.types.EventData(
-            event=bot.FocusDeviceEvent.name,
+            event=mosfet.FocusDeviceEvent.name,
             data={"device": "phone"},
             reason="ring behavior",
         ),
@@ -3443,8 +3443,8 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
 def _speech_event_stimulus() -> hsm.Event[object]:
     """Labeled Listening speech product used as cognition stimulus (no priors)."""
 
-    from bot.abilities import listening
-    from bot.abilities.hearing import voice
+    from mosfet.abilities import listening
+    from mosfet.abilities.hearing import voice
 
     speech = listening.SpeechData(
         content=bytes([0, 1]) * 160,
@@ -3468,12 +3468,12 @@ def _speech_event_stimulus() -> hsm.Event[object]:
 def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> None:
     """A trusted native seed carries typed acoustic data through Autonomy unchanged."""
 
-    from bot.abilities import listening
-    from bot.abilities import communication
-    from bot.abilities.communication import conversation
-    from bot.abilities.communication.conversation import turn_detector
-    from bot.abilities.communication import behaviors
-    from bot.abilities.hearing import voice
+    from mosfet.abilities import listening
+    from mosfet.abilities import communication
+    from mosfet.abilities.communication import conversation
+    from mosfet.abilities.communication.conversation import turn_detector
+    from mosfet.abilities.communication import behaviors
+    from mosfet.abilities.hearing import voice
 
     async def run() -> tuple[
         list[cognition.types.OutputData],
@@ -3494,7 +3494,7 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
         ctx = await start_cognition_ability_for_test(ability)
         bot_actor = _BotActor()
         assert bot_actor.model is not None
-        _ = await bot.started(ctx, bot_actor, bot_actor.model)
+        _ = await mosfet.started(ctx, bot_actor, bot_actor.model)
         conversation_actor = conversation.Conversation(
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
@@ -3504,9 +3504,9 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
         )
         assert conversation_actor.model is not None
         assert communication_actor.model is not None
-        _ = await bot.started(ctx, conversation_actor, conversation_actor.model)
-        _ = await bot.started(ctx, communication_actor, communication_actor.model)
-        from bot.protocols import attachment
+        _ = await mosfet.started(ctx, conversation_actor, conversation_actor.model)
+        _ = await mosfet.started(ctx, communication_actor, communication_actor.model)
+        from mosfet.protocols import attachment
 
         _ = await communication_actor.attach(
             ctx,

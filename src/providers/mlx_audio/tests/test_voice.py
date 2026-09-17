@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import bot.abilities
-from bot.abilities import cognition
-from bot.abilities.communication import conversation
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities.hearing import speech
+import mosfet.abilities
+from mosfet.abilities import cognition
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities.hearing import speech
 
 import asyncio
 import dataclasses
@@ -12,7 +12,7 @@ import io
 import typing
 import wave
 
-from bot.providers.mlx_audio import VoiceDecoder, VoiceEncoder
+from mosfet.providers.mlx_audio import VoiceDecoder, VoiceEncoder
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,7 +29,7 @@ class FixedSpeechDecoder(speech.SpeechDecoder):
 
 
 @dataclasses.dataclass
-class RecordingSpeechEncoder(bot.abilities.Encoder[bytes, bytes]):
+class RecordingSpeechEncoder(mosfet.abilities.Encoder[bytes, bytes]):
     calls: list[bytes] = dataclasses.field(default_factory=list)
 
     @typing.override

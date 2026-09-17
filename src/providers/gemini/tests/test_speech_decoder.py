@@ -9,7 +9,7 @@ import typing
 import pytest
 from google.genai import errors as genai_errors
 
-from bot.providers.gemini import SpeechDecoder, SpeechDecodingError
+from mosfet.providers.gemini import SpeechDecoder, SpeechDecodingError
 
 
 @dataclasses.dataclass

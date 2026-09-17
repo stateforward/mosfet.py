@@ -2,7 +2,7 @@
   "include": [
     "examples/listen_speak_bot/src",
     "examples/phone_bot/src",
-    "src/bot",
+    "src/mosfet",
     "src/providers/elevenlabs/src",
     "src/providers/gemini/src",
     "src/providers/livekit/src",

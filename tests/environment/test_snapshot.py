@@ -1,6 +1,6 @@
 """Direct unit tests for the model-facing snapshot renderer (pure presentation)."""
 
-from bot.environment import snapshot
+from mosfet.environment import snapshot
 
 
 def test_render_environment_wraps_self_with_world_identity() -> None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.abilities.vocal import speech
+from mosfet.abilities.vocal import speech
 
 import asyncio
 import collections.abc
@@ -9,10 +9,10 @@ import dataclasses
 import hsm
 import pytest
 
-import bot.abilities
+import mosfet.abilities
 
-from bot.providers.mlx_audio import SpeechEncoder, SpeechEncodingError
-from bot.providers.mlx_audio._mlx import SpeechGenerationResult
+from mosfet.providers.mlx_audio import SpeechEncoder, SpeechEncodingError
+from mosfet.providers.mlx_audio._mlx import SpeechGenerationResult
 from tests.hsm_instance_state import start_ability_tree
 
 
@@ -92,7 +92,7 @@ def test_speech_encoder_uses_injected_model() -> None:
         }
     ]
     assert writer_calls == [(("samples",), 24000, "wav")]
-    assert isinstance(encoder, bot.abilities.Encoder)
+    assert isinstance(encoder, mosfet.abilities.Encoder)
 
 
 def test_speech_encoder_uses_injected_loader() -> None:

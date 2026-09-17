@@ -117,7 +117,7 @@ jobs:
           uv run --locked --with basedpyright basedpyright --project basedpyright-private.json
           uv run --locked --with basedpyright basedpyright \
             scripts/check_release_version.py \
-            src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py \
+            src/providers/elevenlabs/src/mosfet/providers/elevenlabs/__init__.py \
             src/providers/elevenlabs/tests/test_package_metadata.py \
             src/providers/sqlite_memory/hatch_build.py \
             tests/scripts/test_check_release_version.py \
@@ -127,7 +127,7 @@ jobs:
             (
               cd "$provider_dir"
               provider="$(basename "$provider_dir")"
-              uv run --locked --package "bot-provider-$(echo "$provider" | tr '_' '-')" --with basedpyright basedpyright
+              uv run --locked --package "mosfet-provider-$(echo "$provider" | tr '_' '-')" --with basedpyright basedpyright
             )
           done
 
@@ -138,7 +138,7 @@ jobs:
           # Provider tests derived via glob so new providers are covered automatically.
           for provider_dir in src/providers/*/; do
             provider="$(basename "$provider_dir")"
-            uv run --locked --package "bot-provider-$(echo "$provider" | tr '_' '-')" python -m pytest "$provider_dir/tests" -q
+            uv run --locked --package "mosfet-provider-$(echo "$provider" | tr '_' '-')" python -m pytest "$provider_dir/tests" -q
           done
 
       - name: Build packages
@@ -156,7 +156,7 @@ jobs:
 
           core_wheels=(dist/stateforward_bot-*.whl)
           if (( ${#core_wheels[@]} != 1 )); then
-            echo "Expected exactly one stateforward.bot wheel, found ${#core_wheels[@]}."
+            echo "Expected exactly one stateforward.mosfet wheel, found ${#core_wheels[@]}."
             exit 1
           fi
           core_wheel="${core_wheels[0]}"

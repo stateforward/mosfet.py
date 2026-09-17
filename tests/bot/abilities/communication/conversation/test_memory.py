@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bot.abilities import memory as memory_ability
-from bot.abilities.communication.conversation import memory
+from mosfet.abilities import memory as memory_ability
+from mosfet.abilities.communication.conversation import memory
 
 
 def test_memory_model_is_runtime_resolvable() -> None:

@@ -1,5 +1,5 @@
-from bot import abilities
-from bot.abilities import memory
+from mosfet import abilities
+from mosfet.abilities import memory
 
 import asyncio
 import collections.abc
@@ -134,10 +134,10 @@ def source_records() -> tuple[memory.store.MemoryRecord, ...]:
 
 
 def test_memory_consolidation_contract_lives_in_consolidation_module() -> None:
-    assert memory.consolidation.MemoryConsolidation.__module__ == "bot.abilities.memory.consolidation"
-    assert memory.consolidation.InputData.__module__ == "bot.abilities.memory.consolidation"
-    assert memory.consolidation.OutputData.__module__ == "bot.abilities.memory.consolidation"
-    assert memory.consolidation.MemoryConsolidationSource.__module__ == "bot.abilities.memory.consolidation"
+    assert memory.consolidation.MemoryConsolidation.__module__ == "mosfet.abilities.memory.consolidation"
+    assert memory.consolidation.InputData.__module__ == "mosfet.abilities.memory.consolidation"
+    assert memory.consolidation.OutputData.__module__ == "mosfet.abilities.memory.consolidation"
+    assert memory.consolidation.MemoryConsolidationSource.__module__ == "mosfet.abilities.memory.consolidation"
 
 
 def test_memory_consolidation_requires_source_records() -> None:

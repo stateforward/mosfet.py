@@ -1,5 +1,5 @@
-from bot import abilities
-from bot.abilities.vocal import speech
+from mosfet import abilities
+from mosfet.abilities.vocal import speech
 
 import asyncio
 import collections.abc

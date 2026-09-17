@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bot.abilities.hearing import voice
+from mosfet.abilities.hearing import voice
 
 import asyncio
 import collections.abc
@@ -11,7 +11,7 @@ import wave
 
 import pytest
 
-from bot.providers.mlx_audio import VoiceDiarizationError, VoiceDiarizer
+from mosfet.providers.mlx_audio import VoiceDiarizationError, VoiceDiarizer
 
 
 @dataclasses.dataclass(frozen=True)

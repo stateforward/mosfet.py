@@ -1,10 +1,10 @@
-from bot.abilities.cognition import intuition
-from bot.abilities.cognition import types
-from bot.abilities.cognition import input as cognition_input
-from bot.abilities import ability as ability_module
-from bot.abilities import processing
-import bot
-from bot import event
+from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import types
+from mosfet.abilities.cognition import input as cognition_input
+from mosfet.abilities import ability as ability_module
+from mosfet.abilities import processing
+import mosfet
+from mosfet import event
 
 import asyncio
 import collections.abc
@@ -40,13 +40,13 @@ _SelectionEvent = hsm.Event[_SelectionData](
 class _SelectionActor(hsm.Instance):
     """Minimal recipient used to exercise the real typed dispatch boundary."""
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "IntuitionSelectionActor",
         hsm.initial(hsm.target("/IntuitionSelectionActor/active")),
         hsm.state(
             "active",
             hsm.transition(hsm.on(_SelectionEvent), hsm.effect(_accept_selection)),
-            hsm.transition(hsm.on(bot.FocusDeviceEvent), hsm.effect(_accept_selection)),
+            hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_selection)),
         ),
     )
 
@@ -80,7 +80,7 @@ class _CyclingProcessor(processing.Processor):
 
 
 def _selection_input(actor: hsm.Instance, *, operation_id: str) -> intuition.InputData:
-    stimulus = bot.InputEventData(target_device="phone", priority=0)
+    stimulus = mosfet.InputEventData(target_device="phone", priority=0)
     actors: collections.abc.Mapping[str, hsm.Instance] = {"target": actor}
     turn = types.TurnData(
         input=cognition_input.InputData(
@@ -116,7 +116,7 @@ def _selection(*, value: object) -> processing.Events:
 def _focus_selection(*, device: object) -> processing.Events:
     return (
         processing.SelectedEvent(
-            event=bot.FocusDeviceEvent.name,
+            event=mosfet.FocusDeviceEvent.name,
             data={"device": device},
             confidence=99,
         ),
@@ -132,7 +132,7 @@ def _run_intuition(
         ctx = shared_hsm_context()
         actor = _SelectionActor()
         assert actor.model is not None
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         ability = intuition.Intuition(processor=processor)
         return typing.cast(
             types.CompletionData,
@@ -158,7 +158,7 @@ def test_intuition_returns_directed_terminal_to_one_shot_operation() -> None:
         ctx = shared_hsm_context()
         actor = _SelectionActor()
         assert actor.model is not None
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         child = intuition.Intuition(processor=_SequenceProcessor(()))
         await start_ability_tree(ctx, child)
         operation_id = "intuition-terminal-operation"
@@ -299,6 +299,7 @@ def test_intuition_bounds_alternating_selection_rejections() -> None:
     assert len(processor.calls) == 3
     assert all("input_value" not in (call.instructions or "") for call in processor.calls)
 
+
 def test_confidence_gate_drops_low_confidence_and_cascades() -> None:
     """A composition confidence gate drops below-floor per-event selections.
 
@@ -310,7 +311,7 @@ def test_confidence_gate_drops_low_confidence_and_cascades() -> None:
         ctx = shared_hsm_context()
         actor = _SelectionActor()
         assert actor.model is not None
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         ability = intuition.Intuition(
             processor=_SequenceProcessor(_selection_gate(value="low", confidence=20)),
             confidence_gate=70,
@@ -330,7 +331,7 @@ def test_confidence_gate_passes_high_confidence_survivors() -> None:
     async def run() -> object:
         ctx = shared_hsm_context()
         actor = _SelectionActor()
-        _ = await bot.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, actor, actor.model)
         ability = intuition.Intuition(
             processor=_SequenceProcessor(_selection_gate(value="solid", confidence=99)),
             confidence_gate=95,

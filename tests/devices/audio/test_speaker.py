@@ -1,4 +1,4 @@
-from bot.devices import audio
+from mosfet.devices import audio
 
 import asyncio
 import collections.abc
@@ -6,11 +6,11 @@ import dataclasses
 import typing
 
 import hsm
-import bot
+import mosfet
 
-from bot.device import Device
-from bot.protocols import attachment
-from bot.environment import SoundData, SoundEvent, Environment
+from mosfet.device import Device
+from mosfet.protocols import attachment
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_peripherals
 
 
@@ -50,8 +50,8 @@ def test_speaker_dispatches_audio_output_to_target_device() -> None:
     async def run() -> None:
         speaker = audio.Speaker()
         target = RecordingDevice()
-        _ = await bot.started(None, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
-        _ = await bot.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="physical-speaker"))
+        _ = await mosfet.started(None, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker"))
+        _ = await mosfet.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="physical-speaker"))
         target.events.clear()
         data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=44_100, channels=2)
 
@@ -86,16 +86,16 @@ def test_speaker_transduces_attached_controller_signal_into_environment_sound() 
         controller = RecordingDevice()
         inside = RecordingDevice()
         outside = RecordingDevice()
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker")
         )
-        _ = await bot.started(None, outside, typing.cast(hsm.Model, outside.model), hsm.Config(id="outside-speaker"))
+        _ = await mosfet.started(None, outside, typing.cast(hsm.Model, outside.model), hsm.Config(id="outside-speaker"))
         await speaker.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
         await wait_until(lambda: speaker.state() == "/Device/attached")
         inside.events.clear()
@@ -137,10 +137,10 @@ def test_unattached_speaker_transduces_nothing() -> None:
         environment = Environment()
         speaker = audio.Speaker()
         inside = RecordingDevice()
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, speaker, typing.cast(hsm.Model, speaker.model), hsm.Config(id="phone-speaker")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, inside, typing.cast(hsm.Model, inside.model), hsm.Config(id="inside-speaker")
         )
         inside.events.clear()

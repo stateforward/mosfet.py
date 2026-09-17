@@ -12,18 +12,18 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "bot-provider-elevenlabs",
-    "bot-provider-gemini",
-    "bot-provider-livekit",
-    "bot-provider-mlx-audio",
-    "bot-provider-mlx-vlm",
-    "bot-provider-moonshine",
-    "bot-provider-openai-compat",
-    "bot-provider-postgres-memory",
-    "bot-provider-pyannote",
-    "bot-provider-sqlite-memory",
-    "bot-provider-typesafe",
-    "stateforward-bot",
+    "mosfet-provider-elevenlabs",
+    "mosfet-provider-gemini",
+    "mosfet-provider-livekit",
+    "mosfet-provider-mlx-audio",
+    "mosfet-provider-mlx-vlm",
+    "mosfet-provider-moonshine",
+    "mosfet-provider-openai-compat",
+    "mosfet-provider-postgres-memory",
+    "mosfet-provider-pyannote",
+    "mosfet-provider-sqlite-memory",
+    "mosfet-provider-typesafe",
+    "stateforward-mosfet",
 ]
 
 [[package]]
@@ -214,286 +214,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7a/4b/c1f4e211e50389304d6af32b9280e026a7133e3ad59bbdf8f7a3250f8bee/basedpyright-1.39.9.tar.gz", hash = "sha256:32cbea5fc8273e89df3db20daea56cb7286e419ccdfdc479c64759d2dc071901", size = 24412216, upload-time = "2026-06-27T02:19:49.834Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/d4/e1fa108710d0498a18c77b1e13897f31eab47c69aa8cfe2d2a4df746541e/basedpyright-1.39.9-py3-none-any.whl", hash = "sha256:6b0837b9eba972c71895167ab9b127e6afdbc17abc92312e3f8d15ca82a5611c", size = 13374276, upload-time = "2026-06-27T02:19:54.431Z" },
-]
-
-[[package]]
-name = "bot-provider-elevenlabs"
-source = { editable = "src/providers/elevenlabs" }
-dependencies = [
-    { name = "elevenlabs" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "elevenlabs", specifier = ">=2.49.0,<3.0.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-gemini"
-source = { editable = "src/providers/gemini" }
-dependencies = [
-    { name = "google-genai" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "google-genai", specifier = ">=2.11.0,<3.0.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-livekit"
-source = { editable = "src/providers/livekit" }
-dependencies = [
-    { name = "livekit" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "livekit", specifier = ">=1.1.10,<2.0.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-mlx-audio"
-source = { editable = "src/providers/mlx_audio" }
-dependencies = [
-    { name = "mlx-audio", marker = "sys_platform == 'darwin'" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mlx-audio", marker = "sys_platform == 'darwin'", specifier = ">=0.4.4,<0.5.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-mlx-vlm"
-source = { editable = "src/providers/mlx_vlm" }
-dependencies = [
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = ">=0.6.3,<0.7.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-moonshine"
-source = { editable = "src/providers/moonshine" }
-dependencies = [
-    { name = "moonshine-voice" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "moonshine-voice", specifier = ">=0.0.70,<0.1.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-openai-compat"
-source = { editable = "src/providers/openai_compat" }
-dependencies = [
-    { name = "openai" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "openai", specifier = ">=2.11.0,<3.0.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-postgres-memory"
-source = { editable = "src/providers/postgres_memory" }
-dependencies = [
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "stateforward-bot", editable = "." }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-pyannote"
-source = { editable = "src/providers/pyannote" }
-dependencies = [
-    { name = "pyannote-audio" },
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyannote-audio", specifier = ">=4.0.7,<5.0.0" },
-    { name = "stateforward-bot", editable = "." },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "bot-provider-sqlite-memory"
-source = { editable = "src/providers/sqlite_memory" }
-dependencies = [
-    { name = "stateforward-bot" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-    { name = "sqlite-vec" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "stateforward-bot", editable = "." }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-    { name = "sqlite-vec", specifier = ">=0.1.10a4,<0.2.0" },
-]
-
-[[package]]
-name = "bot-provider-typesafe"
-source = { editable = "src/providers/typesafe" }
-dependencies = [
-    { name = "stateforward-bot" },
-    { name = "typesafe-sdk" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "stateforward-bot", editable = "." },
-    { name = "typesafe-sdk", specifier = ">=0.6.0,<1.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
 ]
 
 [[package]]
@@ -1799,6 +1519,286 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/1a/f32fe9d27851a6c88bdea75891c1d5f0bac11ee5ab72517b9c42657c0262/moonshine_voice-0.0.73-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:c56de7614b18bbc65d8f4f2cb7432d8a258311aef38a49e9e16c8d06df8085f0", size = 55105425, upload-time = "2026-07-24T01:54:17.609Z" },
     { url = "https://files.pythonhosted.org/packages/b6/7a/245402af9a56879cf24f36ba86087240ef8d5f807064fdd510c58de88947/moonshine_voice-0.0.73-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:6461c8097ed78d054c46b4c821143008a07b5fa1f4169674493ccfa06c1407db", size = 56320672, upload-time = "2026-07-24T01:50:09.7Z" },
     { url = "https://files.pythonhosted.org/packages/42/14/51f5813cd4cb1a172885e5b6e7f8a50ca2462cb418b67773d8bf8ab1dcf5/moonshine_voice-0.0.73-py3-none-win_amd64.whl", hash = "sha256:fd9895bec46f929ac3747fb83bede3826f7a32c3d0c9559b4b2840fa5e6d2bcd", size = 50504986, upload-time = "2026-07-24T06:10:12.213Z" },
+]
+
+[[package]]
+name = "mosfet-provider-elevenlabs"
+source = { editable = "src/providers/elevenlabs" }
+dependencies = [
+    { name = "elevenlabs" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "elevenlabs", specifier = ">=2.49.0,<3.0.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-gemini"
+source = { editable = "src/providers/gemini" }
+dependencies = [
+    { name = "google-genai" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "google-genai", specifier = ">=2.11.0,<3.0.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-livekit"
+source = { editable = "src/providers/livekit" }
+dependencies = [
+    { name = "livekit" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "livekit", specifier = ">=1.1.10,<2.0.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-mlx-audio"
+source = { editable = "src/providers/mlx_audio" }
+dependencies = [
+    { name = "mlx-audio", marker = "sys_platform == 'darwin'" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mlx-audio", marker = "sys_platform == 'darwin'", specifier = ">=0.4.4,<0.5.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-mlx-vlm"
+source = { editable = "src/providers/mlx_vlm" }
+dependencies = [
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = ">=0.6.3,<0.7.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-moonshine"
+source = { editable = "src/providers/moonshine" }
+dependencies = [
+    { name = "moonshine-voice" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "moonshine-voice", specifier = ">=0.0.70,<0.1.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-openai-compat"
+source = { editable = "src/providers/openai_compat" }
+dependencies = [
+    { name = "openai" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai", specifier = ">=2.11.0,<3.0.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-postgres-memory"
+source = { editable = "src/providers/postgres_memory" }
+dependencies = [
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "stateforward-mosfet", editable = "." }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-pyannote"
+source = { editable = "src/providers/pyannote" }
+dependencies = [
+    { name = "pyannote-audio" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pyannote-audio", specifier = ">=4.0.7,<5.0.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-sqlite-memory"
+source = { editable = "src/providers/sqlite_memory" }
+dependencies = [
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "sqlite-vec" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "stateforward-mosfet", editable = "." }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+    { name = "sqlite-vec", specifier = ">=0.1.10a4,<0.2.0" },
+]
+
+[[package]]
+name = "mosfet-provider-typesafe"
+source = { editable = "src/providers/typesafe" }
+dependencies = [
+    { name = "stateforward-mosfet" },
+    { name = "typesafe-sdk" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "stateforward-mosfet", editable = "." },
+    { name = "typesafe-sdk", specifier = ">=0.6.0,<1.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
 ]
 
 [[package]]
@@ -3240,7 +3240,16 @@ wheels = [
 ]
 
 [[package]]
-name = "stateforward-bot"
+name = "stateforward-hsm"
+version = "1.3.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/ea/c37a069fae40c6e07fc378453c4ebe8915e7aa6e8cc49c2801e734d2eeac/stateforward_hsm-1.3.7.tar.gz", hash = "sha256:8656f776c614c6eee48dec637a95bba0aa5fd43a8176bcc034ebaa628add9552", size = 186084, upload-time = "2026-08-28T01:54:14.738Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/f0/411848079eb479520e8f492c3bbc9e1139f04763441a01af2f630c2489a2/stateforward_hsm-1.3.7-py3-none-any.whl", hash = "sha256:6deda02a002c37782a4ab3ff1f1682d78199e80e18ab0b994416773df6246e01", size = 39555, upload-time = "2026-08-28T01:54:13.566Z" },
+]
+
+[[package]]
+name = "stateforward-mosfet"
 source = { editable = "." }
 dependencies = [
     { name = "opentelemetry-api" },
@@ -3275,15 +3284,6 @@ dev = [
     { name = "basedpyright", specifier = ">=1.39.9" },
     { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
     { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "stateforward-hsm"
-version = "1.3.7"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e3/ea/c37a069fae40c6e07fc378453c4ebe8915e7aa6e8cc49c2801e734d2eeac/stateforward_hsm-1.3.7.tar.gz", hash = "sha256:8656f776c614c6eee48dec637a95bba0aa5fd43a8176bcc034ebaa628add9552", size = 186084, upload-time = "2026-08-28T01:54:14.738Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/f0/411848079eb479520e8f492c3bbc9e1139f04763441a01af2f630c2489a2/stateforward_hsm-1.3.7-py3-none-any.whl", hash = "sha256:6deda02a002c37782a4ab3ff1f1682d78199e80e18ab0b994416773df6246e01", size = 39555, upload-time = "2026-08-28T01:54:13.566Z" },
 ]
 
 [[package]]

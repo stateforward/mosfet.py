@@ -1,6 +1,6 @@
-# bot-provider-sqlite-memory
+# mosfet-provider-sqlite-memory
 
-SQLite-backed stateforward.bot Memory provider.
+SQLite-backed stateforward.mosfet Memory provider.
 
 One ability apply runs one or more parameterized SQL statements in a single transaction against `bot_memory`. Success commits; any failure rolls back.
 
@@ -17,5 +17,5 @@ There is no separate encode/decode store path. Generation (if used) is a core si
 Run the provider tests:
 
 ```sh
-uv run --package bot-provider-sqlite-memory --group dev python -m pytest src/providers/sqlite_memory/tests
+uv run --package mosfet-provider-sqlite-memory --group dev python -m pytest src/providers/sqlite_memory/tests
 ```

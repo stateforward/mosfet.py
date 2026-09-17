@@ -1,4 +1,4 @@
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 import asyncio
 
@@ -18,9 +18,9 @@ from tests.type_helpers import model_view, object_dict
 
 
 def test_memory_classification_contract_lives_in_classification_module() -> None:
-    assert memory.classification.MemoryClassification.__module__ == "bot.abilities.memory.classification"
-    assert memory.classification.InputData.__module__ == "bot.abilities.memory.classification"
-    assert memory.classification.OutputData.__module__ == "bot.abilities.memory.classification"
+    assert memory.classification.MemoryClassification.__module__ == "mosfet.abilities.memory.classification"
+    assert memory.classification.InputData.__module__ == "mosfet.abilities.memory.classification"
+    assert memory.classification.OutputData.__module__ == "mosfet.abilities.memory.classification"
 
 
 def test_generated_memory_content_is_required() -> None:

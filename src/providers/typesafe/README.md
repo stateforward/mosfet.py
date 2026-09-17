@@ -1,6 +1,6 @@
-# bot-provider-typesafe
+# mosfet-provider-typesafe
 
-TypeSafe AI provider for stateforward.bot: the `system_one` label-tier
+TypeSafe AI provider for stateforward.mosfet: the `system_one` label-tier
 (Choice/Score/Noul) wrapped for the bot's Intuition reflex tier.
 
 - `AsyncSystemOneClient` — async `system_one` transport; SDK errors surface as

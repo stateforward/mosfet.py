@@ -6,15 +6,15 @@ import importlib
 import pathlib
 import threading
 
-import bot.telemetry
+import mosfet.telemetry
 import pytest
 from opentelemetry import _logs
 
-from bot.telemetry import span
-from bot.telemetry.configure import is_enabled, log_file, logger_provider, span_file, tracer_provider
-from bot.telemetry.generator import record_generator_request
+from mosfet.telemetry import span
+from mosfet.telemetry.configure import is_enabled, log_file, logger_provider, span_file, tracer_provider
+from mosfet.telemetry.generator import record_generator_request
 
-_CONFIGURE_MOD = importlib.import_module("bot.telemetry.configure")
+_CONFIGURE_MOD = importlib.import_module("mosfet.telemetry.configure")
 
 
 def _force_flush() -> None:
@@ -29,7 +29,7 @@ def _reset_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> collections.abc.Iterator[None]:
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
@@ -42,12 +42,12 @@ def _reset_telemetry(
 
     monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
     yield
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
 
 
 def test_configure_enables_export_and_exposes_log_file() -> None:
     log_path = pathlib.Path("otel-logs.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     assert is_enabled() is True
     assert log_file() == log_path.resolve()
 
@@ -55,7 +55,7 @@ def test_configure_enables_export_and_exposes_log_file() -> None:
 def test_configure_opt_out_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     log_path = pathlib.Path("disabled.jsonl")
     monkeypatch.setenv("BOT_OTEL_DISABLED", "true")
-    assert bot.telemetry.configure(log_file=log_path) is False
+    assert mosfet.telemetry.configure(log_file=log_path) is False
     assert is_enabled() is False
     record_generator_request(
         provider="openai_compat",
@@ -69,7 +69,7 @@ def test_configure_opt_out_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_configure_enabled_false_writes_nothing() -> None:
     log_path = pathlib.Path("explicit-off.jsonl")
-    assert bot.telemetry.configure(enabled=False, log_file=log_path) is False
+    assert mosfet.telemetry.configure(enabled=False, log_file=log_path) is False
     record_generator_request(
         provider="openai_compat",
         model=None,
@@ -82,8 +82,8 @@ def test_configure_enabled_false_writes_nothing() -> None:
 def test_configure_is_idempotent() -> None:
     first = pathlib.Path("first.jsonl")
     second = pathlib.Path("second.jsonl")
-    assert bot.telemetry.configure(log_file=first) is True
-    assert bot.telemetry.configure(enabled=False, log_file=second) is True
+    assert mosfet.telemetry.configure(log_file=first) is True
+    assert mosfet.telemetry.configure(enabled=False, log_file=second) is True
     record_generator_request(
         provider="openai_compat",
         model=None,
@@ -97,10 +97,10 @@ def test_configure_is_idempotent() -> None:
 def test_configure_rejects_path_outside_cwd(tmp_path: pathlib.Path) -> None:
     outside = tmp_path.parent / f"outside-{tmp_path.name}.jsonl"
     with pytest.raises(ValueError, match="must resolve under the process working directory"):
-        _ = bot.telemetry.configure(log_file=outside)
+        _ = mosfet.telemetry.configure(log_file=outside)
     assert is_enabled() is False
     # Failed configure must not stick as configured — a good path can still install.
-    assert bot.telemetry.configure(log_file="good.jsonl") is True
+    assert mosfet.telemetry.configure(log_file="good.jsonl") is True
     assert is_enabled() is True
 
 
@@ -109,13 +109,13 @@ def test_configure_rejects_symlink_escape(tmp_path: pathlib.Path) -> None:
     link = pathlib.Path("escape-link.jsonl")
     link.symlink_to(outside)
     with pytest.raises(ValueError, match="must resolve under the process working directory"):
-        _ = bot.telemetry.configure(log_file=link)
+        _ = mosfet.telemetry.configure(log_file=link)
     assert is_enabled() is False
 
 
 def test_configure_accepts_relative_path_under_cwd() -> None:
     nested = pathlib.Path("logs") / "nested.jsonl"
-    assert bot.telemetry.configure(log_file=nested) is True
+    assert mosfet.telemetry.configure(log_file=nested) is True
     assert log_file() == nested.resolve()
     record_generator_request(
         provider="openai_compat",
@@ -137,7 +137,7 @@ def test_configure_concurrent_single_outcome() -> None:
 
     def worker() -> None:
         barrier.wait()
-        enabled = bot.telemetry.configure(log_file=log_path)
+        enabled = mosfet.telemetry.configure(log_file=log_path)
         with results_lock:
             results.append(enabled)
 
@@ -180,7 +180,7 @@ def test_record_opt_out_after_configure(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setenv("BOT_OTEL_DISABLED", "true")
     log_path = pathlib.Path("otel-logs.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is False
+    assert mosfet.telemetry.configure(log_file=log_path) is False
     record_generator_request(
         provider="openai_compat",
         model="auto",
@@ -224,7 +224,7 @@ def _capture_otlp_endpoints(monkeypatch: pytest.MonkeyPatch) -> list[str | None]
 
 def test_configure_without_otlp_endpoint_is_jsonl_only(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _capture_otlp_endpoints(monkeypatch)
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert seen == []
     provider = tracer_provider()
     assert provider is not None
@@ -235,7 +235,7 @@ def test_configure_without_otlp_endpoint_is_jsonl_only(monkeypatch: pytest.Monke
 def test_configure_otlp_traces_endpoint_installs_second_processor(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _capture_otlp_endpoints(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4317")
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert seen == ["http://127.0.0.1:4317"]
     provider = tracer_provider()
     assert provider is not None
@@ -246,14 +246,14 @@ def test_configure_otlp_traces_endpoint_installs_second_processor(monkeypatch: p
 def test_configure_otlp_base_endpoint_does_not_append_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _capture_otlp_endpoints(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert seen == ["http://127.0.0.1:4317"]
 
 
 def test_configure_otlp_base_endpoint_strips_legacy_http_path(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _capture_otlp_endpoints(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317/v1/traces")
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert seen == ["http://127.0.0.1:4317"]
 
 
@@ -261,14 +261,14 @@ def test_configure_bot_otlp_endpoint_wins_and_strips_legacy_path(monkeypatch: py
     seen = _capture_otlp_endpoints(monkeypatch)
     monkeypatch.setenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9999/v1/traces")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     assert seen == ["http://127.0.0.1:9999"]
 
 
 def test_configure_otlp_keeps_jsonl_span_export(monkeypatch: pytest.MonkeyPatch) -> None:
     _ = _capture_otlp_endpoints(monkeypatch)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4317")
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     with span.operation(
         "bot.test.operation",
         scope="bot.telemetry.test",

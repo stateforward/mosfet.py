@@ -1,6 +1,6 @@
 import base64
 import hsm
-from bot.devices import phone
+from mosfet.devices import phone
 
 import datetime
 import json
@@ -10,8 +10,8 @@ import uuid
 import pytest
 import pydantic
 
-from bot import event
-from bot.event import (
+from mosfet import event
+from mosfet.event import (
     embeddable_json_schema,
     bytes_from_base64,
     event_json_value,

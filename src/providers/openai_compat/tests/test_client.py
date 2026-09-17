@@ -4,8 +4,8 @@ import dataclasses
 
 import pytest
 
-from bot.providers.openai_compat import ChatClient
-from bot.providers.openai_compat import client as chat_client
+from mosfet.providers.openai_compat import ChatClient
+from mosfet.providers.openai_compat import client as chat_client
 
 
 @dataclasses.dataclass

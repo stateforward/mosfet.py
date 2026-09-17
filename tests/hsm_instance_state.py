@@ -7,17 +7,17 @@ import uuid
 import weakref
 
 import hsm
-import bot
+import mosfet
 
-from bot import abilities
-from bot import behavior
-from bot.abilities import cognition
-from bot.protocols import attachment
+from mosfet import abilities
+from mosfet import behavior
+from mosfet.abilities import cognition
+from mosfet.protocols import attachment
 
-from bot.devices import audio as audio_device
-from bot.devices import phone as phone_device
+from mosfet.devices import audio as audio_device
+from mosfet.devices import phone as phone_device
 
-from bot.device import Device
+from mosfet.device import Device
 
 _ABILITY_TERMINAL_OWNERS: weakref.WeakKeyDictionary[abilities.Ability[typing.Any, typing.Any], hsm.Instance] = (
     weakref.WeakKeyDictionary()
@@ -47,7 +47,7 @@ def _record_ability_terminal_mirror_event(
 
 
 class _AbilityTerminalMirror(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "AbilityTerminalMirror",
         hsm.initial(hsm.target("/AbilityTerminalMirror/recording")),
         hsm.state(
@@ -126,7 +126,7 @@ async def await_result(awaitable: collections.abc.Awaitable[TResult]) -> TResult
 async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
     context = hsm.Context() if ctx is None else ctx
     owner = _AbilityTerminalMirror(ability)
-    _ = await bot.started(context, owner, typing.cast(hsm.Model, owner.model))
+    _ = await mosfet.started(context, owner, typing.cast(hsm.Model, owner.model))
     operation_id = uuid.uuid4().hex
     attached = owner.result_for(operation_id)
     _ = await ability.attach(

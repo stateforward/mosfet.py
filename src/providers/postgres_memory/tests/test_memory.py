@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 import asyncio
 import contextlib
@@ -12,7 +12,7 @@ from typing import override
 
 import pytest
 
-from bot.providers.postgres_memory import (
+from mosfet.providers.postgres_memory import (
     MEMORY_TABLE,
     DatabaseConnection,
     Database,

@@ -8,7 +8,7 @@ import time
 import hsm
 import pytest
 
-from bot.telemetry import control
+from mosfet.telemetry import control
 
 
 @pytest.fixture(autouse=True)

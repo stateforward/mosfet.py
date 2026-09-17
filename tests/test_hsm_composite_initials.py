@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hsm
 
-from bot.abilities.communication.conversation.conversation import Conversation
-from bot.abilities.listening.interpretation import Interpretation
-from bot.abilities.reading.reading import Reading
+from mosfet.abilities.communication.conversation.conversation import Conversation
+from mosfet.abilities.listening.interpretation import Interpretation
+from mosfet.abilities.reading.reading import Reading
 
 
 def _behavior_model(machine_cls: type[hsm.Instance]) -> hsm.Model:

@@ -9,17 +9,17 @@ import datetime
 import typing
 
 import hsm
-import bot
+import mosfet
 import pytest
-from bot import lifecycle
-from bot.abilities import processing
+from mosfet import lifecycle
+from mosfet.abilities import processing
 
-from bot.abilities import ability, encoding
-from bot.abilities import speaking
-from bot.abilities.communication import conversation
-from bot.devices import audio
-from bot.abilities.speaking import EfferenceData, EfferenceEvent
-from bot.environment import SoundData, SoundEvent, Environment
+from mosfet.abilities import ability, encoding
+from mosfet.abilities import speaking
+from mosfet.abilities.communication import conversation
+from mosfet.devices import audio
+from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, start_ability_tree
 from tests.bot.abilities.support import require_model
 
@@ -165,7 +165,7 @@ class SoundListener(hsm.Instance):
         if isinstance(data, SoundData):
             instance._sounds.append(data)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "SoundListener",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -188,14 +188,14 @@ def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
         listener = SoundListener(sounds)
 
         await start_ability_tree(environment, speaking_ability)
-        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
         outputs: list[speaking.OutputData] = []
         original = speaking_ability.dispatch
 
         def capture_terminal(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
-            from bot.abilities import ability
+            from mosfet.abilities import ability
 
             if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
                 data = event.data.data
@@ -231,7 +231,7 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
         original = speaking_ability.dispatch
 
         def capture(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
-            from bot.abilities import ability
+            from mosfet.abilities import ability
 
             if event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
                 data = event.data.data
@@ -262,7 +262,7 @@ def test_speaking_returns_correlated_terminal_directly_to_request_source() -> No
                 del ctx, instance
                 terminals.append(event)
 
-            model = bot.define(
+            model = mosfet.define(
                 "SpeakingRequester",
                 hsm.initial(hsm.target("/SpeakingRequester/waiting")),
                 hsm.state(
@@ -273,7 +273,7 @@ def test_speaking_returns_correlated_terminal_directly_to_request_source() -> No
 
         requester = Requester()
         speaker = speaking.Speaking(encoder=RecordingEncoder())
-        _ = await bot.started(environment, requester, requester.model)
+        _ = await mosfet.started(environment, requester, requester.model)
         await start_ability_tree(environment, speaker)
 
         await hsm.dispatch(
@@ -295,7 +295,7 @@ def test_speaking_returns_correlated_terminal_directly_to_request_source() -> No
 
 def test_speaking_encoding_timeout_cancels_non_returning_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[str, bool]:
-        from bot.abilities.speaking import speaking as speaking_source
+        from mosfet.abilities.speaking import speaking as speaking_source
 
         monkeypatch.setattr(speaking_source, "_ENCODING_TIMEOUT", datetime.timedelta(milliseconds=10))
         encoder = NeverReturningEncoder()
@@ -328,11 +328,11 @@ def test_speaking_is_not_cognition_callable() -> None:
 def test_cognition_does_not_directly_select_speaking_output() -> None:
     """Body output wiring is absent from cognition's actor/tool inventory."""
 
-    import bot
-    from bot.bot import Bot
-    from bot.device import Device
-    from bot.abilities import processing
-    from bot.environment import Environment
+    import mosfet
+    from mosfet.bot import Bot
+    from mosfet.device import Device
+    from mosfet.abilities import processing
+    from mosfet.environment import Environment
     from tests.bot.test_bot import as_cognition
 
     class SpeakProcessor(processing.Processor):
@@ -370,7 +370,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
 
         await probe.dispatch(
             environment,
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=0)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=0)),
         )
         return encoder.calls, processor.inputs
 
@@ -398,7 +398,7 @@ class ListeningPeer(hsm.Instance):
         if isinstance(event.data, EfferenceData):
             instance._seen.append("efference")
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ListeningPeer",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(EfferenceEvent), hsm.effect(_record))),
@@ -418,7 +418,7 @@ class OrderingSoundListener(hsm.Instance):
         if isinstance(event.data, SoundData):
             instance._seen.append("sound")
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "OrderingSoundListener",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -428,7 +428,7 @@ class OrderingSoundListener(hsm.Instance):
 class AbilityOwner(hsm.Instance):
     """Attachment owner so Speaking can leave detached lifecycle and run behavior."""
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "AbilityOwner",
         hsm.initial(hsm.target("owning")),
         hsm.state("owning"),
@@ -443,7 +443,7 @@ async def _speak_with_listening_peer(
 ) -> tuple[list[str], list[EfferenceData]]:
     """Say one thing with a real mouth; return order and copies seen by the linked Listening peer."""
 
-    from bot.protocols import attachment
+    from mosfet.protocols import attachment
 
     mouth = audio.Speaker() if speaker is None else speaker
     environment = Environment()
@@ -452,8 +452,8 @@ async def _speak_with_listening_peer(
 
     peer = ListeningPeer(order)
     owner = AbilityOwner()
-    _ = await bot.started(environment, peer, peer.model)
-    _ = await bot.started(environment, owner, owner.model)
+    _ = await mosfet.started(environment, peer, peer.model)
+    _ = await mosfet.started(environment, owner, owner.model)
     speaking_ability = speaking.Speaking(
         encoder=RecordingEncoder(audio=audio_bytes),
         speaker=mouth,
@@ -462,12 +462,12 @@ async def _speak_with_listening_peer(
         channels=1,
         media_type=media_type,
     )
-    _ = await bot.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     listener = OrderingSoundListener(order)
-    _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+    _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
     environment.join(listener)
 
-    _ = await bot.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
+    _ = await mosfet.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
     # Attach is ability lifecycle only; the motor-command copy goes to ``listening=peer``, not owner.
     _ = await speaking_ability.attach(
         environment,
@@ -564,7 +564,7 @@ def test_speaking_powers_an_unstarted_mouth_it_was_given() -> None:
         listener = SoundListener(sounds)
 
         await start_ability_tree(environment, speaking_ability)
-        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
+        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
         environment.join(listener)
 
         _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
@@ -603,7 +603,7 @@ def test_speaking_never_stops_a_mouth_it_did_not_start() -> None:
         environment = Environment()
 
         # Started by someone else before the ability ever runs: shared, not owned.
-        _ = await bot.started(environment, speaker, require_model(speaker.model))
+        _ = await mosfet.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
 
         await speaking_ability.stop(environment)
@@ -623,7 +623,7 @@ def test_speaking_playout_does_not_attach_optional_speaker() -> None:
         speaker = audio.Speaker()
         speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
         environment = Environment()
-        _ = await bot.started(environment, speaker, require_model(speaker.model))
+        _ = await mosfet.started(environment, speaker, require_model(speaker.model))
         await start_ability_tree(environment, speaking_ability)
 
         for _ in range(3):

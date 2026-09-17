@@ -1,14 +1,14 @@
 [project]
 name = "bot-example-listen-speak-bot"
 version = "0.1.0"
-description = "Device-free listen→speak stateforward.bot example with Mercury 2 intuition + Gemini reasoning (macOS say)."
+description = "Device-free listen→speak stateforward.mosfet example with Mercury 2 intuition + Gemini reasoning (macOS say)."
 requires-python = ">=3.13"
 dependencies = [
-  "stateforward.bot",
-  "bot-provider-gemini",
-  "bot-provider-mlx-audio",
-  "bot-provider-openai-compat",
-  "bot-provider-pyannote",
+  "stateforward.mosfet",
+  "mosfet-provider-gemini",
+  "mosfet-provider-mlx-audio",
+  "mosfet-provider-openai-compat",
+  "mosfet-provider-pyannote",
 ]
 
 [project.scripts]
@@ -16,11 +16,11 @@ listen-speak-bot = "listen_speak_bot_example:main"
 listen-speak-bot-example = "listen_speak_bot_example:main"
 
 [tool.uv.sources]
-stateforward-bot = { path = "../..", editable = true }
-bot-provider-gemini = { path = "../../src/providers/gemini", editable = true }
-bot-provider-mlx-audio = { path = "../../src/providers/mlx_audio", editable = true }
-bot-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
-bot-provider-pyannote = { path = "../../src/providers/pyannote", editable = true }
+stateforward-mosfet = { path = "../..", editable = true }
+mosfet-provider-gemini = { path = "../../src/providers/gemini", editable = true }
+mosfet-provider-mlx-audio = { path = "../../src/providers/mlx_audio", editable = true }
+mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
+mosfet-provider-pyannote = { path = "../../src/providers/pyannote", editable = true }
 
 [dependency-groups]
 dev = [

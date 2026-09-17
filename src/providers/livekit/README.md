@@ -1,4 +1,4 @@
-# bot-provider-livekit
+# mosfet-provider-livekit
 
 LiveKit real-time media provider package for `bot`. This package owns the
 LiveKit Python SDK dependency and exposes a phone-facing provider surface:
@@ -12,7 +12,7 @@ adapters stay package-private.
 Run its tests from the workspace root:
 
 ```sh
-uv run --package bot-provider-livekit --group dev python -m pytest src/providers/livekit/tests
+uv run --package mosfet-provider-livekit --group dev python -m pytest src/providers/livekit/tests
 ```
 
 ## Phone sugar

@@ -1,6 +1,6 @@
 import hsm
 
-from bot import abilities
+from mosfet import abilities
 
 
 def test_ability_defines_operation_contract() -> None:

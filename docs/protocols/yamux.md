@@ -1,7 +1,7 @@
 <!--
 SourceData: https://github.com/hashicorp/yamux/blob/90aa224fb777e4a35bfd4d316c7218e206d89008/spec.md
 License: MPL-2.0, see https://github.com/hashicorp/yamux/blob/90aa224fb777e4a35bfd4d316c7218e206d89008/LICENSE
-Vendored so stateforward.bot subagents can validate Yamux conformance against the exact upstream protocol text.
+Vendored so stateforward.mosfet subagents can validate Yamux conformance against the exact upstream protocol text.
 -->
 
 # Specification

@@ -1,4 +1,4 @@
-from bot.devices import phone
+from mosfet.devices import phone
 
 import json
 import re

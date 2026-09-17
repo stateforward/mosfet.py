@@ -1,13 +1,13 @@
-import bot
-from bot import abilities
-from bot.abilities import ability
-from bot.abilities import listening
-from bot.abilities import processing
-from bot.abilities.communication import communication, conversation
-from bot.abilities.hearing import voice
-from bot.devices import phone
-from bot.environment import SoundEvent
-from bot.protocols import attachment
+import mosfet
+from mosfet import abilities
+from mosfet.abilities import ability
+from mosfet.abilities import listening
+from mosfet.abilities import processing
+from mosfet.abilities.communication import communication, conversation
+from mosfet.abilities.hearing import voice
+from mosfet.devices import phone
+from mosfet.environment import SoundEvent
+from mosfet.protocols import attachment
 
 import asyncio
 import base64
@@ -58,7 +58,7 @@ async def start_abilities(
         ctx = shared_hsm_context()
     for machine in abilities:
         if machine.model is not None:
-            _ = await bot.started(ctx, machine, require_model(machine.model))
+            _ = await mosfet.started(ctx, machine, require_model(machine.model))
     return ctx
 
 
@@ -234,7 +234,7 @@ class ProcessingCancellationOwner(hsm.Instance):
         del ctx
         instance.terminals.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ProcessingCancellationOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -305,7 +305,7 @@ class ModeledChildProcessing(processing.Processing):
     def __init__(self) -> None:
         super().__init__(processor=_ModeledNoopProcessor())
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "ModeledChildProcessing",
         hsm.initial(hsm.target("/ModeledChildProcessing/idle")),
         hsm.state(
@@ -352,15 +352,15 @@ def test_processing_defines_base_operation_contract() -> None:
 def test_processing_operation_store_is_owner_scoped_and_retires_capabilities() -> None:
     async def run() -> None:
         ctx = shared_hsm_context()
-        owner_model = bot.define(
+        owner_model = mosfet.define(
             "OperationStoreOwner",
             hsm.initial(hsm.target("idle")),
             hsm.state("idle"),
         )
         owner = hsm.Instance()
         other_owner = hsm.Instance()
-        await bot.started(ctx, owner, owner_model)
-        await bot.started(ctx, other_owner, owner_model)
+        await mosfet.started(ctx, owner, owner_model)
+        await mosfet.started(ctx, other_owner, owner_model)
 
         first = await processing.start_operation(owner, "shared")
         other = await processing.start_operation(other_owner, "shared")
@@ -403,13 +403,13 @@ def test_processing_operation_store_is_owner_scoped_and_retires_capabilities() -
 def test_processing_operation_store_weak_value_drops_orphaned_operation() -> None:
     async def run() -> None:
         ctx = shared_hsm_context()
-        owner_model = bot.define(
+        owner_model = mosfet.define(
             "OrphanOperationStoreOwner",
             hsm.initial(hsm.target("idle")),
             hsm.state("idle"),
         )
         owner = hsm.Instance()
-        await bot.started(ctx, owner, owner_model)
+        await mosfet.started(ctx, owner, owner_model)
         orphan = await processing.start_operation(owner, "orphan")
         orphan_ref = weakref.ref(orphan)
         owner_ref = weakref.ref(owner)
@@ -428,7 +428,7 @@ def test_processing_operation_store_weak_value_drops_orphaned_operation() -> Non
 
 
 def test_processing_input_models_host_decision_input() -> None:
-    event = bot.FocusDeviceEvent
+    event = mosfet.FocusDeviceEvent
     input = processing.InputData(
         input="incoming phone speech",
         schemas=(event,),
@@ -645,7 +645,7 @@ def _accept_speak_event(
 
 
 class _ControllableDispatchActor(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "ControllableDispatchActor",
         hsm.initial(hsm.target("/ControllableDispatchActor/active")),
         hsm.state(
@@ -714,8 +714,8 @@ def test_dispatch_selected_events_serializes_same_target_and_keeps_targets_paral
         same_target = _OrderingDispatchActor(release_first=release_first)
         other_target = _OrderingDispatchActor(signal_other=release_first)
         ctx = shared_hsm_context()
-        _ = await bot.started(ctx, same_target, require_model(same_target.model), hsm.Config(id="same"))
-        _ = await bot.started(ctx, other_target, require_model(other_target.model), hsm.Config(id="other"))
+        _ = await mosfet.started(ctx, same_target, require_model(same_target.model), hsm.Config(id="same"))
+        _ = await mosfet.started(ctx, other_target, require_model(other_target.model), hsm.Config(id="other"))
 
         await asyncio.wait_for(
             processing.dispatch_selected_events(
@@ -771,7 +771,7 @@ def test_processing_reports_actor_dispatch_failure() -> None:
             )
         )
         ctx = shared_hsm_context()
-        _ = await bot.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+        _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
         actor.result.set_exception(RuntimeError("actor rejected dispatch"))
 
         with pytest.raises(RuntimeError, match="actor rejected dispatch"):
@@ -801,7 +801,7 @@ def test_processing_propagates_operation_source_and_target_to_actor_event() -> N
             )
         )
         ctx = shared_hsm_context()
-        _ = await bot.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+        _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
         actor.result.set_result(None)
 
         _ = await dispatch_ability_for_test(
@@ -834,7 +834,7 @@ def test_processing_does_not_complete_before_actor_dispatch() -> None:
         )
         processing_ability, _ = optional_recording((selection,))
         ctx = shared_hsm_context()
-        _ = await bot.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
+        _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
 
         operation = asyncio.create_task(
             dispatch_ability_for_test(
@@ -882,7 +882,7 @@ def test_patched_event_data_model_requires_patch() -> None:
 
 
 def test_model_facing_event_json_schema_includes_confidence_when_patched() -> None:
-    from bot.event import event_json_schema
+    from mosfet.event import event_json_schema
 
     pure = processing.model_facing_event_json_schema(_BEHAVIOR_OUTPUT_EVENT, patch=None)
     pure_props = pure.get("properties", {})
@@ -1061,14 +1061,14 @@ def test_collect_offered_events_filters_conflicting_schema_targets_and_rejects_m
     )
 
     class TextActor(hsm.Instance):
-        model: typing.ClassVar[hsm.Model | None] = bot.define(
+        model: typing.ClassVar[hsm.Model | None] = mosfet.define(
             "ConflictingTextActor",
             hsm.initial(hsm.target("active")),
             hsm.state("active", hsm.transition(hsm.on(text_event), hsm.effect(_accept_speak_event))),
         )
 
     class CountActor(hsm.Instance):
-        model: typing.ClassVar[hsm.Model | None] = bot.define(
+        model: typing.ClassVar[hsm.Model | None] = mosfet.define(
             "ConflictingCountActor",
             hsm.initial(hsm.target("active")),
             hsm.state("active", hsm.transition(hsm.on(count_event), hsm.effect(_accept_speak_event))),
@@ -1078,12 +1078,10 @@ def test_collect_offered_events_filters_conflicting_schema_targets_and_rejects_m
         ctx = shared_hsm_context()
         text_actor = TextActor()
         count_actor = CountActor()
-        _ = await bot.started(ctx, text_actor, require_model(text_actor.model), hsm.Config(id="text"))
-        _ = await bot.started(ctx, count_actor, require_model(count_actor.model), hsm.Config(id="count"))
+        _ = await mosfet.started(ctx, text_actor, require_model(text_actor.model), hsm.Config(id="text"))
+        _ = await mosfet.started(ctx, count_actor, require_model(count_actor.model), hsm.Config(id="count"))
 
-        offered, actor_events = processing.collect_offered_events(
-            {"text": text_actor, "count": count_actor}
-        )
+        offered, actor_events = processing.collect_offered_events({"text": text_actor, "count": count_actor})
 
         assert offered == (count_event,)
         assert actor_events == {count_event.name: ("count",)}
@@ -1151,8 +1149,8 @@ def test_events_from_dispatch_args_does_not_invent_multi_target() -> None:
 def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
     """Nested Pydantic models must not leave document-root $defs refs under anyOf branches."""
 
-    from bot.devices import phone
-    from bot.event import json_schema_is_embeddable
+    from mosfet.devices import phone
+    from mosfet.event import json_schema_is_embeddable
 
     tool = processing.dispatch_tool(
         (
@@ -1212,7 +1210,7 @@ def test_dispatch_selected_events_rejects_wrong_target_and_accepts_unique_omit()
     async def run() -> None:
         actor = _ControllableDispatchActor()
         ctx = shared_hsm_context()
-        _ = await bot.started(ctx, actor, require_model(actor.model), hsm.Config(id="behavior"))
+        _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="behavior"))
         actor.result.set_result(None)
         input = processing.InputData(
             input="speak",
@@ -1277,8 +1275,8 @@ def test_processing_cancellation_requires_owner_and_preserves_exact_token(active
         ctx = shared_hsm_context()
         owner = ProcessingCancellationOwner()
         intruder = ProcessingCancellationOwner()
-        _ = await bot.started(ctx, owner, owner.model)
-        _ = await bot.started(ctx, intruder, intruder.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, intruder, intruder.model)
         await machine.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

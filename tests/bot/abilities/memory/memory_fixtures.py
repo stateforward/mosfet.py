@@ -1,15 +1,15 @@
 """Shared fixtures for memory tests after SQL-transaction hard cut."""
 
-from bot import abilities
-from bot.abilities import memory
-from bot.protocols import attachment
+from mosfet import abilities
+from mosfet.abilities import memory
+from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
 import typing
 
 import hsm
-import bot
+import mosfet
 
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
@@ -188,7 +188,7 @@ def _record_memory_fixture_terminal_mirror_event(
 
 
 class MemoryFixtureAbilityTerminalMirror(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "MemoryFixtureAbilityTerminalMirror",
         hsm.initial(hsm.target("/MemoryFixtureAbilityTerminalMirror/recording")),
         hsm.state(
@@ -238,7 +238,7 @@ async def start_ability_tree(*abilities: abilities.Ability[typing.Any, typing.An
     for ability in abilities:
         owner = MemoryFixtureAbilityTerminalMirror(ability)
         assert owner.model is not None
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         _ = await ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

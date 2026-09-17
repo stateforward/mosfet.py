@@ -20,8 +20,8 @@ def test_provider_has_package_owned_dependencies() -> None:
     optional_dependencies = typing.cast("dict[str, object]", root_project.get("optional-dependencies", {}))
     dependencies = typing.cast("list[str]", provider_metadata["project"]["dependencies"])
 
-    assert provider_metadata["project"]["name"] == "bot-provider-postgres-memory"
-    assert "stateforward.bot" in dependencies
+    assert provider_metadata["project"]["name"] == "mosfet-provider-postgres-memory"
+    assert "stateforward.mosfet" in dependencies
     assert "psycopg" not in optional_dependencies
     assert "boto3" not in optional_dependencies
     assert "pglite" not in optional_dependencies
@@ -35,12 +35,12 @@ def test_provider_version_is_dynamic() -> None:
     assert provider_project_metadata["readme"] == "README.md"
     assert "version" not in provider_project_metadata
     assert provider_project_metadata["dynamic"] == ["version"]
-    assert provider_metadata["tool"]["hatch"]["version"]["path"] == "src/bot/providers/postgres_memory/__init__.py"
+    assert provider_metadata["tool"]["hatch"]["version"]["path"] == "src/mosfet/providers/postgres_memory/__init__.py"
 
 
 def test_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.postgres_memory")
+    provider_module = importlib.import_module("mosfet.providers.postgres_memory")
     provider_version = typing.cast("object", getattr(provider_module, "__version__", None))
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-postgres-memory")
+    assert provider_version == importlib.metadata.version("mosfet-provider-postgres-memory")

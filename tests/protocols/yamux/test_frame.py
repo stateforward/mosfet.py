@@ -1,6 +1,6 @@
 import struct
 
-from bot.protocols.yamux.frame import (
+from mosfet.protocols.yamux.frame import (
     HEADER_LENGTH,
     VERSION,
     Flag,

@@ -40,9 +40,9 @@ def test_livekit_provider_has_package_owned_dependencies() -> None:
     provider_project_metadata = object_dict(provider_metadata["project"])
     provider_dependencies = string_list(provider_project_metadata["dependencies"])
 
-    assert provider_project_metadata["name"] == "bot-provider-livekit"
+    assert provider_project_metadata["name"] == "mosfet-provider-livekit"
     assert "livekit>=1.1.10,<2.0.0" in provider_dependencies
-    assert "stateforward.bot" in provider_dependencies
+    assert "stateforward.mosfet" in provider_dependencies
     assert "livekit" not in optional_dependencies
 
 
@@ -57,12 +57,12 @@ def test_livekit_provider_version_is_dynamic() -> None:
     assert provider_project_metadata["readme"] == "README.md"
     assert "version" not in provider_project_metadata
     assert provider_project_metadata["dynamic"] == ["version"]
-    assert version_metadata["path"] == "src/bot/providers/livekit/__init__.py"
+    assert version_metadata["path"] == "src/mosfet/providers/livekit/__init__.py"
 
 
 def test_livekit_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.livekit")
+    provider_module = importlib.import_module("mosfet.providers.livekit")
     provider_version = getattr(provider_module, "__version__", None)
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-livekit")
+    assert provider_version == importlib.metadata.version("mosfet-provider-livekit")

@@ -47,20 +47,20 @@ def _export_telemetry_on_exit() -> None:
     over and there is something to explain.
 
     This belongs to the application boundary that called `configure()`. A library must never
-    install a signal handler on whatever embeds it, so `bot.telemetry` cannot do this itself.
+    install a signal handler on whatever embeds it, so `mosfet.telemetry` cannot do this itself.
 
     Shutting a provider down flushes its batch processor, which is what `reset()` does for both.
     The signal handler then re-raises the signal against the default disposition, so the process
     still dies *of SIGTERM* and a parent waiting on it sees exactly the exit it saw before.
     """
 
-    import bot.telemetry
+    import mosfet.telemetry
 
-    atexit.register(bot.telemetry.reset)
+    atexit.register(mosfet.telemetry.reset)
 
     def on_terminate(signum: int, frame: types.FrameType | None) -> None:
         del frame
-        bot.telemetry.reset()
+        mosfet.telemetry.reset()
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -97,7 +97,7 @@ def _human_join_instructions(*, url: str, room: str, api_key: str, api_secret: s
 def _render_summary(summary: dict[str, object]) -> str:
     warnings = "\n".join(f"- {item}" for item in typing.cast(list[str], summary["warnings"]))
     return (
-        "stateforward.bot phone bot\n"
+        "stateforward.mosfet phone bot\n"
         f"Status: {summary['status']}\n"
         f"Bot state: {summary['bot_state']}\n"
         f"Cognition: {summary['cognition_client']}\n"
@@ -234,7 +234,7 @@ def _merge_env_file(base: pathlib.Path, overrides: collections.abc.Mapping[str, 
 
 
 def main(argv: list[str] | None = None) -> None:
-    import bot.telemetry
+    import mosfet.telemetry
 
     parser = argparse.ArgumentParser(
         description="Turnkey phone bot: start local LiveKit if needed, mint token, join the room.",
@@ -281,7 +281,7 @@ def main(argv: list[str] | None = None) -> None:
             os.environ[key] = value
     # Opt-out local OTEL JSONL export for generator request bodies and spans
     # (BOT_OTEL_DISABLED / BOT_OTEL_LOG_FILE / BOT_OTEL_SPAN_FILE).
-    _ = bot.telemetry.configure()
+    _ = mosfet.telemetry.configure()
     _export_telemetry_on_exit()
     if not bool(args.skip_livekit_start):
         _ensure_livekit()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bot.abilities.hearing import speech
-from bot.abilities.communication.conversation import turn_detector
+from mosfet.abilities.hearing import speech
+from mosfet.abilities.communication.conversation import turn_detector
 
 import asyncio
 import collections.abc
@@ -16,8 +16,8 @@ import wave
 import hsm
 import pytest
 
-from bot.providers.mlx_audio import SpeechDecoder, SpeechDecodingError, VoiceDecoder
-from bot.providers.mlx_audio._mlx import SpeechDecodingModel, load_speech_decoding_model
+from mosfet.providers.mlx_audio import SpeechDecoder, SpeechDecodingError, VoiceDecoder
+from mosfet.providers.mlx_audio._mlx import SpeechDecodingModel, load_speech_decoding_model
 from tests.hsm_instance_state import start_ability_tree
 
 

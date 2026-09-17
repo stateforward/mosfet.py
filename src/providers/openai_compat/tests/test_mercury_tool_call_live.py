@@ -14,7 +14,7 @@ Optional::
 
 Run from repo root::
 
-    uv run --package bot-provider-openai-compat --group dev \\
+    uv run --package mosfet-provider-openai-compat --group dev \\
       python -m pytest src/providers/openai_compat/tests/test_mercury_tool_call_live.py -m live -v -s
 """
 
@@ -28,14 +28,14 @@ import typing
 import hsm
 import pytest
 
-from bot.abilities import processing
-from bot.abilities.cognition import intuition
-from bot.abilities.cognition import types as cognition_types
-from bot.devices.phone import events as phone_events
-from bot.devices.phone.phone import RING_SOUND_WAV
-import bot
-from bot.environment import SoundData, SoundEvent
-from bot.providers.openai_compat import ChatClient, Processor
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import types as cognition_types
+from mosfet.devices.phone import events as phone_events
+from mosfet.devices.phone.phone import RING_SOUND_WAV
+import mosfet
+from mosfet.environment import SoundData, SoundEvent
+from mosfet.providers.openai_compat import ChatClient, Processor
 
 pytestmark = pytest.mark.live
 
@@ -83,8 +83,8 @@ def _phone_bot_intuition_schemas() -> tuple[hsm.Event[typing.Any], ...]:
     """Event surface offered to phone_bot intuition (focus + call control + cognition ignore)."""
 
     return (
-        bot.FocusDeviceEvent,
-        bot.ClearFocusEvent,
+        mosfet.FocusDeviceEvent,
+        mosfet.ClearFocusEvent,
         phone_events.AnswerCallEvent,
         phone_events.DeclineCallEvent,
         cognition_types.IgnoreEvent,

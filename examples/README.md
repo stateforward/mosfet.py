@@ -1,6 +1,6 @@
-# stateforward.bot Examples
+# stateforward.mosfet Examples
 
-Examples live outside `src` so they stay out of the distributable stateforward.bot package.
+Examples live outside `src` so they stay out of the distributable stateforward.mosfet package.
 Each single-file example is a `uv` script with its own inline metadata, which keeps
 example-only dependencies out of the root project and provider packages.
 
@@ -38,8 +38,8 @@ offers the semantic `communication.respond` action and owns the temporary route 
 `phone_bot` is its own example package because it depends on real provider
 packages: LiveKit for the phone device and room audio, OpenAI-compatible
 cognition, Gemini STT/TTS, and SQLite memory codecs. Its package metadata
-declares `bot-provider-livekit`, `bot-provider-openai-compat`,
-`bot-provider-gemini`, and `bot-provider-sqlite-memory`. It can read a
+declares `mosfet-provider-livekit`, `mosfet-provider-openai-compat`,
+`mosfet-provider-gemini`, and `mosfet-provider-sqlite-memory`. It can read a
 local provider env file passed with `--env`, constructs one phone-capable agent,
 and reports which provider credentials were loaded without printing secret
 values. The JSON summary separates constructed provider components from
@@ -86,32 +86,32 @@ Executable examples use this shebang:
 #!/usr/bin/env -S uv run --script
 ```
 
-Each example should declare stateforward.bot as a local editable dependency:
+Each example should declare stateforward.mosfet as a local editable dependency:
 
 ```python
 # /// script
 # requires-python = ">=3.13"
 # dependencies = [
-#   "stateforward.bot",
+#   "stateforward.mosfet",
 # ]
 # [tool.uv.sources]
-# stateforward-bot = { path = "..", editable = true }
+# stateforward-mosfet = { path = "..", editable = true }
 # ///
 ```
 
 Add example-specific dependencies in that same block. For provider examples, depend
-on the provider package explicitly instead of pulling provider SDKs into core stateforward.bot:
+on the provider package explicitly instead of pulling provider SDKs into core stateforward.mosfet:
 
 ```python
 # dependencies = [
-#   "stateforward.bot",
-#   "bot-provider-livekit",
-#   "bot-provider-elevenlabs",
+#   "stateforward.mosfet",
+#   "mosfet-provider-livekit",
+#   "mosfet-provider-elevenlabs",
 # ]
 # [tool.uv.sources]
-# stateforward-bot = { path = "..", editable = true }
-# bot-provider-livekit = { path = "../src/providers/livekit", editable = true }
-# bot-provider-elevenlabs = { path = "../src/providers/elevenlabs", editable = true }
+# stateforward-mosfet = { path = "..", editable = true }
+# mosfet-provider-livekit = { path = "../src/providers/livekit", editable = true }
+# mosfet-provider-elevenlabs = { path = "../src/providers/elevenlabs", editable = true }
 ```
 
 For larger examples, create a directory under `examples/` with its own

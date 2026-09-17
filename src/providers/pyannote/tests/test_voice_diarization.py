@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from bot.abilities.hearing import voice
-from bot.abilities.hearing.voice import diarization
-from bot.providers.pyannote import VoiceDiarizationError, VoiceDiarizer
+from mosfet.abilities.hearing import voice
+from mosfet.abilities.hearing.voice import diarization
+from mosfet.providers.pyannote import VoiceDiarizationError, VoiceDiarizer
 
 import asyncio
 import collections.abc

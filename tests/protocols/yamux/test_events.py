@@ -1,6 +1,6 @@
 import hsm
 
-from bot.protocols.yamux.events import (
+from mosfet.protocols.yamux.events import (
     OpenStreamEvent,
     ReceiveDataFrameEvent,
     SendDataEvent,

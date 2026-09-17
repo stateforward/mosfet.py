@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from bot.environment import space
+from mosfet.environment import space
 
 
 def test_position_distance_is_euclidean() -> None:

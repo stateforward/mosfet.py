@@ -8,16 +8,16 @@ import logging
 import typing
 
 import hsm
-import bot
+import mosfet
 import pytest
 from livekit import rtc
 
-import bot.providers.livekit.phone as phone_module
-from bot.devices import audio as audio_device
-from bot.devices import phone as phone_device
-from bot.providers.livekit import signaling
+import mosfet.providers.livekit.phone as phone_module
+from mosfet.devices import audio as audio_device
+from mosfet.devices import phone as phone_device
+from mosfet.providers.livekit import signaling
 
-from bot.providers.livekit import (
+from mosfet.providers.livekit import (
     MediaSnapshot,
     ServiceCallFailedEvent,
     ServiceIncomingCallEvent,
@@ -29,12 +29,12 @@ from bot.providers.livekit import (
     PhoneService,
     PhoneServiceError,
 )
-from bot.providers.livekit.room_audio import (
+from mosfet.providers.livekit.room_audio import (
     AudioStreamFactory,
     LocalAudioTrackFactory,
     RoomHandle,
 )
-from bot.environment import Environment
+from mosfet.environment import Environment
 from tests.hsm_instance_state import device_firmware, phone_display
 from tests.livekit_room_fakes import (
     FakeLocalParticipant,
@@ -187,7 +187,7 @@ class RecordingPhoneEventTarget(hsm.Instance):
             self.events.append(event)
         return self.target.dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "RecordingPhoneEventTarget",
         hsm.initial(hsm.target("active")),
         hsm.state("active"),
@@ -206,7 +206,7 @@ class RecordingPhoneService:
             await self.service.attach(environment, target)
             return
         forwarding_target = RecordingPhoneEventTarget(target=target, events=self.forwarded_events)
-        _ = await bot.started(environment, forwarding_target, forwarding_target.model)
+        _ = await mosfet.started(environment, forwarding_target, forwarding_target.model)
         self.forwarding_target = forwarding_target
         await self.service.attach(environment, forwarding_target)
 
@@ -243,7 +243,7 @@ async def _start_livekit_phone_service(
         resolved._setup_timeout = operation_timeout
     recording_service = RecordingPhoneService(resolved, forwarded_events=forwarded_events)
     phone = phone_device.Phone(service=recording_service)
-    _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+    _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
     await _wait_until(lambda: resolved.state() == "/PhoneService/ready")
     return phone, resolved, recording_service
 
@@ -290,7 +290,7 @@ async def _start_phone_on_room(
     )
     recording_service = RecordingPhoneService(service, forwarded_events=forwarded_events)
     phone = phone_device.Phone(service=recording_service)
-    _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+    _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
     await _wait_until(lambda: service.state() == "/PhoneService/ready")
     if connect_room:
         await service.connect_room(url="wss://livekit.example.com", token="token")
@@ -857,7 +857,7 @@ def test_livekit_phone_service_default_gateway_emits_provider_unavailable_failur
         service = PhoneService(operation_timeout=datetime.timedelta(seconds=1))
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
 
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
@@ -887,7 +887,7 @@ def test_livekit_phone_service_default_gateway_fails_outbound_dial() -> None:
         service = PhoneService(operation_timeout=datetime.timedelta(seconds=1))
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
 
         await phone.dispatch(
@@ -916,7 +916,7 @@ def test_livekit_phone_service_default_gateway_fails_outbound_dial() -> None:
 
 
 def test_livekit_phone_service_public_exports_include_phone_surface() -> None:
-    import bot.providers.livekit as livekit
+    import mosfet.providers.livekit as livekit
 
     assert livekit.PhoneService is PhoneService
     assert livekit.PhoneServiceError is PhoneServiceError
@@ -938,7 +938,7 @@ def test_livekit_phone_service_public_exports_include_phone_surface() -> None:
 def test_livekit_phone_service_stays_unconnected_without_attachment() -> None:
     async def run() -> None:
         service = FakePhoneService()
-        _ = await bot.started(None, service, service.model)
+        _ = await mosfet.started(None, service, service.model)
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await asyncio.sleep(0)
 
@@ -952,13 +952,13 @@ def test_livekit_phone_service_attach_starts_fresh_service() -> None:
         environment = Environment()
         service = FakePhoneService()
         target = hsm.Instance()
-        target_model = bot.define(
+        target_model = mosfet.define(
             "PhoneServiceTarget",
             hsm.initial(hsm.target("active")),
             hsm.state("active"),
         )
 
-        _ = await bot.started(environment, target, target_model, hsm.Config(id="phone-service-target"))
+        _ = await mosfet.started(environment, target, target_model, hsm.Config(id="phone-service-target"))
         await service.attach(environment, target)
 
         assert service.state() == "/PhoneService/ready"
@@ -972,7 +972,7 @@ def test_livekit_phone_service_is_connected_by_phone_service_di() -> None:
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
         await service.incoming_call(
             service.context(),
@@ -990,7 +990,7 @@ def test_livekit_phone_rejects_forged_service_originating_phone_event() -> None:
         service = FakePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
         assert _require_firmware(phone).state() == "/Phone/hung_up"
         forged = dataclasses.replace(
@@ -1084,7 +1084,7 @@ def test_livekit_phone_service_detaches_from_phone_service_target() -> None:
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
         assert device_firmware(phone) is not None
 
@@ -1104,19 +1104,19 @@ def test_livekit_phone_service_keeps_first_phone_attachment_when_second_phone_at
         first = phone_device.Phone(service=service)
         second = phone_device.Phone(service=service)
 
-        _ = await bot.started(None, first, typing.cast(hsm.Model, first.model), hsm.Config(id="first-phone"))
+        _ = await mosfet.started(None, first, typing.cast(hsm.Model, first.model), hsm.Config(id="first-phone"))
         await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
         assert device_firmware(first) is not None
 
         other_target = RecordingPhoneEventTarget(target=_require_firmware(first), events=[])
-        _ = await bot.started(first.context(), other_target, other_target.model, hsm.Config(id="other-target"))
+        _ = await mosfet.started(first.context(), other_target, other_target.model, hsm.Config(id="other-target"))
         with pytest.raises(PhoneServiceError, match="already attached"):
             await service.attach(Environment.from_context(first.context()), other_target)
         await asyncio.sleep(0)
 
         assert service.state() == "/PhoneService/ready"
 
-        _ = await bot.started(
+        _ = await mosfet.started(
             first.context(), second, typing.cast(hsm.Model, second.model), hsm.Config(id="second-phone")
         )
         await _wait_until(lambda: second.state() == "/Device/failed")
@@ -1150,7 +1150,7 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
 
         service = RecordingPhoneServiceInstance()
         environment = Environment()
-        terminal_model = bot.define(
+        terminal_model = mosfet.define(
             "PhoneServiceTerminal",
             hsm.initial(hsm.target("active")),
             hsm.state("active"),
@@ -1167,10 +1167,10 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
         attached_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachedEvent"))
         rejected_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachmentRejectedEvent"))
 
-        _ = await bot.started(environment, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
-        _ = await bot.started(environment, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
-        _ = await bot.started(environment, first_target, first_target.model, hsm.Config(id="first-target"))
-        _ = await bot.started(environment, second_target, second_target.model, hsm.Config(id="second-target"))
+        _ = await mosfet.started(environment, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
+        _ = await mosfet.started(environment, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
+        _ = await mosfet.started(environment, first_target, first_target.model, hsm.Config(id="first-target"))
+        _ = await mosfet.started(environment, second_target, second_target.model, hsm.Config(id="second-target"))
         await service.attach(environment, first_target)
 
         recorded_events.clear()
@@ -2647,7 +2647,7 @@ def test_livekit_phone_service_room_media_answer_is_local_and_reaches_media_read
         )
         recording_service = RecordingPhoneService(service)
         phone = phone_device.Phone(service=recording_service)
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
         await service.connect_room(url="wss://livekit.example.com", token="token")
         await _wait_until(lambda: service.media_snapshot().local_track_sid == "TR_local")
@@ -2809,12 +2809,12 @@ def test_a_replacement_phone_can_attach_to_the_same_service() -> None:
         service = PhoneService()
 
         first = phone_device.Phone(service=service)
-        _ = await bot.started(environment, first, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await mosfet.started(environment, first, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: first.state() == "/Device/detached")
         await first.stop(environment)
 
         second = phone_device.Phone(service=service)
-        _ = await bot.started(environment, second, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await mosfet.started(environment, second, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: second.state() == "/Device/detached", timeout=2.0)
 
         return first.state(), second.state()

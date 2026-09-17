@@ -4,12 +4,12 @@ import typing
 import xml.etree.ElementTree
 
 import hsm
-import bot
+import mosfet
 import pydantic
 import pytest
 
-from bot.device import Device
-from bot.environment import SoundData, SoundEvent, Environment, space
+from mosfet.device import Device
+from mosfet.environment import SoundData, SoundEvent, Environment, space
 
 
 OBSERVED_EVENT = hsm.Event[str](
@@ -40,7 +40,7 @@ class BroadcastRecorder(hsm.Instance):
             self.seen.append((typing.cast(str, event.data), event.target))
         return super().dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "BroadcastRecorder",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(OBSERVED_EVENT), hsm.effect(_consume_observed_event))),
@@ -53,7 +53,7 @@ def test_environment_is_hsm_context() -> None:
         inside = BroadcastRecorder()
         assert isinstance(environment, hsm.Context)
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         await hsm.dispatch_all(environment, OBSERVED_EVENT.with_data("hello"))
 
         return inside.seen
@@ -68,9 +68,9 @@ def test_environment_broadcast_dispatches_to_started_instances_in_scope() -> Non
         inside = BroadcastRecorder()
         outside = BroadcastRecorder()
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
-        _ = await bot.started(None, outside, outside.model, hsm.Config(id="outside"))
+        _ = await mosfet.started(None, outside, outside.model, hsm.Config(id="outside"))
 
         await environment.broadcast(OBSERVED_EVENT.with_data("hello"))
 
@@ -88,7 +88,7 @@ def test_environment_from_done_context_preserves_broadcast_scope() -> None:
         inside = BroadcastRecorder()
         done_context = environment.with_value("probe", "done")
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
         done_context.cancel()
 
@@ -113,7 +113,7 @@ def test_environment_from_canceled_environment_preserves_broadcast_scope() -> No
         environment = Environment()
         inside = BroadcastRecorder()
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
         environment.cancel()
 
@@ -134,7 +134,7 @@ def test_environment_broadcast_without_participants_reaches_nobody() -> None:
         environment = Environment()
         inside = BroadcastRecorder()
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
 
         await environment.broadcast(OBSERVED_EVENT.with_data("hello"))
 
@@ -149,9 +149,9 @@ def test_environment_broadcast_skips_stopped_participant() -> None:
         stopped = BroadcastRecorder()
         listening = BroadcastRecorder()
 
-        _ = await bot.started(environment, stopped, stopped.model, hsm.Config(id="stopped"))
+        _ = await mosfet.started(environment, stopped, stopped.model, hsm.Config(id="stopped"))
         environment.join(stopped)
-        _ = await bot.started(environment, listening, listening.model, hsm.Config(id="listening"))
+        _ = await mosfet.started(environment, listening, listening.model, hsm.Config(id="listening"))
         environment.join(listening)
         await hsm.stop(stopped)
 
@@ -168,7 +168,7 @@ def test_environment_leave_removes_a_citizen() -> None:
         environment = Environment()
         inside = BroadcastRecorder()
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
         environment.leave(inside)
         environment.leave(inside)
@@ -193,7 +193,7 @@ def test_environment_join_rejects_an_instance_from_another_environment() -> None
         other = Environment()
         outsider = BroadcastRecorder()
 
-        _ = await bot.started(other, outsider, outsider.model, hsm.Config(id="outsider"))
+        _ = await mosfet.started(other, outsider, outsider.model, hsm.Config(id="outsider"))
 
         with pytest.raises(RuntimeError, match="already started in another environment"):
             environment.join(outsider)
@@ -208,7 +208,7 @@ def test_environment_from_context_reuses_the_environment_of_a_descendant_context
         environment = Environment()
         inside = BroadcastRecorder()
 
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
 
         assert Environment.from_context(inside.context()) is environment
@@ -266,7 +266,7 @@ class SoundRecorder(hsm.Instance):
             instance.levels.append(data.received_level_db)
             instance.received.append(data)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "SoundRecorder",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -292,7 +292,7 @@ def test_environment_broadcast_reaches_a_participant_above_its_threshold() -> No
         environment = Environment()
         near = SoundRecorder()
 
-        _ = await bot.started(environment, near, near.model, hsm.Config(id="near"))
+        _ = await mosfet.started(environment, near, near.model, hsm.Config(id="near"))
         environment.join(near, placement=space.Placement(position=space.Position(x=1.0, y=0.0), threshold_db=20.0))
 
         await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
@@ -310,7 +310,7 @@ def test_environment_broadcast_skips_a_participant_below_its_threshold() -> None
         far = SoundRecorder()
         position = space.Position(x=500.0, y=0.0)
 
-        _ = await bot.started(environment, far, far.model, hsm.Config(id="far"))
+        _ = await mosfet.started(environment, far, far.model, hsm.Config(id="far"))
         environment.join(far, placement=space.Placement(position=position, threshold_db=20.0))
 
         await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
@@ -332,9 +332,9 @@ def test_environment_broadcast_without_geometry_reaches_everyone() -> None:
         no_threshold = SoundRecorder()
         placed = SoundRecorder()
 
-        _ = await bot.started(environment, unplaced, unplaced.model, hsm.Config(id="unplaced"))
-        _ = await bot.started(environment, no_threshold, no_threshold.model, hsm.Config(id="no-threshold"))
-        _ = await bot.started(environment, placed, placed.model, hsm.Config(id="placed"))
+        _ = await mosfet.started(environment, unplaced, unplaced.model, hsm.Config(id="unplaced"))
+        _ = await mosfet.started(environment, no_threshold, no_threshold.model, hsm.Config(id="no-threshold"))
+        _ = await mosfet.started(environment, placed, placed.model, hsm.Config(id="placed"))
         far = space.Position(x=500.0, y=0.0)
         environment.join(unplaced)
         environment.join(no_threshold, placement=space.Placement(position=far))
@@ -368,8 +368,8 @@ def test_environment_broadcast_short_circuits_when_attenuation_silences_everyone
         far = SoundRecorder()
         bystander = SoundRecorder()
 
-        _ = await bot.started(environment, far, far.model, hsm.Config(id="far"))
-        _ = await bot.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
+        _ = await mosfet.started(environment, far, far.model, hsm.Config(id="far"))
+        _ = await mosfet.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
         environment.join(far, placement=space.Placement(position=space.Position(x=500.0, y=0.0), threshold_db=20.0))
 
         await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
@@ -395,8 +395,8 @@ def test_environment_broadcast_stamps_the_level_each_participant_receives() -> N
         near = SoundRecorder()
         far = SoundRecorder()
 
-        _ = await bot.started(environment, near, near.model, hsm.Config(id="near"))
-        _ = await bot.started(environment, far, far.model, hsm.Config(id="far"))
+        _ = await mosfet.started(environment, near, near.model, hsm.Config(id="near"))
+        _ = await mosfet.started(environment, far, far.model, hsm.Config(id="far"))
         environment.join(near, placement=space.Placement(position=space.Position(x=1.0, y=0.0), threshold_db=0.0))
         environment.join(far, placement=space.Placement(position=space.Position(x=10.0, y=0.0), threshold_db=0.0))
 
@@ -419,7 +419,7 @@ def test_environment_broadcast_leaves_the_source_amplitude_alone() -> None:
         listener = SoundRecorder()
         amplitudes: list[float | None] = []
 
-        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="listener"))
         environment.join(listener, placement=space.Placement(position=space.Position(x=10.0, y=0.0), threshold_db=0.0))
 
         original = _sound(60.0)
@@ -441,8 +441,8 @@ def test_environment_broadcast_leaves_the_level_unstamped_without_geometry() -> 
         unplaced = SoundRecorder()
         placed = SoundRecorder()
 
-        _ = await bot.started(environment, unplaced, unplaced.model, hsm.Config(id="unplaced"))
-        _ = await bot.started(environment, placed, placed.model, hsm.Config(id="placed"))
+        _ = await mosfet.started(environment, unplaced, unplaced.model, hsm.Config(id="unplaced"))
+        _ = await mosfet.started(environment, placed, placed.model, hsm.Config(id="placed"))
         environment.join(unplaced)
         environment.join(placed, placement=space.Placement(position=space.Position(x=1.0, y=0.0)))
 
@@ -466,7 +466,7 @@ def test_environment_broadcast_stamps_a_participant_without_a_threshold() -> Non
         environment = Environment()
         listener = SoundRecorder()
 
-        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="listener"))
         environment.join(listener, placement=space.Placement(position=space.Position(x=10.0, y=0.0)))
 
         await environment.broadcast(_sound(60.0), origin=space.Position(x=0.0, y=0.0))
@@ -490,7 +490,7 @@ def test_environment_broadcast_stamps_a_domain_elevation_without_flattening_it()
         listener = SoundRecorder()
         callers: list[str] = []
 
-        _ = await bot.started(environment, listener, listener.model, hsm.Config(id="listener"))
+        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="listener"))
         environment.join(listener, placement=space.Placement(position=space.Position(x=2.0, y=0.0)))
 
         elevated = SoundEvent.with_data(
@@ -520,7 +520,7 @@ def test_environment_join_rejects_a_conflicting_placement() -> None:
         environment = Environment()
         speaker = SoundRecorder()
 
-        _ = await bot.started(environment, speaker, speaker.model, hsm.Config(id="speaker"))
+        _ = await mosfet.started(environment, speaker, speaker.model, hsm.Config(id="speaker"))
         ear = space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0)
         mouth = space.Placement(position=space.Position(x=0.15, y=0.0), threshold_db=20.0)
         environment.join(speaker, placement=ear)
@@ -547,7 +547,7 @@ class _OwnerActor(hsm.Instance):
         del ctx, event
         _ = instance.set("owned_devices", dict(instance._owned))
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "OwnerActor",
         hsm.attribute("owned_devices"),
         hsm.initial(hsm.target("/OwnerActor/active")),
@@ -569,7 +569,7 @@ def test_model_snapshot_composes_an_environment_root_around_the_perspective() ->
     async def run() -> str | None:
         environment = Environment()
         owner = _OwnerActor()
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         return environment.model_snapshot(owner)
 
     instructions = asyncio.run(run())
@@ -591,8 +591,8 @@ def test_model_snapshot_reports_the_same_environment_identity_across_perspective
         environment = Environment()
         first = _OwnerActor()
         second = _OwnerActor()
-        _ = await bot.started(environment, first, typing.cast(hsm.Model, first.model))
-        _ = await bot.started(environment, second, typing.cast(hsm.Model, second.model))
+        _ = await mosfet.started(environment, first, typing.cast(hsm.Model, first.model))
+        _ = await mosfet.started(environment, second, typing.cast(hsm.Model, second.model))
         return environment.model_snapshot(first), environment.model_snapshot(second)
 
     first_block, second_block = asyncio.run(run())
@@ -611,9 +611,9 @@ def test_model_snapshot_resolves_owned_devices_from_the_environments_own_scope()
     async def run() -> tuple[str | None, str]:
         environment = Environment()
         device = Device()
-        _ = await bot.started(environment, device, typing.cast(hsm.Model, device.model))
+        _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
         owner = _OwnerActor({"phone": hsm.id(device)})
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         return environment.model_snapshot(owner), hsm.id(device)
 
     instructions, device_id = asyncio.run(run())
@@ -631,7 +631,7 @@ def test_model_snapshot_drops_an_owned_reference_the_environment_cannot_resolve(
     async def run() -> str | None:
         environment = Environment()
         owner = _OwnerActor({"phone": "not-a-live-runtime-id"})
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         return environment.model_snapshot(owner)
 
     instructions = asyncio.run(run())
@@ -651,7 +651,7 @@ def test_model_snapshot_returns_none_for_a_perspective_started_in_another_enviro
         environment = Environment()
         other = Environment()
         foreign = _OwnerActor()
-        _ = await bot.started(other, foreign, typing.cast(hsm.Model, foreign.model))
+        _ = await mosfet.started(other, foreign, typing.cast(hsm.Model, foreign.model))
         return environment.model_snapshot(foreign)
 
     assert asyncio.run(run()) is None
@@ -665,9 +665,9 @@ def test_model_snapshot_omits_an_owned_device_that_has_since_stopped() -> None:
     async def run() -> str | None:
         environment = Environment()
         device = Device()
-        _ = await bot.started(environment, device, typing.cast(hsm.Model, device.model))
+        _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
         owner = _OwnerActor({"phone": hsm.id(device)})
-        _ = await bot.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         await hsm.stop(device)
         return environment.model_snapshot(owner)
 

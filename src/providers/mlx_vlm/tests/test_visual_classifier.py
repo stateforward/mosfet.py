@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from bot.abilities import vision
+from mosfet.abilities import vision
 
 import asyncio
 import collections.abc
 
-from bot.providers.mlx_vlm import VisualClassifier
+from mosfet.providers.mlx_vlm import VisualClassifier
 
 
 async def await_visual_classification(

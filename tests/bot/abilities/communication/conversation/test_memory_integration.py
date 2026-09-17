@@ -6,15 +6,15 @@ import sqlite3
 import typing
 
 import hsm
-import bot
+import mosfet
 import pytest
 
-from bot.abilities import ability
-from bot.abilities.communication import conversation
-from bot.abilities import memory as memory_ability
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities.communication.conversation import memory as conversation_memory
-from bot.abilities.communication.conversation import conversation as conversation_module
+from mosfet.abilities import ability
+from mosfet.abilities.communication import conversation
+from mosfet.abilities import memory as memory_ability
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities.communication.conversation import memory as conversation_memory
+from mosfet.abilities.communication.conversation import conversation as conversation_module
 from tests.hsm_instance_state import start_ability_tree
 
 
@@ -47,7 +47,7 @@ class _MisroutingMemory(ability.Ability[memory_ability.InputData, memory_ability
             event.source,
         )
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "MisroutingMemory",
         hsm.initial(hsm.target("idle")),
         hsm.state(
@@ -73,7 +73,7 @@ class _SilentMemory(ability.Ability[memory_ability.InputData, memory_ability.Out
     ) -> None:
         del ctx, instance, event
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "SilentMemory",
         hsm.initial(hsm.target("idle")),
         hsm.state(

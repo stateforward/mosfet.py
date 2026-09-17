@@ -1,5 +1,5 @@
-from bot import behavior
-from bot.behavior import runtime
+from mosfet import behavior
+from mosfet.behavior import runtime
 
 import ast
 import asyncio
@@ -14,7 +14,7 @@ import typing
 import weakref
 
 import hsm
-import bot
+import mosfet
 import pytest
 
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context
@@ -59,7 +59,7 @@ def _reply_to_behavior_source(
 
 
 class _PeerMachine(hsm.Instance):
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "PeerMachine",
         hsm.initial(hsm.target("/PeerMachine/idle")),
         hsm.state(
@@ -751,7 +751,7 @@ def test_cancelled_apply_does_not_cancel_effects_after_dispatch_commit(
 
 
 def test_behavior_apply_uses_typed_operation_topology_not_ability_waiter_registries() -> None:
-    behavior_module = __import__("bot.behavior.behavior", fromlist=["Behavior"])
+    behavior_module = __import__("mosfet.behavior.behavior", fromlist=["Behavior"])
     apply_source = inspect.getsource(vars(behavior_module)["Behavior"].apply)
 
     assert "terminal_waiter" not in apply_source
@@ -987,7 +987,7 @@ def test_slow_starlark_effect_keeps_event_loop_heartbeat_live(monkeypatch: pytes
 
 
 def test_guard_operational_events_publish_complete_pydantic_contracts() -> None:
-    behavior_module = __import__("bot.behavior.behavior", fromlist=["_GuardEvaluationRequestedData"])
+    behavior_module = __import__("mosfet.behavior.behavior", fromlist=["_GuardEvaluationRequestedData"])
     request_schema = vars(behavior_module)["_GuardEvaluationRequestedData"].model_json_schema()
     result_schema = vars(behavior_module)["_GuardEvaluationResultData"].model_json_schema()
 
@@ -996,7 +996,7 @@ def test_guard_operational_events_publish_complete_pydantic_contracts() -> None:
 
 
 def test_guard_operational_result_rejects_malformed_payload() -> None:
-    behavior_module = __import__("bot.behavior.behavior", fromlist=["_GuardEvaluationResultData"])
+    behavior_module = __import__("mosfet.behavior.behavior", fromlist=["_GuardEvaluationResultData"])
     result_data = vars(behavior_module)["_GuardEvaluationResultData"]
 
     with pytest.raises(ValueError):
@@ -1004,7 +1004,7 @@ def test_guard_operational_result_rejects_malformed_payload() -> None:
 
 
 def test_guard_lowering_uses_explicit_candidate_states_without_token_guards() -> None:
-    behavior_module = __import__("bot.behavior.behavior", fromlist=["Behavior"])
+    behavior_module = __import__("mosfet.behavior.behavior", fromlist=["Behavior"])
     compiled = behavior.build(greeting_behavior_source())
     model = typing.cast(hsm.Model, compiled.submodel)
 
@@ -1142,7 +1142,7 @@ behavior = hsm.define(
     async def run() -> tuple[dict[str, object], str, str, str]:
         ctx = shared_hsm_context()
         peer = _PeerMachine()
-        _ = await bot.started(ctx, peer, typing.cast(hsm.Model, peer.model))
+        _ = await mosfet.started(ctx, peer, typing.cast(hsm.Model, peer.model))
         peer_id = hsm.id(peer)
 
         compiled = behavior.build(behavior_source)

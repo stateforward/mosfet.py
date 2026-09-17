@@ -1,4 +1,4 @@
-# bot-provider-mlx-audio
+# mosfet-provider-mlx-audio
 
 MLX Audio voice provider package for `bot`. This package owns the `mlx-audio`
 dependency for local Apple Silicon text-to-speech, speech-to-text, voice
@@ -7,7 +7,7 @@ activity detection, and speaker diarization.
 Run its tests from the workspace root:
 
 ```sh
-uv run --package bot-provider-mlx-audio --group dev python -m pytest src/providers/mlx_audio/tests
+uv run --package mosfet-provider-mlx-audio --group dev python -m pytest src/providers/mlx_audio/tests
 ```
 
 These tests use injected fake MLX Audio runtimes so they can run without
@@ -17,7 +17,7 @@ download the configured local models. Live MLX Audio smoke is not part of the
 default pytest suite; run it explicitly with a local audio file:
 
 ```sh
-BOT_MLX_AUDIO_SMOKE_WAV=/path/to/sample.wav uv run --package bot-provider-mlx-audio python - <<'PY'
+BOT_MLX_AUDIO_SMOKE_WAV=/path/to/sample.wav uv run --package mosfet-provider-mlx-audio python - <<'PY'
 import asyncio
 import os
 import pathlib

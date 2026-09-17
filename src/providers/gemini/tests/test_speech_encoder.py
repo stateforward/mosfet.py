@@ -10,9 +10,9 @@ import wave
 import pytest
 from google.genai import errors as genai_errors
 
-from bot.providers.gemini import ChatClient, SpeechEncoder, SpeechEncodingError
-from bot.providers.gemini import client as gemini_client
-from bot.providers.gemini.speech_encoder import pcm_to_wav
+from mosfet.providers.gemini import ChatClient, SpeechEncoder, SpeechEncodingError
+from mosfet.providers.gemini import client as gemini_client
+from mosfet.providers.gemini.speech_encoder import pcm_to_wav
 
 
 @dataclasses.dataclass

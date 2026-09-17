@@ -35,7 +35,7 @@ import wave
 
 from livekit import rtc
 
-from bot.providers.livekit import signaling
+from mosfet.providers.livekit import signaling
 
 # Repo example helpers (mint token + Gemini speech config).
 _EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -104,7 +104,7 @@ async def _gemini_to_pcm(
 ) -> tuple[bytes, int]:
     """Render speech with off-device Gemini TTS → raw s16le mono PCM."""
 
-    from bot.providers.gemini import ChatClient, SpeechEncoder
+    from mosfet.providers.gemini import ChatClient, SpeechEncoder
 
     encoder = SpeechEncoder(
         client=ChatClient(api_key=api_key, model=model),

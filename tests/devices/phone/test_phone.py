@@ -1,4 +1,4 @@
-from bot.devices import audio as audio_device
+from mosfet.devices import audio as audio_device
 
 import asyncio
 import collections.abc
@@ -10,18 +10,18 @@ import typing
 import hsm
 import pytest
 
-import bot
-from bot.abilities import encoding
-from bot.abilities import processing
-from bot.abilities import speaking
-import bot.devices.phone as phone_contracts
-import bot.devices.phone.phone as phone_module
+import mosfet
+from mosfet.abilities import encoding
+from mosfet.abilities import processing
+from mosfet.abilities import speaking
+import mosfet.devices.phone as phone_contracts
+import mosfet.devices.phone.phone as phone_module
 
-from bot.device import Device
-from bot.devices import phone as phone_device
-from bot.protocols import attachment
+from mosfet.device import Device
+from mosfet.devices import phone as phone_device
+from mosfet.protocols import attachment
 
-from bot.environment import SoundData, SoundEvent, Environment, space
+from mosfet.environment import SoundData, SoundEvent, Environment, space
 from tests.hsm_instance_state import (
     device_peripherals,
     device_firmware,
@@ -125,7 +125,7 @@ class PhoneObservationRecorder(hsm.Instance):
             self.events.append(event)
         return super().dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "PhoneObservationRecorder",
         hsm.initial(hsm.target("listening")),
         hsm.state(
@@ -174,7 +174,7 @@ def test_phone_sms_text_routes_to_display() -> None:
 
     async def run() -> tuple[str | None, str | None]:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
 
         await phone.dispatch(
@@ -244,7 +244,7 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         phone = phone_device.Phone()
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
 
         snapshot_event_names = {
             event_name for transition in hsm.take_snapshot(None, phone).Transitions for event_name in transition.events
@@ -316,7 +316,7 @@ def test_phone_connects_service_originating_events() -> None:
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert service.target is device_firmware(phone)
@@ -334,7 +334,7 @@ def test_phone_service_events_enter_through_attached_service_target() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -354,7 +354,7 @@ def test_phone_dispatch_does_not_forward_service_originating_events() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -377,7 +377,7 @@ def test_phone_service_ingress_does_not_forward_non_service_events() -> None:
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert service.target is device_firmware(phone)
@@ -465,7 +465,7 @@ def test_phone_device_start_initializes_firmware_and_routes_service_events() -> 
     async def run() -> None:
         phone = phone_device.Phone()
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
 
@@ -489,7 +489,7 @@ def test_phone_device_start_initializes_firmware_and_routes_service_events() -> 
 def test_phone_dial_requests_provider_and_commits_connected_call() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -527,10 +527,10 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
         inside = PhoneObservationRecorder()
         outside = PhoneObservationRecorder()
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-        _ = await bot.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
         environment.join(inside)
-        _ = await bot.started(None, outside, outside.model, hsm.Config(id="outside"))
+        _ = await mosfet.started(None, outside, outside.model, hsm.Config(id="outside"))
         phone_id = hsm.id(phone)
 
         await _emit_service_event(
@@ -572,8 +572,8 @@ async def _dialing_phone_in_environment(
 
     phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
     listener = PhoneObservationRecorder()
-    _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-    _ = await bot.started(environment, listener, listener.model, hsm.Config(id="listener"))
+    _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+    _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="listener"))
     environment.join(listener)
     await _wait_until(lambda: phone.state() == "/Device/detached")
     firmware = _phone_firmware(phone)
@@ -638,7 +638,7 @@ def test_phone_dial_failure_is_heard_as_the_call_progress_tone_the_exchange_woul
 def test_phone_no_call_carries_the_service_verdict_that_chose_the_tone() -> None:
     async def run() -> phone_device.NoCallData:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
         firmware = _phone_firmware(phone)
         await phone.dispatch(
@@ -691,8 +691,8 @@ def test_phone_makes_no_sound_for_the_ways_a_handset_makes_none() -> None:
         else:
             phone = phone_device.Phone()
             listener = PhoneObservationRecorder()
-            _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-            _ = await bot.started(environment, listener, listener.model, hsm.Config(id="listener"))
+            _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+            _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="listener"))
             environment.join(listener)
             await _wait_until(lambda: phone.state() == "/Device/detached")
             firmware = _phone_firmware(phone)
@@ -724,7 +724,7 @@ def test_phone_committed_observations_have_priority_over_queued_external_events(
     async def run() -> tuple[str, list[str]]:
         phone = phone_device.Phone()
 
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -766,7 +766,7 @@ def test_phone_committed_observations_have_priority_over_queued_external_events(
 def test_phone_rejects_malformed_incoming_call_before_effects() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -786,7 +786,7 @@ def test_phone_rejects_malformed_payloads_before_event_specific_effects() -> Non
     async def run() -> None:
         phone = phone_device.Phone()
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -862,7 +862,7 @@ def test_phone_rejects_malformed_payloads_before_event_specific_effects() -> Non
 def test_phone_emitted_events_preserve_trigger_metadata() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -895,7 +895,7 @@ def test_phone_emitted_events_preserve_trigger_metadata() -> None:
 def test_phone_firmware_rejects_stale_service_events_by_call_id() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -978,7 +978,7 @@ def test_phone_firmware_rejects_stale_service_events_by_call_id() -> None:
 def test_phone_firmware_declines_and_hangs_up_the_call_it_holds() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1032,7 +1032,7 @@ def test_phone_firmware_declines_and_hangs_up_the_call_it_holds() -> None:
 def test_phone_media_ready_publishes_committed_event() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1086,7 +1086,7 @@ def test_phone_display_shows_who_is_on_the_line() -> None:
 
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
 
@@ -1145,7 +1145,7 @@ class _RingingCallerIdRecorder(hsm.Instance):
         attributes = phone_display(instance.phone).take_snapshot().Attributes or {}
         instance.caller_id_at_delivery.append(_display_caller_id(attributes))
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "RingingCallerIdRecorder",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -1164,10 +1164,10 @@ def test_phone_display_caller_id_lands_before_the_ringing_nerve_reaches_the_room
     async def run() -> str | None:
         environment = Environment()
         phone = phone_device.Phone()
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
         recorder = _RingingCallerIdRecorder(phone)
-        _ = await bot.started(environment, recorder, recorder.model)
+        _ = await mosfet.started(environment, recorder, recorder.model)
         environment.join(recorder)
 
         await _emit_service_event(
@@ -1196,7 +1196,7 @@ def test_phone_firmware_logs_instead_of_silently_dropping_when_display_is_not_st
 
     async def run() -> None:
         firmware = phone_device.Firmware()
-        _ = await bot.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
+        _ = await mosfet.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
         caplog.clear()
         event = phone_device.IncomingCallEvent.with_data(
             phone_device.IncomingCallData(call_id="call-1", caller="Front desk")
@@ -1224,7 +1224,7 @@ def test_phone_snapshot_surfaces_display_caller_id_while_ringing() -> None:
 
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
 
         attributes = phone.take_snapshot().Attributes or {}
@@ -1258,7 +1258,7 @@ def test_phone_display_keeps_the_ring_learned_caller_when_connect_names_nobody()
 
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
 
         await _emit_service_event(
@@ -1305,8 +1305,8 @@ def test_phone_service_audio_routes_through_speaker_to_environment_observers() -
 
         speaker = phone_speaker(phone)
         # The phone powers its own speaker; starting it here would be a second start.
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-        _ = await bot.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, observer, observer.model, hsm.Config(id="observer"))
         environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
@@ -1380,8 +1380,8 @@ def test_phone_service_audio_direct_start_does_not_accept_unstarted_speaker_audi
             channels=1,
         )
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-        _ = await bot.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, observer, observer.model, hsm.Config(id="observer"))
         environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
@@ -1442,8 +1442,8 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
 
         speaker = phone_speaker(phone)
         # The phone powers its own speaker; starting it here would be a second start.
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-        _ = await bot.started(environment, observer, observer.model, hsm.Config(id="observer"))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, observer, observer.model, hsm.Config(id="observer"))
         environment.join(observer)
         assert device_firmware(phone) is not None
         firmware = _phone_firmware(phone)
@@ -1515,7 +1515,7 @@ def test_phone_service_audio_routes_while_transfer_in_progress() -> None:
 def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect() -> None:
     async def run() -> None:
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1572,7 +1572,7 @@ def test_phone_answering_timeout_commits_failed_hangup_and_rejects_late_connect(
 def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> None:
     async def run() -> None:
         phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1624,7 +1624,7 @@ def test_phone_dialing_timeout_reports_no_call_and_rejects_a_late_connect() -> N
 def test_phone_call_failed_ends_current_call_in_each_active_phase() -> None:
     async def started_phone() -> tuple[phone_device.Phone, phone_device.Firmware]:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1762,7 +1762,7 @@ def test_phone_firmware_owns_transfer_state_and_rejects_stale_transfer_events() 
         phone = phone_device.Phone()
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
         stale_transfer_target = phone_device.TransferTarget(kind="address", value="old-helpdesk@example.com")
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1912,7 +1912,7 @@ def test_phone_transfer_timeout_returns_to_answered_and_publishes_failure() -> N
     async def run() -> None:
         phone = phone_device.Phone(transfer_timeout=datetime.timedelta(milliseconds=1))
         transfer_target = phone_device.TransferTarget(kind="address", value="helpdesk@example.com")
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1967,7 +1967,7 @@ def test_phone_transfer_timeout_returns_to_answered_and_publishes_failure() -> N
 def test_public_phone_events_do_not_route_back_into_phone_firmware() -> None:
     async def run() -> None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         # Bring-up now wires firmware to the transducers, so the shell settles a few turns later.
         await _wait_until(lambda: phone.state() == "/Device/detached")
         assert device_firmware(phone) is not None
@@ -1988,7 +1988,7 @@ def test_phone_dispatch_coerces_dict_command_payload_to_firmware() -> None:
 
     async def run() -> str:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         raw = dataclasses.replace(
             phone_device.DialEvent,
             data={"number": DIAL_NUMBER},
@@ -2005,7 +2005,7 @@ def test_phone_dispatch_drops_invalid_dict_command_without_shell_fallthrough() -
 
     async def run() -> str | None:
         phone = phone_device.Phone()
-        _ = await bot.started(None, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         before = phone_current_call_id(_phone_firmware(phone))
         raw = dataclasses.replace(phone_device.DialEvent, data={"not": "a dial"})
         await phone.dispatch(phone.context(), raw)
@@ -2046,7 +2046,7 @@ async def _media_ready_firmware(firmware: phone_device.Firmware) -> None:
     receiver and mouthpiece instead of invoking private effect functions.
     """
 
-    _ = await bot.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
+    _ = await mosfet.started(None, firmware, typing.cast(hsm.Model, phone_device.Firmware.model))
     await firmware.dispatch(
         firmware.context(),
         phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),
@@ -2223,7 +2223,7 @@ def test_each_phone_uplinks_only_what_its_own_microphone_hears() -> None:
 
         # Starting the phones is enough: each powers its own transducers.
         for phone in (first, second):
-            _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+            _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: device_firmware(first) is not None and device_firmware(second) is not None)
 
         for phone, service, call_id in ((first, first_service, "call-first"), (second, second_service, "call-second")):
@@ -2300,7 +2300,7 @@ class Ears(hsm.Instance):
         del ctx
         instance.heard.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Ears",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_hear))),
@@ -2326,14 +2326,14 @@ async def _handset_on_a_call(
     voice = audio_device.Speaker(placement=space.Placement(position=mouth), amplitude_db=_VOICE_DB)
     ears = Ears()
 
-    _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
-    _ = await bot.started(environment, voice, typing.cast(hsm.Model, audio_device.Speaker.model))
-    _ = await bot.started(environment, ears, Ears.model, hsm.Config(id="ears"))
+    _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+    _ = await mosfet.started(environment, voice, typing.cast(hsm.Model, audio_device.Speaker.model))
+    _ = await mosfet.started(environment, ears, Ears.model, hsm.Config(id="ears"))
     environment.join(ears, placement=space.Placement(position=ear, threshold_db=_EARS_THRESHOLD_DB))
     # Speaking is this speaker's controller in production; a transducer needs one to emit.
     controller = hsm.Instance()
-    _ = await bot.started(
-        environment, controller, bot.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s"))
+    _ = await mosfet.started(
+        environment, controller, mosfet.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s"))
     )
     await voice.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
 
@@ -2498,9 +2498,9 @@ def test_a_ringing_phone_is_heard_nearby_and_not_across_the_room() -> None:
         nearby = Ears()
         across_the_room = Ears()
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
-        _ = await bot.started(environment, nearby, Ears.model, hsm.Config(id="nearby"))
-        _ = await bot.started(environment, across_the_room, Ears.model, hsm.Config(id="across-the-room"))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await mosfet.started(environment, nearby, Ears.model, hsm.Config(id="nearby"))
+        _ = await mosfet.started(environment, across_the_room, Ears.model, hsm.Config(id="across-the-room"))
         environment.join(nearby, placement=space.Placement(position=space.Position(x=2.0, y=0.0), threshold_db=20.0))
         environment.join(
             across_the_room,
@@ -2536,7 +2536,7 @@ def test_stopping_a_phone_releases_the_service_it_acquired() -> None:
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: service.target is not None)
         attached = service.target is not None
 
@@ -2558,7 +2558,7 @@ def test_stopping_a_phone_twice_still_releases_once() -> None:
         service = AttachablePhoneService()
         phone = phone_device.Phone(service=service)
 
-        _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         await _wait_until(lambda: service.target is not None)
 
         await phone.stop(environment)
@@ -2583,11 +2583,11 @@ class PhoneHolder(hsm.Instance):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.InputEvent.name:
+        if event.name == mosfet.InputEvent.name:
             self.occasions.append(event)
         return super().dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "PhoneHolder",
         hsm.initial(hsm.target("holding")),
         hsm.state("holding"),
@@ -2614,7 +2614,7 @@ class RoomOccupant(hsm.Instance):
         self.received.append(event)
         return super().dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "RoomOccupant",
         hsm.initial(hsm.target("present")),
         hsm.state("present"),
@@ -2629,9 +2629,9 @@ async def _phone_in_a_hand(
     phone = phone_device.Phone(answer_timeout=datetime.timedelta(milliseconds=1))
     holder = PhoneHolder()
     bystander = RoomOccupant()
-    _ = await bot.started(environment, phone, typing.cast(hsm.Model, phone.model))
-    _ = await bot.started(environment, holder, holder.model, hsm.Config(id="holder"))
-    _ = await bot.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
+    _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+    _ = await mosfet.started(environment, holder, holder.model, hsm.Config(id="holder"))
+    _ = await mosfet.started(environment, bystander, bystander.model, hsm.Config(id="bystander"))
     environment.join(bystander)
     await _wait_until(lambda: phone.state() == "/Device/detached")
     await phone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=holder)))
@@ -2643,7 +2643,7 @@ def _occasion_sources(holder: PhoneHolder) -> list[str | None]:
     return [
         occasion.data.observation.event
         for occasion in holder.occasions
-        if isinstance(occasion.data, bot.InputEventData) and occasion.data.observation is not None
+        if isinstance(occasion.data, mosfet.InputEventData) and occasion.data.observation is not None
     ]
 
 
@@ -2698,7 +2698,7 @@ def test_a_phone_tells_whoever_holds_it_that_nobody_answered() -> None:
         reasons = [
             typing.cast(phone_device.NoCallData, occasion.data.observation.data).reason
             for occasion in holder.occasions
-            if isinstance(occasion.data, bot.InputEventData)
+            if isinstance(occasion.data, mosfet.InputEventData)
             and occasion.data.observation is not None
             and occasion.data.observation.event == phone_device.NoCallEvent.name
         ]

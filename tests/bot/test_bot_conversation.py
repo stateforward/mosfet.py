@@ -9,20 +9,20 @@ import uuid
 
 import hsm
 
-from bot.abilities import cognition
-from bot.abilities import communication
-from bot.abilities.communication import conversation
-from bot.abilities import decoding
-from bot.abilities import encoding
-from bot.abilities import listening
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities import processing
-from bot.abilities import speaking
-from bot.abilities.hearing import speech
-from bot.abilities.hearing import voice as hearing_voice
-from bot.bot import Bot
-from bot.device import Device
-from bot.environment import SoundData, SoundEvent, Environment
+from mosfet.abilities import cognition
+from mosfet.abilities import communication
+from mosfet.abilities.communication import conversation
+from mosfet.abilities import decoding
+from mosfet.abilities import encoding
+from mosfet.abilities import listening
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities import processing
+from mosfet.abilities import speaking
+from mosfet.abilities.hearing import speech
+from mosfet.abilities.hearing import voice as hearing_voice
+from mosfet.bot import Bot
+from mosfet.device import Device
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.test_bot import CapturingCognition, as_cognition
 
 MessageContent: typing.TypeAlias = (

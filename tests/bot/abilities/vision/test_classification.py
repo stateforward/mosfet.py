@@ -1,5 +1,5 @@
-from bot import abilities
-from bot.abilities import vision
+from mosfet import abilities
+from mosfet.abilities import vision
 
 import asyncio
 import collections.abc

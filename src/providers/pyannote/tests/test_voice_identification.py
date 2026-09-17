@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from bot.abilities.hearing import voice
-from bot import abilities
-import bot.providers.pyannote as pyannote
-from bot.providers.pyannote import (
+from mosfet.abilities.hearing import voice
+from mosfet import abilities
+import mosfet.providers.pyannote as pyannote
+from mosfet.providers.pyannote import (
     Classifier,
     VoiceIdentificationError,
     load_speaker_embedding_inference,

@@ -4,12 +4,12 @@ import collections.abc
 import json
 import pathlib
 
-import bot.telemetry
+import mosfet.telemetry
 import pytest
 from opentelemetry import _logs
 
-from bot.telemetry.configure import logger_provider
-from bot.telemetry.generator import record_generator_request
+from mosfet.telemetry.configure import logger_provider
+from mosfet.telemetry.generator import record_generator_request
 
 
 def _force_flush() -> None:
@@ -24,7 +24,7 @@ def _reset_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> collections.abc.Iterator[None]:
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
     monkeypatch.delenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", raising=False)
@@ -37,13 +37,13 @@ def _reset_telemetry(
 
     monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
     yield
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
 
 
 def test_record_generator_request_body_contains_messages(monkeypatch: pytest.MonkeyPatch) -> None:
     log_path = pathlib.Path("generator.jsonl")
     monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     messages = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Alice says hi to Bob"},
@@ -68,7 +68,7 @@ def test_record_generator_request_body_contains_messages(monkeypatch: pytest.Mon
 
 def test_record_generator_request_without_opt_in_omits_prompt_content() -> None:
     log_path = pathlib.Path("no-capture.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     secret = "UNIQUE_SENSITIVE_PROMPT_SHOULD_NOT_PERSIST"
     record_generator_request(
         provider="openai_compat",
@@ -85,7 +85,7 @@ def test_record_generator_request_without_opt_in_omits_prompt_content() -> None:
 def test_record_generator_request_attributes_lack_raw_content(monkeypatch: pytest.MonkeyPatch) -> None:
     log_path = pathlib.Path("attrs.jsonl")
     monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     secret = "UNIQUE_RAW_MESSAGE_CONTENT_SHOULD_NOT_BE_AN_ATTRIBUTE"
     record_generator_request(
         provider="gemini",
@@ -108,7 +108,7 @@ def test_record_generator_request_attributes_lack_raw_content(monkeypatch: pytes
 
 def test_record_generator_request_noop_without_provider() -> None:
     log_path = pathlib.Path("noop.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     record_generator_request(provider="", model=None, messages=[{"role": "user", "content": "x"}])
     _force_flush()
     assert not log_path.exists() or log_path.read_text(encoding="utf-8").strip() == ""
@@ -116,7 +116,7 @@ def test_record_generator_request_noop_without_provider() -> None:
 
 def test_record_generator_request_noop_when_disabled() -> None:
     log_path = pathlib.Path("off.jsonl")
-    assert bot.telemetry.configure(enabled=False, log_file=log_path) is False
+    assert mosfet.telemetry.configure(enabled=False, log_file=log_path) is False
     record_generator_request(
         provider="openai_compat",
         model=None,
@@ -133,7 +133,7 @@ def test_record_generator_request_truncates_deeply_nested_messages(
 
     log_path = pathlib.Path("deep.jsonl")
     monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     nested: object = "leaf"
     for _ in range(40):
         nested = {"n": nested}

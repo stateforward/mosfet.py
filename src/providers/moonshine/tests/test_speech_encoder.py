@@ -7,8 +7,8 @@ import typing
 
 import pytest
 
-from bot.providers.moonshine import SpeechEncoder, SpeechEncodingError
-from bot.providers.moonshine._audio import audio_bytes_to_float_pcm
+from mosfet.providers.moonshine import SpeechEncoder, SpeechEncodingError
+from mosfet.providers.moonshine._audio import audio_bytes_to_float_pcm
 
 
 @dataclasses.dataclass

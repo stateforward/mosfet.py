@@ -1,8 +1,8 @@
-# bot-provider-pyannote
+# mosfet-provider-pyannote
 
 The pyannote provider adapts `pyannote.audio` speaker diarization pipelines
 and speaker-embedding inference to the provider-neutral voice contracts in
-`stateforward.bot`.
+`stateforward.mosfet`.
 
 The package declares the approved runtime dependency:
 

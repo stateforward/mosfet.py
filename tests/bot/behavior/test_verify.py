@@ -1,4 +1,4 @@
-from bot.behavior import verify
+from mosfet.behavior import verify
 
 
 def _transfer_selection_behavior_source() -> str:
@@ -81,7 +81,7 @@ def test_racing_warm_and_callback_fork_survives_forkserver_bootstrap() -> None:
 
     import concurrent.futures
 
-    from bot.behavior import runtime as behavior_runtime
+    from mosfet.behavior import runtime as behavior_runtime
 
     source = """
 input_event = hsm.event(

@@ -34,3 +34,6 @@ test-results/
 .pi/
 "-q"/
 -q/
+
+# internal dev journal
+.blog/

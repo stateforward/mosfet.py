@@ -4,13 +4,13 @@ Operational reference for contributors working on this repository. The root READ
 the product document; everything that used to live there for programmers is consolidated
 here.
 
-Distribution name: `stateforward.bot`, imported as `bot`. Deterministic execution runs
+Distribution name: `stateforward.mosfet`, imported as `bot`. Deterministic execution runs
 on [`stateforward-hsm`](https://pypi.org/project/stateforward-hsm/) (`import hsm`).
 
 ## Composing a bot in code (today's composition surface)
 
 ```python
-import bot
+import mosfet
 import hsm
 from bot import Bot
 from bot.abilities import listening, memory, speaking     # anatomy
@@ -28,7 +28,6 @@ its own behalf.
 ```sh
 uv run --project examples/listen_speak_bot listen-speak-bot
 uv run --project examples/phone_bot phone-bot --json
-uv run --project examples/phone_bot python examples/phone_bot/learning_phone_bot.py
 ```
 
 Each example is its own `uv` package so example-only dependencies never leak into core.
@@ -47,7 +46,7 @@ uv build                         # wheels/CLI release builds (see dist/)
 uv run python scripts/check_release_version.py
 ```
 
-Scoped provider tests: `uv run --package bot-provider-<p> -m pytest src/providers/<p>/tests`.
+Scoped provider tests: `uv run --package mosfet-provider-<p> -m pytest src/providers/<p>/tests`.
 
 See [release.md](release.md) for versioning and CI publishing notes.
 
@@ -65,7 +64,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 
 ## What a Bot is made of
 
-**Core package (`import bot`)**
+**Core package (`import mosfet`)**
 
 | Layer | What ships |
 |---|---|
@@ -81,11 +80,11 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 
 | Package | Provides |
 |---|---|
-| `bot-provider-livekit` | realtime SFU transport + room audio for the Phone |
-| `bot-provider-openai-compat` | chat clients / processors for any OpenAI-compatible endpoint |
-| `bot-provider-gemini` | Gemini text generation & processing |
-| `bot-provider-elevenlabs`, `bot-provider-mlx-audio`, `bot-provider-moonshine` | speech synthesis & recognition (cloud / Apple-Silicon-local / on-device) |
-| `bot-provider-mlx-vlm` | local VLM reading (Apple Silicon) |
-| `bot-provider-pyannote` | voice diarization & speaker identification |
-| `bot-provider-sqlite-memory`, `bot-provider-postgres-memory` | turnkey SQLite / Postgres(+PGlite) durable memory |
-| `bot-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |
+| `mosfet-provider-livekit` | realtime SFU transport + room audio for the Phone |
+| `mosfet-provider-openai-compat` | chat clients / processors for any OpenAI-compatible endpoint |
+| `mosfet-provider-gemini` | Gemini text generation & processing |
+| `mosfet-provider-elevenlabs`, `mosfet-provider-mlx-audio`, `mosfet-provider-moonshine` | speech synthesis & recognition (cloud / Apple-Silicon-local / on-device) |
+| `mosfet-provider-mlx-vlm` | local VLM reading (Apple Silicon) |
+| `mosfet-provider-pyannote` | voice diarization & speaker identification |
+| `mosfet-provider-sqlite-memory`, `mosfet-provider-postgres-memory` | turnkey SQLite / Postgres(+PGlite) durable memory |
+| `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |

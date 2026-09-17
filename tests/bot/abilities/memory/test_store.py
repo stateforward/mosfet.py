@@ -1,6 +1,6 @@
 """SQL-transaction MemoryStore tests (ability boundary only)."""
 
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 import asyncio
 
@@ -112,7 +112,7 @@ def test_input_requires_at_least_one_statement() -> None:
 def test_memory_store_accepts_injected_engine() -> None:
     """The ability runs on a caller-provided engine; the SQLite default stays in the factory."""
 
-    from bot.abilities.memory import store as store_module
+    from mosfet.abilities.memory import store as store_module
 
     engine = store_module.open_sqlite_engine()
     injected = memory.MemoryStore(engine=engine)

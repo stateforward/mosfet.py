@@ -1,6 +1,6 @@
-# bot-provider-postgres-memory
+# mosfet-provider-postgres-memory
 
-Postgres-backed stateforward.bot Memory provider.
+Postgres-backed stateforward.mosfet Memory provider.
 
 One ability apply runs one or more parameterized SQL statements in a single transaction against `bot_memory`. Success commits; any failure rolls back.
 
@@ -19,5 +19,5 @@ There is no separate encode/decode or object-store retain path on the provider s
 Run the provider tests:
 
 ```sh
-uv run --package bot-provider-postgres-memory --group dev python -m pytest src/providers/postgres_memory/tests
+uv run --package mosfet-provider-postgres-memory --group dev python -m pytest src/providers/postgres_memory/tests
 ```

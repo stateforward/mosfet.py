@@ -2,9 +2,9 @@
 
 import types
 
-import bot
-from bot.abilities.communication import conversation
-from bot.abilities.communication.conversation import decision_input
+import mosfet
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.communication.conversation import decision_input
 
 
 def _participated() -> object:
@@ -21,9 +21,9 @@ def _participated() -> object:
 def test_agent_decision_input_maps_contribution_onto_bot_input() -> None:
     decision = conversation.agent_conversation_decision_input(_participated(), target_device="phone")
 
-    assert isinstance(decision.input, bot.InputEventData)
+    assert isinstance(decision.input, mosfet.InputEventData)
     assert decision.input.target_device == "phone"
-    assert decision.input.observation == bot.StimulusData(
+    assert decision.input.observation == mosfet.StimulusData(
         event="bot.ability.conversation.turn_detector",
         data=decision_input.ContributionData(
             conversation_ref="conv-1",
@@ -39,5 +39,5 @@ def test_agent_decision_input_maps_contribution_onto_bot_input() -> None:
 def test_agent_decision_input_uses_neutral_host_priority() -> None:
     decision = conversation.agent_conversation_decision_input(_participated(), target_device="phone")
 
-    assert isinstance(decision.input, bot.InputEventData)
+    assert isinstance(decision.input, mosfet.InputEventData)
     assert decision.input.priority == 0

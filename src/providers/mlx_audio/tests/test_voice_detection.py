@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bot.abilities.hearing import voice
-from bot.devices import phone
+from mosfet.abilities.hearing import voice
+from mosfet.devices import phone
 
 import asyncio
 import collections.abc
@@ -14,8 +14,8 @@ import wave
 
 import pytest
 
-from bot.providers.mlx_audio import VoiceDetectionError, VoiceActivityClassifier
-from bot.providers.mlx_audio._mlx import VoiceActivityEvent
+from mosfet.providers.mlx_audio import VoiceDetectionError, VoiceActivityClassifier
+from mosfet.providers.mlx_audio._mlx import VoiceActivityEvent
 
 SPEECH_WAV = (pathlib.Path(__file__).parent / "assets" / "speech.wav").read_bytes()
 """Real human speech, same encoding as the ring clip (see assets/SOURCES.md)."""

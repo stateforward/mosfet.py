@@ -1,4 +1,4 @@
-from bot.devices import audio
+from mosfet.devices import audio
 
 from tests.type_helpers import object_dict
 

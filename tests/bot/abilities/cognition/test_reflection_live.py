@@ -23,23 +23,23 @@ from pathlib import Path
 import hsm
 import pytest
 
-import bot
-from bot import behavior as behavior_events
-from bot.abilities import cognition
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.devices import phone as phone_device
-from bot.behavior import storage as behavior_storage
-from bot.environment import SoundData, SoundEvent, Environment
+import mosfet
+from mosfet import behavior as behavior_events
+from mosfet.abilities import cognition
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.devices import phone as phone_device
+from mosfet.behavior import storage as behavior_storage
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import phone_firmware
 
 # Optional provider packages — skip collection when not installed in this env.
 OpenAIChatClient = pytest.importorskip(
-    "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
+    "mosfet.providers.openai_compat", reason="mosfet-provider-openai-compat not installed"
 ).ChatClient
 OpenAIProcessor = pytest.importorskip(
-    "bot.providers.openai_compat", reason="bot-provider-openai-compat not installed"
+    "mosfet.providers.openai_compat", reason="mosfet-provider-openai-compat not installed"
 ).Processor
 
 # Live calls are slower than unit tests.
@@ -157,8 +157,8 @@ requires_openai = pytest.mark.skipif(
 def _focus_output(device: str, reason: str) -> cognition.types.OutputData:
     return (
         cognition.types.EventData(
-            event=bot.FocusDeviceEvent.name,
-            data=bot.FocusDeviceEventData(device=device).model_dump(),
+            event=mosfet.FocusDeviceEvent.name,
+            data=mosfet.FocusDeviceEventData(device=device).model_dump(),
             reason=reason,
         ),
     )
@@ -177,7 +177,7 @@ def _answer_call_output(call_id: str, reason: str) -> cognition.types.OutputData
 
 def _cognition_input(*, focus: str | None = "phone") -> cognition.InputData:
     return cognition.InputData(
-        stimulus=bot.InputEventData(target_device=focus or "phone", priority=0),
+        stimulus=mosfet.InputEventData(target_device=focus or "phone", priority=0),
         abilities=(),
         focus=focus,
         focus_candidates=(focus,) if focus else (),
@@ -200,7 +200,7 @@ async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) ->
 
 
 async def _behavior_contents(store: memory.Memory) -> tuple[str, ...]:
-    from bot.behavior import storage as behavior_storage
+    from mosfet.behavior import storage as behavior_storage
 
     select = memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
     out = store.execute(select)
@@ -401,7 +401,7 @@ def _live_behavior_answers_phone_call(
         autonomy = cognition.Autonomy(memory=store)
         shared = shared_hsm_context(environment)
         await start_abilities_for_test(shared, autonomy)
-        _ = await bot.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(shared, phone, typing.cast(hsm.Model, phone.model))
 
         firmware = phone_firmware(phone)
         assert firmware is not None
@@ -562,7 +562,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         shared = shared_hsm_context(environment)
         phone = phone_device.Phone()
         await start_abilities_for_test(shared, ability)
-        _ = await bot.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(shared, phone, typing.cast(hsm.Model, phone.model))
         await wait_idle(ability, timeout=30.0)
         await wait_idle(reflection, timeout=30.0)
 

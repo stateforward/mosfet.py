@@ -22,7 +22,7 @@ def _example_source() -> str:
 def _default_cognition_instructions() -> dict[str, str]:
     """Phone bot uses ability ClassVar defaults (no example-local instruction strings)."""
 
-    from bot.abilities.cognition import intuition, reasoning
+    from mosfet.abilities.cognition import intuition, reasoning
 
     return {
         "intuition_instructions": intuition.DEFAULT_INSTRUCTIONS,
@@ -76,18 +76,18 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     pyproject = (_repo_root() / "examples" / "phone_bot" / "pyproject.toml").read_text(encoding="utf-8")
     source = _example_source()
 
-    assert "bot-provider-livekit" in pyproject
-    assert "bot-provider-gemini" in pyproject
-    assert "bot-provider-sqlite-memory" in pyproject
-    assert "bot-provider-openai-compat" in pyproject
-    assert "bot-provider-mlx-audio" in pyproject
-    assert "bot-provider-pyannote" in pyproject
-    assert "bot-provider-elevenlabs" not in pyproject
-    assert "from bot.providers.gemini import SpeechDecoder as GeminiSpeechDecoder" in source
-    assert "from bot.providers.gemini import SpeechEncoder as GeminiSpeechEncoder" in source
-    assert "from bot.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
-    assert "from bot.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
-    assert "from bot.providers.openai_compat import Processor as OpenAIProcessor" in source
+    assert "mosfet-provider-livekit" in pyproject
+    assert "mosfet-provider-gemini" in pyproject
+    assert "mosfet-provider-sqlite-memory" in pyproject
+    assert "mosfet-provider-openai-compat" in pyproject
+    assert "mosfet-provider-mlx-audio" in pyproject
+    assert "mosfet-provider-pyannote" in pyproject
+    assert "mosfet-provider-elevenlabs" not in pyproject
+    assert "from mosfet.providers.gemini import SpeechDecoder as GeminiSpeechDecoder" in source
+    assert "from mosfet.providers.gemini import SpeechEncoder as GeminiSpeechEncoder" in source
+    assert "from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
+    assert "from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
+    assert "from mosfet.providers.openai_compat import Processor as OpenAIProcessor" in source
     assert "AlwaysVoiceActivityClassifier" not in source
     assert "PeakEnergyVoiceActivityClassifier" not in source
     # The streaming voice-activity classifier consumes raw PCM directly, so no PCM->WAV wrapper stands in front
@@ -98,16 +98,16 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "_pyannote_voice_classifier" in source
     assert "voice_classifier=classifier" in source
     assert "KindSoundClassifier" in source
-    assert "from bot.devices import phone as phone_device" in source
-    assert "from bot.providers.livekit import PhoneService" in source
-    assert "from bot.providers.livekit.audio import PcmWavDecoder" in source
+    assert "from mosfet.devices import phone as phone_device" in source
+    assert "from mosfet.providers.livekit import PhoneService" in source
+    assert "from mosfet.providers.livekit.audio import PcmWavDecoder" in source
     assert "class LiveKitVoiceDecoder" not in source
     assert "class GeminiVoiceDecoder" in source
     assert "abilities.VoiceDecoder" in source
     assert "RoomAudioEndpoint" not in source
     assert "RoomAudioConnectData" not in source
     assert "create_audio_bridge" not in source
-    assert "from bot.providers.sqlite_memory import" not in source
+    assert "from mosfet.providers.sqlite_memory import" not in source
     assert 'DEFAULT_MERCURY_MODEL = "mercury-2"' in source
     assert 'DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"' in source
     assert 'DEFAULT_OPENAI_REASONING_MODEL = "gpt-5.6-terra"' in source
@@ -170,9 +170,9 @@ import asyncio
 import typing
 
 import hsm
-import bot
-from bot import abilities
-from bot.environment import Environment, SoundData, SoundEvent, space
+import mosfet
+from mosfet import abilities
+from mosfet.environment import Environment, SoundData, SoundEvent, space
 from phone_bot_example import person
 
 
@@ -188,7 +188,7 @@ class Ear(hsm.Instance):
         if isinstance(event.data, SoundData):
             instance._heard.append(event.data)
 
-    model = bot.define(
+    model = mosfet.define(
         "Ear",
         hsm.initial(hsm.target("listening")),
         hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
@@ -340,7 +340,7 @@ def test_arriving_ends_only_on_a_correlated_attachment_outcome() -> None:
     left for it to catch, so ``arriving`` carries no trigger but the two outcomes.
     """
 
-    from bot.protocols import attachment
+    from mosfet.protocols import attachment
 
     code = "\n".join(
         [
@@ -368,9 +368,9 @@ def test_a_person_whose_voice_is_already_taken_stops_waiting() -> None:
 import asyncio
 
 import hsm
-import bot
-from bot.environment import Environment, space
-from bot.protocols import attachment
+import mosfet
+from mosfet.environment import Environment, space
+from mosfet.protocols import attachment
 from phone_bot_example import person
 
 
@@ -385,7 +385,7 @@ class Bystander(hsm.Instance):
     def _hold(ctx, instance, event) -> None:
         instance.holding.set()
 
-    model = bot.define(
+    model = mosfet.define(
         "Bystander",
         hsm.initial(hsm.target("waiting")),
         hsm.state(
@@ -449,9 +449,9 @@ def test_a_bot_somebody_spoke_to_is_offered_its_phone_and_nothing_more() -> None
     code = "\n".join(
         [
             "import asyncio, phone_bot_example",
-            "from bot.abilities import processing",
-            "from bot.devices import phone",
-            "from bot.environment import Environment",
+            "from mosfet.abilities import processing",
+            "from mosfet.devices import phone",
+            "from mosfet.environment import Environment",
             "async def main():",
             "    for label in ('spoken-to', 'alone'):",
             "        environment = Environment()",
@@ -545,7 +545,7 @@ def test_the_example_uses_number_as_identity_and_optional_dial_plan() -> None:
     assert "BOT_LIVEKIT_DIRECTORY" not in harness
     assert "directory=" not in source
     assert "_directory_entries" not in source
-    assert "from bot.providers.livekit import PhoneService" in source
+    assert "from mosfet.providers.livekit import PhoneService" in source
     # Two-bots harness identities are normalized numbers, not pretty names.
     assert "phone-bot-alice" not in harness
     assert "phone-bot-bob" not in harness
@@ -802,7 +802,7 @@ def test_phone_bot_example_can_attempt_fake_livekit_room_audio_when_opted_in() -
     code = "\n".join(
         [
             "import asyncio, phone_bot_example",
-            "from bot.providers.livekit import PhoneService, MediaSnapshot",
+            "from mosfet.providers.livekit import PhoneService, MediaSnapshot",
             "_orig_attach = PhoneService.attach",
             "async def _attach(self, environment, target):",
             "    connect = self._room_connect",
@@ -832,7 +832,7 @@ def test_phone_bot_example_does_not_report_ready_without_cognition_credentials()
     code = "\n".join(
         [
             "import asyncio, phone_bot_example",
-            "from bot.providers.livekit import PhoneService",
+            "from mosfet.providers.livekit import PhoneService",
             "_orig_attach = PhoneService.attach",
             "async def _attach(self, environment, target):",
             "    connect = self._room_connect",
@@ -861,7 +861,7 @@ def test_phone_bot_example_reports_room_ready_without_remote_chunks() -> None:
     code = "\n".join(
         [
             "import asyncio, phone_bot_example",
-            "from bot.providers.livekit import PhoneService",
+            "from mosfet.providers.livekit import PhoneService",
             "_orig_attach = PhoneService.attach",
             "async def _attach(self, environment, target):",
             "    connect = self._room_connect",
@@ -910,9 +910,9 @@ def test_phone_bot_powers_the_voice_transducer_it_speaks_through() -> None:
 
     code = """
 import asyncio
-import bot.lifecycle as lifecycle
+import mosfet.lifecycle as lifecycle
 import phone_bot_example as example
-from bot.environment import Environment
+from mosfet.environment import Environment
 
 
 async def main() -> None:
@@ -946,11 +946,11 @@ import os
 import hsm
 
 os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:4317"
-define = importlib.import_module("bot.define")
+define = importlib.import_module("mosfet.define")
 published = []
 define.post_model = lambda payload, url: published.append((dict(payload), url))
 
-from bot.environment import Environment, space
+from mosfet.environment import Environment, space
 import phone_bot_example
 
 
@@ -1045,12 +1045,12 @@ from __future__ import annotations
 
 import asyncio
 
-import bot
+import mosfet
 import hsm
-from bot.abilities import listening
-from bot.abilities.communication import conversation
-from bot.abilities.communication import behaviors
-from bot.abilities.hearing import voice
+from mosfet.abilities import listening
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.communication import behaviors
+from mosfet.abilities.hearing import voice
 from phone_bot_example import SpeechConfig, _listening, _pyannote_voice_classifier
 
 
@@ -1101,9 +1101,9 @@ async def main() -> None:
     ctx = hsm.Context()
     assert conversation_ability.model is not None
     _ = await bot.started(ctx, conversation_ability, conversation_ability.model)
-    from bot.protocols import attachment
+    from mosfet.protocols import attachment
     class Owner(hsm.Instance):
-        model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+        model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
     owner = Owner()
     _ = await bot.started(ctx, owner, owner.model)
     _ = await conversation_ability.attach(
@@ -1161,10 +1161,10 @@ import asyncio
 import pathlib
 import time
 
-from bot.abilities import listening, memory
-from bot.abilities.communication import conversation
-from bot.behavior import storage as behavior_storage
-from bot.environment import Environment
+from mosfet.abilities import listening, memory
+from mosfet.abilities.communication import conversation
+from mosfet.behavior import storage as behavior_storage
+from mosfet.environment import Environment
 from phone_bot_example import AppConfig, start_bot, _someone_in_the_room
 
 SPEECH_EVENT = listening.SpeechEvent.name

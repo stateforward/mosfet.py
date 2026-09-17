@@ -1,7 +1,7 @@
 """StmMemory: bounded, access-reinforced short-term memory of admitted stimuli."""
 
-from bot.abilities import memory
-from bot.abilities.memory import stm
+from mosfet.abilities import memory
+from mosfet.abilities.memory import stm
 
 import dataclasses
 import datetime
@@ -213,6 +213,7 @@ def test_register_reinforced_entry_stays_visible_to_effective_recency() -> None:
     assert [entry.payload["source"] for entry in recent] == ["old-signal"]
     assert recent[0].last_accessed_at is not None
     assert recent[0].stm_id == entry_id
+
 
 def test_register_reinforce_rejects_empty_ids() -> None:
     register = memory.StmMemory()

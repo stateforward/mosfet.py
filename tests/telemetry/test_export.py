@@ -6,13 +6,13 @@ import os
 import pathlib
 import stat
 
-import bot.telemetry
+import mosfet.telemetry
 import pytest
 from opentelemetry import _logs
 
-from bot.telemetry.configure import logger_provider
-from bot.telemetry.export import JsonlFileLogRecordExporter
-from bot.telemetry.generator import record_generator_request
+from mosfet.telemetry.configure import logger_provider
+from mosfet.telemetry.export import JsonlFileLogRecordExporter
+from mosfet.telemetry.generator import record_generator_request
 
 
 def _force_flush() -> None:
@@ -27,7 +27,7 @@ def _reset_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> collections.abc.Iterator[None]:
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
@@ -40,13 +40,13 @@ def _reset_telemetry(
 
     monkeypatch.setattr(_logs, "set_logger_provider", _noop_set_logger_provider)
     yield
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
 
 
 def test_export_writes_generator_request_with_mode_600(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
     log_path = pathlib.Path("otel-logs.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     record_generator_request(
         provider="openai_compat",
         model="test-model",
@@ -70,7 +70,7 @@ def test_export_rejects_replaced_symlink_leaf_outside_cwd(tmp_path: pathlib.Path
     """After configure, replacing the leaf with an outside symlink must not write out."""
 
     log_path = pathlib.Path("otel-logs.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     record_generator_request(
         provider="openai_compat",
         model="test-model",
@@ -123,9 +123,7 @@ def test_export_rejects_replaced_parent_symlink_outside_cwd(tmp_path: pathlib.Pa
     assert list(outside.iterdir()) == []
 
 
-def test_export_stays_in_configure_cwd_after_chdir(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_export_stays_in_configure_cwd_after_chdir(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Configure under A, chdir to B, emit — writes stay under A; B stays empty."""
 
     monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "true")
@@ -134,7 +132,7 @@ def test_export_stays_in_configure_cwd_after_chdir(
     root_a.mkdir()
     root_b.mkdir()
     os.chdir(root_a)
-    assert bot.telemetry.configure(log_file="otel-logs.jsonl") is True
+    assert mosfet.telemetry.configure(log_file="otel-logs.jsonl") is True
     os.chdir(root_b)
     record_generator_request(
         provider="openai_compat",
@@ -155,7 +153,7 @@ def test_export_rejects_hardlinked_leaf(tmp_path: pathlib.Path) -> None:
     outside = tmp_path.parent / f"hardlink-src-{tmp_path.name}.jsonl"
     _ = outside.write_text("sentinel-hardlink\n", encoding="utf-8")
     log_path = pathlib.Path("otel-logs.jsonl")
-    assert bot.telemetry.configure(log_file=log_path) is True
+    assert mosfet.telemetry.configure(log_file=log_path) is True
     os.link(outside, log_path)
 
     exporter = JsonlFileLogRecordExporter(tmp_path / "otel-logs.jsonl")

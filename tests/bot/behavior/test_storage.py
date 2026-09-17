@@ -1,13 +1,13 @@
 """Behavior inventory storage: status lifecycle and usage telemetry."""
 
-from bot.behavior.instance import (
+from mosfet.behavior.instance import (
     STATUS_ACTIVE,
     STATUS_BROKEN,
     STATUS_DRAFT,
     STATUS_REASON_VALIDATION,
     Instance,
 )
-from bot.behavior import storage
+from mosfet.behavior import storage
 
 
 def _base(**overrides: object) -> Instance:

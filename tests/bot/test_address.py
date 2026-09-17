@@ -5,14 +5,16 @@ import weakref
 import hsm
 import pytest
 
-import bot
-from bot import address
-from bot import scope
-from bot.environment import Environment
+import mosfet
+from mosfet import address
+from mosfet import scope
+from mosfet.environment import Environment
 
 
 class _Thing(hsm.Instance):
-    model: typing.ClassVar[object] = bot.define("AddressThing", bot.initial(bot.target("ready")), bot.state("ready"))
+    model: typing.ClassVar[object] = mosfet.define(
+        "AddressThing", mosfet.initial(mosfet.target("ready")), mosfet.state("ready")
+    )
 
 
 _StartedActor = typing.TypeVar("_StartedActor", bound=hsm.Instance)
@@ -25,7 +27,7 @@ async def _started(parent: hsm.Context, actor: _StartedActor, model: object) -> 
     here instead of a ``type: ignore`` at every call site.
     """
 
-    return await bot.started(parent, actor, typing.cast(hsm.Model, model))
+    return await mosfet.started(parent, actor, typing.cast(hsm.Model, model))
 
 
 def _private_parent(environment: Environment) -> hsm.Context:
@@ -120,8 +122,8 @@ def test_detached_actor_leaves_registry_on_collection() -> None:
         private_parent = _private_parent(environment)
 
         class _Ephemeral(hsm.Instance):
-            model: typing.ClassVar[object] = bot.define(
-                "AddressEphemeral", bot.initial(bot.target("ready")), bot.state("ready")
+            model: typing.ClassVar[object] = mosfet.define(
+                "AddressEphemeral", mosfet.initial(mosfet.target("ready")), mosfet.state("ready")
             )
 
         ephemeral = _Ephemeral()
@@ -155,8 +157,8 @@ def test_private_scope_actor_registers_under_environment_segment() -> None:
         private_parent = _private_parent(environment)
 
         class _Private(hsm.Instance):
-            model: typing.ClassVar[object] = bot.define(
-                "AddressPrivate", bot.initial(bot.target("ready")), bot.state("ready")
+            model: typing.ClassVar[object] = mosfet.define(
+                "AddressPrivate", mosfet.initial(mosfet.target("ready")), mosfet.state("ready")
             )
 
         private = _Private()
@@ -196,8 +198,8 @@ def test_private_actor_excluded_from_public_prefix_but_resolvable() -> None:
         private_parent = _private_parent(environment)
 
         class _Private(hsm.Instance):
-            model: typing.ClassVar[object] = bot.define(
-                "AddressPrivate", bot.initial(bot.target("ready")), bot.state("ready")
+            model: typing.ClassVar[object] = mosfet.define(
+                "AddressPrivate", mosfet.initial(mosfet.target("ready")), mosfet.state("ready")
             )
 
         private_thing = _Private()
@@ -265,7 +267,7 @@ def test_register_refreshes_a_torn_down_address() -> None:
         path = address.environment_path(environment.environment_id, hsm.id(thing))
         address.unregister(path)
         assert address.resolve(path) is None
-        bot.register(thing, typing.cast(hsm.Model, _Thing.model))
+        mosfet.register(thing, typing.cast(hsm.Model, _Thing.model))
         return path, thing
 
     path, thing = asyncio.run(run())

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from bot.abilities import processing
-from bot.abilities.language import text
-from bot.environment import SoundData
-from bot.protocols import attachment
-from bot.providers.gemini.processing import Processor, ProcessingError
+from mosfet.abilities import processing
+from mosfet.abilities.language import text
+from mosfet.environment import SoundData
+from mosfet.protocols import attachment
+from mosfet.providers.gemini.processing import Processor, ProcessingError
 
 import asyncio
 import dataclasses
@@ -14,7 +14,7 @@ import uuid
 import weakref
 
 import hsm
-import bot
+import mosfet
 import pydantic
 import pytest
 
@@ -65,7 +65,7 @@ class _ProcessForTestOwner(hsm.Instance):
             message = failure.message if hasattr(failure, "message") else str(failure)
             future.set_exception(RuntimeError(message))
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "ProcessForTestOwner",
         hsm.initial(hsm.target("/ProcessForTestOwner/recording")),
         hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
@@ -91,7 +91,7 @@ async def process_for_test(processor: Processor, input: processing.InputData) ->
     context = hsm.Context().with_value(hsm.Keys.Instances, weakref.WeakValueDictionary())
     owner = _ProcessForTestOwner(output_event=ability.output_event, failed_event=ability.failed_event)
     assert owner.model is not None
-    _ = await bot.started(context, owner, owner.model)
+    _ = await mosfet.started(context, owner, owner.model)
     _ = await ability.attach(
         context,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

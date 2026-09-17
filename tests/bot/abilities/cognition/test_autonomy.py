@@ -1,13 +1,13 @@
-from bot.abilities import cognition
-from bot.abilities import ability
-from bot.abilities import communication
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import autonomy as autonomy_module
-from bot.protocols import attachment
-from bot.behavior import storage as behavior_storage
-from bot.behavior import seed
-import bot
+from mosfet.abilities import cognition
+from mosfet.abilities import ability
+from mosfet.abilities import communication
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import autonomy as autonomy_module
+from mosfet.protocols import attachment
+from mosfet.behavior import storage as behavior_storage
+from mosfet.behavior import seed
+import mosfet
 
 import asyncio
 import ast
@@ -21,9 +21,9 @@ import typing
 import hsm
 import pytest
 
-from bot import behavior
-from bot.devices import phone as phone_device
-from bot.environment import SoundData, SoundEvent, Environment
+from mosfet import behavior
+from mosfet.devices import phone as phone_device
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.hsm_model import choice_transitions, transition_map
@@ -339,7 +339,9 @@ def test_behavior_input_payload_omits_bytes_from_base_model_stimulus() -> None:
     """Learned behavior input uses the canonical projection for non-event Pydantic stimuli."""
 
     cognition_input = cognition.InputData(
-        stimulus=bot.InputEventData(observation=bot.StimulusData(event="test.audio", data={"audio": b"raw-audio"})),
+        stimulus=mosfet.InputEventData(
+            observation=mosfet.StimulusData(event="test.audio", data={"audio": b"raw-audio"})
+        ),
     )
     payload = autonomy_module.behavior_input_payload(cognition_input)
 
@@ -484,7 +486,7 @@ def _record(ctx: hsm.Context, instance: _Owner, event: hsm.Event[typing.Any]) ->
     instance.lifecycle.append(event)
 
 
-_Owner.model = bot.define(
+_Owner.model = mosfet.define(
     "AutonomyTestOwner",
     hsm.initial(hsm.target("/AutonomyTestOwner/ready")),
     hsm.state(
@@ -512,7 +514,7 @@ class _CommunicationRecipient(hsm.Instance):
         self.received = []
 
 
-_CommunicationRecipient.model = bot.define(
+_CommunicationRecipient.model = mosfet.define(
     "AutonomyCommunicationRecipient",
     hsm.initial(hsm.target("/AutonomyCommunicationRecipient/ready")),
     hsm.state(
@@ -676,7 +678,7 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         owner = _Owner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await autonomy.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await _wait_until(lambda: autonomy.state().endswith("/idle"))
 
@@ -805,7 +807,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
         autonomy = cognition.Autonomy(memory=store)
         shared = shared_hsm_context(environment)
         await start_abilities_for_test(shared, autonomy)
-        _ = await bot.started(shared, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(shared, phone, typing.cast(hsm.Model, phone.model))
 
         firmware = phone_firmware(phone)
         assert firmware is not None
@@ -892,7 +894,7 @@ def test_autonomy_learned_candidate_cannot_select_hidden_communication_input() -
         recipient = _CommunicationRecipient()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
-        _ = await bot.started(ctx, recipient, recipient.model)
+        _ = await mosfet.started(ctx, recipient, recipient.model)
 
         base_turn = _turn()
         turn = base_turn.model_copy(

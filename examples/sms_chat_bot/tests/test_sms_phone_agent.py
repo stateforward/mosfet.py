@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import typing
 
-import bot.abilities.language.text as text_generation
+import mosfet.abilities.language.text as text_generation
 
 from sms_chat_bot_example.events import SMSMessageData
 from sms_chat_bot_example.phone import SMSPhone

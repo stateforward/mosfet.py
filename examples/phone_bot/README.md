@@ -1,6 +1,6 @@
 # phone_bot example
 
-stateforward.bot phone bot against a real LiveKit SFU: core `Phone` + LiveKit `PhoneService`,
+stateforward.mosfet phone bot against a real LiveKit SFU: core `Phone` + LiveKit `PhoneService`,
 with Mercury 2 intuition, OpenAI Terra reasoning/reflection, **local Silero VAD**,
 **local pyannote voice identity**, and **off-device Gemini** STT/TTS.
 
@@ -120,8 +120,8 @@ Any other `Encoder[bytes, bytes]` drops in — the Moonshine `SpeechEncoder` in
 | `can_talk` | Room connected **and** OpenAI + Mercury cognition keys **and** Gemini speech key |
 
 Room join alone does not require model keys; full agent talk does. VAD is local Silero
-(`mlx-community/silero-vad` via `bot-provider-mlx-audio`). Voice identity is local pyannote
-speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `bot-provider-pyannote`) so
+(`mlx-community/silero-vad` via `mosfet-provider-mlx-audio`). Voice identity is local pyannote
+speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `mosfet-provider-pyannote`) so
 Listening speech products carry non-empty `source_ids` into Conversation. STT/TTS stay off-device
 Gemini (`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
 `BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL` /

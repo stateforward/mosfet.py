@@ -1,11 +1,11 @@
-from bot.abilities.communication import conversation
-from bot.abilities import ability, decoding
-from bot.abilities import processing
-from bot.abilities.hearing import voice
-from bot.abilities.listening import interpretation
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities.communication.conversation import memory as conversation_memory
-from bot.abilities.identity import value
+from mosfet.abilities.communication import conversation
+from mosfet.abilities import ability, decoding
+from mosfet.abilities import processing
+from mosfet.abilities.hearing import voice
+from mosfet.abilities.listening import interpretation
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities.communication.conversation import memory as conversation_memory
+from mosfet.abilities.identity import value
 
 import asyncio
 import collections.abc
@@ -13,7 +13,7 @@ import dataclasses
 import typing
 
 import hsm
-import bot
+import mosfet
 import pydantic
 import pytest
 
@@ -101,7 +101,7 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
         media_type="audio/pcm",
         source_ids=frozenset({"caller"}),
     )
-    parent = bot.StimulusData[interpretation.SpeechData](
+    parent = mosfet.StimulusData[interpretation.SpeechData](
         event="bot.ability.listening.speech.output",
         data=speech,
     )
@@ -173,7 +173,7 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
             source_ids=frozenset({"caller"}),
         )
         input_data = conversation.TurnData(
-            parent=bot.StimulusData[interpretation.SpeechData](
+            parent=mosfet.StimulusData[interpretation.SpeechData](
                 event="bot.ability.listening.speech.output",
                 data=speech,
             ),
@@ -1100,8 +1100,8 @@ def test_conversation_input_rehydrates_audio_bytes_from_base64_selection() -> No
 
     import base64
 
-    from bot.event import validate_event_data
-    from bot.abilities.communication import conversation
+    from mosfet.event import validate_event_data
+    from mosfet.abilities.communication import conversation
 
     audio = bytes((0, 1, 2, 3, 4, 5, 6, 7)) * 20
     raw = {
@@ -1122,7 +1122,7 @@ def test_event_json_value_omits_unowned_raw_media() -> None:
 
     import base64
 
-    from bot import event
+    from mosfet import event
 
     # Bytes that differ between std (+/) and urlsafe (-_) alphabets.
     audio = bytes((0xFB, 0xFF, 0xFE, 0x00, 0x01, 0x02, 0x03, 0x04)) * 32
@@ -1150,8 +1150,8 @@ def test_event_json_value_omits_unowned_raw_media() -> None:
 
 
 def test_conversation_input_rejects_malformed_audio_base64() -> None:
-    from bot.abilities.communication import conversation
-    from bot.event import validate_event_data
+    from mosfet.abilities.communication import conversation
+    from mosfet.event import validate_event_data
 
     with pytest.raises(pydantic.ValidationError, match="base64"):
         validate_event_data(
@@ -1168,10 +1168,10 @@ def test_conversation_input_rejects_malformed_audio_base64() -> None:
 def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
     """SpeechData JSON dump (urlsafe) must validate as Conversation.input content."""
 
-    from bot.abilities import listening
-    from bot.abilities.communication import conversation
-    from bot.abilities.hearing import voice
-    from bot.event import validate_event_data
+    from mosfet.abilities import listening
+    from mosfet.abilities.communication import conversation
+    from mosfet.abilities.hearing import voice
+    from mosfet.event import validate_event_data
 
     audio = bytes((i % 256 for i in range(115_202)))
     speech = listening.SpeechData(
@@ -1215,10 +1215,10 @@ def test_processing_dispatch_accepts_typed_event_data_instance() -> None:
     import asyncio
 
     import hsm
-    from bot.abilities import processing
-    from bot.abilities.communication.conversation import turn_detector
-    from bot.abilities.communication import conversation
-    from bot.protocols import attachment
+    from mosfet.abilities import processing
+    from mosfet.abilities.communication.conversation import turn_detector
+    from mosfet.abilities.communication import conversation
+    from mosfet.protocols import attachment
 
     audio = bytes((9, 8, 7, 6)) * 200
     typed = conversation.TurnData(
@@ -1234,13 +1234,13 @@ def test_processing_dispatch_accepts_typed_event_data_instance() -> None:
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
         assert conv.model is not None
-        _ = await bot.started(ctx, conv, conv.model)
+        _ = await mosfet.started(ctx, conv, conv.model)
 
         class Owner(hsm.Instance):
-            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         _ = await conv.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 5
@@ -1281,11 +1281,11 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
     import base64
 
     import hsm
-    import bot
-    from bot.abilities import processing
-    from bot.abilities.communication.conversation import turn_detector
-    from bot.abilities.communication import conversation
-    from bot.protocols import attachment
+    import mosfet
+    from mosfet.abilities import processing
+    from mosfet.abilities.communication.conversation import turn_detector
+    from mosfet.abilities.communication import conversation
+    from mosfet.protocols import attachment
 
     audio = bytes((0, 64)) * 800
 
@@ -1295,13 +1295,13 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
             turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
         )
         assert conv.model is not None
-        _ = await bot.started(ctx, conv, conv.model)
+        _ = await mosfet.started(ctx, conv, conv.model)
 
         class Owner(hsm.Instance):
-            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         _ = await conv.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         # wait inactive
         loop = asyncio.get_running_loop()
@@ -1351,7 +1351,7 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
 def test_conversation_stays_active_and_offers_input_after_turn() -> None:
     """Relationship stays active across contributions; InputEvent remains offerable."""
 
-    from bot.abilities import processing
+    from mosfet.abilities import processing
 
     class IdentityDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
         @typing.override

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import bot.abilities
-from bot.abilities.communication.conversation import turn_detector
-from bot.abilities.hearing import speech
-from bot.devices import audio as audio_device
+import mosfet.abilities
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities.hearing import speech
+from mosfet.devices import audio as audio_device
 
 import asyncio
 import collections.abc
@@ -12,7 +12,7 @@ import dataclasses
 import pytest
 from livekit import rtc
 
-from bot.providers.livekit.audio import (
+from mosfet.providers.livekit.audio import (
     AudioBridge,
     AudioFrameDecoder,
     AudioFrameEncoder,
@@ -82,7 +82,7 @@ def test_livekit_audio_frame_encoder_converts_bot_audio_output_to_livekit_frame(
         num_channels=2,
         samples_per_channel=2,
     )
-    assert isinstance(encoder, bot.abilities.Encoder)
+    assert isinstance(encoder, mosfet.abilities.Encoder)
 
 
 def test_livekit_audio_frame_encoder_uses_livekit_sdk_audio_frame_by_default() -> None:
@@ -165,7 +165,7 @@ def test_livekit_audio_frame_decoder_converts_livekit_frame_to_bot_audio_input()
         sample_rate_hz=24000,
         channels=1,
     )
-    assert isinstance(decoder, bot.abilities.Decoder)
+    assert isinstance(decoder, mosfet.abilities.Decoder)
 
 
 def test_livekit_audio_source_writer_captures_bot_audio_output() -> None:
@@ -289,14 +289,14 @@ def test_livekit_voice_decoder_wraps_pcm_audio_for_injected_speech_decoder() -> 
     )
 
     assert transcript == "hello caller"
-    assert isinstance(decoder, bot.abilities.VoiceDecoder)
+    assert isinstance(decoder, mosfet.abilities.VoiceDecoder)
     assert len(speech_decoder.inputs) == 1
     assert speech_decoder.inputs[0].startswith(b"RIFF")
     assert speech_decoder.inputs[0].endswith(b"\x01\x00\x02\x00")
 
 
 def test_livekit_voice_decoder_is_not_package_root_constructable_export() -> None:
-    import bot.providers.livekit as livekit
+    import mosfet.providers.livekit as livekit
 
     assert "VoiceDecoder" not in livekit.__all__
     assert not hasattr(livekit, "VoiceDecoder")

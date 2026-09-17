@@ -1,8 +1,8 @@
 import pydantic
 import pytest
 
-from bot import abilities
-from bot.skills import Skill, SkillSource
+from mosfet import abilities
+from mosfet.skills import Skill, SkillSource
 
 
 def test_skill_defines_learned_proficiency_built_on_abilities() -> None:

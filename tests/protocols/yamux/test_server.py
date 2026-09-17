@@ -1,10 +1,10 @@
 import asyncio
 
-import bot
+import mosfet
 
-from bot.protocols.yamux.events import OpenStreamEvent, OpenStreamData
-from bot.protocols.yamux.server import Server
-from bot.protocols.yamux.session import Session
+from mosfet.protocols.yamux.events import OpenStreamEvent, OpenStreamData
+from mosfet.protocols.yamux.server import Server
+from mosfet.protocols.yamux.session import Session
 
 
 def test_server_uses_session_state_model() -> None:
@@ -16,7 +16,7 @@ def test_server_uses_session_state_model() -> None:
 def test_server_constructs_server_role_session() -> None:
     async def run() -> None:
         server = Server()
-        _ = await bot.started(None, server, server.model)
+        _ = await mosfet.started(None, server, server.model)
 
         assert server.state() == "/Session/connected/open"
 

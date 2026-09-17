@@ -5,13 +5,13 @@ product into a typed Communication input. These tests pin the descriptor contrac
 and the admit/reject behavior through public ability seams only.
 """
 
-from bot.abilities import cognition
-from bot.abilities import communication
-from bot.abilities import listening
-from bot.abilities import processing
-from bot.abilities.communication import behaviors
-from bot.abilities.communication import conversation
-from bot.abilities.hearing import voice
+from mosfet.abilities import cognition
+from mosfet.abilities import communication
+from mosfet.abilities import listening
+from mosfet.abilities import processing
+from mosfet.abilities.communication import behaviors
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.hearing import voice
 
 import asyncio
 import typing

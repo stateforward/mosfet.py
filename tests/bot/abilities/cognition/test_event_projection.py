@@ -1,7 +1,7 @@
 """Direct contract tests for cognition-owned model-facing event projections."""
 
-from bot.abilities import cognition
-from bot.environment import SoundData, SoundEvent
+from mosfet.abilities import cognition
+from mosfet.environment import SoundData, SoundEvent
 
 import typing
 

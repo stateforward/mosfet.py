@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 
-from bot.providers.openai_compat import ChatClient, TextGenerator
+from mosfet.providers.openai_compat import ChatClient, TextGenerator
 
 from . import events
 from .phone import SMSPhone

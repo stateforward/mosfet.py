@@ -1,4 +1,4 @@
-from bot.environment import SoundData, SoundEvent, VisualData, VisualEvent
+from mosfet.environment import SoundData, SoundEvent, VisualData, VisualEvent
 
 import pytest
 

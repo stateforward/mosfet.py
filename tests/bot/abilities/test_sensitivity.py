@@ -14,9 +14,9 @@ import typing
 
 import hsm
 
-from bot.abilities.listening import sensitivity
-from bot.abilities.speaking import EfferenceData, EfferenceEvent
-from bot.environment import SoundData, SoundEvent
+from mosfet.abilities.listening import sensitivity
+from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
+from mosfet.environment import SoundData, SoundEvent
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
 MOUTH = "mouth-transducer"
@@ -300,6 +300,6 @@ def test_the_window_closes_itself_and_cannot_leave_a_bot_deaf() -> None:
 def test_sensitivity_output_is_not_offerable_to_a_model() -> None:
     """A scored sound is perception's bookkeeping, never a tool a model can pick."""
 
-    from bot.abilities import processing
+    from mosfet.abilities import processing
 
     assert typing.cast(object, sensitivity.OutputEvent.kind) != processing.EventKind

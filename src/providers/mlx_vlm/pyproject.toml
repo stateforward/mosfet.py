@@ -1,12 +1,12 @@
 [project]
-name = "bot-provider-mlx-vlm"
+name = "mosfet-provider-mlx-vlm"
 dynamic = ["version"]
-description = "MLX VLM reading provider package for stateforward.bot."
+description = "MLX VLM reading provider package for stateforward.mosfet."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "mlx-vlm>=0.6.3,<0.7.0; sys_platform == 'darwin'",
-  "stateforward.bot",
+  "stateforward.mosfet",
 ]
 
 [dependency-groups]
@@ -20,14 +20,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bot"]
-exclude = ["src/bot/__init__.pyi"]
+packages = ["src/mosfet"]
+exclude = ["src/mosfet/__init__.pyi"]
 
 [tool.hatch.version]
-path = "src/bot/providers/mlx_vlm/__init__.py"
+path = "src/mosfet/providers/mlx_vlm/__init__.py"
 
 [tool.uv.sources]
-stateforward-bot = { workspace = true }
+stateforward-mosfet = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

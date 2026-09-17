@@ -1,7 +1,7 @@
-# bot-provider-moonshine
+# mosfet-provider-moonshine
 
 On-device [Moonshine Voice](https://github.com/moonshine-ai/moonshine) provider package for
-`stateforward.bot`. This package owns the `moonshine-voice` dependency and adapts Moonshine
+`stateforward.mosfet`. This package owns the `moonshine-voice` dependency and adapts Moonshine
 speech-to-text / text-to-speech into the same ability contracts used by other voice providers
 (`SpeechDecoder` for Listening speech decoding, `Encoder[bytes, bytes]` for Speaking TTS).
 
@@ -14,8 +14,8 @@ own bot focus, cognition, or phone lifecycle.
 From the workspace root:
 
 ```sh
-uv sync --package bot-provider-moonshine --group dev
-uv run --package bot-provider-moonshine --group dev python -m pytest src/providers/moonshine/tests
+uv sync --package mosfet-provider-moonshine --group dev
+uv run --package mosfet-provider-moonshine --group dev python -m pytest src/providers/moonshine/tests
 ```
 
 Default tests inject fakes so CI does not download Moonshine models. Live smoke (downloads models
@@ -23,7 +23,7 @@ on first use):
 
 ```sh
 # STT: WAV or raw int16 LE mono PCM
-BOT_MOONSHINE_SMOKE_WAV=/path/to/sample.wav uv run --package bot-provider-moonshine python - <<'PY'
+BOT_MOONSHINE_SMOKE_WAV=/path/to/sample.wav uv run --package mosfet-provider-moonshine python - <<'PY'
 import asyncio
 import os
 import pathlib
@@ -37,7 +37,7 @@ asyncio.run(main())
 PY
 
 # TTS
-uv run --package bot-provider-moonshine python - <<'PY'
+uv run --package mosfet-provider-moonshine python - <<'PY'
 import asyncio
 from bot.providers.moonshine import SpeechEncoder
 

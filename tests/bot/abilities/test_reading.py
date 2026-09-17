@@ -1,7 +1,7 @@
-from bot import abilities
-from bot.abilities import reading
-from bot.abilities import vision
-from bot.protocols import attachment
+from mosfet import abilities
+from mosfet.abilities import reading
+from mosfet.abilities import vision
+from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -11,11 +11,11 @@ import datetime
 import typing
 
 import hsm
-import bot
+import mosfet
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
-import bot.abilities.reading.reading as reading_module
+import mosfet.abilities.reading.reading as reading_module
 
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree as start_unready_ability_tree
 from tests.type_helpers import model_view, object_dict
@@ -160,7 +160,7 @@ class AttachmentOwner(hsm.Instance):
         }:
             instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model | None] = bot.define(
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "ReadingAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -290,7 +290,7 @@ def test_reading_waits_for_aggregate_attachment_completion(monkeypatch: pytest.M
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -343,7 +343,7 @@ def test_reading_reports_correlated_failure_when_attachment_group_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         started = hsm.started
 
         async def fail_group_start[T: hsm.Instance](
@@ -383,7 +383,7 @@ def test_reading_reports_correlated_attach_failure_when_reply_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         started = hsm.started
 
         async def fail_reply_start[T: hsm.Instance](
@@ -423,7 +423,7 @@ def test_reading_reports_correlated_detach_failure_when_reply_start_fails(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -480,7 +480,7 @@ def test_reading_rejects_replayed_group_terminal_when_operation_id_is_reused(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=owner), "reused-id"),
@@ -558,7 +558,7 @@ def test_reading_rolls_back_owner_after_aggregate_attachment_failure(monkeypatch
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -785,7 +785,7 @@ def test_reading_detach_timeout_reports_failure_and_preserves_owner_for_retry(
             image_decoder=StubImageDecoder(),
             output_encoder=StubOutputEncoder(),
         )
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -832,7 +832,7 @@ def test_reading_can_reattach_after_successful_group_detach() -> None:
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reading_ability = stub_reading()
-        _ = await bot.started(ctx, owner, require_model(owner.model))
+        _ = await mosfet.started(ctx, owner, require_model(owner.model))
         await reading_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(

@@ -7,8 +7,8 @@ import typing
 
 import pytest
 
-from bot.abilities.hearing import speech
-from bot.providers.moonshine import SpeechDecoder, SpeechDecodingError
+from mosfet.abilities.hearing import speech
+from mosfet.providers.moonshine import SpeechDecoder, SpeechDecodingError
 
 
 @dataclasses.dataclass(frozen=True)

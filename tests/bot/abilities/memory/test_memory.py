@@ -1,6 +1,6 @@
 """Core Memory SQL-transaction and generation contracts."""
 
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 import asyncio
 import inspect

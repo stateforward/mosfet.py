@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from bot.devices import audio as audio_device
+from mosfet.devices import audio as audio_device
 
 import asyncio
 import collections.abc
 
 import hsm
 
-import bot.providers.livekit.room_audio as room_audio_module
+import mosfet.providers.livekit.room_audio as room_audio_module
 
-from bot.providers.livekit.room_audio import (
+from mosfet.providers.livekit.room_audio import (
     RoomAudioConnectEvent,
     RoomAudioDisconnectEvent,
     RoomAudioConnectData,

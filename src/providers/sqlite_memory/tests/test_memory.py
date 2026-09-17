@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from bot.abilities import memory
+from mosfet.abilities import memory
 
 import asyncio
 import pathlib
 
-from bot.providers.sqlite_memory import (
+from mosfet.providers.sqlite_memory import (
     MEMORY_TABLE,
     MemoryStore,
     SqliteMemory,

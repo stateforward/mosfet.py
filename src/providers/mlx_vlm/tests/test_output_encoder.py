@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from bot.abilities import reading
+from mosfet.abilities import reading
 
 import asyncio
 import collections.abc
 
-import bot.abilities
+import mosfet.abilities
 
-from bot.providers.mlx_vlm import ReadingOutputEncoder
+from mosfet.providers.mlx_vlm import ReadingOutputEncoder
 
 
 async def await_output_encoding(output: collections.abc.Awaitable[reading.OutputData]) -> reading.OutputData:
@@ -21,7 +21,7 @@ def test_reading_output_encoder_returns_reading_output() -> None:
     output = asyncio.run(await_output_encoding(encoder.encode(input)))
 
     assert output == input
-    assert isinstance(encoder, bot.abilities.Encoder)
+    assert isinstance(encoder, mosfet.abilities.Encoder)
 
 
 def test_reading_output_encoder_is_awaitable() -> None:

@@ -1,6 +1,6 @@
-from bot import behavior
-from bot.behavior import source as behavior_source
-from bot.telemetry.configure import span_file, tracer_provider
+from mosfet import behavior
+from mosfet.behavior import source as behavior_source
+from mosfet.telemetry.configure import span_file, tracer_provider
 
 import collections.abc
 import concurrent.futures
@@ -11,7 +11,7 @@ import sys
 import time
 import typing
 
-import bot.telemetry
+import mosfet.telemetry
 import pytest
 from opentelemetry import _logs, trace
 
@@ -418,10 +418,10 @@ def test_parse_source_timeout_emits_evaluate_span(
     )
 
     monkeypatch.chdir(tmp_path)
-    bot.telemetry.reset()
+    mosfet.telemetry.reset()
     monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
     monkeypatch.setattr(trace, "set_tracer_provider", lambda _provider: None)
-    assert bot.telemetry.configure() is True
+    assert mosfet.telemetry.configure() is True
     try:
         with pytest.raises(behavior.SourceError, match="budget"):
             _ = behavior.parse_source(greeting_behavior_source())
@@ -438,12 +438,12 @@ def test_parse_source_timeout_emits_evaluate_span(
         assert attributes["bot.outcome"] == "failed"
         assert attributes["bot.failure.kind"] == "timeout"
     finally:
-        bot.telemetry.reset()
+        mosfet.telemetry.reset()
 
 
 def test_source_worker_module_evaluates_in_a_clean_interpreter() -> None:
     completed = subprocess.run(
-        (sys.executable, "-m", "bot.behavior.source"),
+        (sys.executable, "-m", "mosfet.behavior.source"),
         input=greeting_behavior_source().encode("utf-8"),
         capture_output=True,
         check=False,

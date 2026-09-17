@@ -1,6 +1,6 @@
-from bot import abilities
-from bot.abilities import ability as ability_mod
-from bot.abilities.hearing import voice
+from mosfet import abilities
+from mosfet.abilities import ability as ability_mod
+from mosfet.abilities.hearing import voice
 
 import asyncio
 import collections.abc

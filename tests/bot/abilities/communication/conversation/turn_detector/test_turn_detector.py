@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bot import abilities
-from bot.abilities.communication.conversation import turn_detector
+from mosfet import abilities
+from mosfet.abilities.communication.conversation import turn_detector
 
 import asyncio
 import collections.abc

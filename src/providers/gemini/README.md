@@ -1,12 +1,12 @@
-# bot-provider-gemini
+# mosfet-provider-gemini
 
-Google Gemini provider package for stateforward.bot text generation, processing, and speech.
+Google Gemini provider package for stateforward.mosfet text generation, processing, and speech.
 
 This package owns the [`google-genai`](https://googleapis.github.io/python-genai/) SDK
 dependency (2.11+). It follows current Gemini API guidance:
 
 - **Interactions API** for speech (TTS / STT) — recommended path for new features
-- **`models.generate_content`** for stateforward.bot text generation / processing (still fully
+- **`models.generate_content`** for stateforward.mosfet text generation / processing (still fully
   supported; Interactions migration for text can follow)
 
 ## Text
@@ -26,7 +26,7 @@ output = await generator.generate(
 )
 ```
 
-`Processing` turns a stateforward.bot deliberative frame into typed JSON / operation tool calls.
+`Processing` turns a stateforward.mosfet deliberative frame into typed JSON / operation tool calls.
 
 ## Speech (TTS / STT)
 
@@ -60,5 +60,5 @@ Credentials resolve from, in order: `api_key=`, `GEMINI_API_KEY`, or `GOOGLE_API
 Vertex AI: `ChatClient(vertexai=True, project=..., location=...)`.
 
 ```sh
-uv run --package bot-provider-gemini --group dev python -m pytest src/providers/gemini/tests
+uv run --package mosfet-provider-gemini --group dev python -m pytest src/providers/gemini/tests
 ```

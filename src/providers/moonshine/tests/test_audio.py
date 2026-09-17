@@ -6,7 +6,7 @@ import wave
 
 import pytest
 
-from bot.providers.moonshine._audio import (
+from mosfet.providers.moonshine._audio import (
     audio_bytes_to_float_pcm,
     float_pcm_to_int16_le,
     float_pcm_to_wav,

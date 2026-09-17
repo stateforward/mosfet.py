@@ -21,8 +21,8 @@ def test_provider_has_package_owned_dependencies() -> None:
     dependencies = typing.cast("list[str]", provider_metadata["project"]["dependencies"])
     dev_dependencies = typing.cast("list[str]", provider_metadata["dependency-groups"]["dev"])
 
-    assert provider_metadata["project"]["name"] == "bot-provider-sqlite-memory"
-    assert "stateforward.bot" in dependencies
+    assert provider_metadata["project"]["name"] == "mosfet-provider-sqlite-memory"
+    assert "stateforward.mosfet" in dependencies
     assert "sqlite-vec>=0.1.10a4,<0.2.0" not in dependencies
     assert "sqlite-vec>=0.1.10a4,<0.2.0" in dev_dependencies
     assert "sqlite-vec" not in optional_dependencies
@@ -46,7 +46,7 @@ def test_provider_builds_both_native_extensions_into_wheel() -> None:
     hook_metadata = provider_metadata["tool"]["hatch"]["build"]["hooks"]["custom"]
 
     assert (
-        "src/bot/providers/sqlite_memory/_native/*"
+        "src/mosfet/providers/sqlite_memory/_native/*"
         in provider_metadata["tool"]["hatch"]["build"]["targets"]["wheel"]["artifacts"]
     )
     assert "sqlite-vec>=0.1.10a4,<0.2.0" in hook_metadata["dependencies"]
@@ -78,12 +78,12 @@ def test_provider_version_is_dynamic() -> None:
     assert provider_project_metadata["readme"] == "README.md"
     assert "version" not in provider_project_metadata
     assert provider_project_metadata["dynamic"] == ["version"]
-    assert provider_metadata["tool"]["hatch"]["version"]["path"] == "src/bot/providers/sqlite_memory/__init__.py"
+    assert provider_metadata["tool"]["hatch"]["version"]["path"] == "src/mosfet/providers/sqlite_memory/__init__.py"
 
 
 def test_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.sqlite_memory")
+    provider_module = importlib.import_module("mosfet.providers.sqlite_memory")
     provider_version = typing.cast("object", getattr(provider_module, "__version__", None))
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-sqlite-memory")
+    assert provider_version == importlib.metadata.version("mosfet-provider-sqlite-memory")

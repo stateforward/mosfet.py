@@ -1,4 +1,4 @@
-from bot.abilities.hearing import voice
+from mosfet.abilities.hearing import voice
 
 import asyncio
 import collections.abc
@@ -13,23 +13,23 @@ import hsm
 import pydantic
 import pytest
 
-import bot.device.device as device_module
+import mosfet.device.device as device_module
 
-import bot.lifecycle
-from bot.device import Device
-from bot.protocols import attachment
-from bot.device import (
+import mosfet.lifecycle
+from mosfet.device import Device
+from mosfet.protocols import attachment
+from mosfet.device import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingFailedEvent,
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEventData,
 )
-from bot.environment import Environment
+from mosfet.environment import Environment
 from tests.hsm_instance_state import device_bots, device_firmware, device_peripherals
 from tests.hsm_model import transition_map
 from tests.type_helpers import callable_object, object_dict
 
-_DEFINE = importlib.import_module("bot.define")
+_DEFINE = importlib.import_module("mosfet.define")
 
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
@@ -48,7 +48,7 @@ async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: 
 
 async def start_device_in_environment(device: Device) -> Environment:
     environment = Environment()
-    _ = await bot.started(environment, device, require_model(device.model))
+    _ = await mosfet.started(environment, device, require_model(device.model))
     return environment
 
 
@@ -148,7 +148,7 @@ class AttachmentRecorder(hsm.Instance):
         del ctx
         instance.events.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "AttachmentRecorder",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -177,7 +177,7 @@ FIRMWARE_PROBE_EVENT = hsm.Event[_FirmwareProbeData](
 
 
 class FirmwareProbeDevice(Device):
-    firmware_model: typing.ClassVar[hsm.Model] = bot.define(
+    firmware_model: typing.ClassVar[hsm.Model] = mosfet.define(
         "FirmwareProbe",
         hsm.initial(hsm.target("idle")),
         hsm.state(
@@ -200,7 +200,7 @@ def _note_firmware_attributes(ctx: hsm.Context, instance: hsm.Instance, event: h
 class FirmwareAttributeDevice(Device):
     """Device whose firmware declares observation attributes (one scalar, one opaque object)."""
 
-    firmware_model: typing.ClassVar[hsm.Model] = bot.define(
+    firmware_model: typing.ClassVar[hsm.Model] = mosfet.define(
         "FirmwareAttributeProbe",
         hsm.attribute("current_caller"),
         hsm.attribute("debug_blob"),
@@ -406,7 +406,7 @@ def test_device_attach_rejects_started_device_from_another_environment() -> None
         device = Device()
         bot_instance = hsm.Instance()
 
-        _ = await bot.started(first_environment, device, require_model(device.model))
+        _ = await mosfet.started(first_environment, device, require_model(device.model))
 
         with pytest.raises(RuntimeError, match="Device is already started in another environment"):
             await device.attach(second_environment, attach_event(bot_instance))
@@ -421,7 +421,7 @@ def test_device_attach_dispatches_deferred_attach_during_firmware_initialization
         device = SlowInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -445,7 +445,7 @@ def test_device_detach_dispatch_is_deferred_during_firmware_initialization() -> 
         device = SlowInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(bot_instance))
         await device.detach(environment, detach_event(bot_instance))
 
@@ -530,7 +530,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         assert device.state() == "/Device/initializing"
         # hsm 1.3.2: stopped firmware has empty state and cannot take_snapshot / id.
         assert first_firmware.state() == ""
-        assert bot.lifecycle.is_started(first_firmware) is False
+        assert mosfet.lifecycle.is_started(first_firmware) is False
         del first_firmware_id, instances
 
         await device.dispatch(environment, stale_result)
@@ -547,7 +547,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
         await hsm.stop(device)
 
         assert second_firmware.state() == ""
-        assert bot.lifecycle.is_started(second_firmware) is False
+        assert mosfet.lifecycle.is_started(second_firmware) is False
 
     asyncio.run(run())
 
@@ -568,7 +568,7 @@ def test_device_attach_does_not_raise_when_firmware_initialization_fails() -> No
         device = ReleasableFailingInitializingDevice(release)
         bot_instance = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -594,7 +594,7 @@ def test_device_repeated_attach_events_are_deferred_until_firmware_failure() -> 
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(first_bot))
         await device.attach(environment, attach_event(second_bot))
 
@@ -617,8 +617,8 @@ def test_device_deferred_attach_preserves_completion_correlation() -> None:
         release = asyncio.Event()
         device = SlowInitializingDevice(release)
         requester = AttachmentRecorder()
-        _ = await bot.started(environment, requester, requester.model)
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, requester, requester.model)
+        _ = await mosfet.started(environment, device, require_model(device.model))
 
         await hsm.Instance.dispatch(
             device,
@@ -648,7 +648,7 @@ def test_device_attach_dispatch_returns_before_firmware_initialization_times_out
         device = HangingInitializingDevice()
         bot_instance = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(bot_instance))
 
         assert device.state() == "/Device/initializing"
@@ -669,7 +669,7 @@ def test_device_firmware_initialization_timeout_stops_started_firmware_child() -
         environment = Environment()
         device = HangingAfterFirmwareStartedDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await asyncio.sleep(0.02)
         await wait_until(lambda: device.state() == "/Device/failed")
 
@@ -688,7 +688,7 @@ def test_device_retains_live_firmware_ownership_when_cleanup_does_not_complete()
         environment = Environment()
         device = StopHangingStartedFirmwareDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await asyncio.sleep(0.05)
         await wait_until(lambda: device.state() == "/Device/initialization_failing")
         await asyncio.sleep(0.05)
@@ -718,7 +718,7 @@ def test_device_repeated_attach_events_are_dropped_when_firmware_initialization_
         first_bot = hsm.Instance()
         second_bot = hsm.Instance()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await device.attach(environment, attach_event(first_bot))
         await device.attach(environment, attach_event(second_bot))
 
@@ -736,7 +736,7 @@ def test_device_attach_event_is_ignored_after_firmware_initialization_failed() -
         environment = Environment()
         device = FailingInitializingDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await asyncio.sleep(0)
 
         assert device.state() == "/Device/failed"
@@ -1136,14 +1136,14 @@ def test_device_matches_started_agent_by_runtime_hsm_id() -> None:
     async def run() -> None:
         device = Device()
         bot_instance = hsm.Instance()
-        agent_model = bot.define(
+        agent_model = mosfet.define(
             "RuntimeAgent",
             hsm.initial(hsm.target("attached")),
             hsm.state("attached"),
         )
 
         environment = await start_device_in_environment(device)
-        _ = await bot.started(environment, bot_instance, agent_model, hsm.Config(id="bot-device-owner"))
+        _ = await mosfet.started(environment, bot_instance, agent_model, hsm.Config(id="bot-device-owner"))
         await device.attach(environment, attach_event(bot_instance))
         await device.dispatch(
             device.context(),
@@ -1188,7 +1188,7 @@ class ProbeFirmware(hsm.Instance):
         del ctx
         instance.receipts.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ProbeFirmware",
         hsm.initial(hsm.target("idle")),
         hsm.state("idle", hsm.transition(hsm.on(_EnvironmentProbeEvent), hsm.effect(_record))),
@@ -1209,7 +1209,7 @@ def test_device_firmware_is_addressable_but_never_a_broadcast_participant() -> N
         environment = Environment()
         device = ProbeFirmwareDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await wait_until(lambda: device_firmware(device) is not None)
         firmware = typing.cast(ProbeFirmware, device_firmware(device))
         instances = environment.value(hsm.Keys.Instances)
@@ -1253,7 +1253,7 @@ def test_device_started_in_environment_is_a_broadcast_recipient_without_a_bot() 
         environment = Environment()
         device = ProbeFirmwareDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await wait_until(lambda: device_firmware(device) is not None)
         firmware = typing.cast(ProbeFirmware, device_firmware(device))
         firmware.receipts.clear()
@@ -1278,7 +1278,7 @@ def test_restarted_device_keeps_environment_presence() -> None:
         environment = Environment()
         device = ProbeFirmwareDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await wait_until(lambda: device_firmware(device) is not None)
 
         restarted = await device.restart(environment)
@@ -1306,7 +1306,7 @@ def test_device_restart_rejects_the_devices_own_context() -> None:
         environment = Environment()
         device = ProbeFirmwareDevice()
 
-        _ = await bot.started(environment, device, require_model(device.model))
+        _ = await mosfet.started(environment, device, require_model(device.model))
         await wait_until(lambda: device_firmware(device) is not None)
 
         with pytest.raises(ValueError, match="outlives the device"):
@@ -1327,13 +1327,13 @@ def test_device_stop_powers_down_the_peripherals_it_started() -> None:
         peripheral = Device()
         owner = Device(peripherals=(peripheral,))
 
-        _ = await bot.started(environment, owner, require_model(owner.model))
-        await wait_until(lambda: bot.lifecycle.is_started(peripheral))
-        started_with_owner = bot.lifecycle.is_started(peripheral)
+        _ = await mosfet.started(environment, owner, require_model(owner.model))
+        await wait_until(lambda: mosfet.lifecycle.is_started(peripheral))
+        started_with_owner = mosfet.lifecycle.is_started(peripheral)
 
         await owner.stop(environment)
 
-        return started_with_owner, bot.lifecycle.is_started(peripheral)
+        return started_with_owner, mosfet.lifecycle.is_started(peripheral)
 
     started_with_owner, still_started = asyncio.run(run())
 
@@ -1349,10 +1349,10 @@ def test_device_start_tolerates_a_peripheral_started_before_it() -> None:
         peripheral = Device()
         owner = Device(peripherals=(peripheral,))
 
-        _ = await bot.started(environment, peripheral, require_model(peripheral.model), hsm.Config(id="pre-started"))
+        _ = await mosfet.started(environment, peripheral, require_model(peripheral.model), hsm.Config(id="pre-started"))
         before = hsm.id(peripheral)
         # Must not raise "instance already has a running HSM".
-        _ = await bot.started(environment, owner, require_model(owner.model))
+        _ = await mosfet.started(environment, owner, require_model(owner.model))
         await wait_until(lambda: owner.state() == "/Device/detached")
 
         return before, hsm.id(peripheral)
@@ -1378,9 +1378,9 @@ def test_device_start_refreshes_owner_for_a_pre_started_peripheral(
         environment = Environment()
         peripheral = Device()
         owner = Device(peripherals=(peripheral,))
-        _ = await bot.started(environment, peripheral, require_model(peripheral.model), hsm.Config(id="pre-started"))
+        _ = await mosfet.started(environment, peripheral, require_model(peripheral.model), hsm.Config(id="pre-started"))
         before = hsm.id(peripheral)
-        _ = await bot.started(environment, owner, require_model(owner.model))
+        _ = await mosfet.started(environment, owner, require_model(owner.model))
         await wait_until(lambda: owner.state() == "/Device/detached")
         return before, hsm.id(peripheral)
 
@@ -1409,10 +1409,10 @@ def test_device_stop_clears_owned_models_and_restart_republishes_owners(
         environment = Environment()
         peripheral = Device()
         owner = Device(peripherals=(peripheral,))
-        _ = await bot.started(environment, owner, require_model(owner.model))
+        _ = await mosfet.started(environment, owner, require_model(owner.model))
         await wait_until(lambda: owner.state() == "/Device/detached")
         await peripheral.stop(environment)
-        assert not bot.lifecycle.is_started(peripheral)
+        assert not mosfet.lifecycle.is_started(peripheral)
         calls.clear()
 
         await owner.stop(environment)
@@ -1457,7 +1457,7 @@ def test_device_stop_clears_its_owner_when_stopped_directly(
         environment = Environment()
         child = Device()
         owner = Device(peripherals=(child,))
-        _ = await bot.started(environment, owner, require_model(owner.model))
+        _ = await mosfet.started(environment, owner, require_model(owner.model))
         await wait_until(lambda: owner.state() == "/Device/detached")
         calls.clear()
 
@@ -1485,6 +1485,6 @@ def test_device_start_rejects_a_cycle_in_its_peripherals() -> None:
         object.__setattr__(first, "_peripherals", (second,))
 
         with pytest.raises(RuntimeError, match="cycle"):
-            _ = await bot.started(environment, first, require_model(first.model))
+            _ = await mosfet.started(environment, first, require_model(first.model))
 
     asyncio.run(run())

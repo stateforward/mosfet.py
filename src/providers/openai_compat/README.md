@@ -1,6 +1,6 @@
-# bot-provider-openai-compat
+# mosfet-provider-openai-compat
 
-OpenAI-compatible provider package for stateforward.bot text generation and processing abilities.
+OpenAI-compatible provider package for stateforward.mosfet text generation and processing abilities.
 
 ## Live Mercury tool-call eval
 
@@ -8,7 +8,7 @@ Evidence suite for Inception Mercury 2 dispatch tool calls (phone-bot intuition 
 
 ```sh
 # from repo root; requires BOT_MERCURY_API_KEY (or MERCURY_API_KEY / INCEPTION_API_KEY)
-uv run --package bot-provider-openai-compat --group dev \
+uv run --package mosfet-provider-openai-compat --group dev \
   python -m pytest src/providers/openai_compat/tests/test_mercury_tool_call_live.py -m live -v -s
 ```
 
@@ -34,5 +34,5 @@ output = await generator.generate(
 )
 ```
 
-`Processing` turns a stateforward.bot `InputData` frame into a typed output by asking the model to return JSON
+`Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.

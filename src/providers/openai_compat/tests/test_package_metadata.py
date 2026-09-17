@@ -34,9 +34,9 @@ def test_provider_has_package_owned_dependencies() -> None:
     provider_project_metadata = object_dict(provider_metadata["project"])
     dependencies = string_list(provider_project_metadata["dependencies"])
 
-    assert provider_project_metadata["name"] == "bot-provider-openai-compat"
+    assert provider_project_metadata["name"] == "mosfet-provider-openai-compat"
     assert "openai>=2.11.0,<3.0.0" in dependencies
-    assert "stateforward.bot>=0.1.0,<0.2.0" in dependencies
+    assert "stateforward.mosfet>=0.1.0,<0.2.0" in dependencies
     assert "openai-compat" not in optional_dependencies
 
 
@@ -51,12 +51,12 @@ def test_provider_version_is_dynamic() -> None:
     assert provider_project_metadata["readme"] == "README.md"
     assert "version" not in provider_project_metadata
     assert provider_project_metadata["dynamic"] == ["version"]
-    assert version_metadata["path"] == "src/bot/providers/openai_compat/__init__.py"
+    assert version_metadata["path"] == "src/mosfet/providers/openai_compat/__init__.py"
 
 
 def test_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.openai_compat")
+    provider_module = importlib.import_module("mosfet.providers.openai_compat")
     provider_version = getattr(provider_module, "__version__", None)
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-openai-compat")
+    assert provider_version == importlib.metadata.version("mosfet-provider-openai-compat")

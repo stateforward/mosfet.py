@@ -1,15 +1,15 @@
-from bot.devices import audio
+from mosfet.devices import audio
 
 import asyncio
 import collections.abc
 import typing
 
 import hsm
-import bot
+import mosfet
 
-from bot.device import Device
-from bot.protocols import attachment
-from bot.environment import SoundData, SoundEvent, Environment
+from mosfet.device import Device
+from mosfet.protocols import attachment
+from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.hsm_instance_state import device_bots, device_peripherals
 
 
@@ -49,10 +49,10 @@ def test_microphone_dispatches_audio_input_to_target_device() -> None:
     async def run() -> None:
         microphone = audio.Microphone()
         target = RecordingDevice()
-        _ = await bot.started(
+        _ = await mosfet.started(
             None, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="livekit-microphone")
         )
-        _ = await bot.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="phone-audio"))
+        _ = await mosfet.started(None, target, typing.cast(hsm.Model, target.model), hsm.Config(id="phone-audio"))
         target.events.clear()
         data = audio.InputData(audio=b"captured-audio", media_type="audio/opus", sample_rate_hz=48_000, channels=1)
 
@@ -88,13 +88,13 @@ def test_microphone_transduces_one_capture_per_environment_sound_to_each_attache
         controller = RecordingDevice()
         bystander = RecordingDevice()
 
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, bystander, typing.cast(hsm.Model, bystander.model), hsm.Config(id="bystander")
         )
         await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
@@ -138,10 +138,12 @@ def test_unattached_microphone_transduces_nothing() -> None:
         microphone = audio.Microphone()
         listener = RecordingDevice()
 
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone")
         )
-        _ = await bot.started(environment, listener, typing.cast(hsm.Model, listener.model), hsm.Config(id="listener"))
+        _ = await mosfet.started(
+            environment, listener, typing.cast(hsm.Model, listener.model), hsm.Config(id="listener")
+        )
         listener.events.clear()
 
         await environment.broadcast(
@@ -192,10 +194,10 @@ def test_microphone_mid_attach_transduces_nothing() -> None:
         microphone = HalfAttachedMicrophone()
         controller = RecordingDevice()
 
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, microphone, typing.cast(hsm.Model, microphone.model), hsm.Config(id="microphone")
         )
-        _ = await bot.started(
+        _ = await mosfet.started(
             environment, controller, typing.cast(hsm.Model, controller.model), hsm.Config(id="controller")
         )
         await microphone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))

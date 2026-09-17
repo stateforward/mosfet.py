@@ -1,11 +1,11 @@
-from bot import StimulusData
-from bot import abilities
-from bot.abilities import cognition
-from bot.abilities import listening
-from bot.abilities.hearing import sound as sound_hearing
-from bot.abilities.hearing import speech
-from bot.abilities.hearing import voice
-from bot.protocols import attachment
+from mosfet import StimulusData
+from mosfet import abilities
+from mosfet.abilities import cognition
+from mosfet.abilities import listening
+from mosfet.abilities.hearing import sound as sound_hearing
+from mosfet.abilities.hearing import speech
+from mosfet.abilities.hearing import voice
+from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -18,12 +18,12 @@ import wave
 from typing import override
 
 import hsm
-import bot
+import mosfet
 from tests.bot.abilities.support import dispatch_ability_for_test
 import pytest
 
-from bot.abilities.speaking import EfferenceData, EfferenceEvent
-from bot.environment import SoundData, SoundEvent
+from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
+from mosfet.environment import SoundData, SoundEvent
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
 
@@ -301,7 +301,7 @@ class ListeningAttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ListeningAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -726,13 +726,13 @@ def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_f
             speech_decoder=RecordingSpeechDecoder(),
         )
         owner = hsm.Instance()
-        owner_model = bot.define(
+        owner_model = mosfet.define(
             "ListeningAttachmentOwner",
             hsm.initial(hsm.target("ready")),
             hsm.state("ready"),
         )
         ctx = hsm.Context()
-        _ = await bot.started(ctx, owner, owner_model)
+        _ = await mosfet.started(ctx, owner, owner_model)
         await minimum.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -793,7 +793,7 @@ def test_listening_reports_aggregate_attachment_failure_and_accepts_retry(
         listening_ability = listening.Listening(
             voice_activity_classifier=FixedVoiceActivityClassifier(voice.detection.ApplyData(segments=()))
         )
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await listening_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -871,7 +871,7 @@ def test_listening_detaches_each_group_once_through_group_and_can_reattach(
         listening_ability = listening.Listening(
             voice_activity_classifier=FixedVoiceActivityClassifier(voice.detection.ApplyData(segments=()))
         )
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await listening_ability.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1502,7 +1502,7 @@ def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
 @pytest.mark.live
 def test_listening_decodes_real_wav_with_real_mlx_providers() -> None:
     """Exercise Listening through real MLX VAD and speech decoding providers."""
-    mlx_audio = pytest.importorskip("bot.providers.mlx_audio")
+    mlx_audio = pytest.importorskip("mosfet.providers.mlx_audio")
 
     async def run() -> cognition.InputData:
         speech_wav_path = (
@@ -1633,9 +1633,9 @@ def test_listening_failure_payload_reuses_ability_failure_message_shape() -> Non
 def test_interpretation_routes_child_output_and_preserves_wav_for_vad() -> None:
     """A public Interpretation run preserves WAV ingress while consuming typed child output."""
 
-    from bot.abilities.hearing import voice
-    from bot.abilities.listening import interpretation as interpretation_module
-    from bot.abilities.listening import sensitivity
+    from mosfet.abilities.hearing import voice
+    from mosfet.abilities.listening import interpretation as interpretation_module
+    from mosfet.abilities.listening import sensitivity
 
     class RecordingVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
         inputs: list[bytes]

@@ -1,12 +1,12 @@
 [project]
-name = "bot-provider-typesafe"
+name = "mosfet-provider-typesafe"
 dynamic = ["version"]
-description = "TypeSafe AI label-tier selection provider (system_one Choice/Score/Noul) for stateforward.bot."
+description = "TypeSafe AI label-tier selection provider (system_one Choice/Score/Noul) for stateforward.mosfet."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "typesafe-sdk>=0.6.0,<1.0.0",
-  "stateforward.bot>=0.1.0,<0.2.0",
+  "stateforward.mosfet>=0.1.0,<0.2.0",
 ]
 
 [dependency-groups]
@@ -19,16 +19,16 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-exclude = ["src/bot/__init__.pyi"]
+exclude = ["src/mosfet/__init__.pyi"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bot"]
+packages = ["src/mosfet"]
 
 [tool.hatch.version]
-path = "src/bot/providers/typesafe/__init__.py"
+path = "src/mosfet/providers/typesafe/__init__.py"
 
 [tool.uv.sources]
-stateforward-bot = { workspace = true }
+stateforward-mosfet = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -43,5 +43,5 @@ target-version = "py313"
 [tool.basedpyright]
 reportImportCycles = false
 include = ["src", "tests"]
-extraPaths = ["src", "../../../src", "../../..", "src/bot/providers/typesafe"]
+extraPaths = ["src", "../../../src", "../../..", "src/mosfet/providers/typesafe"]
 pythonVersion = "3.13"

@@ -1,5 +1,5 @@
-from bot.abilities.hearing import speech as hearing_speech
-from bot.abilities.vocal import speech as vocal_speech
+from mosfet.abilities.hearing import speech as hearing_speech
+from mosfet.abilities.vocal import speech as vocal_speech
 
 import pydantic
 

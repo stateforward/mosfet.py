@@ -1,12 +1,12 @@
-import bot
-from bot import behavior
-from bot.abilities import cognition
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities.cognition import reflection as reflection_module
-from bot.abilities.cognition.reflection import reflection as reflection_impl
-from bot.abilities.cognition.reflection import revision
-from bot.protocols import attachment
+import mosfet
+from mosfet import behavior
+from mosfet.abilities import cognition
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import reflection as reflection_module
+from mosfet.abilities.cognition.reflection import reflection as reflection_impl
+from mosfet.abilities.cognition.reflection import revision
+from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
@@ -76,7 +76,7 @@ class AttachmentOwner(hsm.Instance):
         del ctx
         instance.lifecycle.append(event)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "ReflectionAttachmentOwner",
         hsm.initial(hsm.target("recording")),
         hsm.state(
@@ -88,7 +88,7 @@ class AttachmentOwner(hsm.Instance):
             hsm.transition(hsm.on(processing.CancelledEvent), hsm.effect(_record)),
             hsm.transition(hsm.on(cognition.Reflection.output_event), hsm.effect(_record)),
             hsm.transition(hsm.on(cognition.Reflection.failed_event), hsm.effect(_record)),
-            hsm.transition(hsm.on(bot.RebootEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(mosfet.RebootEvent), hsm.effect(_record)),
         ),
     )
 
@@ -125,7 +125,7 @@ def reflection_with_processor(
 def reflection_input() -> cognition.reflection.InputData:
     return cognition.reflection.InputData(
         cognition_input=cognition.InputData(
-            stimulus=bot.InputEventData(target_device="phone", priority=0),
+            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
             abilities=(),
             actors={},
             focus=None,
@@ -142,7 +142,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         reflection = cognition.Reflection(processor=HangingProcessor(), memory=store)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         input = reflection_input()
@@ -155,7 +155,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
                     turn=turn,
                     selection=cognition.types.EventData(
                         event=behavior.CreateEvent.name,
-                        data=behavior.CreateData(name="ForgedBehavior", triggers=(bot.InputEvent.name,)).model_dump(
+                        data=behavior.CreateData(name="ForgedBehavior", triggers=(mosfet.InputEvent.name,)).model_dump(
                             mode="json"
                         ),
                     ),
@@ -187,7 +187,7 @@ def test_reflection_waits_for_direct_child_cancel_before_acknowledging() -> None
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -233,7 +233,7 @@ def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id
                     event=behavior.CreateEvent.name,
                     data=behavior.CreateData(
                         name="CancellationBehavior",
-                        triggers=(bot.InputEvent.name,),
+                        triggers=(mosfet.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
             )
@@ -241,7 +241,7 @@ def test_reflection_change_cancellation_handles_delimiter_in_parent_operation_id
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -284,7 +284,7 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
                     event=behavior.CreateEvent.name,
                     data=behavior.CreateData(
                         name="StartingCancellationBehavior",
-                        triggers=(bot.InputEvent.name,),
+                        triggers=(mosfet.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
             )
@@ -292,7 +292,7 @@ def test_reflection_change_cancellation_prevents_late_completion() -> None:
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -332,7 +332,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class StubbornProcessing(processing.Processing):
-        submodel = bot.define(
+        submodel = mosfet.define(
             "StubbornReflectionProcessing",
             hsm.initial(hsm.target("/StubbornReflectionProcessing/waiting")),
             hsm.state(
@@ -364,7 +364,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         )
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -389,7 +389,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
             ),
         )
         await wait_until(lambda: reflection.state().endswith("/rebooting"))
-        await wait_until(lambda: any(event.name == bot.RebootEvent.name for event in owner.lifecycle))
+        await wait_until(lambda: any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle))
         result = list(owner.lifecycle), reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -398,10 +398,10 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
     lifecycle, state = asyncio.run(run())
 
     failures = [event for event in lifecycle if event.name == cognition.Reflection.failed_event.name]
-    reboots = [event for event in lifecycle if event.name == bot.RebootEvent.name]
+    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert len(failures) == 1
     assert len(reboots) == 1
-    assert reboots[0].data == bot.RebootEventData(reason="cognition_child_teardown_failed")
+    assert reboots[0].data == mosfet.RebootEventData(reason="cognition_child_teardown_failed")
     assert state.endswith("/rebooting")
 
 
@@ -410,7 +410,7 @@ def test_reflection_cancel_guard_rejects_wrong_operation_and_source() -> None:
         reflection, connection = reflection_ability()
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         request_id = getattr(reflection_module.Reflection, "_child_id")(
@@ -503,7 +503,7 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -535,7 +535,7 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
                     event=behavior.CreateEvent.name,
                     data=behavior.CreateData(
                         name="TimedChangeBehavior",
-                        triggers=(bot.InputEvent.name,),
+                        triggers=(mosfet.InputEvent.name,),
                     ).model_dump(mode="json"),
                 ),
             )
@@ -543,7 +543,7 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
         reflection, connection = reflection_with_processor(processor)
         ctx = hsm.Context()
         owner = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -632,8 +632,8 @@ def test_reflection_rejects_forged_behavior_mutation_during_select() -> None:
         ctx = hsm.Context()
         owner = AttachmentOwner()
         intruder = AttachmentOwner()
-        _ = await bot.started(ctx, owner, owner.model)
-        _ = await bot.started(ctx, intruder, intruder.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, intruder, intruder.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         turn = reflection_input()
@@ -681,7 +681,7 @@ def test_reflection_waits_for_aggregate_attachment_completion(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -755,7 +755,7 @@ def test_reflection_defers_detach_during_initialization_then_detaches_once(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -852,7 +852,7 @@ def test_reflection_detaches_once_and_cancels_active_processing(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_with_processor(processor)
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -917,7 +917,7 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: reflection.state().endswith("/idle"))
         owner.lifecycle.clear()
@@ -983,7 +983,7 @@ def test_reflection_reports_aggregate_attachment_failure_and_accepts_retry(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1058,7 +1058,7 @@ def test_reflection_detaches_once_through_group_and_can_reattach(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data_and_id(
@@ -1124,7 +1124,7 @@ def test_reflection_reports_detach_failure_and_accepts_retry(
         ctx = hsm.Context()
         owner = AttachmentOwner()
         reflection, connection = reflection_ability()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         await reflection.attach(
             ctx,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),

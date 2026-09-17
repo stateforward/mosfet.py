@@ -1,4 +1,4 @@
-from bot.abilities.communication import conversation
+from mosfet.abilities.communication import conversation
 
 import asyncio
 

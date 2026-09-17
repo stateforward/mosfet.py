@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from bot.providers.elevenlabs import speech_encoder
+from mosfet.providers.elevenlabs import speech_encoder
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

@@ -35,9 +35,9 @@ def test_provider_has_package_owned_dependencies() -> None:
     root_project = object_dict(root_metadata["project"])
     optional_dependencies = object_dict(root_project.get("optional-dependencies", {}))
 
-    assert provider_project_metadata["name"] == "bot-provider-mlx-audio"
+    assert provider_project_metadata["name"] == "mosfet-provider-mlx-audio"
     assert "mlx-audio>=0.4.4,<0.5.0; sys_platform == 'darwin'" in provider_dependencies
-    assert "stateforward.bot" in provider_dependencies
+    assert "stateforward.mosfet" in provider_dependencies
     assert "mlx-audio" not in optional_dependencies
 
 
@@ -52,12 +52,12 @@ def test_provider_version_is_dynamic() -> None:
     assert provider_project_metadata["readme"] == "README.md"
     assert "version" not in provider_project_metadata
     assert provider_project_metadata["dynamic"] == ["version"]
-    assert version_metadata["path"] == "src/bot/providers/mlx_audio/__init__.py"
+    assert version_metadata["path"] == "src/mosfet/providers/mlx_audio/__init__.py"
 
 
 def test_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.mlx_audio")
+    provider_module = importlib.import_module("mosfet.providers.mlx_audio")
     provider_version = getattr(provider_module, "__version__", None)
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-mlx-audio")
+    assert provider_version == importlib.metadata.version("mosfet-provider-mlx-audio")

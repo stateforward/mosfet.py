@@ -1,7 +1,7 @@
-from bot import abilities
-from bot.abilities import generative
-from bot.abilities import memory
-from bot.abilities import processing
+from mosfet import abilities
+from mosfet.abilities import generative
+from mosfet.abilities import memory
+from mosfet.abilities import processing
 
 import asyncio
 import collections.abc
@@ -201,12 +201,12 @@ def expected_memory() -> memory.classification.GeneratedMemory:
 
 
 def test_associative_memory_contract_lives_in_associative_module() -> None:
-    assert memory.associative.AssociativeMemory.__module__ == "bot.abilities.memory.associative"
-    assert memory.associative.InputData.__module__ == "bot.abilities.memory.associative"
-    assert memory.associative.OutputData.__module__ == "bot.abilities.memory.associative"
-    assert memory.associative.AssociationData.__module__ == "bot.abilities.memory.associative"
-    assert memory.associative.LinkedData.__module__ == "bot.abilities.memory.associative"
-    assert memory.associative.Link.__module__ == "bot.abilities.memory.associative"
+    assert memory.associative.AssociativeMemory.__module__ == "mosfet.abilities.memory.associative"
+    assert memory.associative.InputData.__module__ == "mosfet.abilities.memory.associative"
+    assert memory.associative.OutputData.__module__ == "mosfet.abilities.memory.associative"
+    assert memory.associative.AssociationData.__module__ == "mosfet.abilities.memory.associative"
+    assert memory.associative.LinkedData.__module__ == "mosfet.abilities.memory.associative"
+    assert memory.associative.Link.__module__ == "mosfet.abilities.memory.associative"
 
 
 def test_associative_memory_requires_source_records() -> None:

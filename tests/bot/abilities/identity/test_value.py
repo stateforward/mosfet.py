@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from bot.abilities.identity import value
+from mosfet.abilities.identity import value
 
 
 def test_identity_values_are_hashable_and_canonical() -> None:

@@ -1,10 +1,10 @@
 """Package metadata sanity: name, version, and public surface."""
 
-import bot.providers.typesafe as package
+import mosfet.providers.typesafe as package
 
 
 def test_package_name_and_version() -> None:
-    assert package.__name__.endswith("bot.providers.typesafe")
+    assert package.__name__.endswith("mosfet.providers.typesafe")
     assert package.__version__ == "0.1.0"
 
 

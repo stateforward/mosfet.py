@@ -1,18 +1,18 @@
-from bot import abilities
-import bot.lifecycle
-import bot
-from bot.abilities import cognition
-from bot.abilities import encoding
-from bot.abilities import listening
-from bot.abilities import memory
-from bot.abilities import processing
-from bot.abilities import speaking
-from bot.abilities.cognition import Cognition
-from bot.abilities.hearing import sound as sound_hearing
-from bot.abilities.hearing import speech
-from bot.abilities.hearing import voice
-from bot.devices import audio
-from bot.devices import phone as phone_device
+from mosfet import abilities
+import mosfet.lifecycle
+import mosfet
+from mosfet.abilities import cognition
+from mosfet.abilities import encoding
+from mosfet.abilities import listening
+from mosfet.abilities import memory
+from mosfet.abilities import processing
+from mosfet.abilities import speaking
+from mosfet.abilities.cognition import Cognition
+from mosfet.abilities.hearing import sound as sound_hearing
+from mosfet.abilities.hearing import speech
+from mosfet.abilities.hearing import voice
+from mosfet.devices import audio
+from mosfet.devices import phone as phone_device
 import asyncio
 from pathlib import Path
 import collections.abc
@@ -32,15 +32,15 @@ import pytest
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_prefix_is_absent
 
-from bot.bot import Bot
-import bot.bot as bot_module
-from bot.device import Device
-from bot import event as event_contract
-from bot.event import event_json_schema
-from bot.protocols import attachment
+from mosfet.bot import Bot
+import mosfet.bot as bot_module
+from mosfet.device import Device
+from mosfet import event as event_contract
+from mosfet.event import event_json_schema
+from mosfet.protocols import attachment
 
-from bot.abilities.speaking import EfferenceData, EfferenceEvent
-from bot.environment import (
+from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
+from mosfet.environment import (
     SoundData,
     SoundEvent,
     VisualData,
@@ -68,15 +68,15 @@ def no_output(reason: str = "") -> cognition.types.OutputData:
 def focus_output(device: str, reason: str) -> cognition.types.OutputData:
     return (
         cognition.types.EventData(
-            event=bot.FocusDeviceEvent.name,
-            data=bot.FocusDeviceEventData(device=device).model_dump(),
+            event=mosfet.FocusDeviceEvent.name,
+            data=mosfet.FocusDeviceEventData(device=device).model_dump(),
             reason=reason,
         ),
     )
 
 
 def clear_output(reason: str) -> cognition.types.OutputData:
-    return (cognition.types.EventData(event=bot.ClearFocusEvent.name, reason=reason),)
+    return (cognition.types.EventData(event=mosfet.ClearFocusEvent.name, reason=reason),)
 
 
 def event_data_schema(event: hsm.Event[typing.Any]) -> dict[str, object]:
@@ -84,7 +84,7 @@ def event_data_schema(event: hsm.Event[typing.Any]) -> dict[str, object]:
 
 
 def input_priority(input: object) -> int:
-    if isinstance(input, bot.InputEventData):
+    if isinstance(input, mosfet.InputEventData):
         return input.priority
     return 0
 
@@ -480,7 +480,7 @@ _StubCancelEvent = hsm.Event[_StubCancelData](name="test.stub.cancel", schema=_S
 class _BaseStubCognition(abilities.Ability[cognition.InputData, typing.Any]):
     """Cognition stub that records cancel dispatches and never produces output."""
 
-    submodel: typing.ClassVar[hsm.Model | None] = bot.define(
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "StubCognition",
         hsm.initial(hsm.target("idle")),
         hsm.state("idle"),
@@ -515,7 +515,7 @@ class TimeoutStubCognitionAgent(Bot):
 
 class BasicAgent(Bot):
     actions: list[cognition.types.OutputData]
-    failures: list[bot.ProcessingFailedEventData]
+    failures: list[mosfet.ProcessingFailedEventData]
 
     def __init__(self, devices: collections.abc.Mapping[str, Device]) -> None:
         super().__init__(devices=devices, cognition=as_cognition(IgnoreAbility()))
@@ -524,13 +524,13 @@ class BasicAgent(Bot):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.ProcessingCompletedEvent.name:
+        if event.name == mosfet.ProcessingCompletedEvent.name:
             completed = event.data
-            assert isinstance(completed, bot.ProcessingCompletedEventData)
+            assert isinstance(completed, mosfet.ProcessingCompletedEventData)
             self.actions.append(typing.cast(cognition.types.OutputData, completed.output))
-        if event.name == bot.ProcessingFailedEvent.name:
+        if event.name == mosfet.ProcessingFailedEvent.name:
             failure = event.data
-            assert isinstance(failure, bot.ProcessingFailedEventData)
+            assert isinstance(failure, mosfet.ProcessingFailedEventData)
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
@@ -547,9 +547,9 @@ class LifecycleRecordingAgent(BasicAgent):
         if isinstance(
             event.data,
             (
-                bot.ActivatingDoneEventData,
-                bot.ActivatingFailedEventData,
-                bot.DeactivatingDoneEventData,
+                mosfet.ActivatingDoneEventData,
+                mosfet.ActivatingFailedEventData,
+                mosfet.DeactivatingDoneEventData,
             ),
         ):
             self.lifecycle_events.append(event)
@@ -581,7 +581,7 @@ class FocusedAgent(Bot):
 
 class AbilityAgent(Bot):
     actions: list[cognition.types.OutputData]
-    failures: list[bot.ProcessingFailedEventData]
+    failures: list[mosfet.ProcessingFailedEventData]
 
     def __init__(
         self,
@@ -606,13 +606,13 @@ class AbilityAgent(Bot):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.ProcessingCompletedEvent.name:
+        if event.name == mosfet.ProcessingCompletedEvent.name:
             completed = event.data
-            assert isinstance(completed, bot.ProcessingCompletedEventData)
+            assert isinstance(completed, mosfet.ProcessingCompletedEventData)
             self.actions.append(typing.cast(cognition.types.OutputData, completed.output))
-        if event.name == bot.ProcessingFailedEvent.name:
+        if event.name == mosfet.ProcessingFailedEvent.name:
             failure = event.data
-            assert isinstance(failure, bot.ProcessingFailedEventData)
+            assert isinstance(failure, mosfet.ProcessingFailedEventData)
             self.failures.append(failure)
         return super().dispatch(ctx, event)
 
@@ -662,7 +662,7 @@ class OccasionAgent(AbilityAgent):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
-        if event.name == bot.InputEvent.name:
+        if event.name == mosfet.InputEvent.name:
             self.occasions.append(event)
         return super().dispatch(ctx, event)
 
@@ -791,7 +791,7 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
     monkeypatch.setattr(hsm, "started", spy_started)
 
     async def run() -> tuple[
-        str, str, str, bool, list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]
+        str, str, str, bool, list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]
     ]:
         release = asyncio.Event()
         ability = BlockingSequenceAbility(
@@ -802,14 +802,14 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
         environment = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/processing" and len(ability.calls) == 1)
         _ = await hsm.dispatch(
             environment,
             active_bot,
             dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
+                mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_child_teardown_failed")),
                 id="reboot-turn",
                 source=hsm.id(cognition_ability),
                 target=hsm.id(active_bot),
@@ -823,7 +823,7 @@ def test_cognition_reboot_request_cycles_bot_lifecycle(
         _ = release.set()
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=4)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=4)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
         return (
@@ -880,7 +880,7 @@ def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts
             environment,
             active_bot,
             dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_detach_rollback_failed")),
+                mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_detach_rollback_failed")),
                 id="activation-reboot",
                 source=hsm.id(cognition_ability),
                 target=hsm.id(active_bot),
@@ -945,7 +945,7 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart(monke
             environment,
             active_bot,
             dataclasses.replace(
-                bot.RebootEvent.with_data(bot.RebootEventData(reason="cognition_child_teardown_failed")),
+                mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_child_teardown_failed")),
                 id="timeout-reboot",
                 source=hsm.id(cognition_ability),
                 target=hsm.id(active_bot),
@@ -1052,7 +1052,7 @@ def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it()
         environment = Environment()
         model = cognition_ability.model
         assert model is not None
-        _ = await bot.started(environment, cognition_ability, model)
+        _ = await mosfet.started(environment, cognition_ability, model)
 
         _ = await active_bot.attach(environment)
         await asyncio.sleep(0.05)
@@ -1098,10 +1098,10 @@ def test_bot_attachment_group_preserves_preexisting_device_attachment() -> None:
         active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
         environment = Environment()
 
-        _ = await bot.started(environment, active_bot, active_bot.model)
+        _ = await mosfet.started(environment, active_bot, active_bot.model)
         first_device_model = first_device.model
         assert first_device_model is not None
-        _ = await bot.started(environment, first_device, first_device_model)
+        _ = await mosfet.started(environment, first_device, first_device_model)
         await first_device.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=active_bot)),
@@ -1396,13 +1396,13 @@ async def answered_phone_in_environment() -> tuple[Environment, phone_device.Pho
     phone = phone_device.Phone()
     phone_model = phone.model
     assert phone_model is not None
-    _ = await bot.started(environment, phone, phone_model)
+    _ = await mosfet.started(environment, phone, phone_model)
     await answer_phone(phone)
     return environment, phone
 
 
 def probe_input() -> processing.InputData:
-    return processing.InputData(input=bot.InputEventData(target_device="phone", priority=0))
+    return processing.InputData(input=mosfet.InputEventData(target_device="phone", priority=0))
 
 
 def test_bot_uses_hsm_instance_identity() -> None:
@@ -1440,79 +1440,81 @@ def test_concrete_agent_can_declare_and_instantiate_innate_ability() -> None:
 
 
 def test_bot_events_use_pydantic_schemas() -> None:
-    activate_schema = object_dict(bot.ActivateEvent.schema)
-    deactivate_schema = object_dict(bot.DeactivateEvent.schema)
-    reboot_schema = object_dict(bot.RebootEvent.schema)
-    input_schema = object_dict(bot.InputEvent.schema)
-    completed_schema = object_dict(bot.ProcessingCompletedEvent.schema)
-    failed_schema = object_dict(bot.ProcessingFailedEvent.schema)
-    focus_device_schema = object_dict(bot.FocusDeviceEvent.schema)
-    clear_focus_schema = object_dict(bot.ClearFocusEvent.schema)
-    activating_done_schema = object_dict(bot.ActivatingDoneEvent.schema)
-    activating_failed_schema = object_dict(bot.ActivatingFailedEvent.schema)
-    deactivating_done_schema = object_dict(bot.DeactivatingDoneEvent.schema)
+    activate_schema = object_dict(mosfet.ActivateEvent.schema)
+    deactivate_schema = object_dict(mosfet.DeactivateEvent.schema)
+    reboot_schema = object_dict(mosfet.RebootEvent.schema)
+    input_schema = object_dict(mosfet.InputEvent.schema)
+    completed_schema = object_dict(mosfet.ProcessingCompletedEvent.schema)
+    failed_schema = object_dict(mosfet.ProcessingFailedEvent.schema)
+    focus_device_schema = object_dict(mosfet.FocusDeviceEvent.schema)
+    clear_focus_schema = object_dict(mosfet.ClearFocusEvent.schema)
+    activating_done_schema = object_dict(mosfet.ActivatingDoneEvent.schema)
+    activating_failed_schema = object_dict(mosfet.ActivatingFailedEvent.schema)
+    deactivating_done_schema = object_dict(mosfet.DeactivatingDoneEvent.schema)
 
-    assert bot.ActivateEvent.name == "bot.activate"
-    assert activate_schema == bot.ActivateEventData.model_json_schema()
+    assert mosfet.ActivateEvent.name == "bot.activate"
+    assert activate_schema == mosfet.ActivateEventData.model_json_schema()
     assert activate_schema["description"]
     assert activate_schema["examples"] == [{}]
-    assert bot.DeactivateEvent.name == "bot.deactivate"
-    assert deactivate_schema == bot.DeactivateEventData.model_json_schema()
+    assert mosfet.DeactivateEvent.name == "bot.deactivate"
+    assert deactivate_schema == mosfet.DeactivateEventData.model_json_schema()
     assert deactivate_schema["description"]
     assert deactivate_schema["examples"] == [{}]
-    assert bot.RebootEvent.name == "bot.reboot"
-    assert reboot_schema == bot.RebootEventData.model_json_schema()
+    assert mosfet.RebootEvent.name == "bot.reboot"
+    assert reboot_schema == mosfet.RebootEventData.model_json_schema()
     assert reboot_schema["description"]
     assert reboot_schema["required"] == ["reason"]
-    assert bot.InputEvent.name == "bot.input"
-    assert input_schema == bot.InputEventData.model_json_schema()
+    assert mosfet.InputEvent.name == "bot.input"
+    assert input_schema == mosfet.InputEventData.model_json_schema()
     # A device does not know its bot-local name and need not rank itself, so an occasion can be
     # reported with neither; the body resolves the device from the envelope source.
     assert "required" not in input_schema
     input_properties = typing.cast(collections.abc.Mapping[str, object], input_schema["properties"])
     assert "observation" in input_properties
     # An occasion is ingress, never a model tool: a bot cannot select having a moment.
-    assert bot.InputEvent.kind == hsm.EventKind
-    assert bot.InputEvent.kind != event_contract.EventKind
-    assert bot.FocusDeviceEvent.name == "bot.focus_device"
-    assert focus_device_schema == bot.FocusDeviceEventData.model_json_schema()
-    assert bot.ClearFocusEvent.name == "bot.clear_focus"
-    assert clear_focus_schema == bot.ClearFocusEventData.model_json_schema()
-    assert bot.ProcessingCompletedEvent.name == "bot.processing.completed"
-    assert completed_schema == bot.ProcessingCompletedEventData.model_json_schema()
+    assert mosfet.InputEvent.kind == hsm.EventKind
+    assert mosfet.InputEvent.kind != event_contract.EventKind
+    assert mosfet.FocusDeviceEvent.name == "bot.focus_device"
+    assert focus_device_schema == mosfet.FocusDeviceEventData.model_json_schema()
+    assert mosfet.ClearFocusEvent.name == "bot.clear_focus"
+    assert clear_focus_schema == mosfet.ClearFocusEventData.model_json_schema()
+    assert mosfet.ProcessingCompletedEvent.name == "bot.processing.completed"
+    assert completed_schema == mosfet.ProcessingCompletedEventData.model_json_schema()
     assert completed_schema["description"]
     assert completed_schema["required"] == ["output", "focus_candidates"]
-    assert bot.ProcessingFailedEvent.name == "bot.processing.failed"
-    assert failed_schema == bot.ProcessingFailedEventData.model_json_schema()
+    assert mosfet.ProcessingFailedEvent.name == "bot.processing.failed"
+    assert failed_schema == mosfet.ProcessingFailedEventData.model_json_schema()
     assert failed_schema["description"]
-    assert bot.ActivatingDoneEvent.name == "bot.activated"
-    assert activating_done_schema == bot.ActivatingDoneEventData.model_json_schema()
-    assert bot.ActivatingFailedEvent.name == "bot.activating.failed"
-    assert activating_failed_schema == bot.ActivatingFailedEventData.model_json_schema()
-    assert bot.DeactivatingDoneEvent.name == "bot.deactivated"
-    assert deactivating_done_schema == bot.DeactivatingDoneEventData.model_json_schema()
+    assert mosfet.ActivatingDoneEvent.name == "bot.activated"
+    assert activating_done_schema == mosfet.ActivatingDoneEventData.model_json_schema()
+    assert mosfet.ActivatingFailedEvent.name == "bot.activating.failed"
+    assert activating_failed_schema == mosfet.ActivatingFailedEventData.model_json_schema()
+    assert mosfet.DeactivatingDoneEvent.name == "bot.deactivated"
+    assert deactivating_done_schema == mosfet.DeactivatingDoneEventData.model_json_schema()
     assert deactivating_done_schema["description"]
     assert deactivating_done_schema["examples"] == [{}]
 
 
 def test_bot_input_priority_is_bounded() -> None:
-    assert bot.InputEventData(target_device="phone", priority=0).priority == 0
-    assert bot.InputEventData(target_device="phone", priority=10).priority == 10
+    assert mosfet.InputEventData(target_device="phone", priority=0).priority == 0
+    assert mosfet.InputEventData(target_device="phone", priority=10).priority == 10
 
     with pytest.raises(ValueError):
-        _ = bot.InputEventData(target_device="phone", priority=-1)
+        _ = mosfet.InputEventData(target_device="phone", priority=-1)
     with pytest.raises(ValueError):
-        _ = bot.InputEventData(target_device="phone", priority=11)
+        _ = mosfet.InputEventData(target_device="phone", priority=11)
 
 
 def test_bot_input_can_carry_typed_observation() -> None:
-    data = bot.InputEventData(
+    data = mosfet.InputEventData(
         target_device="phone",
         priority=0,
-        observation=bot.StimulusData(event="phone.incoming_call", data=HappeningData(situation="call-123")),
+        observation=mosfet.StimulusData(event="phone.incoming_call", data=HappeningData(situation="call-123")),
     )
 
-    assert data.observation == bot.StimulusData(event="phone.incoming_call", data=HappeningData(situation="call-123"))
+    assert data.observation == mosfet.StimulusData(
+        event="phone.incoming_call", data=HappeningData(situation="call-123")
+    )
 
 
 def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
@@ -1614,7 +1616,7 @@ def test_unfocused_agent_focuses_target_device_before_processing_input() -> None
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
@@ -1625,7 +1627,7 @@ def test_unfocused_agent_focuses_target_device_before_processing_input() -> None
     assert state == "/Bot/active/focused"
     assert focused_device
     assert len(calls) == 1
-    assert calls[0].input == bot.InputEventData(target_device="phone", priority=3)
+    assert calls[0].input == mosfet.InputEventData(target_device="phone", priority=3)
     assert actions == [no_output("priority:3")]
 
 
@@ -1637,7 +1639,7 @@ def test_unfocused_agent_rejects_input_from_unconfigured_target_device() -> None
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=3)),
         )
         await asyncio.sleep(0)
 
@@ -1658,7 +1660,7 @@ def test_unfocused_agent_does_not_focus_anonymous_device_type_name() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="Device", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="Device", priority=3)),
         )
         await asyncio.sleep(0)
 
@@ -1681,7 +1683,7 @@ def test_bot_copies_configured_devices_at_construction() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=3)),
         )
         await asyncio.sleep(0)
 
@@ -1702,12 +1704,12 @@ def test_bot_uses_configured_device_keys_for_processing_input() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=3)),
         )
         await asyncio.sleep(0)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
@@ -1746,12 +1748,14 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
     # First ring turn enters processing from unfocused: focus is offered, clear is not
     # (clear lives on focused + processing leaf, and entry snapshot is still unfocused).
     assert set(operations) == {
-        bot.FocusDeviceEvent.name,
+        mosfet.FocusDeviceEvent.name,
         phone_device.AnswerCallEvent.name,
         phone_device.DeclineCallEvent.name,
         cognition.types.IgnoreEvent.name,
     }
-    assert event_data_schema(operations[bot.FocusDeviceEvent.name]) == bot.FocusDeviceEventData.model_json_schema()
+    assert (
+        event_data_schema(operations[mosfet.FocusDeviceEvent.name]) == mosfet.FocusDeviceEventData.model_json_schema()
+    )
     answer_operation = operations[phone_device.AnswerCallEvent.name]
     assert event_data_schema(answer_operation) == event_json_schema(phone_device.AnswerCallEvent)
 
@@ -1784,10 +1788,10 @@ def test_bot_snapshot_merges_focused_device_transitions() -> None:
     assert phone_device.DeclineCallEvent.name not in before_focus
     # Focus is available while active; clear only when focused (or mid-processing).
     # Device call tools appear only with focus/device state.
-    assert bot.FocusDeviceEvent.name in before_focus
-    assert bot.ClearFocusEvent.name not in before_focus
-    assert bot.FocusDeviceEvent.name in after_focus
-    assert bot.ClearFocusEvent.name in after_focus
+    assert mosfet.FocusDeviceEvent.name in before_focus
+    assert mosfet.ClearFocusEvent.name not in before_focus
+    assert mosfet.FocusDeviceEvent.name in after_focus
+    assert mosfet.ClearFocusEvent.name in after_focus
     assert phone_device.AnswerCallEvent.name in after_focus
     assert phone_device.DeclineCallEvent.name in after_focus
 
@@ -1820,9 +1824,9 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert isinstance(observed_sound, phone_device.SoundData)
     assert observed_sound.caller == "Front desk"
     offered = {event.name for event in observed_browser_input.schemas}
-    assert bot.FocusDeviceEvent.name in offered
+    assert mosfet.FocusDeviceEvent.name in offered
     # Second turn while already focused: clear is on focused snapshot during processing entry.
-    assert bot.ClearFocusEvent.name in offered
+    assert mosfet.ClearFocusEvent.name in offered
     assert phone_device.AnswerCallEvent.name in offered
     assert phone_device.DeclineCallEvent.name in offered
 
@@ -2334,7 +2338,7 @@ def test_bot_preserves_trace_metadata_when_dispatching_operation_to_device() -> 
 
 
 def test_bot_routes_operation_snapshot_failure_to_processing_failed_event() -> None:
-    async def run() -> tuple[str, list[processing.InputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[processing.InputData], list[mosfet.ProcessingFailedEventData]]:
         ability = IgnoreAbility()
         phone = SnapshotFailingPhone()
         active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
@@ -2343,7 +2347,7 @@ def test_bot_routes_operation_snapshot_failure_to_processing_failed_event() -> N
         phone.fail_snapshots = True
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2365,7 +2369,7 @@ def test_bot_processing_input_includes_primary_ability_affordance() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
@@ -2385,12 +2389,12 @@ def test_focused_agent_processes_other_target_without_automatic_focus_change() -
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
 
@@ -2400,7 +2404,7 @@ def test_focused_agent_processes_other_target_without_automatic_focus_change() -
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    assert calls[1].input == bot.InputEventData(target_device="browser", priority=2)
+    assert calls[1].input == mosfet.InputEventData(target_device="browser", priority=2)
     assert actions == [no_output("priority:3"), no_output("priority:2")]
 
 
@@ -2463,7 +2467,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
         str,
         bool,
         list[cognition.types.OutputData],
-        list[bot.ProcessingFailedEventData],
+        list[mosfet.ProcessingFailedEventData],
         list[processing.InputData],
     ]:
         release = asyncio.Event()
@@ -2516,7 +2520,11 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
     # Then it finds out. The far end hanging up and its own answer landing on nothing are both
     # facts about the world that now come back to it — neither used to reach it at all, which
     # is how a bot could go on believing it had answered a call that had already ended.
-    assert [turn.input.observation.event for turn in calls[1:] if isinstance(turn.input, bot.InputEventData) and turn.input.observation] == [
+    assert [
+        turn.input.observation.event
+        for turn in calls[1:]
+        if isinstance(turn.input, mosfet.InputEventData) and turn.input.observation
+    ] == [
         phone_device.HungUpEvent.name,
         phone_device.NoCallEvent.name,
     ]
@@ -2524,7 +2532,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
 
 
 def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
                 event=phone_device.HangUpCallEvent.name,
@@ -2540,7 +2548,7 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2558,7 +2566,7 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
 
 
 def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
                 target="phone",
@@ -2578,7 +2586,7 @@ def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2596,7 +2604,7 @@ def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
 
 
 def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
                 target="browser",
@@ -2616,7 +2624,7 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2634,17 +2642,17 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
 
 
 def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
-    async def run() -> tuple[str, bool, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, bool, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
                 target="phone",
-                event=bot.FocusDeviceEvent.name,
+                event=mosfet.FocusDeviceEvent.name,
                 data={"device": "browser"},
                 reason="target mismatch",
             ),
             cognition.types.EventData(
                 target="phone",
-                event=bot.FocusDeviceEvent.name,
+                event=mosfet.FocusDeviceEvent.name,
                 data={"device": "browser"},
                 reason="target mismatch",
             ),
@@ -2654,7 +2662,7 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2673,7 +2681,7 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
 
 
 def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         data: dict[str, object] = {
             "call_id": "call-123",
             "transfer_id": "transfer-123",
@@ -2701,7 +2709,7 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.actions) and active_bot.state() == "/Bot/active/focused")
 
@@ -2728,7 +2736,7 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
 
 
 def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema() -> None:
-    async def run() -> tuple[str, list[cognition.types.OutputData], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[cognition.types.OutputData], list[mosfet.ProcessingFailedEventData]]:
         ability = SequenceAbility(
             cognition.types.EventData(
                 target="phone",
@@ -2765,7 +2773,7 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
 
@@ -2783,11 +2791,11 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
 
 
 def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_rejections() -> None:
-    async def run() -> tuple[int, list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+    async def run() -> tuple[int, list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]]:
         processor = CyclingSelectionProcessor(
-            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 0}),),
-            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={}),),
-            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 1}),),
+            (cognition.types.EventData(event=mosfet.FocusDeviceEvent.name, data={"device": 0}),),
+            (cognition.types.EventData(event=mosfet.FocusDeviceEvent.name, data={}),),
+            (cognition.types.EventData(event=mosfet.FocusDeviceEvent.name, data={"device": 1}),),
         )
         active_bot = AbilityAgent(
             devices=configured_devices("phone", "browser"),
@@ -2797,7 +2805,7 @@ def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_re
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
 
@@ -2812,10 +2820,10 @@ def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_re
 
 
 def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> None:
-    async def run() -> tuple[int, list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[int, list[mosfet.ProcessingFailedEventData]]:
         processor = CyclingSelectionProcessor(
-            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 0}),),
-            (cognition.types.EventData(event=bot.FocusDeviceEvent.name, data={"device": 1}),),
+            (cognition.types.EventData(event=mosfet.FocusDeviceEvent.name, data={"device": 0}),),
+            (cognition.types.EventData(event=mosfet.FocusDeviceEvent.name, data={"device": 1}),),
         )
         active_bot = AbilityAgent(
             devices=configured_devices("phone", "browser"),
@@ -2825,7 +2833,7 @@ def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> No
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
 
@@ -2846,7 +2854,7 @@ def test_focused_agent_dispatches_multi_event_focus_selection() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bot_has_focus(active_bot) and active_bot.state() == "/Bot/active/focused")
 
@@ -2915,17 +2923,17 @@ def test_focused_agent_ability_can_change_focus_device() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
 
@@ -2936,7 +2944,7 @@ def test_focused_agent_ability_can_change_focus_device() -> None:
     assert state == "/Bot/active/focused"
     assert inputs[2].focus == "browser"
     assert len(calls) == 3
-    assert calls[1].input == bot.InputEventData(target_device="browser", priority=1)
+    assert calls[1].input == mosfet.InputEventData(target_device="browser", priority=1)
     assert actions == [
         no_output("stay on phone"),
         focus_output("browser", "change focus"),
@@ -2964,16 +2972,16 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "stale-focus-seed",
             ),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="browser", priority=1),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="browser", priority=1),
                 "stale-focus-live",
             ),
         )
@@ -2981,7 +2989,7 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
 
         # Correct cognition source/target, wrong turn id — must not move focus.
         stale_focus = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="screen")),
+            mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="screen")),
             id="not-stale-focus-live",
             source=hsm.id(cognitive),
             target=hsm.id(active_bot),
@@ -2993,7 +3001,7 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
 
@@ -3016,7 +3024,7 @@ def test_bot_rejects_forged_focus_for_unconfigured_device() -> None:
         active_bot = basic_agent(devices={})
         _ = await start_bot_with_devices(active_bot)
         forged = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="ghost")),
+            mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="ghost")),
             metadata={"bot.focus_candidates": ("ghost",)},
         )
 
@@ -3042,23 +3050,23 @@ def test_bot_rejects_forged_focus_action_source_during_current_processing() -> N
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=1),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=1),
                 "initial-focus",
             ),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=2),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=2),
                 "current-focus-source",
             ),
         )
         await wait_until(lambda: len(cognitive.input_events) == 2)
         request = cognitive.input_events[1]
         forged = dataclasses.replace(
-            bot.ClearFocusEvent.with_data(bot.ClearFocusEventData()),
+            mosfet.ClearFocusEvent.with_data(mosfet.ClearFocusEventData()),
             id=f"{request.id}:intuition",
             source="forged-source",
             target=hsm.id(active_bot),
@@ -3078,7 +3086,7 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
         str,
         list[cognition.InputData],
         list[cognition.types.OutputData],
-        list[bot.ProcessingFailedEventData],
+        list[mosfet.ProcessingFailedEventData],
     ]:
         ability = SequenceAbility(
             no_output("stay on phone"),
@@ -3092,17 +3100,17 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
 
@@ -3131,12 +3139,12 @@ def test_focused_agent_ability_can_clear_focus() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=5)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=5)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
 
@@ -3147,7 +3155,7 @@ def test_focused_agent_ability_can_clear_focus() -> None:
     assert state == "/Bot/active/unfocused"
     assert not focused_device
     assert len(calls) == 2
-    assert calls[1].input == bot.InputEventData(target_device="phone", priority=5)
+    assert calls[1].input == mosfet.InputEventData(target_device="phone", priority=5)
     assert actions == [no_output("stay on phone"), clear_output("done")]
 
 
@@ -3160,13 +3168,13 @@ def test_bot_processing_state_defers_repeated_input_until_processing_completes()
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
         )
         await wait_until(lambda: ability.calls == [1])
 
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         assert ability.calls == [1]
         _ = release.set()
@@ -3190,15 +3198,15 @@ def test_bot_focus_change_during_processing_does_not_swallow_completion() -> Non
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "processing-focus-change",
             ),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/processing")
 
         focus = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser")),
+            mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="browser")),
             metadata={"bot.focus_candidates": ("phone", "browser")},
         )
         await active_bot.dispatch(active_bot.context(), focus)
@@ -3232,7 +3240,7 @@ def test_bot_processing_state_defers_observed_phone_event_until_processing_compl
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/processing")
 
@@ -3248,7 +3256,7 @@ def test_bot_processing_state_defers_observed_phone_event_until_processing_compl
     state, calls, actions = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert calls[0].input == bot.InputEventData(target_device="phone", priority=1)
+    assert calls[0].input == mosfet.InputEventData(target_device="phone", priority=1)
     assert_heard_phone_ring(calls[1].input)
     assert actions == [
         no_output("initial"),
@@ -3270,7 +3278,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/processing")
 
@@ -3288,7 +3296,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
 
     assert state == "/Bot/active/focused"
     assert len(calls) == 1
-    assert calls[0].input == bot.InputEventData(target_device="phone", priority=1)
+    assert calls[0].input == mosfet.InputEventData(target_device="phone", priority=1)
     assert actions == [no_output("initial")]
 
 
@@ -3309,18 +3317,18 @@ def test_deferred_input_replays_after_focus_device_completion() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
 
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/processing")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         assert len(ability.calls) == 2
         _ = release.set()
@@ -3332,7 +3340,7 @@ def test_deferred_input_replays_after_focus_device_completion() -> None:
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    assert calls[2].input == bot.InputEventData(target_device="phone", priority=3)
+    assert calls[2].input == mosfet.InputEventData(target_device="phone", priority=3)
     assert actions == [
         no_output("initial focus"),
         focus_output("browser", "change focus"),
@@ -3357,18 +3365,18 @@ def test_deferred_input_replays_after_clear_focus_completion() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
 
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/processing")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=3)),
         )
         assert len(ability.calls) == 2
         _ = release.set()
@@ -3380,7 +3388,7 @@ def test_deferred_input_replays_after_clear_focus_completion() -> None:
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    assert calls[2].input == bot.InputEventData(target_device="browser", priority=3)
+    assert calls[2].input == mosfet.InputEventData(target_device="browser", priority=3)
     assert actions == [
         no_output("initial focus"),
         clear_output("clear before replay"),
@@ -3394,7 +3402,7 @@ def test_bot_processing_state_rejects_malformed_input_event_data() -> None:
         active_bot = AbilityAgent(devices={}, cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
-        malformed = bot.InputEvent.with_data(typing.cast(bot.InputEventData, object()))
+        malformed = mosfet.InputEvent.with_data(typing.cast(mosfet.InputEventData, object()))
         await active_bot.dispatch(active_bot.context(), malformed)
         await asyncio.sleep(0)
 
@@ -3407,13 +3415,13 @@ def test_bot_processing_state_rejects_malformed_input_event_data() -> None:
 
 
 def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
-    async def run() -> tuple[str, list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+    async def run() -> tuple[str, list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]]:
         active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=FailingAbility())
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
 
@@ -3436,7 +3444,7 @@ def test_bot_processing_terminal_finishes_operation_timer_actor(fails: bool) -> 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(bot.InputEventData(target_device="phone", priority=3), "timer-turn"),
+            mosfet.InputEvent.with_data_and_id(mosfet.InputEventData(target_device="phone", priority=3), "timer-turn"),
         )
         await wait_until(lambda: bool(cognition_ability.input_events))
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
@@ -3458,8 +3466,8 @@ def test_bot_rejects_stale_processing_completion_for_blocked_turn() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "live-turn",
             ),
         )
@@ -3467,8 +3475,8 @@ def test_bot_rejects_stale_processing_completion_for_blocked_turn() -> None:
 
         # Correct endpoints, wrong turn id: topology alone must not complete the live turn.
         stale = dataclasses.replace(
-            bot.ProcessingCompletedEvent.with_data(
-                bot.ProcessingCompletedEventData(output=no_output("stale"), focus_candidates=("phone",))
+            mosfet.ProcessingCompletedEvent.with_data(
+                mosfet.ProcessingCompletedEventData(output=no_output("stale"), focus_candidates=("phone",))
             ),
             id="stale-operation",
             source=hsm.id(cognition_ability),
@@ -3497,8 +3505,8 @@ def test_bot_rejects_stale_cognition_output_with_correct_endpoints() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "live-output-turn",
             ),
         )
@@ -3540,22 +3548,22 @@ def test_bot_rejects_focus_for_wrong_turn_id_during_processing() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=1),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=1),
                 "focus-seed",
             ),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and len(cognitive.inputs) == 1)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=2),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=2),
                 "focus-live-turn",
             ),
         )
         await wait_until(lambda: len(cognitive.inputs) == 2 and active_bot.state() == "/Bot/active/processing")
         forged = dataclasses.replace(
-            bot.FocusDeviceEvent.with_data(bot.FocusDeviceEventData(device="browser")),
+            mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="browser")),
             id="not-focus-live-turn",
             source=hsm.id(cognitive),
             target=hsm.id(active_bot),
@@ -3566,7 +3574,7 @@ def test_bot_rejects_focus_for_wrong_turn_id_during_processing() -> None:
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(cognitive.inputs) == 3 and active_bot.state() == "/Bot/active/focused")
         return active_bot.state(), cognitive.inputs[2].focus
@@ -3584,8 +3592,8 @@ def test_bot_rejects_cancelled_with_wrong_token() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "cancel-token-turn",
             ),
         )
@@ -3614,16 +3622,16 @@ def test_bot_rejects_current_processing_terminal_from_wrong_endpoint(wrong_endpo
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data_and_id(
-                bot.InputEventData(target_device="phone", priority=3),
+            mosfet.InputEvent.with_data_and_id(
+                mosfet.InputEventData(target_device="phone", priority=3),
                 "current-operation",
             ),
         )
         await wait_until(lambda: bool(cognition_ability.input_events))
         request = cognition_ability.input_events[0]
         forged = dataclasses.replace(
-            bot.ProcessingCompletedEvent.with_data(
-                bot.ProcessingCompletedEventData(output=no_output("forged"), focus_candidates=("phone",))
+            mosfet.ProcessingCompletedEvent.with_data(
+                mosfet.ProcessingCompletedEventData(output=no_output("forged"), focus_candidates=("phone",))
             ),
             id=request.id,
             source="forged-source" if wrong_endpoint == "source" else hsm.id(cognition_ability),
@@ -3639,7 +3647,7 @@ def test_bot_rejects_current_processing_terminal_from_wrong_endpoint(wrong_endpo
 
 def test_bot_processing_state_times_out_hanging_ability() -> None:
     async def run() -> tuple[
-        str, bool, str | None, list[int], list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]
+        str, bool, str | None, list[int], list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]
     ]:
         ability = CancellableHangingAbility()
         # First turn hangs forever (timeout cancels). Second turn returns immediately; use a
@@ -3649,12 +3657,12 @@ def test_bot_processing_state_times_out_hanging_ability() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and ability.cancelled)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=4)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=4)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
 
@@ -3680,14 +3688,14 @@ def test_bot_processing_state_times_out_hanging_ability() -> None:
 
 
 def test_bot_processing_timeout_recovery_finishes_cancellation() -> None:
-    async def run() -> tuple[str, bool, list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, bool, list[mosfet.ProcessingFailedEventData]]:
         ability = CancellableHangingAbility()
         active_bot = TimeoutAbilityAgent(devices=configured_devices("phone"), cognition=ability)
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await asyncio.sleep(0.05)
 
@@ -3702,14 +3710,14 @@ def test_bot_processing_timeout_recovery_finishes_cancellation() -> None:
 
 
 def test_bot_processing_cancellation_timeout_fails_closed_and_rejects_next_turn() -> None:
-    async def run() -> tuple[str, list[int], list[bot.ProcessingFailedEventData]]:
+    async def run() -> tuple[str, list[int], list[mosfet.ProcessingFailedEventData]]:
         processor = CancellableHangingProcessor()
         cognition_ability = CapturingCognition(processor, swallow_cancel=True)
         active_bot = TimeoutAbilityAgent(devices=configured_devices("phone"), cognition=cognition_ability)
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         for _ in range(100):
             if active_bot.state() == "/Bot/degraded":
@@ -3717,7 +3725,7 @@ def test_bot_processing_cancellation_timeout_fails_closed_and_rejects_next_turn(
             await asyncio.sleep(0.002)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=4)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=4)),
         )
         await asyncio.sleep(0.01)
         return active_bot.state(), processor.calls, active_bot.failures
@@ -3745,12 +3753,12 @@ def test_completed_turn_cancels_processing_timer(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(hsm, "started", spy_started)
 
-    async def run() -> tuple[list[bot.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+    async def run() -> tuple[list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]]:
         active_bot = QuickTimeoutAgent(devices=configured_devices("phone"), cognition=IgnoreAbility())
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and bool(active_bot.actions))
         await asyncio.sleep(0.05)  # well past the 20ms turn timeout
@@ -3775,7 +3783,7 @@ def test_bot_timeout_cancel_uses_cognition_cancel_event_contract() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(cognition_ability.received))
         return cognition_ability.received
@@ -3796,7 +3804,7 @@ def test_bot_timeout_cancel_falls_back_to_processing_cancel_event() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(cognition_ability.received))
         return cognition_ability.received
@@ -3856,10 +3864,10 @@ def test_bot_activation_emits_correlated_public_completion_after_attachment() ->
     async def run() -> hsm.Event[typing.Any]:
         active_bot = LifecycleRecordingAgent(devices={"phone": Device()})
         environment = Environment()
-        _ = await bot.started(environment, active_bot, active_bot.model)
+        _ = await mosfet.started(environment, active_bot, active_bot.model)
         environment.join(active_bot)
         request = dataclasses.replace(
-            bot.ActivateEvent.with_data(bot.ActivateEventData()),
+            mosfet.ActivateEvent.with_data(mosfet.ActivateEventData()),
             id="activation-request",
             source="activation-owner",
             target=hsm.id(active_bot),
@@ -3874,7 +3882,7 @@ def test_bot_activation_emits_correlated_public_completion_after_attachment() ->
 
     terminal = asyncio.run(run())
 
-    assert isinstance(terminal.data, bot.ActivatingDoneEventData)
+    assert isinstance(terminal.data, mosfet.ActivatingDoneEventData)
     assert terminal.id == "activation-request"
     assert terminal.source == terminal.target
     assert terminal.source
@@ -3894,7 +3902,7 @@ def test_bot_activation_emits_public_failure_without_public_completion() -> None
     terminals = asyncio.run(run())
 
     assert len(terminals) == 1
-    assert isinstance(terminals[0].data, bot.ActivatingFailedEventData)
+    assert isinstance(terminals[0].data, mosfet.ActivatingFailedEventData)
 
 
 def test_bot_deactivation_emits_correlated_public_completion_after_cleanup() -> None:
@@ -3903,7 +3911,7 @@ def test_bot_deactivation_emits_correlated_public_completion_after_cleanup() -> 
         environment = await start_bot_with_devices(active_bot)
         active_bot.lifecycle_events.clear()
         request = dataclasses.replace(
-            bot.DeactivateEvent.with_data(bot.DeactivateEventData()),
+            mosfet.DeactivateEvent.with_data(mosfet.DeactivateEventData()),
             id="deactivation-request",
             source="deactivation-owner",
             target=hsm.id(active_bot),
@@ -3918,7 +3926,7 @@ def test_bot_deactivation_emits_correlated_public_completion_after_cleanup() -> 
 
     terminal = asyncio.run(run())
 
-    assert isinstance(terminal.data, bot.DeactivatingDoneEventData)
+    assert isinstance(terminal.data, mosfet.DeactivatingDoneEventData)
     assert terminal.id == "deactivation-request"
     assert terminal.source == terminal.target
     assert terminal.source
@@ -3988,7 +3996,7 @@ def test_bot_deactivation_clears_focus() -> None:
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bot_has_focus(active_bot))
 
@@ -4018,18 +4026,18 @@ def test_bot_deactivation_stops_input_output_abilities() -> None:
             output=(output_ability,),
         )
         environment = await start_bot_with_devices(active_bot)
-        assert bot.lifecycle.is_started(input_ability) is True
-        assert bot.lifecycle.is_started(output_ability) is True
-        assert bot.lifecycle.is_started(cognition_ability) is True
+        assert mosfet.lifecycle.is_started(input_ability) is True
+        assert mosfet.lifecycle.is_started(output_ability) is True
+        assert mosfet.lifecycle.is_started(cognition_ability) is True
 
         _ = await active_bot.detach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive")
 
         return (
-            bot.lifecycle.is_started(input_ability),
-            bot.lifecycle.is_started(output_ability),
-            bot.lifecycle.is_started(cognition_ability),
-            bot.lifecycle.is_started(active_bot),
+            mosfet.lifecycle.is_started(input_ability),
+            mosfet.lifecycle.is_started(output_ability),
+            mosfet.lifecycle.is_started(cognition_ability),
+            mosfet.lifecycle.is_started(active_bot),
         )
 
     input_live, output_live, cognition_live, bot_live = asyncio.run(run())
@@ -4048,9 +4056,9 @@ def test_bot_focus_state_has_no_public_accessor() -> None:
 
 
 def test_bot_core_does_not_import_device_audio_events() -> None:
-    import bot
+    import mosfet
 
-    assert bot.InputEvent.name == "bot.input"
+    assert mosfet.InputEvent.name == "bot.input"
     assert not hasattr(bot_module, "OutputEvent")
     assert not hasattr(bot_module, "_RAW_AUDIO_EVENT_NAMES")
     assert "bot.devices.audio" not in Path(bot_module.__file__).read_text()
@@ -4125,7 +4133,7 @@ def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
         environment = Environment()
         started_device_model = started_device.model
         assert started_device_model is not None
-        _ = await bot.started(environment, started_device, started_device_model)
+        _ = await mosfet.started(environment, started_device, started_device_model)
         _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         await wait_until(lambda: device_bots(started_device) == (active_bot,))
@@ -4297,7 +4305,7 @@ async def somebody_speaks(
     """
 
     mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
-    _ = await bot.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
+    _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
     voice = speaking.Speaking(
         encoder=UtteranceEncoder(),
         speaker=mouth,
@@ -4716,7 +4724,7 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
     different content and both are worth exactly one turn.
     """
 
-    async def run() -> tuple[list[processing.InputData], list[bot.ProcessingFailedEventData], str]:
+    async def run() -> tuple[list[processing.InputData], list[mosfet.ProcessingFailedEventData], str]:
         ability = IgnoreAbility()
         device = ReportingDevice()
         active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
@@ -4736,16 +4744,16 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
     turns, failures, state = asyncio.run(run())
 
     stimulus = turns[0].input
-    assert isinstance(stimulus, bot.InputEventData)
+    assert isinstance(stimulus, mosfet.InputEventData)
     # What happened rode along; what to do about it did not.
-    assert stimulus.observation == bot.StimulusData(
+    assert stimulus.observation == mosfet.StimulusData(
         event=HappeningEvent.name,
         data=HappeningData(situation="became one thing"),
         id="",
         source="",
         target="",
     )
-    assert set(bot.InputEventData.model_fields) == {"target_device", "priority", "observation"}
+    assert set(mosfet.InputEventData.model_fields) == {"target_device", "priority", "observation"}
     # Doing nothing twice is not a failure, and the body is left exactly where it started.
     assert failures == []
     assert state == "/Bot/inactive"
@@ -4793,7 +4801,7 @@ def test_a_happening_during_a_busy_turn_is_still_waiting_afterwards() -> None:
     never.
     """
 
-    async def run() -> tuple[int, list[bot.ProcessingFailedEventData], str]:
+    async def run() -> tuple[int, list[mosfet.ProcessingFailedEventData], str]:
         release = asyncio.Event()
         ability = BlockingAbility(release=release)
         device = ReportingDevice()
@@ -4886,16 +4894,16 @@ def test_body_handles_device_reports_in_arrival_order_regardless_of_priority() -
     turns = asyncio.run(run())
 
     assert len(turns) == 2
-    assert isinstance(turns[0].input, bot.InputEventData)
-    assert isinstance(turns[1].input, bot.InputEventData)
-    assert turns[0].input.observation == bot.StimulusData(
+    assert isinstance(turns[0].input, mosfet.InputEventData)
+    assert isinstance(turns[1].input, mosfet.InputEventData)
+    assert turns[0].input.observation == mosfet.StimulusData(
         event=HappeningEvent.name,
         data=HappeningData(situation="background thought"),
         id="",
         source="",
         target="",
     )
-    assert turns[1].input.observation == bot.StimulusData(
+    assert turns[1].input.observation == mosfet.StimulusData(
         event=HappeningEvent.name,
         data=HappeningData(situation="urgent ring"),
         id="",
@@ -4961,7 +4969,7 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
         list[cognition.InputData],
         list[processing.InputData],
         list[cognition.types.OutputData],
-        list[bot.ProcessingFailedEventData],
+        list[mosfet.ProcessingFailedEventData],
     ]:
         ability = SequenceAbility(
             no_output("stay on phone"),
@@ -4974,17 +4982,17 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
         environment = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=3)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
         await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/unfocused")
         await active_bot.dispatch(
             active_bot.context(),
-            bot.InputEvent.with_data(bot.InputEventData(target_device="browser", priority=1)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
         await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
         result = (
@@ -5034,7 +5042,7 @@ def _socket_guarded_import_probe() -> str:
         "    raise RuntimeError('network blocked during import')\n"
         "socket.create_connection = _blocked_create_connection\n"
         "http.client.HTTPConnection.connect = _blocked_http_connect\n"
-        "import bot\n"
+        "import mosfet\n"
     )
 
 
@@ -5060,7 +5068,7 @@ def test_importing_bot_opens_zero_connections_without_publish_opt_in(tmp_path: P
 
     Model definition runs at import time, so ``define`` must not publish implicitly:
     with an OTLP endpoint configured (publish path armed) and connections blocked,
-    ``import bot`` succeeds without a single connection attempt. Setting
+    ``import mosfet`` succeeds without a single connection attempt. Setting
     ``BOT_MODEL_PUBLISH=1`` re-arms the explicit path (attempt recorded, still
     non-fatal to the import).
     """
@@ -5079,7 +5087,7 @@ def test_importing_bot_opens_zero_connections_without_publish_opt_in(tmp_path: P
 def test_model_publish_opt_in_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Model publishing is explicit: only ``BOT_MODEL_PUBLISH=1`` enables it."""
 
-    from bot.define import model_publish_enabled
+    from mosfet.define import model_publish_enabled
 
     monkeypatch.delenv("BOT_MODEL_PUBLISH", raising=False)
     assert model_publish_enabled() is False

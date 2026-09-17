@@ -37,9 +37,9 @@ def test_provider_has_package_owned_dependencies() -> None:
     root_project = object_dict(root_metadata["project"])
     optional_dependencies = object_dict(root_project.get("optional-dependencies", {}))
 
-    assert provider_project_metadata["name"] == "bot-provider-elevenlabs"
+    assert provider_project_metadata["name"] == "mosfet-provider-elevenlabs"
     assert "elevenlabs>=2.49.0,<3.0.0" in provider_dependencies
-    assert "stateforward.bot" in provider_dependencies
+    assert "stateforward.mosfet" in provider_dependencies
     assert "elevenlabs" not in optional_dependencies
 
 
@@ -55,12 +55,12 @@ def test_provider_version_is_dynamic() -> None:
     provider_hatch_metadata = object_dict(provider_tool_metadata["hatch"])
     provider_version_metadata = object_dict(provider_hatch_metadata["version"])
 
-    assert provider_version_metadata["path"] == "src/bot/providers/elevenlabs/__init__.py"
+    assert provider_version_metadata["path"] == "src/mosfet/providers/elevenlabs/__init__.py"
 
 
 def test_provider_version_matches_installed_metadata() -> None:
-    provider_module = importlib.import_module("bot.providers.elevenlabs")
+    provider_module = importlib.import_module("mosfet.providers.elevenlabs")
     provider_version = getattr(provider_module, "__version__", None)
 
     assert isinstance(provider_version, str)
-    assert provider_version == importlib.metadata.version("bot-provider-elevenlabs")
+    assert provider_version == importlib.metadata.version("mosfet-provider-elevenlabs")

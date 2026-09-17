@@ -5,7 +5,7 @@ import pathlib
 
 # Flat allowlist keyed by stable relative paths:
 # - bot production: relative to src/bot (e.g. abilities/processing.py)
-# - provider production: relative to src/ (e.g. providers/livekit/src/bot/providers/livekit/phone.py)
+# - provider production: relative to src/ (e.g. providers/livekit/src/mosfet/providers/livekit/phone.py)
 # Only production .py under those roots is scanned (provider package tests and
 # hatch/vendor trees outside each provider's src/ are excluded).
 _LEGACY_COORDINATION_METADATA_REFERENCES: dict[str, dict[str, int]] = {

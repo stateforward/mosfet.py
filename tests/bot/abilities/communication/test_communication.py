@@ -9,22 +9,22 @@ import datetime
 import typing
 
 import hsm
-import bot
+import mosfet
 import hsm.muid as muid
 import pytest
 
-from bot.abilities import communication
-from bot.abilities.communication import conversation
-from bot.abilities import decoding
-from bot.abilities import encoding
-from bot.abilities import processing
-from bot.abilities import speaking
-from bot.abilities.communication.conversation import turn_detector
-from bot import event
-from bot import StimulusData
-from bot.abilities import ability
-from bot.protocols import attachment
-from bot.environment import Environment
+from mosfet.abilities import communication
+from mosfet.abilities.communication import conversation
+from mosfet.abilities import decoding
+from mosfet.abilities import encoding
+from mosfet.abilities import processing
+from mosfet.abilities import speaking
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet import event
+from mosfet import StimulusData
+from mosfet.abilities import ability
+from mosfet.protocols import attachment
+from mosfet.environment import Environment
 from tests.hsm_instance_state import start_ability_tree
 from tests.hsm_model import transition_map
 
@@ -79,7 +79,7 @@ class TerminalCollector(hsm.Instance):
         del ctx
         instance.events.append(event)
 
-    model = bot.define(
+    model = mosfet.define(
         "TerminalCollector",
         hsm.initial(hsm.target("/TerminalCollector/recording")),
         hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
@@ -202,8 +202,8 @@ def test_communication_respond_surfaces_speaking_failure() -> None:
         assert collector_model is not None
         comm_model = comm.model
         assert comm_model is not None
-        await bot.started(ctx, collector, collector_model)
-        await bot.started(ctx, comm, comm_model)
+        await mosfet.started(ctx, collector, collector_model)
+        await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -247,8 +247,8 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
         comm_model = comm.model
         assert collector_model is not None
         assert comm_model is not None
-        _ = await bot.started(ctx, collector, collector_model)
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, collector, collector_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         monkeypatch.setattr(muid, "make", lambda: "")
@@ -314,8 +314,8 @@ def test_communication_response_timeout_recovers_after_non_returning_encoder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> tuple[str, str, list[ability.FailureData]]:
-        from bot.abilities.communication import communication as communication_source
-        from bot.abilities.speaking import speaking as speaking_source
+        from mosfet.abilities.communication import communication as communication_source
+        from mosfet.abilities.speaking import speaking as speaking_source
 
         monkeypatch.setattr(speaking_source, "_ENCODING_TIMEOUT", datetime.timedelta(milliseconds=10))
         monkeypatch.setattr(communication_source, "_RESPONSE_TIMEOUT", datetime.timedelta(milliseconds=20))
@@ -326,10 +326,10 @@ def test_communication_response_timeout_recovers_after_non_returning_encoder(
         collector = TerminalCollector()
 
         await start_ability_tree(ctx, speaker)
-        _ = await bot.started(ctx, collector, collector.model)
+        _ = await mosfet.started(ctx, collector, collector.model)
         comm_model = comm.model
         assert comm_model is not None
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -361,7 +361,7 @@ def test_communication_settled_speaking_terminal_is_not_abandoned_by_responding_
     """A speaking hop that has already settled must take the success path when the deadline is due."""
 
     async def run() -> tuple[str, list[bytes], list[ability.FailureData]]:
-        from bot.abilities.communication import communication as communication_source
+        from mosfet.abilities.communication import communication as communication_source
 
         monkeypatch.setattr(communication_source, "_RESPONSE_TIMEOUT", datetime.timedelta(milliseconds=50))
         ctx = Environment()
@@ -372,10 +372,10 @@ def test_communication_settled_speaking_terminal_is_not_abandoned_by_responding_
         collector = TerminalCollector()
 
         await start_ability_tree(ctx, speaker)
-        _ = await bot.started(ctx, collector, collector.model)
+        _ = await mosfet.started(ctx, collector, collector.model)
         comm_model = comm.model
         assert comm_model is not None
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -414,8 +414,8 @@ def test_communication_rejects_success_terminal_with_wrong_target() -> None:
         comm_model = comm.model
         assert collector_model is not None
         assert comm_model is not None
-        _ = await bot.started(ctx, collector, collector_model)
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, collector, collector_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -464,8 +464,8 @@ def test_communication_rejects_failure_terminal_with_wrong_target() -> None:
         comm_model = comm.model
         assert collector_model is not None
         assert comm_model is not None
-        _ = await bot.started(ctx, collector, collector_model)
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, collector, collector_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -528,7 +528,7 @@ def test_communication_activate_event_while_inactive() -> None:
         )
         model = ability.submodel
         assert model is not None
-        _ = await bot.started(ctx, ability, model)
+        _ = await mosfet.started(ctx, ability, model)
         await _wait_until(lambda: "inactive" in (ability.state() or ""))
         _ = await hsm.dispatch(
             ctx,
@@ -552,13 +552,13 @@ def test_communication_activate_ignored_while_engaged() -> None:
         speaker = speaking.Speaking(encoder=RecordingEncoder())
         ability = communication.Communication(active_conversation=first, speaking=speaker)
         assert ability.model is not None
-        _ = await bot.started(ctx, ability, ability.model)
+        _ = await mosfet.started(ctx, ability, ability.model)
 
         class Owner(hsm.Instance):
-            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         _ = await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await _wait_until(lambda: "/behavior/active" in (ability.state() or ""))
         _ = await hsm.dispatch(
@@ -639,8 +639,8 @@ def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
         assert collector_model is not None
         comm_model = comm.model
         assert comm_model is not None
-        _ = await bot.started(ctx, collector, collector_model)
-        _ = await bot.started(ctx, comm, comm_model)
+        _ = await mosfet.started(ctx, collector, collector_model)
+        _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         await hsm.dispatch(
@@ -701,13 +701,13 @@ def test_conversation_input_enabled_while_active() -> None:
             turn_detector=turn_detector.TurnDetector(decoder=HangingDecoder()),
         )
         assert hung.model is not None
-        _ = await bot.started(ctx, hung, hung.model)
+        _ = await mosfet.started(ctx, hung, hung.model)
 
         class Owner(hsm.Instance):
-            model = bot.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
+            model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
 
         owner = Owner()
-        _ = await bot.started(ctx, owner, owner.model)
+        _ = await mosfet.started(ctx, owner, owner.model)
         _ = await hung.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await _wait_until(lambda: (hung.state() or "").endswith("/behavior/inactive"))
 
@@ -737,8 +737,8 @@ def test_conversation_input_enabled_while_active() -> None:
 def test_communication_seed_is_native_and_fresh_per_candidate_run() -> None:
     """The immutable native descriptor ships a factory that returns fresh HSMs."""
 
-    from bot.abilities import listening
-    from bot.abilities.communication import behaviors
+    from mosfet.abilities import listening
+    from mosfet.abilities.communication import behaviors
 
     seeded = behaviors.speech_heard_seed()
     first = seeded.factory()
@@ -770,9 +770,9 @@ def test_speech_heard_dispatches_one_terminal_output_without_self_output_dispatc
 ) -> None:
     """SpeechHeard emits its typed terminal wrapper without re-dispatching its output to itself."""
 
-    from bot.abilities import cognition, listening
-    from bot.abilities.hearing import voice
-    from bot.abilities.communication import behaviors
+    from mosfet.abilities import cognition, listening
+    from mosfet.abilities.hearing import voice
+    from mosfet.abilities.communication import behaviors
 
     async def run() -> tuple[hsm.Event[typing.Any], ...]:
         instance = behaviors.SpeechHeard()
@@ -815,9 +815,9 @@ def test_speech_heard_dispatches_one_terminal_output_without_self_output_dispatc
 def test_speech_heard_emits_unhandled_without_source_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty source_ids is not identified speech; SpeechHeard must complete unhandled immediately."""
 
-    from bot.abilities import cognition, listening
-    from bot.abilities.hearing import voice
-    from bot.abilities.communication import behaviors
+    from mosfet.abilities import cognition, listening
+    from mosfet.abilities.hearing import voice
+    from mosfet.abilities.communication import behaviors
 
     async def run() -> tuple[hsm.Event[typing.Any], ...]:
         instance = behaviors.SpeechHeard()
@@ -862,9 +862,9 @@ def test_speech_heard_emits_unhandled_without_source_ids(monkeypatch: pytest.Mon
 def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
     """Communication's typed routed event keeps env → Listening → admit ancestry across JSON hops."""
 
-    from bot.abilities import listening
-    from bot.abilities.hearing import voice
-    from bot.environment import SoundData, SoundEvent
+    from mosfet.abilities import listening
+    from mosfet.abilities.hearing import voice
+    from mosfet.environment import SoundData, SoundEvent
 
     sound = SoundData(audio=b"sound", media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
     speech = listening.SpeechData(

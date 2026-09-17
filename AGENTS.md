@@ -2,7 +2,7 @@
 
 ## Operating Context
 
-- stateforward.bot is a Python 3.13 event-driven software-robot framework for deterministic, realtime robot behavior.
+- stateforward.mosfet is a Python 3.13 event-driven software-robot framework for deterministic, realtime robot behavior.
 - Treat the current source tree and tests as the source of truth. Memory and adventure notes inform how you read the
   tree; they are not permission to resurrect stale contracts.
 - Keep this file a concise project contract. Do not turn it into a design notebook, tutorial, changelog, or per-actor
@@ -66,8 +66,8 @@
 ### Naming and imports
 
 - NEVER prefix a class, constant, event, or export with its package or module name; the namespace already carries that.
-- ALWAYS import domain packages and qualify symbols so domain context stays present (`import bot` then `bot.Bot`;
-  `from bot.devices import phone` then `phone.RingingEvent`). Prefer package-as-namespace over flattening symbols into
+- ALWAYS import domain packages and qualify symbols so domain context stays present (`import mosfet` then `mosfet.Bot`;
+  `from mosfet.devices import phone` then `phone.RingingEvent`). Prefer package-as-namespace over flattening symbols into
   the caller's namespace.
 - Event **names** carry their domain; Python access must match the owning domain package.
 - NEVER export or import a public `events` package. Event types live on the domain package that owns them. Defining

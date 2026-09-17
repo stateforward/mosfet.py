@@ -31,7 +31,7 @@ def _discover_provider_specs() -> tuple[PackageSpec, ...]:
         if not isinstance(project, dict):
             continue
         name = project.get("name")
-        if not isinstance(name, str) or not name.startswith("bot-provider-"):
+        if not isinstance(name, str) or not name.startswith("mosfet-provider-"):
             continue
         tool = metadata.get("tool")
         version_path: object = None
@@ -55,9 +55,9 @@ def _discover_provider_specs() -> tuple[PackageSpec, ...]:
 
 PACKAGE_SPECS = (
     PackageSpec(
-        name="stateforward.bot",
+        name="stateforward.mosfet",
         pyproject_path=REPO_ROOT / "pyproject.toml",
-        version_path="src/bot/__init__.py",
+        version_path="src/mosfet/__init__.py",
     ),
     *_discover_provider_specs(),
 )

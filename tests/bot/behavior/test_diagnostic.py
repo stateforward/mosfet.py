@@ -1,4 +1,4 @@
-from bot import behavior
+from mosfet import behavior
 
 
 def test_check_rejects_empty_source() -> None:

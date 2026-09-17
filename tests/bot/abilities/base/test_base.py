@@ -1,5 +1,5 @@
-from bot import abilities
-from bot.protocols import attachment
+from mosfet import abilities
+from mosfet.protocols import attachment
 
 import asyncio
 import datetime
@@ -8,7 +8,7 @@ import typing
 import weakref
 
 import hsm
-import bot
+import mosfet
 import pytest
 
 
@@ -44,7 +44,7 @@ class FailingEncoder(abilities.Encoder[str, bytes]):
 
 
 class AbilityOwner(hsm.Instance):
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "GenericAbilityOwner",
         hsm.initial(hsm.target("active")),
         hsm.state("active"),
@@ -57,7 +57,7 @@ async def start_directed_child(child: abilities.Ability[typing.Any, typing.Any])
         weakref.WeakValueDictionary[object, hsm.Instance](),
     )
     owner = AbilityOwner()
-    _ = await bot.started(ctx, owner, owner.model)
+    _ = await mosfet.started(ctx, owner, owner.model)
     await child.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
@@ -108,8 +108,8 @@ def test_abilities_export_encoding_decoding_generative_and_classifying_contracts
 
 def test_legacy_base_ability_package_is_removed() -> None:
     legacy_packages = (
-        "bot.abilities.generating",
-        "bot.abilities.base",
+        "mosfet.abilities.generating",
+        "mosfet.abilities.base",
     )
 
     for package in legacy_packages:

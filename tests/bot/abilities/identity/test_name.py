@@ -5,8 +5,8 @@ from __future__ import annotations
 import datetime
 import sqlite3
 
-from bot.abilities import identity
-from bot.abilities import memory
+from mosfet.abilities import identity
+from mosfet.abilities import memory
 
 
 def open_store() -> tuple[memory.Memory, sqlite3.Connection]:
@@ -84,7 +84,7 @@ def test_a_name_is_not_recalled_as_a_standing_directive() -> None:
     to carry out.
     """
 
-    from bot.abilities.cognition import directives
+    from mosfet.abilities.cognition import directives
 
     store, connection = open_store()
     try:

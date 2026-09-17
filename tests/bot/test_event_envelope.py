@@ -1,8 +1,8 @@
 """Direct contract tests for typed HSM event payload envelopes."""
 
-import bot
-from bot import event
-from bot.environment import SoundData, SoundEvent
+import mosfet
+from mosfet import event
+from mosfet.environment import SoundData, SoundEvent
 
 import pytest
 
@@ -29,4 +29,4 @@ def test_event_schema_round_trip_validates_sound_data() -> None:
 
 
 def test_event_kind_marks_model_offerable_events() -> None:
-    assert bot.event is event
+    assert mosfet.event is event

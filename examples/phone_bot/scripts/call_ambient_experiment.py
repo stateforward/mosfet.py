@@ -32,12 +32,12 @@ import hsm
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from phone_bot_example import AppConfig, PhoneBot  # noqa: E402
 
-from bot.abilities import memory  # noqa: E402
-from bot.abilities.cognition import types as cognition_types  # noqa: E402
-from bot.devices.phone import events as phone_events  # noqa: E402
-from bot.devices.phone.phone import Firmware, RING_SOUND_WAV  # noqa: E402
-from bot.behavior import storage as behavior_storage  # noqa: E402
-from bot.environment import SoundData, SoundEvent, Environment  # noqa: E402
+from mosfet.abilities import memory  # noqa: E402
+from mosfet.abilities.cognition import types as cognition_types  # noqa: E402
+from mosfet.devices.phone import events as phone_events  # noqa: E402
+from mosfet.devices.phone.phone import Firmware, RING_SOUND_WAV  # noqa: E402
+from mosfet.behavior import storage as behavior_storage  # noqa: E402
+from mosfet.environment import SoundData, SoundEvent, Environment  # noqa: E402
 
 
 def _load_env_files(*paths: pathlib.Path) -> None:

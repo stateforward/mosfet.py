@@ -1,4 +1,4 @@
-from bot import behavior
+from mosfet import behavior
 
 import pytest
 
@@ -12,7 +12,7 @@ def test_compile_preserves_starlark_event_contracts() -> None:
     spec = behavior_spec(compiled)
 
     assert isinstance(compiled, behavior.Behavior)
-    assert compiled.__class__.__module__ == "bot.behavior"
+    assert compiled.__class__.__module__ == "mosfet.behavior"
     assert spec.name == "AnswerGreeting"
     assert spec.triggers == ("conversation.greeting.recognized",)
     assert compiled.input_event.name == "bot.behavior.answer_greeting.input"

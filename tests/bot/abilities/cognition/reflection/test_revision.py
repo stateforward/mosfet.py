@@ -6,9 +6,9 @@ import json
 import hsm
 import pytest
 
-from bot import behavior
-from bot.abilities import memory
-from bot.abilities.cognition.reflection import revision
+from mosfet import behavior
+from mosfet.abilities import memory
+from mosfet.abilities.cognition.reflection import revision
 from tests.bot.abilities.cognition.test_cognition import FixedProcessor
 from tests.bot.abilities.cognition.test_cognition import cognition_input
 from tests.bot.abilities.cognition.test_cognition import focus_output
@@ -265,10 +265,10 @@ def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
     name, and never invents a name when evidence is absent.
     """
 
-    from bot.abilities.cognition import episodes as episodes_module
-    from bot.abilities.cognition import input as cognition_input
-    from bot.abilities.cognition.reflection.revision import ChangeWriteInput, _grounded_triggers
-    from bot.environment import SoundData, SoundEvent
+    from mosfet.abilities.cognition import episodes as episodes_module
+    from mosfet.abilities.cognition import input as cognition_input
+    from mosfet.abilities.cognition.reflection.revision import ChangeWriteInput, _grounded_triggers
+    from mosfet.environment import SoundData, SoundEvent
 
     stimulus = SoundEvent.with_data(
         SoundData(audio=b"ring-bytes", media_type="audio/wav", sample_rate_hz=16_000, channels=1)

@@ -1,4 +1,4 @@
-from bot import behavior
+from mosfet import behavior
 
 import pytest
 

@@ -12,9 +12,9 @@ from typing import override
 
 import pytest
 
-from bot.abilities import identity
-from bot.abilities.hearing import speech
-from bot.environment import SoundData
+from mosfet.abilities import identity
+from mosfet.abilities.hearing import speech
+from mosfet.environment import SoundData
 
 
 class EchoSpeechDecoder(speech.SpeechDecoder):

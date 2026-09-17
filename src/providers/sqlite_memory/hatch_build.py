@@ -33,7 +33,7 @@ class CustomBuildHook(BuildHookInterface):
         if os.environ.get("BOT_SQLITE_MEMORY_SKIP_NATIVE_BUILD") == "1":
             return
         root = pathlib.Path(self.root)
-        output_dir = root / "src/bot/providers/sqlite_memory/_native"
+        output_dir = root / "src/mosfet/providers/sqlite_memory/_native"
         _ = build_objstore_extension(root, output_dir)
         _ = copy_sqlite_vec_extension(output_dir)
 
@@ -41,7 +41,7 @@ class CustomBuildHook(BuildHookInterface):
 def build_objstore_extension(root: pathlib.Path, output_dir: pathlib.Path | None = None) -> pathlib.Path:
     vendor = root / "vendor/sqlite-objstore"
     if output_dir is None:
-        output_dir = root / "src/bot/providers/sqlite_memory/_native"
+        output_dir = root / "src/mosfet/providers/sqlite_memory/_native"
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / native_library_name()
     compiler = compiler_command()
@@ -73,7 +73,7 @@ def build_objstore_extension(root: pathlib.Path, output_dir: pathlib.Path | None
         "-I",
         str(vendor / "third_party/blake3"),
         "-include",
-        "src/bot/providers/sqlite_memory/_sqlite_extension_api.h",
+        "src/mosfet/providers/sqlite_memory/_sqlite_extension_api.h",
         "-o",
         str(output),
         *sources,
@@ -148,7 +148,7 @@ def sqlite_link_flags() -> list[str]:
 
 def objstore_sources(vendor: pathlib.Path) -> tuple[pathlib.Path, ...]:
     return (
-        pathlib.Path("src/bot/providers/sqlite_memory/_objstore_extension.c"),
+        pathlib.Path("src/mosfet/providers/sqlite_memory/_objstore_extension.c"),
         vendor / "src/objstore.c",
         vendor / "src/backend_registry.c",
         vendor / "src/backend_fs_common.c",

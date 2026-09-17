@@ -5,8 +5,8 @@ here, and choose nothing here: the only part of them inside the simulation is th
 actually encounter — a mouth, somewhere in the room, at some loudness. The words come from
 outside, from whoever is at the terminal, and they arrive already chosen.
 
-The mouth is the same :class:`~bot.devices.audio.speaker.Speaker` the robot uses for its own
-voice, and the voice is the same :class:`~bot.abilities.speaking.Speaking`, because a person's
+The mouth is the same :class:`~mosfet.devices.audio.speaker.Speaker` the robot uses for its own
+voice, and the voice is the same :class:`~mosfet.abilities.speaking.Speaking`, because a person's
 mouth and a robot's mouth are the same object acoustically: a transducer at a position with a
 level. Every utterance leaves through ``Environment.broadcast`` with a real ``amplitude_db`` from
 a real ``space.Placement``, so a bot standing too far away, or with too high a ``threshold_db``,
@@ -26,16 +26,16 @@ import typing
 import uuid
 
 import hsm
-import bot
+import mosfet
 
-from bot import abilities
-from bot import lifecycle
-from bot.abilities import ability
-from bot.abilities import speaking
-from bot.devices import audio
-from bot.environment import Environment, space
-from bot.protocols import attachment
-from bot.telemetry import observer
+from mosfet import abilities
+from mosfet import lifecycle
+from mosfet.abilities import ability
+from mosfet.abilities import speaking
+from mosfet.devices import audio
+from mosfet.environment import Environment, space
+from mosfet.protocols import attachment
+from mosfet.telemetry import observer
 
 _LOG = logging.getLogger("phone_bot_example.hsm")
 
@@ -182,7 +182,7 @@ class Person(hsm.Instance):
         # and made no sound, which looks exactly like a bot that did not hear them.
         _LOG.warning("person utterance failed reason=%s", message)
 
-    model: typing.ClassVar[hsm.Model] = bot.define(
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Person",
         hsm.initial(hsm.target("arriving")),
         hsm.state(
@@ -224,7 +224,7 @@ class Person(hsm.Instance):
 
         self._arrived = asyncio.get_running_loop().create_future()
         self._arriving_id = uuid.uuid4().hex
-        _ = await bot.started(environment, self, self.model)
+        _ = await mosfet.started(environment, self, self.model)
         mouth_model = self._mouth.model
         if mouth_model is None:
             raise RuntimeError("A mouth with no lifecycle model cannot be powered.")
@@ -233,7 +233,7 @@ class Person(hsm.Instance):
         # voice may already have powered it — Speaking starts an unstarted mouth it is given —
         # so power it only when nobody has.
         if not lifecycle.is_started(self._mouth):
-            _ = await bot.started(environment, self._mouth, mouth_model)
+            _ = await mosfet.started(environment, self._mouth, mouth_model)
         _ = await self._voice.attach(
             environment,
             attachment.AttachEvent.with_data_and_id(

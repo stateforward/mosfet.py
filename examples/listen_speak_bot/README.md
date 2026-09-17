@@ -1,6 +1,6 @@
 # listen_speak_bot example
 
-Device-free stateforward.bot integration status: **Listening** is attached to an acquired
+Device-free stateforward.mosfet integration status: **Listening** is attached to an acquired
 **Communication** ability, which owns nested **Conversation** and routes selected responses to
 **Speaking**; the demo is incomplete only when cognition selects no response.
 

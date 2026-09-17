@@ -3,27 +3,27 @@
 This repo uses Hatchling dynamic version metadata with a package-owned
 `__version__` constant for each distribution.
 
-- `bot` reads its version from `src/bot/__init__.py`.
-- `bot-provider-elevenlabs` reads its version from
-  `src/providers/elevenlabs/src/bot/providers/elevenlabs/__init__.py`.
-- `bot-provider-gemini` reads its version from
-  `src/providers/gemini/src/bot/providers/gemini/__init__.py`.
-- `bot-provider-livekit` reads its version from
-  `src/providers/livekit/src/bot/providers/livekit/__init__.py`.
-- `bot-provider-mlx-audio` reads its version from
-  `src/providers/mlx_audio/src/bot/providers/mlx_audio/__init__.py`.
-- `bot-provider-mlx-vlm` reads its version from
-  `src/providers/mlx_vlm/src/bot/providers/mlx_vlm/__init__.py`.
-- `bot-provider-moonshine` reads its version from
-  `src/providers/moonshine/src/bot/providers/moonshine/__init__.py`.
-- `bot-provider-openai-compat` reads its version from
-  `src/providers/openai_compat/src/bot/providers/openai_compat/__init__.py`.
-- `bot-provider-pyannote` reads its version from
-  `src/providers/pyannote/src/bot/providers/pyannote/__init__.py`.
-- `bot-provider-sqlite-memory` reads its version from
-  `src/providers/sqlite_memory/src/bot/providers/sqlite_memory/__init__.py`.
-- `bot-provider-postgres-memory` reads its version from
-  `src/providers/postgres_memory/src/bot/providers/postgres_memory/__init__.py`.
+- `bot` reads its version from `src/mosfet/__init__.py`.
+- `mosfet-provider-elevenlabs` reads its version from
+  `src/providers/elevenlabs/src/mosfet/providers/elevenlabs/__init__.py`.
+- `mosfet-provider-gemini` reads its version from
+  `src/providers/gemini/src/mosfet/providers/gemini/__init__.py`.
+- `mosfet-provider-livekit` reads its version from
+  `src/providers/livekit/src/mosfet/providers/livekit/__init__.py`.
+- `mosfet-provider-mlx-audio` reads its version from
+  `src/providers/mlx_audio/src/mosfet/providers/mlx_audio/__init__.py`.
+- `mosfet-provider-mlx-vlm` reads its version from
+  `src/providers/mlx_vlm/src/mosfet/providers/mlx_vlm/__init__.py`.
+- `mosfet-provider-moonshine` reads its version from
+  `src/providers/moonshine/src/mosfet/providers/moonshine/__init__.py`.
+- `mosfet-provider-openai-compat` reads its version from
+  `src/providers/openai_compat/src/mosfet/providers/openai_compat/__init__.py`.
+- `mosfet-provider-pyannote` reads its version from
+  `src/providers/pyannote/src/mosfet/providers/pyannote/__init__.py`.
+- `mosfet-provider-sqlite-memory` reads its version from
+  `src/providers/sqlite_memory/src/mosfet/providers/sqlite_memory/__init__.py`.
+- `mosfet-provider-postgres-memory` reads its version from
+  `src/providers/postgres_memory/src/mosfet/providers/postgres_memory/__init__.py`.
 - `scripts/check_release_version.py` discovers provider packages via
   `src/providers/*/pyproject.toml` (workspace glob, not a hardcoded list), validates that package `pyproject.toml`
   files declare `dynamic = ["version"]`, that Hatchling points at the expected
@@ -85,7 +85,7 @@ pushing a release tag.
 
 - Keep provider dependencies on core `bot` explicit when a provider imports
   current ability contracts. The OpenAI-compatible provider publishes with
-  `stateforward.bot>=0.1.0,<0.2.0`; raise the lower bound in the provider package when a
+  `stateforward.mosfet>=0.1.0,<0.2.0`; raise the lower bound in the provider package when a
   future release starts requiring newer core APIs.
 - Decide which optional hosted Postgres, PGlite socket, and S3-compatible client
   packages should become provider-owned dependencies. The initial Postgres
