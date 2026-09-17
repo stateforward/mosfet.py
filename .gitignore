@@ -29,3 +29,8 @@ web/playwright/.cache/
 goal/
 comments/
 test-results/
+
+# agent harness state
+.pi/
+"-q"/
+-q/
