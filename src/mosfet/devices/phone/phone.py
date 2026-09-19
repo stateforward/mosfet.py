@@ -9,6 +9,7 @@ import logging
 import typing
 
 import hsm
+import pydantic
 import mosfet.device
 
 from mosfet import lifecycle
@@ -77,32 +78,11 @@ from .events import (
     TransferRequestData,
     TransferStartedEvent,
     TransferTarget,
-    SmsTextData,
 )
 import uuid
 import mosfet
 from mosfet import telemetry
 from mosfet.telemetry.hsm import Traced, deliver
-from .display import NotificationsData, NotificationsEvent
-from .events import (
-    DismissNotificationData,
-    DismissNotificationEvent,
-    NotificationData,
-    NotificationEvent,
-    NotificationNotFoundData,
-    NotificationNotFoundEvent,
-    ReadNotificationData,
-    ReadNotificationEvent,
-    SendTextMessageData,
-    SendTextMessageEvent,
-    ServiceTextMessageSendFailedEvent,
-    ServiceTextMessageSendRequestedEvent,
-    ServiceTextMessageSentEvent,
-    TextMessageSendFailedData,
-    TextMessageSendFailedEvent,
-    TextMessageSentData,
-    TextMessageSentEvent,
-)
 
 RINGER_DB = 80.0
 """How loud a handset ringer is, in dB SPL measured one metre away.
@@ -127,16 +107,6 @@ is not holding the handset. A call-progress tone is for the one person already h
 earpiece only has to reach an ear 15 cm away. At that distance this lands near 76 dB SPL, which is
 about what a handset receiver does with a tone, and across a room it is nearly nothing — which is
 right: nobody but the caller hears their own busy tone.
-"""
-
-NOTIFICATION_DB = 70.0
-"""How loud a handset's notification ding is, in dB SPL measured one metre away.
-
-Device-intrinsic like :data:`RINGER_DB`, and deliberately 10 dB below it. Both come out of the same
-loudspeaker and both are for the room — a text alert has to reach someone who is not holding the
-phone, which is why it sits well above :data:`CALL_PROGRESS_DB`. But a ring must keep fetching you
-until you answer, while a notification will wait, so handsets play one short, quieter ding.
-Across a room it is audible and easy to miss, which is what a notification is.
 """
 
 MOUTH_OFFSET_M = 0.15
@@ -167,9 +137,6 @@ BUSY_TONE_WAV = _load_sound_wav("busy.wav")
 
 REORDER_TONE_WAV = _load_sound_wav("reorder.wav")
 """Reorder tone (fast busy): what the network sends when it could not complete the call at all."""
-
-NOTIFICATION_WAV = _load_sound_wav("notification.wav")
-"""Notification ding: the one short chime a handset plays for any notification."""
 
 _RingingCommittedEvent = hsm.Event[RingingData](
     name="bot.phone.ringing.committed",
@@ -315,10 +282,6 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
     ``kind`` is the explicit provenance label ``phone.ringing`` (not bare ``ring``, which is
     ambiguous for models).
 
-    A notification is heard as the handset's generic ding, ``kind`` ``phone.notification``. The
-    ding sounds the same whatever caused it, so it carries the notification itself — the causing
-    event (today a new message), which is what the banner previews.
-
     ``None`` means this observation is inaudible and there is nothing to put in the environment.
     Silence is a real answer here, not a gap: several ways of ending up with no call are ones a
     real handset marks with no sound whatsoever, and manufacturing a tone for them would be
@@ -348,28 +311,11 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
             source=hsm.id(owner),
             metadata=dict(event.metadata),
         )
-    if isinstance(data, NotificationData):
-        return dataclasses.replace(
-            SoundEvent.with_data(
-                SoundData(
-                    audio=NOTIFICATION_WAV,
-                    media_type="audio/wav",
-                    sample_rate_hz=16_000,
-                    channels=1,
-                    kind="phone.notification",
-                    notification=data,
-                    amplitude_db=NOTIFICATION_DB,
-                )
-            ),
-            source=hsm.id(owner),
-            metadata=dict(event.metadata),
-        )
     if isinstance(data, NoCallData):
         # A call-progress tone, when there is one. Which tone is the exchange's verdict carried
         # down the line, not something the handset works out — the handset only reproduces it.
         if data.reason != "dial_failed":
-            # nothing_to_answer: pressing answer with nothing ringing does essentially nothing
-            # audible on a real handset. dial_abandoned: you hung up, so you hear nothing, because
+            # dial_abandoned: you hung up, so you hear nothing, because
             # you hung up. dial_not_answered: there is no "they did not answer" tone and never was
             # — a real caller hears ringback the whole time and then gives up, so what marks this
             # case is ringback *stopping*, which is a sound the phone has yet to be able to make.
@@ -413,9 +359,6 @@ class Firmware(Traced):
     _current_call_id: str | None
     _current_transfer_id: str | None
     _current_transfer_target: TransferTarget | None
-    # The lock screen's pending list, oldest first. Firmware owns it and drives the display from
-    # it; the display only shows what it is sent.
-    _notifications: tuple[NotificationData, ...]
 
     def __init__(
         self,
@@ -442,7 +385,6 @@ class Firmware(Traced):
         self._current_call_id = None
         self._current_transfer_id = None
         self._current_transfer_target = None
-        self._notifications = ()
 
     def event_recorder(self) -> EventRecorder:
         service = self._service
@@ -650,25 +592,6 @@ class Firmware(Traced):
         Firmware._publish(ctx, instance, event, ServiceDialRequestedEvent.with_data(data))
 
     @staticmethod
-    def _publish_text_message_send_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, SendTextMessageData)
-        Firmware._publish(ctx, instance, event, ServiceTextMessageSendRequestedEvent.with_data(data))
-
-    @staticmethod
-    def _publish_text_message_sent(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, TextMessageSentData)
-        Firmware._publish(ctx, instance, event, TextMessageSentEvent.with_data(data))
-
-    @staticmethod
-    def _publish_text_message_send_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        # The service's verdict travels with the fact it explains, as for a failed dial.
-        data = event.data
-        assert isinstance(data, TextMessageSendFailedData)
-        Firmware._publish(ctx, instance, event, TextMessageSendFailedEvent.with_data(data))
-
-    @staticmethod
     def _publish_decline_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         Firmware._publish(
             ctx,
@@ -793,10 +716,6 @@ class Firmware(Traced):
                 HungUpData(call_id=Firmware._current_call(instance), outcome="local_hang_up")
             ),
         )
-
-    @staticmethod
-    def _publish_nothing_to_answer(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="nothing_to_answer")))
 
     @staticmethod
     def _publish_dial_not_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
@@ -977,51 +896,6 @@ class Firmware(Traced):
         Firmware._publish(ctx, instance, event, CallTransferFailedEvent.with_data(data))
 
     @staticmethod
-    def _show_notifications(ctx: hsm.Context, instance: "Firmware", trigger: hsm.Event) -> None:
-        Firmware._drive_display(
-            ctx, instance, trigger, NotificationsEvent.with_data(NotificationsData(pending=instance._notifications))
-        )
-
-    @staticmethod
-    def _add_notification(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        """A notification stays on the lock screen until it is read or dismissed, held or not."""
-
-        data = event.data
-        assert isinstance(data, NotificationData)
-        instance._notifications = (*instance._notifications, data)
-        Firmware._show_notifications(ctx, instance, event)
-
-    @staticmethod
-    def _is_pending_notification(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
-        del ctx
-        data = event.data
-        assert isinstance(data, ReadNotificationData | DismissNotificationData)
-        return any(notification.id == data.id for notification in instance._notifications)
-
-    @staticmethod
-    def _is_unknown_notification(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
-        return not Firmware._is_pending_notification(ctx, instance, event)
-
-    @staticmethod
-    def _remove_notification(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        """Read and dismiss both take it off the lock screen; neither is announced to anyone."""
-
-        data = event.data
-        assert isinstance(data, ReadNotificationData | DismissNotificationData)
-        instance._notifications = tuple(
-            notification for notification in instance._notifications if notification.id != data.id
-        )
-        Firmware._show_notifications(ctx, instance, event)
-
-    @staticmethod
-    def _publish_notification_not_found(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        data = event.data
-        assert isinstance(data, ReadNotificationData | DismissNotificationData)
-        # The command is the trigger itself, so its canonical name is what the failure names.
-        not_found = NotificationNotFoundData.model_validate({"id": data.id, "command": event.name})
-        Firmware._publish(ctx, instance, event, NotificationNotFoundEvent.with_data(not_found))
-
-    @staticmethod
     def _set_current_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         del ctx
         data = event.data
@@ -1035,7 +909,7 @@ class Firmware(Traced):
         trigger: hsm.Event,
         drive: hsm.Event[typing.Any],
     ) -> None:
-        """Put ``drive`` (caller ID or notifications) on the display; log rather than silently drop when it is not live.
+        """Put ``drive`` on the display; log rather than silently drop when it is not live.
 
         Firmware is the controller that wires and drives its own display, dispatching a typed
         event rather than reaching into the display's attribute directly. The production path
@@ -1109,8 +983,7 @@ class Firmware(Traced):
         assert call_id is not None
         instance._closed_call_ids = frozenset((*instance._closed_call_ids, call_id))
 
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "Phone",
+    _topology: typing.ClassVar[tuple[hsm.Element, ...]] = (
         hsm.initial(hsm.target("/Phone/hung_up")),
         hsm.state(
             "hung_up",
@@ -1132,11 +1005,6 @@ class Firmware(Traced):
                 hsm.on(DialEvent),
                 hsm.effect(_publish_dial_requested),
                 hsm.target("/Phone/dialing"),
-            ),
-            # Answering with nothing ringing does nothing, but it must not do it silently.
-            hsm.transition(
-                hsm.on(AnswerCallEvent),
-                hsm.effect(_publish_nothing_to_answer),
             ),
         ),
         # No current call here: the exchange assigns one on connect, so every exit that is not a
@@ -1427,32 +1295,17 @@ class Firmware(Traced):
                 hsm.target("/Phone/answered/media_ready"),
             ),
         ),
-        # Messaging is independent of the call: a handset sends texts whatever state its call is
-        # in, so these live at the root rather than under any call state.
-        hsm.transition(hsm.on(SendTextMessageEvent), hsm.effect(_publish_text_message_send_requested)),
-        hsm.transition(hsm.on(ServiceTextMessageSentEvent), hsm.effect(_publish_text_message_sent)),
-        hsm.transition(hsm.on(ServiceTextMessageSendFailedEvent), hsm.effect(_publish_text_message_send_failed)),
-        # The lock screen is independent of the call too. Reading and dismissing are the holder's
-        # own acts on it; replying to a message is not reading it.
-        hsm.transition(hsm.on(NotificationEvent), hsm.effect(_add_notification)),
-        hsm.transition(
-            hsm.on(ReadNotificationEvent), hsm.guard(_is_pending_notification), hsm.effect(_remove_notification)
-        ),
-        hsm.transition(
-            hsm.on(DismissNotificationEvent), hsm.guard(_is_pending_notification), hsm.effect(_remove_notification)
-        ),
-        hsm.transition(
-            hsm.on(ReadNotificationEvent),
-            hsm.guard(_is_unknown_notification),
-            hsm.effect(_publish_notification_not_found),
-        ),
-        hsm.transition(
-            hsm.on(DismissNotificationEvent),
-            hsm.guard(_is_unknown_notification),
-            hsm.effect(_publish_notification_not_found),
-        ),
-        hsm.observe(observer),
     )
+    """The call topology, the one definition of how a phone handles calls.
+
+    Kept as elements rather than only as the finished model so a phone that does more than calls
+    (``mosfet.devices.smart_phone``) defines its firmware from these same elements plus its own,
+    instead of copying them. ``hsm.redefine`` cannot extend :attr:`model` for that: its
+    observation and trace-binding elements apply only to members defined before them, so anything
+    appended after would be unobserved and unbound.
+    """
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define("Phone", *_topology, hsm.observe(observer))
 
 
 class Phone(mosfet.device.Device):
@@ -1464,6 +1317,18 @@ class Phone(mosfet.device.Device):
     _service: Service
     _firmware_instance: Firmware
     firmware_model: typing.ClassVar[hsm.Model] = Firmware.model
+    # What this handset is built from. A phone that does more than calls swaps in its own
+    # firmware and screen here and inherits everything else.
+    _firmware_type: typing.ClassVar[type[Firmware]] = Firmware
+    _display_type: typing.ClassVar[type[Display]] = Display
+    _command_schemas: typing.ClassVar[tuple[type[pydantic.BaseModel], ...]] = (
+        DialData,
+        AnswerCallData,
+        DeclineCallData,
+        HangUpCallData,
+        TransferCallData,
+    )
+    """Owner command payloads this handset accepts: every one enters firmware, never the shell."""
 
     def __init__(
         self,
@@ -1479,7 +1344,7 @@ class Phone(mosfet.device.Device):
     ) -> None:
         resolved_microphone = microphone if microphone is not None else audio.Microphone()
         resolved_speaker = speaker if speaker is not None else audio.Speaker()
-        resolved_display = display if display is not None else Display()
+        resolved_display = display if display is not None else self._display_type()
         # Where the handset is. Its transducers carry their own placements: the earpiece is at the
         # ear and the mouthpiece MOUTH_OFFSET_M away, which is the whole point of them being
         # separate devices. The display shows caller ID rather than producing acoustic energy, so
@@ -1497,7 +1362,7 @@ class Phone(mosfet.device.Device):
             elevate=self._observe,
         )
         self._service = observation_service
-        self._firmware_instance = Firmware(
+        self._firmware_instance = self._firmware_type(
             service=observation_service,
             speaker=resolved_speaker,
             microphone=resolved_microphone,
@@ -1536,34 +1401,15 @@ class Phone(mosfet.device.Device):
         before, which is why a bot could sit through a connected call never having been told a
         call existed.
 
-        For calls, exactly one path per observation, decided by whether it made a sound: you
-        notice a ringing phone once, and the ear is how. Notifications are the exception (see
-        ``dispatch``): the room hears the ding and the holder gets the notification itself,
-        because the banner in your hand is how you learn what the ding was.
-
-        Outgoing texts follow the same rule. A text that did not go is silent to the room and
-        plain to the hand (the "not delivered" mark on the message you just sent), so it reaches
-        the holder. A text that went is not surfaced at all: the holder pressed send and already
-        knows what it sent, a handset marks success with nothing worth noticing, and telling the
-        bot would buy it a fresh turn for every message it sends — an invitation to answer itself.
-        :data:`TextMessageSentEvent` stays a published fact for the service side and observers.
-
-        A read or dismiss that named no pending notification is plain to the hand in the same way;
-        one that worked is visible on the display the holder is looking at, and nothing more.
+        Exactly one path per observation, decided by whether it made a sound: you notice a ringing
+        phone once, and the ear is how.
 
         Both say what happened and neither says what to do about it.
         """
 
         if not isinstance(
             event.data,
-            RingingData
-            | CallData
-            | HungUpData
-            | TransferData
-            | CallTransferFailedData
-            | NoCallData
-            | TextMessageSendFailedData
-            | NotificationNotFoundData,
+            RingingData | CallData | HungUpData | TransferData | CallTransferFailedData | NoCallData,
         ):
             return
         stimulus = _environment_observation_event(self, event)
@@ -1599,17 +1445,7 @@ class Phone(mosfet.device.Device):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        """Firmware-only for owner call-control payloads; shell for lifecycle/other.
-
-        Owner commands enter firmware only — not dual-delivered and not name-routed. Typed
-        command payloads pass through; dict/None payloads whose event schema is a command
-        model are coerced via ``validate_event_data`` (JSON/API ingress). Device shell
-        lifecycle and other events stay on the shell HSM. Service observations enter
-        firmware via the service attach target, not through this shell ingress.
-
-        Resolves to whether the routed machine accepted the event: firmware for SMS
-        notifications and owner commands (``False`` without firmware), the shell otherwise.
-        """
+        """Handset ingress: open the turn's trace here, then route the event (see ``_route``)."""
 
         async def _deliver() -> bool:
             # The handset is where a stimulus enters the bot: an event that arrives carrying no
@@ -1623,56 +1459,39 @@ class Phone(mosfet.device.Device):
                 context=telemetry.event_context(event),
             ):
                 return await telemetry.capture.record_dispatch(
-                    asyncio.Task(_route(), loop=asyncio.get_running_loop(), eager_start=True),
+                    asyncio.Task(self._route(ctx, event), loop=asyncio.get_running_loop(), eager_start=True),
                     component="phone.ingress",
                     event=event,
                     source=event.source,
                     target=hsm.id(self),
                 )
 
-        async def _route() -> bool:
-            if isinstance(event.data, SmsTextData):
-                # One notification, stamped once with its handset id, drives all three paths: the
-                # room hears the ding, whoever holds the phone gets the banner, and firmware keeps
-                # it on the lock screen until it is read or dismissed — held or not.
-                notification = dataclasses.replace(
-                    NotificationEvent.with_data(
-                        # Validated, not asserted: the event's own name must be a notifying one.
-                        NotificationData.model_validate(
-                            {
-                                "id": event.data.id or event.id or uuid.uuid4().hex,
-                                "name": event.name,
-                                "data": event.data,
-                            }
-                        )
-                    ),
-                    id=event.id,
-                    metadata=dict(event.metadata),
-                )
-                stimulus = _environment_observation_event(self, notification)
-                if stimulus is not None:
-                    placement = self._placement
-                    _ = Environment.from_context(ctx).broadcast(
-                        stimulus,
-                        origin=None if placement is None else placement.position,
-                    )
-                self._tell_holders(ctx, notification)
-                if self._firmware is None:
-                    return False
-                return await self._firmware.dispatch(ctx, notification)
-            firmware = self._firmware
-            command = Phone._coerce_owner_command(event)
-            if command is not None:
-                if firmware is None:
-                    return False
-                return await firmware.dispatch(ctx, command)
-            # Device shell lifecycle / other events.
-            return await deliver(self, ctx, event)
-
         return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
 
-    @staticmethod
-    def _coerce_owner_command(event: hsm.Event) -> hsm.Event | None:
+    async def _route(self, ctx: hsm.Context, event: hsm.Event) -> bool:
+        """Firmware-only for owner command payloads; shell for lifecycle/other.
+
+        Owner commands enter firmware only — not dual-delivered and not name-routed. Typed
+        command payloads pass through; dict/None payloads whose event schema is a command
+        model are coerced via ``validate_event_data`` (JSON/API ingress). Device shell
+        lifecycle and other events stay on the shell HSM. Service observations enter
+        firmware via the service attach target, not through this shell ingress.
+
+        Resolves to whether the routed machine accepted the event: firmware for owner commands
+        (``False`` without firmware), the shell otherwise.
+        """
+
+        command = self._coerce_owner_command(event)
+        if command is not None:
+            firmware = self._firmware
+            if firmware is None:
+                return False
+            return await firmware.dispatch(ctx, command)
+        # Device shell lifecycle / other events.
+        return await deliver(self, ctx, event)
+
+    @classmethod
+    def _coerce_owner_command(cls, event: hsm.Event) -> hsm.Event | None:
         """Return a firmware-bound owner command event, or None when not a command ingress.
 
         Already-typed command payloads pass through. Unvalidated dict/None payloads are
@@ -1680,30 +1499,12 @@ class Phone(mosfet.device.Device):
         identity, not event.name). Invalid payloads are dropped (no shell fall-through).
         """
 
-        command_schemas = (
-            DialData,
-            AnswerCallData,
-            DeclineCallData,
-            HangUpCallData,
-            TransferCallData,
-            SendTextMessageData,
-            ReadNotificationData,
-            DismissNotificationData,
-        )
+        command_schemas = cls._command_schemas
         data = event.data
         if isinstance(data, command_schemas):
             return event
         schema = event.schema
-        if (
-            schema is not DialData
-            and schema is not AnswerCallData
-            and schema is not DeclineCallData
-            and schema is not HangUpCallData
-            and schema is not TransferCallData
-            and schema is not SendTextMessageData
-            and schema is not ReadNotificationData
-            and schema is not DismissNotificationData
-        ):
+        if not any(schema is command_schema for command_schema in command_schemas):
             return None
         try:
             validated = validate_event_data(event, {} if data is None else data)

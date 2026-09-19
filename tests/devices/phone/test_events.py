@@ -38,7 +38,6 @@ PHONE_EVENTS = (
     phone.TransferStartedEvent,
     phone.CallTransferCompletedEvent,
     phone.CallTransferFailedEvent,
-    phone.SmsTextEvent,
 )
 
 
@@ -66,26 +65,6 @@ def test_phone_service_events_use_transport_neutral_pydantic_schemas() -> None:
     # A withheld caller still rings.
     assert phone.IncomingCallData(call_id="livekit:caller").caller is None
     assert "display_hint" not in _schema_properties(phone.IncomingCallEvent.schema)
-
-
-def test_phone_sms_event_schema_is_phone_local() -> None:
-    """SMS is its own phone transport, not a second call schema."""
-
-    sms = phone.SmsTextData(id="message-id", sender="+15555550101", text="Book me the 10:15.")
-
-    assert phone.SmsTextEvent.name == "phone.sms.text"
-    assert object_dict(phone.SmsTextEvent.schema) == phone.SmsTextData.model_json_schema()
-    assert sms.id == "message-id"
-    assert sms.sender == "+15555550101"
-    assert "call_id" not in _schema_properties(phone.SmsTextEvent.schema)
-    assert phone.SmsTextData(text="Book me the 10:15.").id is None
-    assert phone.SmsTextData(text="Book me the 10:15.").sender is None
-    with pytest.raises(pydantic.ValidationError):
-        phone.SmsTextData(id="", text="Book me the 10:15.")
-    with pytest.raises(pydantic.ValidationError):
-        phone.SmsTextData(sender="", text="Book me the 10:15.")
-    with pytest.raises(pydantic.ValidationError):
-        phone.SmsTextData(text="")
 
 
 def test_phone_transfer_events_use_call_identity_and_target_schemas() -> None:
@@ -289,15 +268,15 @@ def test_phone_public_events_describe_committed_firmware_state() -> None:
 
 
 def test_phone_no_call_event_reports_a_request_that_produced_no_call() -> None:
-    """Nothing to answer, and dials that never connect, are loud rather than dropped."""
+    """Dials that never connect are loud rather than dropped."""
 
     assert phone.NoCallEvent.name == "phone.no_call"
     assert object_dict(phone.NoCallEvent.schema) == phone.NoCallData.model_json_schema()
-    assert phone.NoCallData(reason="nothing_to_answer").reason == "nothing_to_answer"
+    assert phone.NoCallData(reason="dial_abandoned").reason == "dial_abandoned"
     # No call happened, so there is no call id to report it against.
     assert "call_id" not in _schema_properties(phone.NoCallEvent.schema)
     # A service verdict when a service gave one, and nothing invented when none did.
-    assert phone.NoCallData(reason="nothing_to_answer").failure_kind is None
+    assert phone.NoCallData(reason="dial_abandoned").failure_kind is None
     assert phone.NoCallData(reason="dial_failed", failure_kind="call_declined").failure_kind == "call_declined"
 
 

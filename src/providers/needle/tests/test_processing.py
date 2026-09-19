@@ -11,7 +11,7 @@ import pytest
 
 from mosfet.abilities import cognition, processing
 from mosfet.abilities.cognition import intuition
-from mosfet.devices import phone
+from mosfet.devices import smart_phone
 from mosfet.providers import needle
 
 
@@ -45,11 +45,11 @@ class _FailingEngine:
         raise needle.EngineError("needle_init failed")
 
 
-def _notification() -> hsm.Event[phone.NotificationData]:
-    return hsm.Event[phone.NotificationData](
+def _notification() -> hsm.Event[smart_phone.NotificationData]:
+    return hsm.Event[smart_phone.NotificationData](
         name="phone.notification",
-        schema=phone.NotificationData,
-        data=phone.NotificationData.model_validate(
+        schema=smart_phone.NotificationData,
+        data=smart_phone.NotificationData.model_validate(
             {
                 "id": "message-1",
                 "name": "phone.sms.text",
@@ -60,7 +60,7 @@ def _notification() -> hsm.Event[phone.NotificationData]:
 
 
 def _offered() -> tuple[hsm.Event[typing.Any], ...]:
-    return (phone.SendTextMessageEvent, cognition.IgnoreEvent)
+    return (smart_phone.SendTextMessageEvent, cognition.IgnoreEvent)
 
 
 def _run(engine: needle.Engine, *, actor_events: dict[str, tuple[str, ...]] | None = None) -> object:

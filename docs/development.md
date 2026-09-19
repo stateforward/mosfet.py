@@ -69,7 +69,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | Layer | What ships |
 |---|---|
 | Body | `bot.Bot` — lifecycle, device attachment, stimulus fan-out, cognition handoff, reflex floor |
-| Devices | `bot.devices.phone` (ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.audio` (microphone, speaker with placement) |
+| Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts), `bot.devices.audio` (microphone, speaker with placement) |
 | Environment | broadcast scope, typed stimuli (`environment.sound`, …), world snapshots, `bot.environment.space` propagation law |
 | Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Vision, Reading, Language, Memory (STM/register, associative, consolidation, long-term), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
 | Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning — all cancellable, all typed |

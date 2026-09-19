@@ -1,6 +1,6 @@
 """One bot turn is one trace, end to end.
 
-A phone text drives the whole stack with fake model processors: phone ingress -> holder
+A smart phone text drives the whole stack with fake model processors: phone ingress -> holder
 (``bot.input``) -> cognition tiers (autonomy, intuition, reasoning, reflection) ->
 ``phone.send_text_message`` -> firmware -> messaging service -> the service's verdict. Every span
 and every log record emitted while that turn runs must carry the same trace id, every span's
@@ -24,7 +24,7 @@ import mosfet.telemetry
 import pytest
 from mosfet.abilities import cognition, memory, processing
 from mosfet.bot import Bot
-from mosfet.devices import phone
+from mosfet.devices import phone, smart_phone
 from mosfet.environment import Environment
 from opentelemetry import _logs
 
@@ -89,13 +89,13 @@ class _Carrier:
             self.target = None
 
     def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        if event.name != phone.ServiceTextMessageSendRequestedEvent.name or self.target is None:
+        if event.name != smart_phone.ServiceTextMessageSendRequestedEvent.name or self.target is None:
             return
         request = event.data
-        assert isinstance(request, phone.SendTextMessageData)
+        assert isinstance(request, smart_phone.SendTextMessageData)
         self.sent.put_nowait(request.text)
-        verdict = phone.ServiceTextMessageSentEvent.with_data(
-            phone.TextMessageSentData(to=request.to, text=request.text)
+        verdict = smart_phone.ServiceTextMessageSentEvent.with_data(
+            smart_phone.TextMessageSentData(to=request.to, text=request.text)
         )
         _ = asyncio.ensure_future(self.target.dispatch(ctx, dataclasses.replace(verdict, id=event.id)))
 
@@ -120,7 +120,7 @@ class _Reply(processing.Processor):
         mosfet.telemetry.record_generator_response(provider="fake", model="fake-model", response={}, latency_s=0.0)
         return (
             processing.SelectedEvent(
-                event=phone.SendTextMessageEvent.name,
+                event=smart_phone.SendTextMessageEvent.name,
                 data={"to": _VISITOR, "text": "hello back"},
                 reason="answer the visitor",
             ),
@@ -166,7 +166,7 @@ def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing
             reflection=cognition.Reflection(processor=_NoChange(), memory=store),
         )
         carrier = _Carrier()
-        handset = phone.Phone(service=carrier)
+        handset = smart_phone.SmartPhone(service=carrier)
         body = _PhoneBot(handset=handset, cognition_ability=ability)
         environment = Environment()
         await body.attach(environment)
@@ -177,7 +177,7 @@ def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing
         await handset.dispatch(
             handset.context(),
             dataclasses.replace(
-                phone.SmsTextEvent.with_data(phone.SmsTextData(id=message_id, sender=_VISITOR, text="Hey")),
+                smart_phone.SmsTextEvent.with_data(smart_phone.SmsTextData(id=message_id, sender=_VISITOR, text="Hey")),
                 id=message_id,
             ),
         )
@@ -232,8 +232,8 @@ def test_phone_text_turn_is_one_trace_with_intact_parents_and_no_duplicate_event
     assert {
         "phone.notification",
         "bot.input",
-        phone.SendTextMessageEvent.name,
-        phone.ServiceTextMessageSentEvent.name,
+        smart_phone.SendTextMessageEvent.name,
+        smart_phone.ServiceTextMessageSentEvent.name,
     } <= observed
 
 

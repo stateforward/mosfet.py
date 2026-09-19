@@ -1770,11 +1770,7 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
         mosfet.FocusDeviceEvent.name,
         phone_device.AnswerCallEvent.name,
         phone_device.DeclineCallEvent.name,
-        # A handset can text whatever its call is doing, so texting is on offer while it rings.
-        phone_device.SendTextMessageEvent.name,
-        # The lock screen is the holder's whatever the call is doing, so reading and dismissing are too.
-        phone_device.ReadNotificationEvent.name,
-        phone_device.DismissNotificationEvent.name,
+        # A basic phone makes calls only: no texting or lock screen is on offer.
         cognition.types.IgnoreEvent.name,
     }
     assert (
@@ -2481,9 +2477,10 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
     """Stale device selections dispatch; the device drops them per its own topology.
 
     Delivery validation resolves against declared events (HSM-CONTEXT-001: no probed peer
-    state), so a selection whose target moved on is no longer rejected pre-dispatch. The
-    device ignores it as unmatched, the turn completes, and the hangup is observed as the
-    next stimulus.
+    state), so a selection whose target moved on is no longer rejected pre-dispatch. A phone
+    answers only while it rings, so the stale answer lands on an idle handset that has no answer
+    transition: the device drops it as unmatched and reports nothing. The turn completes, and
+    the remote hang-up is observed as the next stimulus — the only one.
     """
 
     async def run() -> tuple[
@@ -2493,6 +2490,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
         list[cognition.types.OutputData],
         list[mosfet.ProcessingFailedEventData],
         list[processing.InputData],
+        list[str],
     ]:
         release = asyncio.Event()
         answer_selection = cognition.types.EventData(
@@ -2516,7 +2514,12 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
         )
         await wait_until(lambda: firmware.state() == "/Phone/hung_up")
         release.set()
-        await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: bool(active_bot.actions))
+        # Let the stale answer reach the handset and settle; nothing further may come of it.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert isinstance(firmware, phone_device.Firmware)
 
         return (
             active_bot.state(),
@@ -2525,9 +2528,10 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
             active_bot.actions,
             active_bot.failures,
             list(ability.calls),
+            [event.name for event in firmware.event_recorder().events],
         )
 
-    state, phone_state, focused_device, actions, failures, calls = asyncio.run(run())
+    state, phone_state, focused_device, actions, failures, calls, published = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
     assert phone_state == "/Phone/hung_up"
@@ -2541,17 +2545,17 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
             reason="answer incoming call",
         ),
     )
-    # Then it finds out. The far end hanging up and its own answer landing on nothing are both
-    # facts about the world that now come back to it — neither used to reach it at all, which
-    # is how a bot could go on believing it had answered a call that had already ended.
+    # Then it finds out the far end hung up, which is how it learns the call it answered is gone.
+    # Its own answer landed on an idle handset with nothing ringing, which has no answer to give:
+    # the device dropped it and reported nothing, so no further turn follows.
+    assert len(calls) == 2
     assert [
         turn.input.observation.event
         for turn in calls[1:]
         if isinstance(turn.input, mosfet.InputEventData) and turn.input.observation
-    ] == [
-        phone_device.HungUpEvent.name,
-        phone_device.NoCallEvent.name,
-    ]
+    ] == [phone_device.HungUpEvent.name]
+    assert phone_device.NoCallEvent.name not in published
+    assert published[-1] == phone_device.HungUpEvent.name
     assert failures == []
 
 

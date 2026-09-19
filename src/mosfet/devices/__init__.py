@@ -9,6 +9,6 @@ Import device domains and qualify symbols so the namespace is present:
     audio.Microphone
 """
 
-from . import audio, phone
+from . import audio, phone, smart_phone
 
-__all__ = ["audio", "phone"]
+__all__ = ["audio", "phone", "smart_phone"]

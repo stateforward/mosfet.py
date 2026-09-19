@@ -13,7 +13,7 @@ The example intentionally has a small SMS chat surface:
 * On successful generation with non-empty output, `SMSChatBotBody` calls `SMSPhone.send`.
 * On generation failure or empty output, no SMS is sent: there are no retries and no
   fallback replies.
-* `SMSMessageData` is the phone-domain `SmsTextData` from `bot.devices.phone`. The example
+* `SMSMessageData` is the phone-domain `SmsTextData` from `mosfet.devices.smart_phone`. The example
   has no `SMSMessageEvent`, `SMSMessageSentEvent`, or idle/generating HSM flow.
 
 Run it:

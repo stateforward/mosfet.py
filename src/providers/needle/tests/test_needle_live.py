@@ -15,7 +15,7 @@ import hsm
 import pytest
 
 from mosfet.abilities import cognition, processing
-from mosfet.devices import phone
+from mosfet.devices import smart_phone
 from mosfet.providers import needle
 
 pytestmark = [
@@ -28,10 +28,10 @@ pytestmark = [
 
 
 def test_notification_turn_through_real_needle() -> None:
-    stimulus = hsm.Event[phone.NotificationData](
+    stimulus = hsm.Event[smart_phone.NotificationData](
         name="phone.notification",
-        schema=phone.NotificationData,
-        data=phone.NotificationData.model_validate(
+        schema=smart_phone.NotificationData,
+        data=smart_phone.NotificationData.model_validate(
             {
                 "id": "message-1",
                 "name": "phone.sms.text",
@@ -41,7 +41,7 @@ def test_notification_turn_through_real_needle() -> None:
     )
     turn = processing.InputData(
         input=stimulus,
-        schemas=(phone.SendTextMessageEvent, cognition.IgnoreEvent),
+        schemas=(smart_phone.SendTextMessageEvent, cognition.IgnoreEvent),
         actors={},
         actor_events={"phone.send_text_message": ("phone",)},
         authority=None,
