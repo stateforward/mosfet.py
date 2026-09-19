@@ -241,8 +241,10 @@ def define(name: str, *elements: hsm.Element) -> hsm.Model:
         component="define",
         stage="construct",
     ) as active:
-        # Every behavior and guard runs in the trace context of the event driving it.
-        model = hsm.define(name, *elements, EventContextBinding())
+        # Every behavior and guard runs in the trace context of the event driving it, including
+        # members a later ``hsm.redefine`` adds: the binding is the model's validator and finalizer.
+        binding = EventContextBinding()
+        model = hsm.define(name, *elements, hsm.validator(binding), hsm.finalizer(binding))
         outcome = publish(topology(model)) if model_publish_enabled() else _PUBLISH_SKIPPED
         active.set_attribute(_PUBLISH_ATTR, outcome)
         if outcome == _PUBLISH_FAILED:

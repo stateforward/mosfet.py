@@ -6,11 +6,9 @@ import typing
 import uuid
 
 import hsm
-import mosfet
 import pydantic
 
 from mosfet.environment import SoundEvent, Environment
-from mosfet.telemetry import observer
 
 # Flat symbol imports (not `from . import display`), as in the phone package: SmartPhone accepts
 # a `display` constructor parameter, which would shadow a `display` module import.
@@ -127,9 +125,10 @@ class Firmware(phone.Firmware):
         not_found = NotificationNotFoundData.model_validate({"id": data.id, "command": event.name})
         Firmware._publish(ctx, instance, event, NotificationNotFoundEvent.with_data(not_found))
 
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "Phone",
-        *phone.Firmware._topology,
+    # A redefine of the phone's own firmware model: its call topology, observation, and trace
+    # binding all carry over, and apply to the transitions added here as well.
+    model: typing.ClassVar[hsm.Model] = hsm.redefine(
+        phone.Firmware.model,
         # Messaging is independent of the call: a handset sends texts whatever state its call is
         # in, so these live at the root rather than under any call state.
         hsm.transition(hsm.on(SendTextMessageEvent), hsm.effect(_publish_text_message_send_requested)),
@@ -154,7 +153,6 @@ class Firmware(phone.Firmware):
             hsm.guard(_is_unknown_notification),
             hsm.effect(_publish_notification_not_found),
         ),
-        hsm.observe(observer),
     )
 
 

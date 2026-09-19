@@ -3,6 +3,8 @@ from mosfet.devices import phone as phone_device
 import asyncio
 import dataclasses
 import datetime
+import json
+import pathlib
 import typing
 import xml.etree.ElementTree
 
@@ -11,10 +13,14 @@ import pydantic
 import pytest
 
 import mosfet
+import mosfet.telemetry
 from mosfet.abilities import processing
 from mosfet.devices import smart_phone
 from mosfet.environment import Environment
 from mosfet.protocols import attachment
+from mosfet.telemetry import span
+from mosfet.telemetry.configure import span_file, tracer_provider
+from opentelemetry import _logs
 from tests.devices.phone.handset import (
     PhoneHolder,
     PhoneObservationRecorder,
@@ -436,7 +442,7 @@ def _transition_signatures(model: hsm.Model, state: str, event_name: str) -> lis
 def test_a_smart_phone_handles_every_call_exactly_as_a_phone_does() -> None:
     """Every call transition of the phone is present, unchanged, in the smart phone's firmware.
 
-    The smart phone defines its firmware from the phone's own call topology, so a call on either
+    The smart phone's firmware model is an ``hsm.redefine`` of the phone's, so a call on either
     handset walks the same states through the same guards, effects, and targets.
     """
 
@@ -594,3 +600,122 @@ def test_a_smart_phone_takes_messaging_commands_and_a_phone_does_not() -> None:
     # The shell takes delivery and ignores it, as any unmatched event: nothing reaches firmware.
     assert basic_published == []
     assert smart_phone.SendTextMessageEvent.name not in phone_device.Phone.firmware_model.events
+
+
+def _messaging_transitions() -> dict[str, hsm.TransitionElement]:
+    """The transitions the smart phone's redefine adds to the phone's firmware model."""
+
+    phone_model = phone_device.Phone.firmware_model
+    smart_model = smart_phone.SmartPhone.firmware_model
+    return {
+        name: member
+        for name, member in smart_model.members.items()
+        if isinstance(member, hsm.TransitionElement) and name not in phone_model.members
+    }
+
+
+def test_every_messaging_transition_is_observed_once_and_bound_to_its_event_trace() -> None:
+    """The redefine carries the phone's observation and trace binding onto every messaging transition."""
+
+    smart_model = smart_phone.SmartPhone.firmware_model
+    transitions = _messaging_transitions()
+    observations = [name for name, member in smart_model.members.items() if isinstance(member, hsm.ObservationElement)]
+
+    assert len(transitions) == 8
+    assert len(observations) == 1
+    for name, transition in transitions.items():
+        observed = [effect for effect in transition.effect if effect.startswith(f"{observations[0]}/")]
+        assert len(observed) == 1, name
+        for effect in transition.effect:
+            behavior = smart_model.members[effect]
+            assert isinstance(behavior, hsm.BehaviorElement)
+            assert getattr(behavior.operation, "__mosfet_event_context__", False), effect
+    guards = [transition.guard for transition in transitions.values() if transition.guard]
+    for guard in guards:
+        constraint = smart_model.members[guard]
+        assert isinstance(constraint, hsm.ConstraintElement)
+        assert getattr(constraint.expression, "__mosfet_event_context__", False), guard
+
+
+def test_messaging_transitions_run_once_each_in_the_trace_of_their_event(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mosfet.telemetry.reset()
+    for name in (
+        "BOT_OTEL_DISABLED",
+        "BOT_OTEL_LOG_FILE",
+        "BOT_OTEL_SPAN_FILE",
+        "BOT_OTEL_CAPTURE",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "BOT_OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
+    assert mosfet.telemetry.configure() is True
+    tracer = span.tracer("tests.devices.smart_phone")
+
+    async def run() -> dict[str, int]:
+        phone, _firmware, _holder, _bystander = await _smart_phone_in_a_hand(Environment())
+        traces: dict[str, int] = {}
+        with tracer.start_as_current_span("text") as turn:
+            traces["text"] = turn.get_span_context().trace_id
+            await _text_phone(phone, "message-id", "Book me the 10:15.")
+        await wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
+        with tracer.start_as_current_span("read") as turn:
+            traces["read"] = turn.get_span_context().trace_id
+            await phone.dispatch(
+                phone.context(),
+                smart_phone.ReadNotificationEvent.with_data(smart_phone.ReadNotificationData(id="message-id")),
+            )
+        await wait_until(lambda: _pending_notification_ids(phone) == [])
+        with tracer.start_as_current_span("dismiss") as turn:
+            traces["dismiss"] = turn.get_span_context().trace_id
+            await phone.dispatch(
+                phone.context(),
+                smart_phone.DismissNotificationEvent.with_data(smart_phone.DismissNotificationData(id="no-such-id")),
+            )
+        with tracer.start_as_current_span("send") as turn:
+            traces["send"] = turn.get_span_context().trace_id
+            await phone.dispatch(
+                phone.context(),
+                smart_phone.SendTextMessageEvent.with_data(
+                    smart_phone.SendTextMessageData(to="+15555550101", text="See you at 10:15.")
+                ),
+            )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await hsm.stop(phone)
+        return traces
+
+    try:
+        traces = asyncio.run(run())
+        provider = tracer_provider()
+        if provider is not None:
+            _ = provider.force_flush()
+        path = span_file()
+        assert path is not None
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    finally:
+        mosfet.telemetry.reset()
+
+    transitions = _messaging_transitions()
+    observed = sorted(
+        (
+            typing.cast(str, record["attributes"]["hsm.event.name"]),
+            typing.cast(str, record["trace_id"]),
+        )
+        for record in records
+        if record["name"] == "bot.hsm.observe"
+        and record["attributes"].get("hsm.observation.occurrence") == "event"
+        and record["attributes"].get("hsm.observation.source") in transitions
+    )
+    assert observed == sorted(
+        [
+            (smart_phone.NotificationEvent.name, format(traces["text"], "032x")),
+            (smart_phone.ReadNotificationEvent.name, format(traces["read"], "032x")),
+            (smart_phone.DismissNotificationEvent.name, format(traces["dismiss"], "032x")),
+            (smart_phone.SendTextMessageEvent.name, format(traces["send"], "032x")),
+        ]
+    )

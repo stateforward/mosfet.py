@@ -3280,11 +3280,11 @@ wheels = [
 
 [[package]]
 name = "stateforward-hsm"
-version = "1.3.9"
+version = "1.3.10"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/67/d5/2004b514be6b3878c31209b522f3fe57d35c0762c9a722270252b98ac60b/stateforward_hsm-1.3.9.tar.gz", hash = "sha256:76b9ca1b63182d1fd2dfaa2bd008abae30f245079ab887ef0b844eb05c578bae", size = 186924, upload-time = "2026-09-18T00:19:12.694Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/77/ff7fb98447d494c9d887bbc45a0bd967e4162bb55d266547603f8ca603f0/stateforward_hsm-1.3.10.tar.gz", hash = "sha256:d06ecd1b801199bd507d40fa8d31cf72825f9c3ed0192f44d75389059b593015", size = 188009, upload-time = "2026-09-19T14:04:34.522Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/c3/b7a5ab583b2a25f8d6bbb280b8c280366a0e0e730e059fe4e0f3735bc7a3/stateforward_hsm-1.3.9-py3-none-any.whl", hash = "sha256:a1e986b2610de2db15a3a87817d31eb85d9c3d06363906a8aa886ae94d4be81e", size = 39881, upload-time = "2026-09-18T00:19:11.698Z" },
+    { url = "https://files.pythonhosted.org/packages/19/64/65deea9a3c8dfc65bd46d6a831d9d17cc09790543f913e3358622f8c9a6c/stateforward_hsm-1.3.10-py3-none-any.whl", hash = "sha256:c7868c9e9226fe9cf50d91c29a591029f5a4615f6583efd3b1fb7f9f5e556c60", size = 40501, upload-time = "2026-09-19T14:04:33.351Z" },
 ]
 
 [[package]]
@@ -3315,7 +3315,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.0,<3.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0,<3.0.0" },
     { name = "starlark-go", specifier = ">=1.0.1,<2.0.0" },
-    { name = "stateforward-hsm", specifier = ">=1.3.9,<1.4" },
+    { name = "stateforward-hsm", specifier = ">=1.3.10,<1.4" },
 ]
 
 [package.metadata.requires-dev]

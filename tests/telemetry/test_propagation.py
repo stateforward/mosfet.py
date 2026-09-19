@@ -2,9 +2,10 @@
 
 - `Traced.dispatch` stamps the dispatcher's context on the event, so an event queued behind a busy
   machine is processed in its own trace, not in the trace that started that processing run.
-- `EventContextBinding` (appended by ``mosfet.define``) runs every behavior and guard in its
-  event's context, sync and async alike, and accepts class-body ``staticmethod`` activities
-  without relying on an observer wrapper.
+- `EventContextBinding` (the validator and finalizer of every ``mosfet.define`` model) runs every
+  behavior and guard in its event's context, sync and async alike, accepts class-body
+  ``staticmethod`` activities without relying on an observer wrapper, and follows the model
+  through ``hsm.redefine``: what a redefine adds is bound and observed exactly once.
 - A stage that dispatches to its own machine and is cancelled by the transition it caused reads
   ``handed_off``; a stage cancelled by the machine stopping reads ``cancelled``.
 - No model is observed twice: observation is wired on the machine a runtime starts, never also on
@@ -259,4 +260,88 @@ def test_no_behavior_is_observed_more_than_once() -> None:
             and _observation_layers(typing.cast(hsm.BehaviorElement[typing.Any], member).operation) > 1
         }
     )
+    assert doubled == []
+
+
+_EXTEND = hsm.Event(name="test.extend")
+
+
+class _Extended(mosfet.telemetry.Traced):
+    """A ``mosfet.define`` model, observed, then extended with ``hsm.redefine``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: dict[str, int] = {}
+        self.observed: list[tuple[str, str, int]] = []
+
+    @staticmethod
+    def _observe(ctx: hsm.Context, instance: "_Extended", observation: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.observed.append((observation.source, mosfet.telemetry.observed_occurrence(observation), _trace_id()))
+
+    @staticmethod
+    def _on_extend(ctx: hsm.Context, instance: "_Extended", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance.seen["effect"] = _trace_id()
+
+    @staticmethod
+    def _enter_extended(ctx: hsm.Context, instance: "_Extended", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance.seen["entry"] = _trace_id()
+
+    @staticmethod
+    async def _run_extended(ctx: hsm.Context, instance: "_Extended", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance.seen["activity"] = _trace_id()
+
+    base: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Extended",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+        hsm.observe(_observe),
+    )
+    model: typing.ClassVar[hsm.Model] = hsm.redefine(
+        base,
+        hsm.transition(hsm.on(_EXTEND), hsm.source("idle"), hsm.effect(_on_extend), hsm.target("extended")),
+        hsm.state("extended", hsm.entry(_enter_extended), hsm.activity(_run_extended)),
+    )
+
+
+def test_redefine_added_behaviors_run_in_their_event_trace_and_are_observed_once() -> None:
+    tracer = span.tracer("tests.telemetry.propagation")
+
+    async def run() -> tuple[_Extended, int]:
+        extended = _Extended()
+        _ = await mosfet.started(None, extended, extended.model)
+        extended.observed.clear()
+        with tracer.start_as_current_span("turn") as turn:
+            turn_trace = turn.get_span_context().trace_id
+            _ = await hsm.dispatch(None, extended, _EXTEND)
+        await asyncio.sleep(0.01)
+        await hsm.stop(extended)
+        return extended, turn_trace
+
+    extended, turn_trace = asyncio.run(run())
+
+    assert extended.seen == {"effect": turn_trace, "entry": turn_trace, "activity": turn_trace}
+    added = ("_on_extend", "_enter_extended", "_run_extended")
+    behaviors = sorted(
+        (source.rsplit("/", 1)[-1], trace_id)
+        for source, occurrence, trace_id in extended.observed
+        if occurrence == "behavior" and source.rsplit("/", 1)[-1] in added
+    )
+    assert behaviors == sorted((name, turn_trace) for name in added)
+    transitions = [
+        (source, trace_id)
+        for source, occurrence, trace_id in extended.observed
+        if occurrence == "event" and source.startswith("/Extended/transition")
+    ]
+    assert len(transitions) == 1
+    assert transitions[0][1] == turn_trace
+    doubled = [
+        name
+        for name, member in extended.model.members.items()
+        if isinstance(member, hsm.BehaviorElement)
+        and _observation_layers(typing.cast(hsm.BehaviorElement[typing.Any], member).operation) > 1
+    ]
     assert doubled == []

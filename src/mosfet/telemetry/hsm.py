@@ -22,7 +22,7 @@ Propagation — one stimulus is one trace:
   ``hsm.Event.metadata`` (`stamp_context`); ``hsm`` runs a machine's queue in whichever task
   started its processing run, so without the stamp an event queued behind a busy machine would
   join that run's trace instead of its own.
-- `EventContextBinding`, appended by ``mosfet.define``, runs every behavior and guard with its
+- `EventContextBinding`, installed by ``mosfet.define`` as the model's validator and finalizer, runs every behavior and guard with its
   event's context attached, so spans, log records, tasks, thread hops (``asyncio.to_thread`` and
   ``span.bind``), provider calls, and further dispatches all join the event's trace with the
   right parent.
@@ -324,25 +324,31 @@ def _bound_operation(operation: _Operation) -> _Operation:
 
 
 @dataclasses.dataclass(kw_only=True)
-class EventContextBinding(hsm.Element):
-    """Define-time element: run every behavior and guard in its triggering event's trace context.
+class EventContextBinding(hsm.DefaultModelValidator):
+    """Model validator and finalizer: run every behavior and guard in its triggering event's trace context.
 
-    ``mosfet.define`` appends it last, so it sees every member (including an embedded submodel's
-    and any observation wrappers) before ``hsm`` validates the model. Entry, exit, effect,
-    activity, operation, and guard callables are wrapped so the event's carried context
-    (`event_context`) is the active one while they run: spans they start, records they log, tasks
-    they create, and events they dispatch all join the event's trace under the right parent.
-    Wrapping is idempotent (a submodel embedded in several models is bound once), sync stays sync
-    and async stays async, as ``hsm`` validates both.
+    ``mosfet.define`` installs one instance as both the model's ``hsm.validator`` and its
+    ``hsm.finalizer``. Both are model elements, so they follow the model through ``hsm.redefine``:
+    every member, including members a redefine adds, is bound whenever the model is built, not
+    only the members present when the model was first defined.
+
+    Binding runs before ``hsm.DefaultModelFinalizer`` (so a class-body ``staticmethod`` activity
+    reads as the coroutine function it wraps) and again after it, so the ``hsm.observe``
+    wrappers that finalizer applies also run in the event's context. The model is validated
+    once, finished: ``hsm`` applies observations when it finalizes, and a guarded transition
+    with no target and no effect (one that consumes a stale or late event) is valid only once
+    its observation effect is in place.
+
+    Entry, exit, effect, activity, operation, and guard callables are wrapped so the event's
+    carried context (`event_context`) is the active one while they run: spans they start,
+    records they log, tasks they create, and events they dispatch all join the event's trace
+    under the right parent. Wrapping is idempotent (a submodel embedded in several models, or a
+    member seen by both passes, is bound once), sync stays sync and async stays async, as ``hsm``
+    validates both.
     """
 
-    def redefine(
-        self,
-        model: hsm.Model,
-        stack: list[hsm.Element],
-        element: hsm.Element | None = None,
-    ) -> hsm.Element | None:
-        del stack, element
+    @staticmethod
+    def _bind(model: hsm.Model) -> None:
         for member in model.members.values():
             if isinstance(member, hsm.BehaviorElement):
                 behavior = typing.cast(hsm.BehaviorElement[typing.Any], member)
@@ -351,7 +357,17 @@ class EventContextBinding(hsm.Element):
                 constraint = typing.cast(hsm.ConstraintElement[typing.Any], member)
                 if callable(constraint.expression):
                     constraint.expression = _bound_operation(typing.cast(_Operation, constraint.expression))
-        return None
+
+    @typing.override
+    def validate(self, model: hsm.Model) -> None:
+        # Validation waits for the finished model (see `finalize`).
+        self._bind(model)
+
+    def finalize(self, model: hsm.Model) -> hsm.Model:
+        finalized = hsm.DefaultModelFinalizer().finalize(model)
+        self._bind(finalized)
+        super().validate(finalized)
+        return finalized
 
 
 def _empty_event() -> hsm.Event[typing.Any]:

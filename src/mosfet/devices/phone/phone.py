@@ -983,7 +983,8 @@ class Firmware(Traced):
         assert call_id is not None
         instance._closed_call_ids = frozenset((*instance._closed_call_ids, call_id))
 
-    _topology: typing.ClassVar[tuple[hsm.Element, ...]] = (
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Phone",
         hsm.initial(hsm.target("/Phone/hung_up")),
         hsm.state(
             "hung_up",
@@ -1295,17 +1296,13 @@ class Firmware(Traced):
                 hsm.target("/Phone/answered/media_ready"),
             ),
         ),
+        hsm.observe(observer),
     )
     """The call topology, the one definition of how a phone handles calls.
 
-    Kept as elements rather than only as the finished model so a phone that does more than calls
-    (``mosfet.devices.smart_phone``) defines its firmware from these same elements plus its own,
-    instead of copying them. ``hsm.redefine`` cannot extend :attr:`model` for that: its
-    observation and trace-binding elements apply only to members defined before them, so anything
-    appended after would be unobserved and unbound.
+    A phone that does more than calls (``mosfet.devices.smart_phone``) redefines this model with
+    ``hsm.redefine`` to add its own transitions, so call logic lives here only.
     """
-
-    model: typing.ClassVar[hsm.Model] = mosfet.define("Phone", *_topology, hsm.observe(observer))
 
 
 class Phone(mosfet.device.Device):
