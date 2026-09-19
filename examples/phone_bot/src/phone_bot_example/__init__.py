@@ -535,7 +535,7 @@ class ExampleConversation(abilities.Conversation):
         self._failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         maybe_terminal = (
             event.data if event.name in {ability.TerminalOutputEvent.name, ability.TerminalErrorEvent.name} else event
         )
@@ -983,7 +983,7 @@ class PhoneBot(Bot):
             raise RuntimeError("Phone bot activation failed.")
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if isinstance(event.data, (mosfet.ActivatingDoneEventData, mosfet.ActivatingFailedEventData)):
             self._resolve_activation_lifecycle(event)
         if event.name == self._conversation.output_event.name:

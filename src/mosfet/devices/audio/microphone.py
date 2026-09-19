@@ -51,6 +51,6 @@ class Microphone(Device):
         data: InputData,
         *,
         metadata: collections.abc.Mapping[str, object] | None = None,
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         event = routed_audio_event(self.input_event, data, source=self, target=target, metadata=metadata)
         return target.dispatch(ctx, event)

@@ -15,7 +15,6 @@ from mosfet.protocols import attachment
 import pydantic
 
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from .input import InputData, is_input
@@ -1356,7 +1355,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.target("/Cognition/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(

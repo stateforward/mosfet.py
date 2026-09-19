@@ -18,7 +18,6 @@ import mosfet
 from mosfet.protocols import attachment
 import pydantic
 
-from mosfet.telemetry import observer
 
 _STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _AssociativeMemoryChildrenAttachedEvent = hsm.Event[object](
@@ -864,7 +863,6 @@ class AssociativeMemory(ability.Ability[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

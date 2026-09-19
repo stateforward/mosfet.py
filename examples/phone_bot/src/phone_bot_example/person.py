@@ -255,7 +255,7 @@ class Person(hsm.Instance):
             await hsm.stop(self, environment)
         return self
 
-    def say(self, text: str, *, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
+    def say(self, text: str, *, ctx: hsm.Context) -> collections.abc.Awaitable[bool]:
         """Say ``text`` out loud, from where this person is standing.
 
         The words are opaque: they are synthesized and broadcast, and nothing on this side reads

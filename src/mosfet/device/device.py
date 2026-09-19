@@ -22,6 +22,7 @@ from mosfet.device.events import (
 )
 from mosfet.telemetry import observer
 from mosfet.environment import Environment, require_environment_scope, space
+from mosfet.telemetry.hsm import Traced, deliver
 
 _DEFAULT_FIRMWARE = mosfet.define(
     "DeviceFirmware",
@@ -60,58 +61,6 @@ _FirmwareInitializingCleanupFailedEvent = hsm.Event[_FirmwareInitializingCleanup
 )
 
 
-class ObservationData(pydantic.BaseModel):
-    """Bot-agnostic device observation for body/environment elevation.
-
-    What the device became, stated plainly and asking for nothing. The device stamps
-    the original event as a typed product and how insistent it is (``priority``); it
-    never names what the bot should do. Body/environment owns the explicit elevation
-    of this typed event into ``bot.input`` — devices never construct body events and
-    never route on event names.
-    """
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "description": (
-                "Device-domain observation: a state change felt by whoever holds the device. "
-                "Elevated to bot.input at the body/environment boundary."
-            ),
-            "examples": [
-                {
-                    "priority": 5,
-                    "observation": {"event": "test.device.happening", "data": {"situation": "changed"}},
-                }
-            ],
-        },
-    )
-
-    priority: int = pydantic.Field(
-        default=5,
-        ge=0,
-        le=10,
-        description=(
-            "How insistent this observation is, where 0 is the highest priority and 10 is the lowest. "
-            "Like loudness, this belongs to the signal rather than to whatever produced it; a "
-            "source that does not distinguish leaves it at the ordinary default."
-        ),
-        examples=[0, 5, 10],
-    )
-    observation: mosfet.StimulusData[object] = pydantic.Field(
-        description=(
-            "Complete typed product emitted by the device event that caused this observation. "
-            "Its envelope preserves source, target, and correlation provenance."
-        ),
-        examples=[{"event": "test.device.happening", "data": {"situation": "changed"}}],
-    )
-
-
-ObservationEvent = hsm.Event[ObservationData](
-    name="device.observation",
-    schema=ObservationData,
-)
-
-
 def _require_attach_environment_scope(environment: Environment, instance: "Device") -> None:
     if environment.contains(instance):
         return
@@ -120,7 +69,7 @@ def _require_attach_environment_scope(environment: Environment, instance: "Devic
     raise RuntimeError("Device is already started in another environment.")
 
 
-class Device(hsm.Instance, attachment.Attachment):
+class Device(Traced, attachment.Attachment):
     """Environment interaction surface that records attached external actors."""
 
     firmware_model: typing.ClassVar[hsm.Model] = _DEFAULT_FIRMWARE
@@ -270,64 +219,22 @@ class Device(hsm.Instance, attachment.Attachment):
         Environment.from_context(self.context()).join(self, placement=self._placement)
         return instance
 
-    def _report(self, ctx: hsm.Context, event: hsm.Event[typing.Any], *, priority: int = 5) -> None:
-        """Tell the bots this device is attached to that its own state changed.
-
-        This is the device's nerve, not the room. It reaches the bots holding this device and
-        nobody else, so a private device fact — a call connecting, a line going dead — never
-        becomes a public broadcast that every citizen in the environment overhears. Sound and
-        vision are what the environment carries, because those are what a room actually
-        carries; everything else about a device is felt only by whoever is holding it.
-
-        The report says *what happened* and never what to do about it. It carries the original
-        event as a typed device-domain product, and there is deliberately no hint, suggestion,
-        or requested action: the bot is the one that decides whether a change is worth acting
-        on, and doing nothing is a legitimate answer. Body/environment owns the explicit
-        elevation of this typed observation into ``bot.input`` — devices never construct body events.
-
-        Reserved for state changes. Never call this per media frame, per audio chunk, or per
-        sample: streams already have their own path, and a per-frame report would defer without
-        bound behind a body that is busy thinking.
-        """
-
-        from mosfet.environment import elevate_device_observation_to_input
-
-        owners = tuple(self._attachments)
-        if not owners:
-            # Nowhere to feel it: an unattached device reports to nobody (same as before —
-            # the per-owner envelope stamp below never runs, so an unstarted device with no
-            # owners stays silent instead of failing on hsm.id).
-            return
-        observation = dataclasses.replace(
-            ObservationEvent.with_data(
-                ObservationData(
-                    priority=priority,
-                    observation=mosfet.StimulusData.from_event(event),
-                )
-            ),
-            id=event.id or uuid.uuid4().hex,
-            source=hsm.id(self),
-            metadata=dict(event.metadata),
-        )
-        for owner in owners:
-            elevate_device_observation_to_input(ctx, owner, observation)
-
     @typing.override
-    async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
+    async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> bool:
         environment = Environment.from_context(ctx)
         _require_attach_environment_scope(environment, self)
-        await hsm.Instance.dispatch(self, ctx, event)
+        return await deliver(self, ctx, event)
 
     @typing.override
-    async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
+    async def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> bool:
         # Stopped/unstarted device: surface typed failure when a reply sink exists.
         if not lifecycle.is_started(self):
             data = event.data
             if not isinstance(data, attachment.DetachData):
-                return
+                return False
             reply_to: hsm.Instance = data.reply_to if data.reply_to is not None else data.actor
             reply_id = hsm.id(reply_to) if lifecycle.is_started(reply_to) else ""
-            await hsm.Instance.dispatch(
+            await deliver(
                 reply_to,
                 ctx,
                 dataclasses.replace(
@@ -344,9 +251,9 @@ class Device(hsm.Instance, attachment.Attachment):
                     metadata=dict(event.metadata),
                 ),
             )
-            return
+            return False
         require_environment_scope(Environment.from_context(ctx), self, participant="Device")
-        await hsm.Instance.dispatch(self, ctx, event)
+        return await deliver(self, ctx, event)
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
@@ -424,24 +331,26 @@ class Device(hsm.Instance, attachment.Attachment):
         return self
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         """Deliver into device shell and firmware. No event-name routing table.
 
         Shell-only lifecycle payloads (attach/detach) stay on the shell.
         Other events also reach firmware when present; unmatched triggers are ignored by
         normal HSM semantics. Dual delivery is intentional for shared device/firmware
         observations; subclasses (e.g. Phone) may override with narrower routing.
+        Resolves to whether the shell or the firmware accepted the event.
         """
 
-        async def _deliver() -> None:
-            await hsm.Instance.dispatch(self, ctx, event)
+        async def _deliver() -> bool:
+            shell_delivered = await deliver(self, ctx, event)
             firmware = self._firmware
             if firmware is None:
-                return
+                return shell_delivered
             # Shell-only lifecycle (typed payload, not event.name).
             if isinstance(event.data, (attachment.AttachData, attachment.DetachData)):
-                return
-            await firmware.dispatch(ctx, event)
+                return shell_delivered
+            firmware_delivered = await firmware.dispatch(ctx, event)
+            return shell_delivered or firmware_delivered
 
         # Match hsm.Instance.dispatch: eager Task so fire-and-forget effect paths still run.
         return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)

@@ -926,10 +926,10 @@ def test_failed_detector_readiness_stops_and_does_not_cache_detector(
         ctx: hsm.Context | None,
         target: hsm.Dispatchable | None,
         event: hsm.Event[typing.Any],
-    ) -> typing.Awaitable[None]:
+    ) -> typing.Awaitable[bool]:
         if event.name == turn_detector.TurnDetectorReadyRequestEvent.name:
 
-            async def fail() -> None:
+            async def fail() -> bool:
                 raise RuntimeError("detector readiness dispatch failed")
 
             return fail()
@@ -1415,7 +1415,7 @@ def test_conversation_append_same_correlation_is_idempotent() -> None:
             self.outputs: list[conversation.Messages] = []
 
         @typing.override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
                 terminal = event.data
                 if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):

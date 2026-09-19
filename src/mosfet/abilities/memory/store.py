@@ -25,7 +25,6 @@ from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import ClauseElement
 
-from mosfet.telemetry import observer
 
 from . import schema
 
@@ -462,7 +461,6 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
                 hsm.target("/MemoryStore/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

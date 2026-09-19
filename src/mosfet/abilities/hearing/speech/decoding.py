@@ -8,8 +8,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
-
 
 class SpeechDecoder(decoding.Decoder[bytes, bytes], abc.ABC):
     """Decoder that converts speech input bytes into normalized speech bytes."""
@@ -130,7 +128,6 @@ class SpeechDecoding(decoding.Decoding[bytes, bytes]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

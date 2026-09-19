@@ -1,6 +1,6 @@
 """Device primitives for stateforward.mosfet."""
 
-from mosfet.device.device import Device, ObservationData, ObservationEvent
+from mosfet.device.device import Device
 from mosfet.device.events import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
@@ -15,7 +15,5 @@ __all__ = [
     "FirmwareInitializingDoneEventData",
     "FirmwareInitializingFailedEvent",
     "FirmwareInitializingFailedEventData",
-    "ObservationData",
-    "ObservationEvent",
     "Sandbox",
 ]

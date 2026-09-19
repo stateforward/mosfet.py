@@ -43,7 +43,7 @@ class RecordingSpeechEncoding(speech.SpeechEncoding):
         self.failures = []
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.output_event.name:
             output = event.data
             assert isinstance(output, bytes)

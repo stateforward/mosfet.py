@@ -10,8 +10,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 class InputData(pydantic.BaseModel):
     """Provider-neutral voice segments to identify by voice embedding."""
@@ -270,5 +268,4 @@ class VoiceIdentification(classifying.Classifying[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )

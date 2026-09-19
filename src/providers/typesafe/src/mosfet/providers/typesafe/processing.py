@@ -41,6 +41,8 @@ import collections.abc
 import typing
 
 import pydantic
+import time
+import mosfet.telemetry
 
 _RESERVED_PASS_CRITERION = "__unhandled__"
 _DEFAULT_PASS_WORDING = "None of these: leave the turn unhandled."
@@ -218,11 +220,31 @@ class Processor(processing.Processor):
                 payload_key_specs[question_name] = (name, key)
 
         state_document = {"turn": stimulus_document}
+        mosfet.telemetry.record_generator_request(
+            provider="typesafe",
+            model=self._model,
+            messages=[state_document],
+            tools=question_map,
+        )
+        started = time.monotonic()
         try:
             async with self._client_factory() as client:
                 response = await client.system_one(state=state_document, questions=question_map)
         except SystemOneError as error:
+            mosfet.telemetry.record_generator_response(
+                provider="typesafe",
+                model=self._model,
+                response=None,
+                latency_s=time.monotonic() - started,
+                error=error,
+            )
             raise ProcessingError(f"TypeSafe system_one call failed: {error}") from error
+        mosfet.telemetry.record_generator_response(
+            provider="typesafe",
+            model=self._model,
+            response=response,
+            latency_s=time.monotonic() - started,
+        )
 
         chosen = response.choices["selection"].choice
         if chosen == _RESERVED_PASS_CRITERION:

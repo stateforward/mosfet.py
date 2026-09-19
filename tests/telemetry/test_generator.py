@@ -149,3 +149,18 @@ def test_record_generator_request_truncates_deeply_nested_messages(
     text = json.dumps(content)
     assert "<truncated:max-depth>" in text
     assert '"leaf"' not in text
+
+
+def test_record_generator_usage_emits_token_counts_without_payload_opt_in() -> None:
+    log_path = pathlib.Path("usage.jsonl")
+    assert mosfet.telemetry.configure(log_file=log_path) is True
+    mosfet.telemetry.record_generator_usage(
+        provider="openai_compat",
+        model="gpt-test",
+        usage={"input_tokens": 10, "output_tokens": 7, "reasoning_tokens": 5},
+    )
+    _force_flush()
+    payload = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["body"] == {"input_tokens": 10, "output_tokens": 7, "reasoning_tokens": 5}
+    assert payload["attributes"]["stage"] == "usage"
+    assert payload["attributes"]["model"] == "gpt-test"

@@ -9,7 +9,6 @@ import typing
 from openai import OpenAI
 import pydantic
 
-
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
@@ -18,7 +17,7 @@ def _no_api_key() -> str:
 
 
 class RequestError(RuntimeError):
-    """Raised when an OpenAI-compatible chat completion request fails."""
+    """Raised when an OpenAI-compatible chat completion or Responses API request fails."""
 
 
 def _empty_headers() -> dict[str, str]:
@@ -37,6 +36,14 @@ class OpenAIChatCompletionsResource(typing.Protocol):
         ...
 
 
+class OpenAIResponsesResource(typing.Protocol):
+    """OpenAI SDK responses resource used by this provider."""
+
+    def create(self, **kwargs: object) -> object:
+        """Create a response with SDK-compatible keyword arguments."""
+        ...
+
+
 class OpenAIChatResource(typing.Protocol):
     """OpenAI SDK chat resource used by this provider."""
 
@@ -47,6 +54,17 @@ class OpenAIClient(typing.Protocol):
     """OpenAI SDK client shape used by this provider."""
 
     chat: OpenAIChatResource
+    responses: OpenAIResponsesResource
+
+
+class ReasoningEffort(enum.StrEnum):
+    """Reasoning effort accepted by OpenAI reasoning models."""
+
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class ChatCompletionClient(typing.Protocol):
@@ -62,6 +80,31 @@ class ChatCompletionClient(typing.Protocol):
     ) -> dict[str, object]:
         """Create a chat completion response using provider-neutral JSON values."""
         ...
+
+
+class ResponsesClient(typing.Protocol):
+    """Client interface used by stateforward.mosfet OpenAI Responses API text generators."""
+
+    def create_response(
+        self,
+        *,
+        input: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        tool_choice: str | None = None,
+        text_format: collections.abc.Mapping[str, object] | None = None,
+        reasoning: collections.abc.Mapping[str, object] | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Create a Responses API response using provider-neutral JSON values."""
+        ...
+
+
+def _json_object(value: object, message: str) -> dict[str, object]:
+    json_value = jsonable(value)
+    if not isinstance(json_value, collections.abc.Mapping):
+        raise TypeError(message)
+    mapping = typing.cast(collections.abc.Mapping[object, object], json_value)
+    return {str(key): item for key, item in mapping.items()}
 
 
 def jsonable(value: object) -> object:
@@ -120,8 +163,8 @@ def _normalized_base_url(value: str) -> str:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class ChatClient(ChatCompletionClient):
-    """OpenAI SDK-backed client for providers that expose the Chat Completions API shape."""
+class ChatClient(ChatCompletionClient, ResponsesClient):
+    """OpenAI SDK-backed client for the Chat Completions API shape and, where served, the Responses API."""
 
     model: str
     base_url: str = _DEFAULT_OPENAI_BASE_URL
@@ -162,11 +205,45 @@ class ChatClient(ChatCompletionClient):
         except Exception as error:
             message = "OpenAI-compatible chat completion request failed."
             raise RequestError(message) from error
-        json_response = jsonable(response)
-        if not isinstance(json_response, collections.abc.Mapping):
-            raise TypeError("OpenAI-compatible chat completion response must be a JSON object.")
-        response_mapping = typing.cast(collections.abc.Mapping[object, object], json_response)
-        return {str(key): item for key, item in response_mapping.items()}
+        return _json_object(response, "OpenAI-compatible chat completion response must be a JSON object.")
+
+    @typing.override
+    def create_response(
+        self,
+        *,
+        input: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        tool_choice: str | None = None,
+        text_format: collections.abc.Mapping[str, object] | None = None,
+        reasoning: collections.abc.Mapping[str, object] | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        body: dict[str, object] = dict(self.default_body)
+        if extra_body is not None:
+            body.update(jsonable_mapping(dict(extra_body)))
+
+        kwargs: dict[str, object] = {
+            "model": self.model,
+            "input": typing.cast(list[object], jsonable(input)),
+        }
+        if tools:
+            kwargs["tools"] = typing.cast(list[object], jsonable(tools))
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        if text_format is not None:
+            kwargs["text"] = {"format": jsonable_mapping(dict(text_format))}
+        if reasoning is not None:
+            kwargs["reasoning"] = jsonable_mapping(dict(reasoning))
+        if body:
+            kwargs["extra_body"] = body
+
+        client = self._client()
+        try:
+            response = client.responses.create(**kwargs)
+        except Exception as error:
+            message = "OpenAI Responses API request failed."
+            raise RequestError(message) from error
+        return _json_object(response, "OpenAI Responses API response must be a JSON object.")
 
     def _client(self) -> OpenAIClient:
         if self.client is not None:
@@ -198,8 +275,10 @@ __all__ = [
     "ChatCompletionClient",
     "OpenAI",
     "ChatClient",
+    "ReasoningEffort",
     "RequestError",
     "OpenAIClient",
+    "ResponsesClient",
     "jsonable",
     "jsonable_mapping",
 ]

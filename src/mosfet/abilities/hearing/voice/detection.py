@@ -20,8 +20,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 class VoiceDetectionSegment(pydantic.BaseModel):
     """One voice span in the inspected audio, measured from the start of that input."""
@@ -553,7 +551,6 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
                 hsm.target("/VoiceDetection/VoiceDetected/Monitoring"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

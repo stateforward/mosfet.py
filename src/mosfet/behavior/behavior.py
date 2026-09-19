@@ -23,7 +23,7 @@ import pydantic
 
 from mosfet import abilities
 
-from mosfet.telemetry import observer
+from mosfet.telemetry.hsm import Traced
 
 
 class _OperationalEventData(pydantic.BaseModel):
@@ -116,11 +116,11 @@ _CallbackFailedEvent = hsm.Event[_CallbackExecutionResultData](
 )
 
 
-class _ApplyOperation(hsm.Instance):
+class _ApplyOperation(Traced):
     """One-shot apply settlement address; the awaitable is closure-bound."""
 
 
-class _GuardEvaluator(hsm.Instance):
+class _GuardEvaluator(Traced):
     _callback_runtime: runtime.CallbackRuntime
     _owner: "Behavior"
 
@@ -221,7 +221,7 @@ class _GuardEvaluator(hsm.Instance):
     )
 
 
-class _CallbackExecutor(hsm.Instance):
+class _CallbackExecutor(Traced):
     _callback_runtime: runtime.CallbackRuntime
     _owner: "Behavior"
 
@@ -325,7 +325,6 @@ class Behavior(abilities.Ability[object, object]):
         "Behavior",
         hsm.initial(hsm.target("/Behavior/idle")),
         hsm.state("idle"),
-        hsm.observe(observer),
     )
 
     @staticmethod
@@ -573,19 +572,22 @@ class Behavior(abilities.Ability[object, object]):
         await super().stop(ctx)
 
     @typing.override
-    def apply(self, input: object, *, ctx: hsm.Context | None = None) -> collections.abc.Awaitable[None]:
+    def apply(self, input: object, *, ctx: hsm.Context | None = None) -> collections.abc.Awaitable[bool]:
         """Dispatch one behavior operation and wait for its correlated settlement.
 
         Cancellation only stops this caller's settlement wait. Once dispatch commits,
         the HSM and its ordered callback executor continue the operation and may still
         emit modeled outputs or failures. The operation id isolates late settlement
         cleanup so it cannot satisfy a later ``apply`` call.
+
+        Resolves to whether the input was delivered; an undelivered input never
+        settles, so it returns ``False`` without waiting.
         """
 
         operation_id = uuid.uuid4().hex
         dispatch_context = self.context() if ctx is None else ctx
 
-        async def dispatch_and_wait() -> None:
+        async def dispatch_and_wait() -> bool:
             settled: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
             def is_correlated(
@@ -627,7 +629,7 @@ class Behavior(abilities.Ability[object, object]):
             operation = _ApplyOperation()
             try:
                 _ = await mosfet.started(self.context(), operation, operation_model)
-                await hsm.dispatch(
+                delivered = await hsm.dispatch(
                     dispatch_context,
                     self,
                     dataclasses.replace(
@@ -636,7 +638,10 @@ class Behavior(abilities.Ability[object, object]):
                         target=hsm.id(self),
                     ),
                 )
+                if not delivered:
+                    return False
                 await settled
+                return True
             finally:
                 await asyncio.shield(operation.stop(self.context()))
 
@@ -815,7 +820,6 @@ def _lower_element(
             *extra_root_elements,
             *children,
             *generated_failure,
-            hsm.observe(observer),
         )
     if kind == "state":
         state_name = typing.cast(str, element["name"])

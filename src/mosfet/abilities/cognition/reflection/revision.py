@@ -27,10 +27,10 @@ from mosfet.behavior.instance import Instance
 from mosfet.behavior.source import STARLARK_API
 from mosfet.protocols import attachment
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from .. import episodes
+from .. import inventory
 from .. import input
 from .. import types
 
@@ -327,12 +327,6 @@ def _load_behavior(store: memory.Memory, name: str) -> Instance | None:
     return behaviors[0] if behaviors else None
 
 
-def _store_behavior(store: memory.Memory, behavior: Instance) -> None:
-    _ = store.execute(
-        memory.InputData(statements=_compile_statements(behavior_storage.replace_behavior_clauses(behavior)))
-    )
-
-
 def _draft(intent: CreateData) -> Instance:
     return behavior_storage.mark_draft(
         Instance(
@@ -585,7 +579,7 @@ class Revision(processing.Processing):
                     existing = _load_behavior(instance._memory, create_intent.name)
                     if existing is None:
                         existing = _draft(create_intent)
-                        _store_behavior(instance._memory, existing)
+                        inventory.store_behavior(instance._memory, existing, cause="draft")
                     intent = ChangeData(
                         name=create_intent.name,
                         triggers=create_intent.triggers,
@@ -833,7 +827,7 @@ class Revision(processing.Processing):
         behavior = data.behavior_instance
         if behavior is None:
             behavior = behavior_storage.mark_draft(data.write.existing_behavior, reason=STATUS_REASON_VALIDATION)
-        _store_behavior(instance._memory, behavior)
+        inventory.store_behavior(instance._memory, behavior, cause="draft")
         return behavior
 
     @staticmethod
@@ -841,7 +835,7 @@ class Revision(processing.Processing):
         data = event.data
         assert isinstance(data, _CheckedData)
         assert data.behavior_instance is not None
-        _store_behavior(instance._memory, data.behavior_instance)
+        inventory.store_behavior(instance._memory, data.behavior_instance, cause="accept")
         written = data.written.model_copy(
             update={
                 "name": data.behavior_instance.name,
@@ -1268,7 +1262,6 @@ class Revision(processing.Processing):
             ),
         ),
         hsm.state("rebooting", hsm.defer(input_event)),
-        hsm.observe(observer),
     )
 
     def __init__(self, *, processor: processing.Processor | ProcessorFactory, memory: memory.Memory) -> None:

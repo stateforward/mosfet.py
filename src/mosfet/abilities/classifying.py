@@ -8,8 +8,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
-
 
 class Classifier(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
     """Classifier interface."""
@@ -152,7 +150,6 @@ class Classifying(ability.Ability[ability.TInput, ability.TOutput]):
                 hsm.target("/Classifying/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(

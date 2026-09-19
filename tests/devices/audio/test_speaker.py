@@ -29,12 +29,12 @@ class RecordingDevice(Device):
         self.events: list[hsm.Event[typing.Any]] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         del ctx
         self.events.append(event)
 
-        done = asyncio.get_running_loop().create_future()
-        done.set_result(None)
+        done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        done.set_result(True)
         return done
 
 

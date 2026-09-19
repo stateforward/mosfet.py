@@ -33,12 +33,13 @@ from mosfet.behavior import runtime
 from mosfet.behavior import seed
 from mosfet.behavior import storage as behavior_storage
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from . import episodes
+from . import inventory
 from . import input
 from . import types
+from mosfet.telemetry.hsm import Traced
 
 _LOG = logging.getLogger(__name__)
 
@@ -512,7 +513,7 @@ class _BehaviorOperation(processing.Operation):
         )
 
 
-class _CandidateRun(hsm.Instance):
+class _CandidateRun(Traced):
     """Operation actor that owns one Behavior through attach, run, and bounded detach."""
 
     @classmethod
@@ -1544,8 +1545,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         store = data.store
         if store is not None:
             try:
-                clauses = behavior_storage.replace_behavior_clauses(updated)
-                _ = store.execute(memory.InputData(statements=memory.compile_statements(*clauses)))
+                inventory.store_behavior(store, updated, cause="usage")
             except Exception:
                 telemetry.span.record_current_failure("behavior_usage_persistence")
                 persisted_event = _BehaviorUsagePersistenceFailedEvent
@@ -2894,7 +2894,6 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 ),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(

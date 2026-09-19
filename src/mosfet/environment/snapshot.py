@@ -139,7 +139,7 @@ def _render_owned_devices(
     """
 
     # Lazy: mosfet.device imports mosfet.environment at module level, so a top-level import here
-    # would close a cycle back through this package (same reason Device._report imports lazily).
+    # would close a cycle back through this package.
     from mosfet.device import Device
 
     if not isinstance(value, collections.abc.Mapping):

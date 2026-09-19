@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import typing
+import uuid
 import wave
 
 import hsm
@@ -176,7 +177,7 @@ class MetadataRecordingAbility(processing.Processing):
         return self._meta.input_event_metadata
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.input_event.name:
             self._meta.input_event_metadata.append(dict(event.metadata))
         return super().dispatch(ctx, event)
@@ -406,12 +407,13 @@ class CapturingCognition(cognition.Cognition):
         )
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == cognition.InputEvent.name:
             self.input_events.append(event)
         if self.swallow_cancel and event.name == cognition.CancelEvent.name:
-            future = asyncio.get_running_loop().create_future()
-            future.set_result(None)
+            # Swallowed: the cancel is never delivered.
+            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            future.set_result(False)
             return future
         return super().dispatch(ctx, event)
 
@@ -439,7 +441,7 @@ class InputRecordingCognition(Cognition):
         )
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == cognition.InputEvent.name and isinstance(event.data, cognition.InputData):
             self.inputs.append(event.data)
         return super().dispatch(ctx, event)
@@ -492,7 +494,7 @@ class _BaseStubCognition(abilities.Ability[cognition.InputData, typing.Any]):
         self.received = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name in {_StubCancelEvent.name, processing.CancelEvent.name}:
             self.received.append(event)
         return super().dispatch(ctx, event)
@@ -523,7 +525,7 @@ class BasicAgent(Bot):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == mosfet.ProcessingCompletedEvent.name:
             completed = event.data
             assert isinstance(completed, mosfet.ProcessingCompletedEventData)
@@ -543,7 +545,7 @@ class LifecycleRecordingAgent(BasicAgent):
         self.lifecycle_events = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if isinstance(
             event.data,
             (
@@ -605,7 +607,7 @@ class AbilityAgent(Bot):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == mosfet.ProcessingCompletedEvent.name:
             completed = event.data
             assert isinstance(completed, mosfet.ProcessingCompletedEventData)
@@ -635,6 +637,23 @@ HappeningEvent = hsm.Event[HappeningData](
 )
 
 
+def _dispatch_to_holders(device: Device, event: hsm.Event[typing.Any], *, priority: int = 5) -> None:
+    """What a device does when something happens to it: dispatch bot.input carrying the event to its holders."""
+    for owner in tuple(device._attachments):  # pyright: ignore[reportPrivateUsage]
+        _ = hsm.dispatch(
+            device.context(),
+            owner,
+            dataclasses.replace(
+                mosfet.InputEvent.with_data(
+                    mosfet.InputEventData(priority=priority, observation=mosfet.StimulusData.from_event(event))
+                ),
+                id=event.id or uuid.uuid4().hex,
+                source=hsm.id(device),
+                target=hsm.id(owner),
+            ),
+        )
+
+
 class ReportingDevice(Device):
     """A device a test can make something happen to.
 
@@ -643,7 +662,7 @@ class ReportingDevice(Device):
     """
 
     def happen(self, situation: str = "changed") -> None:
-        self._report(self.context(), HappeningEvent.with_data(HappeningData(situation=situation)))
+        _dispatch_to_holders(self, HappeningEvent.with_data(HappeningData(situation=situation)))
 
 
 class OccasionAgent(AbilityAgent):
@@ -661,7 +680,7 @@ class OccasionAgent(AbilityAgent):
         super().__init__(devices=devices, cognition=cognition)
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == mosfet.InputEvent.name:
             self.occasions.append(event)
         return super().dispatch(ctx, event)
@@ -709,7 +728,7 @@ class ImmediatelyFailingInitializingDevice(Device):
 
 class LifecycleDispatchFailingDevice(Device):
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name in {attachment.AttachEvent.name, attachment.DetachEvent.name}:
             raise RuntimeError("device lifecycle dispatch override failed")
         return super().dispatch(ctx, event)
@@ -751,7 +770,7 @@ class ContextRecordingPhone(phone_device.Phone):
         self.event_metadata = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == phone_device.AnswerCallEvent.name:
             self.event_metadata.append(dict(event.metadata))
         return super().dispatch(ctx, event)
@@ -904,13 +923,13 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart(monke
             self.detach_calls = 0
 
         @typing.override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if event.name == attachment.DetachEvent.name:
                 self.detach_calls += 1
                 if self.detach_calls == 1:
 
-                    async def hang() -> None:
-                        _ = await asyncio.Event().wait()
+                    async def hang() -> bool:
+                        return await asyncio.Event().wait()
 
                     return hang()
             return super().dispatch(ctx, event)
@@ -1013,7 +1032,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
             group: attachment.Group,
             ctx: hsm.Context,
             event: hsm.Event[attachment.AttachData],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             nonlocal attach_calls, group_is_private
             attach_calls += 1
             group_is_private = not environment.contains(group)
@@ -1023,7 +1042,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
             group: attachment.Group,
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             nonlocal detach_calls
             detach_calls += 1
             return group_detach(group, ctx, event)
@@ -1261,7 +1280,7 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
         environment = Environment()
         original_dispatch = hsm.Instance.dispatch
 
-        def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(instance: hsm.Instance, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if instance is failing_device and event.name == attachment.AttachEvent.name:
                 raise RuntimeError("device attach dispatch failed")
             return original_dispatch(instance, ctx, event)
@@ -1751,6 +1770,11 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
         mosfet.FocusDeviceEvent.name,
         phone_device.AnswerCallEvent.name,
         phone_device.DeclineCallEvent.name,
+        # A handset can text whatever its call is doing, so texting is on offer while it rings.
+        phone_device.SendTextMessageEvent.name,
+        # The lock screen is the holder's whatever the call is doing, so reading and dismissing are too.
+        phone_device.ReadNotificationEvent.name,
+        phone_device.DismissNotificationEvent.name,
         cognition.types.IgnoreEvent.name,
     }
     assert (
@@ -1960,7 +1984,7 @@ class RecordingListening(listening.Listening):
         self.speech_decoder = decoder
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         self.received.append(event)
         if event.name == cognition.InputEvent.name:
             handoff = event.data
@@ -4091,11 +4115,11 @@ def test_bot_ignores_unhandled_device_event() -> None:
 def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPatch) -> None:
     class HangOnDetachDevice(Device):
         @typing.override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if event.name == attachment.DetachEvent.name:
 
-                async def hang() -> None:
-                    _ = await asyncio.Event().wait()
+                async def hang() -> bool:
+                    return await asyncio.Event().wait()
 
                 return hang()
             return super().dispatch(ctx, event)
@@ -4866,7 +4890,7 @@ class _PriorityReportingDevice(ReportingDevice):
     """ReportingDevice that lets a test choose the report priority."""
 
     def happen_with_priority(self, situation: str, *, priority: int) -> None:
-        self._report(self.context(), HappeningEvent.with_data(HappeningData(situation=situation)), priority=priority)
+        _dispatch_to_holders(self, HappeningEvent.with_data(HappeningData(situation=situation)), priority=priority)
 
 
 def test_body_handles_device_reports_in_arrival_order_regardless_of_priority() -> None:
@@ -4920,7 +4944,7 @@ class _OutputTap(ProbeAbility):
         self.seen: list[str] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         self.seen.append(event.name)
         return super().dispatch(ctx, event)
 

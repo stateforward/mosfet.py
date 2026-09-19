@@ -18,7 +18,7 @@ from mosfet import scope
 
 from . import events
 from .attachment import Attachment
-
+from mosfet.telemetry.hsm import Traced, deliver
 
 type _MemberResult = events.AttachCompleteData | events.DetachedData | events.FailedData
 
@@ -129,7 +129,7 @@ def _first_failure(results: collections.abc.Mapping[int, _MemberResult]) -> even
     return None
 
 
-class _Reply(hsm.Instance):
+class _Reply(Traced):
     """Accept one correlated member outcome for one aggregate operation."""
 
     @staticmethod
@@ -318,7 +318,7 @@ class _Reply(hsm.Instance):
             raise
 
 
-class Group(hsm.Instance, Attachment, hsm.Dispatchable):
+class Group(Traced, Attachment, hsm.Dispatchable):
     """Coordinate concurrent attachment lifecycle barriers for fixed members."""
 
     _attachment_limit: typing.ClassVar[int | None] = None
@@ -375,7 +375,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             )
             for index, reply in replies.items():
                 member = instance._attachments[index]
-                _ = hsm.Instance.dispatch(
+                _ = deliver(
                     reply,
                     lifetime,
                     dataclasses.replace(
@@ -414,7 +414,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 )
             except asyncio.CancelledError:
                 if ctx.is_done() and reply is None:
-                    _ = hsm.Instance.dispatch(
+                    _ = deliver(
                         instance,
                         instance.context(),
                         dataclasses.replace(
@@ -446,7 +446,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 # Prefer Attachment._actor_id: hsm.id can fail mid-stop (hsm 1.3.2+).
                 member_id = Attachment._actor_id(member)
                 if reply is not None:
-                    _ = hsm.Instance.dispatch(
+                    _ = deliver(
                         reply,
                         ctx,
                         dataclasses.replace(
@@ -458,7 +458,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         ),
                     )
                     return
-                _ = hsm.Instance.dispatch(
+                _ = deliver(
                     instance,
                     ctx,
                     dataclasses.replace(
@@ -516,7 +516,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             )
             for index, reply in replies.items():
                 member = instance._attachments[index]
-                _ = hsm.Instance.dispatch(
+                _ = deliver(
                     reply,
                     lifetime,
                     dataclasses.replace(
@@ -560,7 +560,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 )
             except asyncio.CancelledError:
                 if ctx.is_done() and reply is None:
-                    _ = hsm.Instance.dispatch(
+                    _ = deliver(
                         instance,
                         instance.context(),
                         dataclasses.replace(
@@ -590,7 +590,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     message=f"{type(instance).__name__} member detach failed.",
                 )
                 if reply is not None:
-                    _ = hsm.Instance.dispatch(
+                    _ = deliver(
                         reply,
                         ctx,
                         dataclasses.replace(
@@ -602,7 +602,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                         ),
                     )
                     return
-                _ = hsm.Instance.dispatch(
+                _ = deliver(
                     instance,
                     ctx,
                     dataclasses.replace(
@@ -1094,11 +1094,11 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         self,
         ctx: hsm.Context,
         event: hsm.Event[events.AttachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         data = event.data
         assert isinstance(data, events.AttachData)
 
-        async def start_members_and_dispatch() -> None:
+        async def start_members_and_dispatch() -> bool:
             for member in self._attachments:
                 model = typing.cast(_Modeled, typing.cast(object, member)).model
                 if lifecycle.is_started(member):
@@ -1127,8 +1127,8 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                             metadata=dict(event.metadata),
                         ),
                     )
-                    return
-            await hsm.Instance.dispatch(
+                    return False
+            return await deliver(
                 self,
                 ctx,
                 dataclasses.replace(
@@ -1166,7 +1166,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         self,
         ctx: hsm.Context,
         event: hsm.Event[events.DetachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         data = event.data
         assert isinstance(data, events.DetachData)
         operation = _OperationData(
@@ -1181,7 +1181,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
             members=tuple(range(len(self._attachments))),
             fallback_attached=True,
         )
-        return hsm.Instance.dispatch(
+        return deliver(
             self,
             ctx,
             dataclasses.replace(
@@ -1194,12 +1194,13 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
         )
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         """Attach/detach by typed payload; group HSM vs member fan-out for the rest.
 
         AttachData/DetachData select lifecycle methods (not event.name). Group
         coordination payloads (operation/member outcomes) use Instance.dispatch; other
-        events fan out to members. No ``event.name`` admission door.
+        events fan out to members. No ``event.name`` admission door. Resolves to
+        whether any recipient accepted the event (``False`` with no members).
         """
 
         data = event.data
@@ -1218,11 +1219,11 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                 _MemberDetachFailedData,
             ),
         ):
-            return hsm.Instance.dispatch(self, ctx, event)
+            return deliver(self, ctx, event)
 
-        async def dispatch_all() -> None:
+        async def dispatch_all() -> bool:
             source = event.source or hsm.id(self)
-            _ = await asyncio.gather(
+            delivered = await asyncio.gather(
                 *(
                     hsm.dispatch(
                         ctx,
@@ -1237,6 +1238,7 @@ class Group(hsm.Instance, Attachment, hsm.Dispatchable):
                     for member in self._attachments
                 )
             )
+            return any(delivered)
 
         return asyncio.create_task(dispatch_all())
 

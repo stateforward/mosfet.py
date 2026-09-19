@@ -10,8 +10,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 class InputData(pydantic.BaseModel):
     """Raw PCM audio and the format needed by a voice diarizer."""
@@ -269,5 +267,4 @@ class VoiceDiarization(classifying.Classifying[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )

@@ -86,7 +86,7 @@ class UnfinishedAttachment(hsm.Instance, attachment.Attachment):
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.AttachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         return hsm.dispatch(ctx, self, event)
 
     @typing.override
@@ -94,7 +94,7 @@ class UnfinishedAttachment(hsm.Instance, attachment.Attachment):
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.DetachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         return hsm.dispatch(ctx, self, event)
 
     model: typing.ClassVar[hsm.Model] = mosfet.define(

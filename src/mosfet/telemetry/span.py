@@ -16,8 +16,11 @@ themselves.
 
 from __future__ import annotations
 
+import asyncio
 import collections.abc
 import contextlib
+import contextvars
+import dataclasses
 import functools
 import re
 import typing
@@ -40,6 +43,9 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 Ok = "ok"
 Failed = "failed"
+Cancelled = "cancelled"
+HandedOff = "handed_off"
+_HANDOFF_ATTR = "bot.handoff.event"
 
 AttributeValue = str | bool | int | float
 Attributes = collections.abc.Mapping[str, AttributeValue]
@@ -90,6 +96,53 @@ def record_failure(span: Span, kind: str) -> None:
     span.set_attribute(_OUTCOME_ATTR, Failed)
     span.set_attribute(_FAILURE_KIND_ATTR, stable)
     span.set_status(Status(StatusCode.ERROR, stable))
+
+
+@dataclasses.dataclass(eq=False)
+class _Stage:
+    """One open ``operation()`` and the hand-off it is waiting to be cancelled by, if any."""
+
+    span: Span
+    handoff: str | None = None
+    moved: collections.abc.Callable[[], bool] | None = None
+
+
+# The operations open in the current behavior (see `handoff_scope`), innermost last. A list, not a
+# tuple, on purpose: a task a behavior creates copies this context and must register into the same
+# scope, so a hand-off dispatched from it reaches the stages that are awaiting it.
+_OPEN_STAGES: contextvars.ContextVar[list[_Stage] | None] = contextvars.ContextVar(
+    "mosfet_telemetry_open_stages", default=None
+)
+
+
+@contextlib.contextmanager
+def handoff_scope() -> collections.abc.Generator[None]:
+    """Start a fresh set of open stages for one HSM behavior invocation.
+
+    `expect_handoff` marks only the stages opened inside the behavior that dispatches, never those
+    of another machine's behavior further up the await chain.
+    """
+
+    token = _OPEN_STAGES.set([])
+    try:
+        yield
+    finally:
+        _OPEN_STAGES.reset(token)
+
+
+def expect_handoff(event_name: str, *, moved: collections.abc.Callable[[], bool]) -> None:
+    """Mark every stage open in this behavior as handing off by dispatching ``event_name``.
+
+    An activity that dispatches an event to its own machine may be cancelled by the transition
+    that event takes. If one of these stages is later cancelled while ``moved()`` holds, the
+    cancellation is that hand-off and the span reads ``bot.outcome=handed_off`` with
+    ``bot.handoff.event=<event_name>``; otherwise (the machine stopping, a caller giving up) it is
+    a real cancellation and reads ``cancelled``. ``event_name`` must be a modeled event name.
+    """
+
+    for stage in _OPEN_STAGES.get() or ():
+        stage.handoff = event_name
+        stage.moved = moved
 
 
 def record_current_failure(kind: str) -> None:
@@ -151,14 +204,30 @@ def operation(
         record_exception=False,
         set_status_on_exception=False,
     ) as active:
+        open_stage = _Stage(active)
+        stages = _OPEN_STAGES.get()
+        if stages is None:
+            stages = []
+            _ = _OPEN_STAGES.set(stages)
+        stages.append(open_stage)
         try:
             yield active
         except Exception as error:
             record_failure(active, failure_kind(error, type(error).__name__))
             raise
+        except asyncio.CancelledError:
+            # Cancellation is not a fault, but a stage that leaves no outcome at all is
+            # indistinguishable from one still running. A stage whose own dispatch moved its
+            # machine on (``expect_handoff``) was cancelled by that hand-off: record it as such so
+            # it never reads like an error. Any other cancellation is recorded as ``cancelled``
+            # without an ERROR status (FAILURE_KINDS.md: cancelled, not broken).
+            if open_stage.handoff is not None and (open_stage.moved is None or open_stage.moved()):
+                active.set_attribute(_HANDOFF_ATTR, open_stage.handoff)
+                active.set_attribute(_OUTCOME_ATTR, HandedOff)
+            else:
+                active.set_attribute(_OUTCOME_ATTR, Cancelled)
+            raise
         except BaseException:
-            # Cancellation is not an Exception and is not a fault, but a stage that leaves no
-            # outcome at all is indistinguishable from one still running.
             record_failure(active, "cancelled")
             raise
         else:
@@ -169,6 +238,9 @@ def operation(
             if recorded is not None and recorded.get(_OUTCOME_ATTR) == Failed:
                 return
             active.set_attribute(_OUTCOME_ATTR, Ok)
+        finally:
+            if open_stage in stages:
+                stages.remove(open_stage)
 
 
 def bind[**P, T](func: collections.abc.Callable[P, T]) -> collections.abc.Callable[P, T]:
@@ -206,10 +278,14 @@ def bind[**P, T](func: collections.abc.Callable[P, T]) -> collections.abc.Callab
 __all__ = [
     "Attributes",
     "AttributeValue",
+    "Cancelled",
     "Failed",
+    "HandedOff",
     "Ok",
     "bind",
+    "expect_handoff",
     "failure_kind",
+    "handoff_scope",
     "normalized_kind",
     "operation",
     "record_current_failure",

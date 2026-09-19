@@ -35,7 +35,6 @@ import mosfet
 import pydantic
 
 from mosfet.environment import SoundData, SoundEvent
-from mosfet.telemetry import observer
 from ..speaking import EfferenceData, EfferenceEvent
 
 _PLAYOUT_SECONDS_ATTRIBUTE = "sensitivity_playout_seconds"
@@ -335,7 +334,6 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
                 hsm.target("/Sensitivity/quiet"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

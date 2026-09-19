@@ -28,7 +28,6 @@ import pydantic
 from mosfet import lifecycle
 from mosfet import telemetry
 from mosfet.protocols import attachment
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 if typing.TYPE_CHECKING:
@@ -839,7 +838,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

@@ -75,7 +75,7 @@ class RecordingTextGeneration(text.TextGeneration):
         self.failures = []
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.output_event.name:
             output = event.data
             assert isinstance(output, text.OutputData)
@@ -214,11 +214,12 @@ class CompositeAbility(abilities.Ability[object, object]):
         self.hold_terminal = False
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if self.hold_terminal and event.name == self._composite_attachment_terminal_event.name:
             self.held_terminals.append(event)
-            held = asyncio.get_running_loop().create_future()
-            held.set_result(None)
+            # Held back, not delivered to the machine.
+            held: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            held.set_result(False)
             return held
         return super().dispatch(ctx, event)
 
@@ -1126,7 +1127,7 @@ def _is_modeled_ability_apply_hook_reference(reference: str) -> bool:
 
 
 def test_apply_dispatches_input_event_without_result_bridge() -> None:
-    async def run() -> tuple[object, list[text.OutputData]]:
+    async def run() -> tuple[bool, list[text.OutputData]]:
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         ctx, owner = await start_recorded_generation(generation)
 
@@ -1147,7 +1148,7 @@ def test_apply_dispatches_input_event_without_result_bridge() -> None:
 
     result, outputs = asyncio.run(run())
 
-    assert result is None
+    assert result is True
     assert outputs == [text.OutputData(content="HELLO")]
 
 

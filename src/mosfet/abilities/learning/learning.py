@@ -46,7 +46,6 @@ from sqlalchemy import select
 
 from mosfet.behavior import ChangeData, CreateData
 from mosfet.protocols import attachment
-from mosfet.telemetry import observer
 
 _LOG = logging.getLogger(__name__)
 
@@ -1701,7 +1700,6 @@ class Learning(ability.Ability[InputData, OutputData]):
             ),
         ),
         hsm.state("rebooting", hsm.defer(input_event)),
-        hsm.observe(observer),
     )
 
     def __init__(

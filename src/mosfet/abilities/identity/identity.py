@@ -33,7 +33,6 @@ import pydantic
 from mosfet import event
 from mosfet.abilities import cognition
 from mosfet.environment import SoundData, SoundEvent
-from mosfet.telemetry import observer
 
 
 class AdoptData(pydantic.BaseModel):
@@ -487,7 +486,6 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
                 hsm.target("/Identity/knowing"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

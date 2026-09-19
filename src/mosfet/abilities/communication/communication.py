@@ -26,7 +26,6 @@ from mosfet.abilities import speaking
 from . import conversation
 from mosfet.protocols import attachment
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 Conversation = conversation.Conversation
@@ -756,7 +755,6 @@ class Communication(ability.Ability[TurnData, object]):
             ),
         ),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
 

@@ -14,7 +14,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
 
 QueryParameters: typing.TypeAlias = tuple[object, ...]
 DatabaseRow: typing.TypeAlias = collections.abc.Mapping[str, object]
@@ -297,7 +296,6 @@ class PostgresMemory(ability.Ability[memory.InputData, memory.OutputData]):
                 hsm.target("/PostgresMemory/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

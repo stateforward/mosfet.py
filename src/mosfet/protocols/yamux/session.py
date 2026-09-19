@@ -44,6 +44,7 @@ from mosfet.protocols.yamux.frame import (
     GoAwayCode,
 )
 from mosfet.protocols.yamux.stream import Stream, StreamSnapshot, StreamState
+from mosfet.telemetry.hsm import Traced
 
 Role = typing.Literal["client", "server"]
 DEFAULT_PING_TIMEOUT = datetime.timedelta(seconds=30)
@@ -705,7 +706,7 @@ def _is_outstanding_ping_ack(ctx: hsm.Context, instance: "Session", event: hsm.E
     )
 
 
-class Session(hsm.Instance):
+class Session(Traced):
     """HSM-owned Yamux session coordinating normal Python streams."""
 
     _accept_new_streams: bool

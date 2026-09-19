@@ -655,7 +655,7 @@ class _ControllableDispatchActor(hsm.Instance):
     )
 
     events: list[hsm.Event[typing.Any]]
-    result: asyncio.Future[None]
+    result: asyncio.Future[bool]
 
     def __init__(self) -> None:
         super().__init__()
@@ -667,7 +667,7 @@ class _ControllableDispatchActor(hsm.Instance):
         self,
         ctx: hsm.Context,
         event: hsm.Event[typing.Any],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         if event.name == _BEHAVIOR_OUTPUT_EVENT.name:
             self.events.append(event)
             return self.result
@@ -693,10 +693,10 @@ class _OrderingDispatchActor(_ControllableDispatchActor):
         self,
         ctx: hsm.Context,
         event: hsm.Event[typing.Any],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         del ctx
 
-        async def deliver() -> None:
+        async def deliver() -> bool:
             data = event.data
             assert isinstance(data, _SpeakData)
             if data.text == "first" and self.release_first is not None:
@@ -704,6 +704,7 @@ class _OrderingDispatchActor(_ControllableDispatchActor):
             if data.text == "other" and self.signal_other is not None:
                 self.signal_other.set()
             self.events.append(event)
+            return True
 
         return deliver()
 
@@ -802,7 +803,7 @@ def test_processing_propagates_operation_source_and_target_to_actor_event() -> N
         )
         ctx = shared_hsm_context()
         _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="speaker"))
-        actor.result.set_result(None)
+        actor.result.set_result(True)
 
         _ = await dispatch_ability_for_test(
             processing_ability,
@@ -856,7 +857,7 @@ def test_processing_does_not_complete_before_actor_dispatch() -> None:
         assert len(actor.events) == 1
         assert not operation.done()
 
-        actor.result.set_result(None)
+        actor.result.set_result(True)
         assert await operation == processing.CompletionData(
             input=processing.InputData(
                 input="speak",
@@ -1211,7 +1212,7 @@ def test_dispatch_selected_events_rejects_wrong_target_and_accepts_unique_omit()
         actor = _ControllableDispatchActor()
         ctx = shared_hsm_context()
         _ = await mosfet.started(ctx, actor, require_model(actor.model), hsm.Config(id="behavior"))
-        actor.result.set_result(None)
+        actor.result.set_result(True)
         input = processing.InputData(
             input="speak",
             schemas=(_BEHAVIOR_OUTPUT_EVENT,),

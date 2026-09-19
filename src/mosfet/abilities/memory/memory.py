@@ -18,7 +18,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
 
 # Re-export store transaction contract as the Memory ability surface.
 Statement = store.Statement
@@ -266,7 +265,6 @@ class MemoryGeneration(ability.Ability[SourceData, CandidateData]):
                 hsm.target("/MemoryGeneration/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 
@@ -383,7 +381,6 @@ def memory_model(*, name: str, input_event: hsm.Event[InputData]) -> hsm.Model:
                 hsm.target(f"{root}/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

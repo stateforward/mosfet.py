@@ -20,7 +20,6 @@ import pydantic
 
 from mosfet.protocols import attachment
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 ParticipantKind: typing.TypeAlias = typing.Literal["bot", "human", "service", "runtime"]
@@ -1282,7 +1281,6 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             ),
         ),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
 

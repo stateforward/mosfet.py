@@ -14,7 +14,6 @@ from mosfet import event
 import pydantic
 
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from mosfet.behavior import BreakData, ChangeData, CreateData
@@ -1006,7 +1005,6 @@ class Reasoning(processing.Processing):
                 hsm.target("/Reasoning/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def effort_ceiling(self) -> Effort | None:

@@ -17,7 +17,6 @@ import mosfet
 from mosfet.protocols import attachment
 import pydantic
 
-from mosfet.telemetry import observer
 
 InputKind: typing.TypeAlias = typing.Literal["image", "text"]
 ReadingOutputKind: typing.TypeAlias = typing.Literal["image", "text", "unreadable"]
@@ -959,7 +958,6 @@ class Reading(ability.Ability[InputData, OutputData]):
             ),
         ),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
 

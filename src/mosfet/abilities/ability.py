@@ -15,7 +15,7 @@ from mosfet import lifecycle
 from mosfet import scope
 from mosfet.protocols import attachment
 from mosfet.telemetry import observer
-
+from mosfet.telemetry.hsm import Traced
 
 TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
@@ -90,7 +90,7 @@ class _CompositeAttachmentOperation:
     consumed: bool = False
 
 
-class _CompositeAttachmentReply(hsm.Instance):
+class _CompositeAttachmentReply(Traced):
     @classmethod
     def model_for(cls, operation: _CompositeAttachmentOperation) -> hsm.Model:
         expected = (
@@ -210,7 +210,7 @@ RebootRequestEvent = hsm.Event[hsm.Event[typing.Any]](
 )
 
 
-class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutput]):
+class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
     """Specific event-driven operational capacity.
 
     Answers: What operations can the system perform?
@@ -890,18 +890,18 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.AttachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         """Start this ability lifecycle and dispatch its attach request."""
 
         model = self.model
 
-        async def start_and_dispatch() -> None:
+        async def start_and_dispatch() -> bool:
             if model is None:
-                return
+                return False
             # Restart when not live.
             if not lifecycle.is_started(self):
                 _ = await mosfet.started(ctx, self, model)
-            _ = await hsm.dispatch(ctx, self, event)
+            return await hsm.dispatch(ctx, self, event)
 
         task = asyncio.Task(
             start_and_dispatch(),
@@ -916,10 +916,10 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.DetachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         """Dispatch this ability's detach request."""
 
-        async def detach_or_fail() -> None:
+        async def detach_or_fail() -> bool:
             if not lifecycle.is_started(self):
                 data = event.data
                 assert isinstance(data, attachment.DetachData)
@@ -944,8 +944,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
                         metadata=dict(event.metadata),
                     ),
                 )
-                return
-            await hsm.dispatch(ctx, self, event)
+                return False
+            return await hsm.dispatch(ctx, self, event)
 
         task = asyncio.Task(
             detach_or_fail(),
@@ -968,8 +968,8 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
             return
         await hsm.stop(group, ctx)
 
-    def apply(self, input: TInput, *, ctx: hsm.Context | None = None) -> collections.abc.Awaitable[None]:
-        """Dispatch this ability's input event."""
+    def apply(self, input: TInput, *, ctx: hsm.Context | None = None) -> collections.abc.Awaitable[bool]:
+        """Dispatch this ability's input event; resolves to whether it was delivered."""
 
         return hsm.dispatch(
             self.context() if ctx is None else ctx,
@@ -978,7 +978,7 @@ class Ability(hsm.Instance, attachment.Attachment, typing.Generic[TInput, TOutpu
         )
 
 
-class _TerminalOperation(hsm.Instance):
+class _TerminalOperation(Traced):
     """One-shot reply address; all operation data is closure-bound in its model."""
 
 

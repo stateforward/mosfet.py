@@ -59,7 +59,7 @@ class RecordingConversation(conversation.Conversation):
         super().__init__(turn_detector=turn_detector.TurnDetector(decoder=IdentityTextDecoder()))
         self.outputs: list[conversation.Messages] = []
 
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
             terminal = event.data
             if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
@@ -233,7 +233,7 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
         observed: list[hsm.Event[typing.Any]] = []
 
         class RecordingSpeaking(speaking.Speaking):
-            def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
+            def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
                 if event.name == speaking.InputEvent.name:
                     observed.append(event)
                 return super().dispatch(ctx, event)
@@ -785,7 +785,7 @@ def test_speech_heard_dispatches_one_terminal_output_without_self_output_dispatc
             dispatch_ctx: hsm.Context | None,
             target: hsm.Dispatchable | None,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if target is instance:
                 dispatched.append(event)
             return dispatch(dispatch_ctx, target, event)
@@ -830,7 +830,7 @@ def test_speech_heard_emits_unhandled_without_source_ids(monkeypatch: pytest.Mon
             dispatch_ctx: hsm.Context | None,
             target: hsm.Dispatchable | None,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if target is instance:
                 dispatched.append(event)
             return dispatch(dispatch_ctx, target, event)

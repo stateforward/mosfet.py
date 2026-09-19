@@ -6,6 +6,7 @@ import hsm
 import pydantic
 
 from mosfet.device import Device
+from xml.sax import saxutils
 
 
 class CallerIdData(pydantic.BaseModel):
@@ -44,28 +45,62 @@ CallerIdEvent = hsm.Event[CallerIdData](
 )
 
 
-class DisplaySmsTextData(events.SmsTextData):
-    """Display-domain copy of one phone-domain SMS text.
+class NotificationsData(pydantic.BaseModel):
+    """Drive signal for a phone's lock screen: every notification still pending, oldest first.
 
-    We model this separately so the display can carry the text without
-    importing phone transport semantics outside the display module.
+    Firmware owns the list — it adds a notification when one arrives and takes it off when the
+    holder reads or dismisses it — and puts the whole list on this wire each time it changes, the
+    way it puts a caller ID there. The display only shows it. An empty list clears the screen of
+    notifications.
     """
 
-    @classmethod
-    def from_sms_text(cls, sms_text: events.SmsTextData) -> "DisplaySmsTextData":
-        """Project phone-domain message into display-domain view."""
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "pending": [
+                        {
+                            "id": "message-id",
+                            "name": "phone.sms.text",
+                            "data": {"id": "message-id", "sender": "+15555550101", "text": "Book me the 10:15."},
+                        }
+                    ]
+                },
+                {"pending": []},
+            ],
+        },
+    )
 
-        return cls.model_validate(sms_text.model_dump())
+    pending: tuple[events.NotificationData, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Notifications on the screen that nobody has read or dismissed yet, oldest first, each "
+            "carrying the event that caused it."
+        ),
+    )
+
+    def __model_repr__(self) -> str:
+        """Lock screen as the holder sees it: one element per pending notification, ids first."""
+
+        rendered: list[str] = []
+        for notification in self.pending:
+            message = notification.data
+            sender = "" if message.sender is None else f"<sender>{saxutils.escape(message.sender)}</sender>"
+            attributes = f"id={saxutils.quoteattr(notification.id)} name={saxutils.quoteattr(notification.name)}"
+            text = f"<text>{saxutils.escape(message.text)}</text>"
+            rendered.append(f"<notification {attributes}>{sender}{text}</notification>")
+        return "".join(rendered)
 
 
-DisplaySmsTextEvent = hsm.Event[DisplaySmsTextData](
-    name="phone.display.sms_text",
-    schema=DisplaySmsTextData,
+NotificationsEvent = hsm.Event[NotificationsData](
+    name="phone.display.notifications",
+    schema=NotificationsData,
 )
 
 
 class Display(Device):
-    """Passive output peripheral that shows caller ID on a phone handset's screen.
+    """Passive output peripheral that shows caller ID and pending notifications on a phone handset's screen.
 
     Mirrors :class:`~mosfet.devices.audio.microphone.Microphone` and
     :class:`~mosfet.devices.audio.speaker.Speaker`: no firmware of its own, because a handset screen
@@ -98,18 +133,18 @@ class Display(Device):
         _ = instance.set("caller_id", data.caller_id)
 
     @staticmethod
-    def _show_sms_text(ctx: hsm.Context, instance: "Display", event: hsm.Event[typing.Any]) -> None:
-        """Store the phone-domain SMS text on the display."""
+    def _show_notifications(ctx: hsm.Context, instance: "Display", event: hsm.Event[typing.Any]) -> None:
+        """Show the pending notifications firmware put on the wire; none pending shows nothing."""
 
         del ctx
         data = event.data
-        assert isinstance(data, DisplaySmsTextData)
-        _ = instance.set("sms_text", data)
+        assert isinstance(data, NotificationsData)
+        _ = instance.set("notifications", data if data.pending else None)
 
     model: typing.ClassVar[hsm.Model | None] = hsm.redefine(
         typing.cast(hsm.Model, Device.model),
         hsm.attribute("caller_id"),
         hsm.transition(hsm.on(CallerIdEvent), hsm.effect(_show)),
-        hsm.attribute("sms_text"),
-        hsm.transition(hsm.on(DisplaySmsTextEvent), hsm.effect(_show_sms_text)),
+        hsm.attribute("notifications"),
+        hsm.transition(hsm.on(NotificationsEvent), hsm.effect(_show_notifications)),
     )

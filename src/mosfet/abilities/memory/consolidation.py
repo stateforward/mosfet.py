@@ -13,8 +13,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 class MemoryConsolidationSource(pydantic.BaseModel):
     """A retained memory record and the decoded memory content used during consolidation."""
@@ -455,7 +453,6 @@ class MemoryConsolidation(ability.Ability[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

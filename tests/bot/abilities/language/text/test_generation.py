@@ -26,7 +26,7 @@ class RecordingTextGeneration(text.TextGeneration):
         self.outputs = []
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.output_event.name:
             output = event.data
             assert isinstance(output, text.OutputData)
@@ -72,7 +72,7 @@ def test_text_generation_uses_message_sequence_input() -> None:
 
 
 def test_text_generation_apply_dispatches_input_event() -> None:
-    async def run() -> tuple[None, list[text.OutputData]]:
+    async def run() -> tuple[bool, list[text.OutputData]]:
         generation = RecordingTextGeneration(generator=EchoTextGenerator())
         await start_ability_tree(None, generation)
         input = text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hello"),))
@@ -87,7 +87,7 @@ def test_text_generation_apply_dispatches_input_event() -> None:
 
     result, outputs = asyncio.run(run())
 
-    assert result is None
+    assert result is True
     assert outputs == [text.OutputData(content="HELLO")]
 
 

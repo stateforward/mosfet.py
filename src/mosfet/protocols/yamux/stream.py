@@ -9,6 +9,7 @@ import mosfet
 import pydantic
 
 from mosfet.protocols.yamux.frame import INITIAL_STREAM_WINDOW
+from mosfet.telemetry.hsm import Traced
 
 _MAX_UINT32 = (1 << 32) - 1
 WindowConsumedCallback = collections.abc.Callable[[int, int], collections.abc.Awaitable[None] | None]
@@ -177,7 +178,7 @@ def _window_data(event: hsm.Event[typing.Any]) -> StreamWindowData | None:
 
 
 @dataclasses.dataclass(kw_only=True)
-class Stream(hsm.Instance):
+class Stream(Traced):
     """Python stream abstraction for one Yamux stream.
 
     The Yamux lifecycle is modeled as an HSM class contract. The object still owns the embedded Python reader,

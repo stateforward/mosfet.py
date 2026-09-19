@@ -6,8 +6,10 @@ import dataclasses
 import datetime
 import logging
 import typing
+import xml.etree.ElementTree
 
 import hsm
+import pydantic
 import pytest
 
 import mosfet
@@ -120,7 +122,7 @@ class PhoneObservationRecorder(hsm.Instance):
         self.events = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name in {audio_device.OutputEvent.name, SoundEvent.name, phone_device.RingingEvent.name}:
             self.events.append(event)
         return super().dispatch(ctx, event)
@@ -170,9 +172,9 @@ def test_phone_owns_private_microphone_speaker_and_display_peripherals() -> None
 
 
 def test_phone_sms_text_routes_to_display() -> None:
-    """A phone message is display-only: the shell never adds a conversation surface."""
+    """A phone message lands on the display as a pending notification, not a conversation surface."""
 
-    async def run() -> tuple[str | None, str | None]:
+    async def run() -> tuple[phone_device.NotificationsData | None, str | None]:
         phone = phone_device.Phone()
         _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await _wait_until(lambda: phone.state() == "/Device/detached")
@@ -183,22 +185,20 @@ def test_phone_sms_text_routes_to_display() -> None:
                 phone_device.SmsTextData(id="message-id", sender="+15555550101", text="Book me the 10:15.")
             ),
         )
-        await asyncio.sleep(0)
-
         display = phone_display(phone)
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
         attributes = display.take_snapshot().Attributes or {}
-        sms_text = attributes.get("/DeviceDisplay/sms_text")
-        caller_id = attributes.get("/DeviceDisplay/caller_id")
         return (
-            typing.cast(phone_device.SmsTextData | None, sms_text),
-            typing.cast(str | None, caller_id),
+            typing.cast(phone_device.NotificationsData | None, attributes.get("/DeviceDisplay/notifications")),
+            typing.cast(str | None, attributes.get("/DeviceDisplay/caller_id")),
         )
 
-    sms_text, caller_id = asyncio.run(run())
-    assert sms_text is not None
-    assert sms_text.id == "message-id"
-    assert sms_text.sender == "+15555550101"
-    assert sms_text.text == "Book me the 10:15."
+    notifications, caller_id = asyncio.run(run())
+    assert notifications is not None
+    assert [notification.id for notification in notifications.pending] == ["message-id"]
+    assert notifications.pending[0].data == phone_device.SmsTextData(
+        id="message-id", sender="+15555550101", text="Book me the 10:15."
+    )
     assert caller_id is None
 
 
@@ -228,6 +228,9 @@ def test_phone_uses_phone_firmware_instance() -> None:
     assert phone_current_transfer_target(_phone_firmware(phone)) is None
 
 
+_LOCK_SCREEN_COMMANDS = (phone_device.ReadNotificationEvent.name, phone_device.DismissNotificationEvent.name)
+
+
 def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
     def operation_names(phone: phone_device.Phone) -> list[str]:
         event_map = dict(typing.cast(hsm.Model, phone.model).events)
@@ -236,7 +239,7 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         for transition in hsm.take_snapshot(phone.context(), phone).Transitions:
             for event_name in transition.events:
                 event = event_map.get(event_name)
-                if event is not None and event.kind == processing.EventKind:
+                if event is not None and event.kind == processing.EventKind and event.name not in names:
                     names.append(event.name)
         return names
 
@@ -252,7 +255,13 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         assert phone_device.IncomingCallEvent.name in snapshot_event_names
         # Idle offers dial, and answer — which reports phone.no_call rather than dropping a stray
         # answer in silence. The button exists on an idle handset; pressing it does nothing.
-        assert operation_names(phone) == [phone_device.DialEvent.name, phone_device.AnswerCallEvent.name]
+        # Texting is offered in every state: a handset sends texts whatever its call is doing.
+        assert operation_names(phone) == [
+            phone_device.DialEvent.name,
+            phone_device.AnswerCallEvent.name,
+            phone_device.SendTextMessageEvent.name,
+            *_LOCK_SCREEN_COMMANDS,
+        ]
 
         await _emit_service_event(
             phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123"))
@@ -261,11 +270,17 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         assert operation_names(phone) == [
             phone_device.AnswerCallEvent.name,
             phone_device.DeclineCallEvent.name,
+            phone_device.SendTextMessageEvent.name,
+            *_LOCK_SCREEN_COMMANDS,
         ]
 
         await _answer_call(phone, "call-123")
 
-        assert operation_names(phone) == [phone_device.HangUpCallEvent.name]
+        assert operation_names(phone) == [
+            phone_device.HangUpCallEvent.name,
+            phone_device.SendTextMessageEvent.name,
+            *_LOCK_SCREEN_COMMANDS,
+        ]
 
         await _emit_service_event(
             phone, phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123"))
@@ -274,6 +289,8 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
         assert operation_names(phone) == [
             phone_device.TransferCallEvent.name,
             phone_device.HangUpCallEvent.name,
+            phone_device.SendTextMessageEvent.name,
+            *_LOCK_SCREEN_COMMANDS,
         ]
 
         await phone.dispatch(
@@ -283,7 +300,11 @@ def test_phone_processing_operations_follow_merged_firmware_snapshot() -> None:
             ),
         )
 
-        assert operation_names(phone) == [phone_device.HangUpCallEvent.name]
+        assert operation_names(phone) == [
+            phone_device.HangUpCallEvent.name,
+            phone_device.SendTextMessageEvent.name,
+            *_LOCK_SCREEN_COMMANDS,
+        ]
 
     asyncio.run(run())
 
@@ -563,6 +584,66 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert sound.caller == "Front desk"
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
+
+
+def test_phone_broadcasts_a_notification_ding_carrying_the_new_message_event() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str, object]:
+        metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
+        environment = Environment()
+        phone = phone_device.Phone()
+        inside = PhoneObservationRecorder()
+        outside = PhoneObservationRecorder()
+
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        _ = await mosfet.started(environment, inside, inside.model, hsm.Config(id="inside"))
+        environment.join(inside)
+        _ = await mosfet.started(None, outside, outside.model, hsm.Config(id="outside"))
+
+        await phone.dispatch(
+            phone.context(),
+            dataclasses.replace(
+                phone_device.SmsTextEvent.with_data(
+                    phone_device.SmsTextData(id="message-id", sender="+15555550101", text="Book me the 10:15.")
+                ),
+                metadata=metadata,
+            ),
+        )
+        display = phone_display(phone)
+        await _wait_until(
+            lambda: bool(inside.events)
+            and bool((display.take_snapshot().Attributes or {}).get("/DeviceDisplay/notifications"))
+        )
+
+        attributes = display.take_snapshot().Attributes or {}
+        return inside.events, outside.events, hsm.id(phone), attributes.get("/DeviceDisplay/notifications")
+
+    inside_events, outside_events, phone_id, notifications = asyncio.run(run())
+
+    assert len(inside_events) == 1
+    assert inside_events[0].name == "environment.sound"
+    assert inside_events[0].source == phone_id
+    assert inside_events[0].target == "inside"
+    sound = inside_events[0].data
+    assert isinstance(sound, phone_device.SoundData)
+    assert sound.kind == "phone.notification"
+    assert sound.media_type == "audio/wav"
+    assert sound.sample_rate_hz == 16_000
+    assert sound.channels == 1
+    assert sound.audio.startswith(b"RIFF")
+    assert sound.audio == phone_device.NOTIFICATION_WAV
+    assert sound.amplitude_db == phone_device.NOTIFICATION_DB
+    assert sound.caller is None
+    assert sound.notification is not None
+    assert sound.notification.id == "message-id"
+    assert sound.notification.name == phone_device.SmsTextEvent.name == "phone.sms.text"
+    assert sound.notification.data == phone_device.SmsTextData(
+        id="message-id", sender="+15555550101", text="Book me the 10:15."
+    )
+    assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+    assert outside_events == []
+    # The screen shows the same notification, pending until it is read or dismissed.
+    assert isinstance(notifications, phone_device.NotificationsData)
+    assert notifications.pending == (sound.notification,)
 
 
 async def _dialing_phone_in_environment(
@@ -2080,12 +2161,12 @@ def test_receiver_audio_reaches_the_speaker_and_never_the_service() -> None:
                 self.elevated = []
 
             @typing.override
-            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
                 del ctx
                 data = event.data
                 if isinstance(data, audio_device.OutputData):
                     self.elevated.append(data)
-                return asyncio.ensure_future(asyncio.sleep(0))
+                return asyncio.ensure_future(asyncio.sleep(0, result=True))
 
         class TrackingService:
             events: list[hsm.Event[typing.Any]]
@@ -2133,12 +2214,12 @@ def test_receiver_audio_keeps_its_service_type() -> None:
 
     class CapturingSpeaker(audio_device.Speaker):
         @typing.override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
             del ctx
             data = event.data
             if isinstance(data, audio_device.OutputData):
                 captured.append(data)
-            return asyncio.ensure_future(asyncio.sleep(0))
+            return asyncio.ensure_future(asyncio.sleep(0, result=True))
 
     async def run() -> None:
         firmware = phone_device.Firmware(service=phone_device.EventRecorder(), speaker=CapturingSpeaker())
@@ -2582,7 +2663,7 @@ class PhoneHolder(hsm.Instance):
         self.occasions = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == mosfet.InputEvent.name:
             self.occasions.append(event)
         return super().dispatch(ctx, event)
@@ -2610,7 +2691,7 @@ class RoomOccupant(hsm.Instance):
         self.received = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         self.received.append(event)
         return super().dispatch(ctx, event)
 
@@ -2686,7 +2767,7 @@ def test_a_phone_tells_whoever_holds_it_that_nobody_answered() -> None:
     still a fact, and it is the one that decides whether waiting any longer is worth it.
     """
 
-    async def run() -> tuple[list[str | None], list[hsm.Event[typing.Any]], list[object]]:
+    async def run() -> tuple[list[str | None], list[hsm.Event[typing.Any]], list[str]]:
         environment = Environment()
         phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
         await phone.dispatch(
@@ -2817,3 +2898,301 @@ def test_the_room_never_carries_private_call_state() -> None:
     assert phone_device.AnsweredEvent.name in in_the_hand
     assert phone_device.MediaReadyEvent.name in in_the_hand
     assert phone_device.HungUpEvent.name in in_the_hand
+
+
+def test_a_phone_hands_whoever_holds_it_the_new_message_notification() -> None:
+    """A text dings the room and puts the notification, carrying the new message, in the holder's hand."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str]:
+        environment = Environment()
+        phone, _firmware, holder, bystander = await _phone_in_a_hand(environment)
+        await phone.dispatch(
+            phone.context(),
+            phone_device.SmsTextEvent.with_data(
+                phone_device.SmsTextData(id="message-id", sender="+15555550101", text="Book me the 10:15.")
+            ),
+        )
+        await _wait_until(lambda: bool(holder.occasions))
+        return holder.occasions, bystander.received, hsm.id(phone)
+
+    occasions, received, phone_id = asyncio.run(run())
+
+    assert len(occasions) == 1
+    occasion = occasions[0]
+    assert occasion.source == phone_id
+    assert occasion.target == "holder"
+    assert isinstance(occasion.data, mosfet.InputEventData)
+    observation = occasion.data.observation
+    assert observation is not None
+    assert observation.event == phone_device.NotificationEvent.name == "phone.notification"
+    notification = observation.data
+    assert isinstance(notification, phone_device.NotificationData)
+    assert notification.id == "message-id"
+    assert notification.name == "phone.sms.text"
+    assert notification.data == phone_device.SmsTextData(
+        id="message-id", sender="+15555550101", text="Book me the 10:15."
+    )
+    # The room hears only the ding; the notification itself is not broadcast.
+    assert [event.name for event in received] == ["environment.sound"]
+
+
+def test_phone_send_text_message_asks_the_service_and_commits_its_verdict() -> None:
+    """Pressing send hands the text to the service; the service's verdict is the outcome.
+
+    The verdict is correlated to its request by envelope id. A failed send reaches the holder;
+    a successful one is published but is not an occasion for the holder.
+    """
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[str], list[phone_device.TextMessageSendFailedData]]:
+        environment = Environment()
+        phone, firmware, holder, bystander = await _phone_in_a_hand(environment)
+        recorder = firmware.event_recorder()
+        for request_id, text in (("send-1", "See you at 10:15."), ("send-2", "Still there?")):
+            await phone.dispatch(
+                phone.context(),
+                dataclasses.replace(
+                    phone_device.SendTextMessageEvent.with_data(
+                        phone_device.SendTextMessageData(to="+15555550101", text=text)
+                    ),
+                    id=request_id,
+                ),
+            )
+        await _wait_until(
+            lambda: _event_names(recorder).count(phone_device.ServiceTextMessageSendRequestedEvent.name) == 2
+        )
+        await recorder.receive(
+            phone.context(),
+            dataclasses.replace(
+                phone_device.ServiceTextMessageSentEvent.with_data(
+                    phone_device.TextMessageSentData(to="+15555550101", text="See you at 10:15.")
+                ),
+                id="send-1",
+            ),
+        )
+        await recorder.receive(
+            phone.context(),
+            dataclasses.replace(
+                phone_device.ServiceTextMessageSendFailedEvent.with_data(
+                    phone_device.TextMessageSendFailedData(
+                        to="+15555550101", text="Still there?", failure_kind="remote_unavailable"
+                    )
+                ),
+                id="send-2",
+            ),
+        )
+        await _wait_until(lambda: phone_device.TextMessageSendFailedEvent.name in _event_names(recorder))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        observed = [
+            occasion.data.observation.event
+            for occasion in holder.occasions
+            if isinstance(occasion.data, mosfet.InputEventData) and occasion.data.observation is not None
+        ]
+        failures = [
+            typing.cast(phone_device.TextMessageSendFailedData, occasion.data.observation.data)
+            for occasion in holder.occasions
+            if isinstance(occasion.data, mosfet.InputEventData)
+            and occasion.data.observation is not None
+            and occasion.data.observation.event == phone_device.TextMessageSendFailedEvent.name
+        ]
+        assert bystander.received == []
+        return list(recorder.events), observed, failures
+
+    published, observed, failures = asyncio.run(run())
+
+    def payloads(name: str) -> list[tuple[str | None, typing.Any]]:
+        return [(event.id, event.data) for event in published if event.name == name]
+
+    assert payloads(phone_device.ServiceTextMessageSendRequestedEvent.name) == [
+        ("send-1", phone_device.SendTextMessageData(to="+15555550101", text="See you at 10:15.")),
+        ("send-2", phone_device.SendTextMessageData(to="+15555550101", text="Still there?")),
+    ]
+    assert payloads(phone_device.TextMessageSentEvent.name) == [
+        ("send-1", phone_device.TextMessageSentData(to="+15555550101", text="See you at 10:15.")),
+    ]
+    assert payloads(phone_device.TextMessageSendFailedEvent.name) == [
+        (
+            "send-2",
+            phone_device.TextMessageSendFailedData(
+                to="+15555550101", text="Still there?", failure_kind="remote_unavailable"
+            ),
+        ),
+    ]
+    assert [failure.text for failure in failures] == ["Still there?"]
+    assert phone_device.TextMessageSentEvent.name not in observed
+
+
+def test_send_text_message_schema_offers_no_default_recipient() -> None:
+    """The command's schema carries no example address a model could copy as a default."""
+
+    schema = phone_device.SendTextMessageData.model_json_schema()
+    assert schema["required"] == ["to", "text"]
+    assert "examples" not in schema["properties"]["to"]
+    with pytest.raises(pydantic.ValidationError):
+        _ = phone_device.SendTextMessageData(to="+15555550101", text="")
+
+
+class PhoneOwner(hsm.Instance):
+    """A perspective that owns a phone the way a bot does: by naming it in ``owned_devices``."""
+
+    _owned: dict[str, str]
+
+    def __init__(self, owned: dict[str, str]) -> None:
+        super().__init__()
+        self._owned = dict(owned)
+
+    @staticmethod
+    def _note_owned_devices(ctx: hsm.Context, instance: "PhoneOwner", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        _ = instance.set("owned_devices", dict(instance._owned))
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "PhoneOwner",
+        hsm.attribute("owned_devices"),
+        hsm.initial(hsm.target("holding")),
+        hsm.state("holding", hsm.entry(_note_owned_devices)),
+    )
+
+
+def _pending_notification_ids(phone: phone_device.Phone) -> list[str]:
+    notifications = (phone_display(phone).take_snapshot().Attributes or {}).get("/DeviceDisplay/notifications")
+    if notifications is None:
+        return []
+    assert isinstance(notifications, phone_device.NotificationsData)
+    return [notification.id for notification in notifications.pending]
+
+
+async def _text_phone(phone: phone_device.Phone, message_id: str, text: str) -> None:
+    await phone.dispatch(
+        phone.context(),
+        phone_device.SmsTextEvent.with_data(phone_device.SmsTextData(id=message_id, sender="+15555550101", text=text)),
+    )
+
+
+def test_a_notification_waits_on_the_lock_screen_for_whoever_picks_the_phone_up_later() -> None:
+    """Nobody holds the phone when the text lands; it is still there, in context, once somebody does."""
+
+    async def run() -> tuple[list[str], str | None, list[hsm.Event[typing.Any]]]:
+        environment = Environment()
+        phone = phone_device.Phone()
+        _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone.model))
+        await _wait_until(lambda: phone.state() == "/Device/detached")
+        await _text_phone(phone, "message-id", "Book me the 10:15.")
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
+
+        holder = PhoneHolder()
+        _ = await mosfet.started(environment, holder, holder.model, hsm.Config(id="holder"))
+        await phone.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=holder)))
+        await _wait_until(lambda: holder in device_bots(phone))
+        owner = PhoneOwner({"phone": hsm.id(phone)})
+        _ = await mosfet.started(environment, owner, owner.model)
+        return _pending_notification_ids(phone), environment.model_snapshot(owner), holder.occasions
+
+    pending, context, occasions = asyncio.run(run())
+
+    assert pending == ["message-id"]
+    # Picking the phone up later is not a new notification: nothing is replayed into the hand.
+    assert occasions == []
+    assert context is not None
+    root = xml.etree.ElementTree.fromstring(context)
+    notification = root.find("self/owned_devices/device[@ref='phone']/display/notifications/notification")
+    assert notification is not None
+    assert notification.get("id") == "message-id"
+    assert notification.get("name") == "phone.sms.text"
+    assert notification.findtext("sender") == "+15555550101"
+    assert notification.findtext("text") == "Book me the 10:15."
+
+
+@pytest.mark.parametrize("command", [phone_device.ReadNotificationEvent, phone_device.DismissNotificationEvent])
+def test_reading_or_dismissing_takes_only_that_notification_off_the_lock_screen(
+    command: hsm.Event[typing.Any],
+) -> None:
+    """Both leave the pending list; neither is announced to the holder, who did it."""
+
+    async def run() -> tuple[list[str], list[str | None]]:
+        environment = Environment()
+        phone, _firmware, holder, _bystander = await _phone_in_a_hand(environment)
+        await _text_phone(phone, "first", "Book me the 10:15.")
+        await _text_phone(phone, "second", "Actually 10:30.")
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["first", "second"])
+        # JSON ingress, the way a model's tool call arrives.
+        await phone.dispatch(phone.context(), dataclasses.replace(command, data={"id": "first"}))
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["second"])
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return _pending_notification_ids(phone), _occasion_sources(holder)
+
+    pending, told = asyncio.run(run())
+
+    assert pending == ["second"]
+    assert told == [phone_device.NotificationEvent.name, phone_device.NotificationEvent.name]
+
+
+def test_the_last_notification_read_clears_the_lock_screen() -> None:
+    async def run() -> object:
+        phone, _firmware, _holder, _bystander = await _phone_in_a_hand(Environment())
+        await _text_phone(phone, "message-id", "Book me the 10:15.")
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
+        await phone.dispatch(
+            phone.context(),
+            phone_device.ReadNotificationEvent.with_data(phone_device.ReadNotificationData(id="message-id")),
+        )
+        await _wait_until(lambda: _pending_notification_ids(phone) == [])
+        return (phone.take_snapshot().Attributes or {}).get("display")
+
+    display = asyncio.run(run())
+
+    assert isinstance(display, dict)
+    assert typing.cast(dict[str, object], display).get("notifications") is None
+
+
+@pytest.mark.parametrize("command", [phone_device.ReadNotificationEvent, phone_device.DismissNotificationEvent])
+def test_naming_a_notification_that_is_not_pending_tells_the_holder(command: hsm.Event[typing.Any]) -> None:
+    """An unknown or already-cleared id is a typed failure in the hand, never a silent no-op."""
+
+    async def run() -> tuple[list[str], list[hsm.Event[typing.Any]]]:
+        phone, _firmware, holder, _bystander = await _phone_in_a_hand(Environment())
+        await _text_phone(phone, "message-id", "Book me the 10:15.")
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
+        await phone.dispatch(phone.context(), dataclasses.replace(command, data={"id": "no-such-id"}))
+        await _wait_until(lambda: len(holder.occasions) == 2)
+        return _pending_notification_ids(phone), holder.occasions
+
+    pending, occasions = asyncio.run(run())
+
+    assert pending == ["message-id"]
+    failure = occasions[-1].data
+    assert isinstance(failure, mosfet.InputEventData)
+    assert failure.observation is not None
+    assert failure.observation.event == phone_device.NotificationNotFoundEvent.name
+    assert failure.observation.data == phone_device.NotificationNotFoundData.model_validate(
+        {"id": "no-such-id", "command": command.name}
+    )
+
+
+def test_replying_to_a_text_does_not_read_its_notification() -> None:
+    """Reading is its own act: sending a text to the sender leaves the notification pending."""
+
+    async def run() -> list[str]:
+        phone, _firmware, _holder, _bystander = await _phone_in_a_hand(Environment())
+        await _text_phone(phone, "message-id", "Book me the 10:15.")
+        await _wait_until(lambda: _pending_notification_ids(phone) == ["message-id"])
+        await phone.dispatch(
+            phone.context(),
+            phone_device.SendTextMessageEvent.with_data(
+                phone_device.SendTextMessageData(to="+15555550101", text="Done.")
+            ),
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)
+        return _pending_notification_ids(phone)
+
+    assert asyncio.run(run()) == ["message-id"]
+
+
+def test_the_phone_offers_its_holder_read_and_dismiss_whatever_its_call_is_doing() -> None:
+    transitions = transition_map(phone_device.Phone.firmware_model)
+
+    for command in (phone_device.ReadNotificationEvent.name, phone_device.DismissNotificationEvent.name):
+        for state in ("/Phone/hung_up", "/Phone/ringing", "/Phone/answered/media_ready"):
+            assert command in transitions[state], (command, state)

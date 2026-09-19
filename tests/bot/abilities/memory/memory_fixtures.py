@@ -136,7 +136,7 @@ class RecordingShortTermMemory(memory.ShortTermMemory):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
             self.inputs.append(event.data)
         return super().dispatch(ctx, event)
@@ -154,7 +154,7 @@ class RecordingLongTermMemory(memory.LongTermMemory):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
             self.inputs.append(event.data)
         return super().dispatch(ctx, event)
@@ -172,7 +172,7 @@ class RecordingMemory(memory.Memory):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
             self.inputs.append(event.data)
         return super().dispatch(ctx, event)

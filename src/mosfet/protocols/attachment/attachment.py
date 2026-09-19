@@ -25,17 +25,18 @@ class Attachment(typing.Protocol):
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
 
+    # attach/detach resolve to whether the request was delivered to the attachment machine.
     def attach(
         self,
         ctx: hsm.Context,
         event: hsm.Event[events.AttachData],
-    ) -> collections.abc.Awaitable[None]: ...
+    ) -> collections.abc.Awaitable[bool]: ...
 
     def detach(
         self,
         ctx: hsm.Context,
         event: hsm.Event[events.DetachData],
-    ) -> collections.abc.Awaitable[None]: ...
+    ) -> collections.abc.Awaitable[bool]: ...
 
     def _attachment_index(self, actor: hsm.Instance) -> int | None:
         actor_id = Attachment._actor_id(actor)

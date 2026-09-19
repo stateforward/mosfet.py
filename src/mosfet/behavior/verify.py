@@ -20,6 +20,8 @@ from mosfet.protocols import attachment
 from . import compiler
 from . import diagnostic
 from . import instance
+from mosfet.telemetry import span
+from mosfet.telemetry.hsm import Traced
 
 
 def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Diagnostic:
@@ -31,7 +33,7 @@ def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Di
     )
 
 
-class _TerminalOwner(hsm.Instance):
+class _TerminalOwner(Traced):
     """Minimal owner that completes when the behavior ability forwards a terminal.
 
     Topology selects the terminal via explicit ``hsm.on(output_event)`` /
@@ -229,8 +231,9 @@ def _run_coroutine(coro: collections.abc.Awaitable[object]) -> object:
     except RuntimeError:
         return asyncio.run(typing.cast(collections.abc.Coroutine[typing.Any, typing.Any, object], coro))
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        # The worker thread starts in an empty context: carry the caller's trace into it.
         return pool.submit(
-            asyncio.run,
+            span.bind(asyncio.run),
             typing.cast(collections.abc.Coroutine[typing.Any, typing.Any, object], coro),
         ).result()
 

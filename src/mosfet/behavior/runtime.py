@@ -71,7 +71,7 @@ class _Instance(typing.Protocol):
         self,
         ctx: hsm.Context,
         event: hsm.Event[typing.Any],
-    ) -> collections.abc.Awaitable[None]: ...
+    ) -> collections.abc.Awaitable[bool]: ...
 
 
 @dataclasses.dataclass(frozen=True)
@@ -490,7 +490,7 @@ def _run_callback_worker(request: dict[str, object]) -> _WorkerCallbackResult:
             completed.set()
 
     supervisor = threading.Thread(
-        target=evaluate,
+        target=span.bind(evaluate),
         name="bot-behavior-callback-evaluation",
         daemon=True,
     )

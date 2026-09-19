@@ -7,7 +7,7 @@ import typing
 import hsm
 import pydantic
 from pydantic.json_schema import SkipJsonSchema
-
+from mosfet.telemetry.hsm import Traced
 
 _ACTOR_DESCRIPTION = (
     "Stable HSM actor requesting an attachment relationship with the event recipient. The recipient owns the "
@@ -27,7 +27,7 @@ _ACTOR_JSON_SCHEMA = {
 }
 
 
-class _DeserializedActor(hsm.Instance):
+class _DeserializedActor(Traced):
     """Typed placeholder for an attachment actor decoded from JSON.
 
     Owns its ``id`` as a declared field set in its own ``__init__`` (no ``setattr`` workaround).

@@ -33,7 +33,6 @@ from mosfet.protocols import attachment
 import mosfet
 from mosfet.abilities import cognition
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 from mosfet.environment import SoundData, SoundEvent
 from ..speaking import EfferenceData, EfferenceEvent
@@ -397,7 +396,6 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             ),
         ),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
 

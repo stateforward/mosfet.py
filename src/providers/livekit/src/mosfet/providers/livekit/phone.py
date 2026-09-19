@@ -33,6 +33,7 @@ from .room_audio import (
     RoomAudioTrackPath,
     RoomHandle,
 )
+from mosfet.telemetry.hsm import Traced
 
 _DEFAULT_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
@@ -877,7 +878,7 @@ class MediaSnapshot(pydantic.BaseModel):
     )
 
 
-class PhoneService(hsm.Instance):
+class PhoneService(Traced):
     """stateforward.mosfet-native LiveKit phone service that adapts LiveKit call control and room media to phone firmware events."""
 
     _operation_timeout: datetime.timedelta
@@ -2068,12 +2069,12 @@ class PhoneService(hsm.Instance):
 
         _ = self.dispatch(ctx, event)
 
-    def incoming_call(self, ctx: hsm.Context, data: phone.IncomingCallData) -> collections.abc.Awaitable[None]:
+    def incoming_call(self, ctx: hsm.Context, data: phone.IncomingCallData) -> collections.abc.Awaitable[bool]:
         """Report an incoming LiveKit/SIP call to the provider-neutral phone firmware."""
 
         return self.dispatch(ctx, ServiceIncomingCallEvent.with_data(data))
 
-    def receive_remote_audio(self, ctx: hsm.Context, data: audio.InputData) -> collections.abc.Awaitable[None]:
+    def receive_remote_audio(self, ctx: hsm.Context, data: audio.InputData) -> collections.abc.Awaitable[bool]:
         """Publish remote room PCM into PhoneService. Delivery is gated by HSM guards.
 
         Remote audio is delivered to phone firmware as `ServiceAudioReceived` only when a media
@@ -2088,29 +2089,29 @@ class PhoneService(hsm.Instance):
 
         return self.dispatch(ctx, inject_context(_RemoteAudioReceivedEvent.with_data(data)))
 
-    def media_ready(self, ctx: hsm.Context, data: phone.MediaReadyData) -> collections.abc.Awaitable[None]:
+    def media_ready(self, ctx: hsm.Context, data: phone.MediaReadyData) -> collections.abc.Awaitable[bool]:
         """Report that LiveKit media is ready for the active call."""
 
         return self.dispatch(ctx, ServiceMediaReadyEvent.with_data(data))
 
-    def remote_hang_up(self, ctx: hsm.Context, data: phone.RemoteHangUpData) -> collections.abc.Awaitable[None]:
+    def remote_hang_up(self, ctx: hsm.Context, data: phone.RemoteHangUpData) -> collections.abc.Awaitable[bool]:
         """Report that the remote LiveKit/SIP party ended the call."""
 
         return self.dispatch(ctx, ServiceRemoteHangUpEvent.with_data(data))
 
-    def call_failed(self, ctx: hsm.Context, data: phone.CallFailedData) -> collections.abc.Awaitable[None]:
+    def call_failed(self, ctx: hsm.Context, data: phone.CallFailedData) -> collections.abc.Awaitable[bool]:
         """Report a normalized LiveKit call failure to phone firmware."""
 
         return self.dispatch(ctx, ServiceCallFailedEvent.with_data(data))
 
     def transfer_completed(
         self, ctx: hsm.Context, data: phone.TransferCompletedData
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         """Report that LiveKit completed the active transfer."""
 
         return self.dispatch(ctx, ServiceTransferCompletedEvent.with_data(data))
 
-    def transfer_failed(self, ctx: hsm.Context, data: phone.TransferFailedData) -> collections.abc.Awaitable[None]:
+    def transfer_failed(self, ctx: hsm.Context, data: phone.TransferFailedData) -> collections.abc.Awaitable[bool]:
         """Report that LiveKit rejected or failed the active transfer."""
 
         return self.dispatch(ctx, ServiceTransferFailedEvent.with_data(data))

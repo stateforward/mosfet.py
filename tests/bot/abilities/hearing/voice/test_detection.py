@@ -137,7 +137,7 @@ class RecordingVoiceDetection(voice.detection.VoiceDetection):
         self.outputs = []
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         # Public Start/End ride inside TerminalOutputEvent; also accept bare boundary events.
         public = event
         if event.name == ability_mod.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):

@@ -12,7 +12,6 @@ import mosfet
 import pydantic
 
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from . import types
@@ -725,6 +724,7 @@ class Intuition(processing.Processing):
             if product is None or len(product) == 0:
                 terminal: types.OutputData | None = None
                 selections: types.OutputData = ()
+                escalation = "empty_product"
             else:
                 gate = instance._confidence_gate
                 if gate is not None and data.event_confidences is not None:
@@ -743,17 +743,21 @@ class Intuition(processing.Processing):
                     # never a handled-empty selection (the pass-criterion lesson).
                     selections = ()
                     terminal = None
+                    escalation = "gate_dropped_all"
                 elif escalate or any(
                     _is_deliberative_input_event(item.event, {schema.name: schema for schema in data.input.schemas})
                     for item in product
                 ):
                     selections = _environment_actions(product, current_input=data.input)
                     terminal = None
+                    escalation = "low_confidence" if escalate else "deliberative_input"
                 else:
                     selections = product
                     terminal = product
+                    escalation = "none"
             active.set_attribute("bot.selection.count", len(selections))
             active.set_attribute("bot.cognition.escalated", terminal is None)
+            active.set_attribute("bot.cognition.escalation.reason", escalation)
             if selections and data.input.actors:
                 next_event: hsm.Event[typing.Any] = _DispatchPlannedEvent.with_data(
                     _DispatchPlanData(
@@ -1008,7 +1012,6 @@ class Intuition(processing.Processing):
                 ),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def effort_ceiling(self) -> Effort | None:

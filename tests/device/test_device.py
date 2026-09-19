@@ -504,7 +504,7 @@ def test_device_ignores_stale_firmware_initialization_result_after_restart() -> 
             await super()._initialize_firmware(ctx, event)
 
         @override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if event.name == FirmwareInitializingDoneEvent.name and event.source:
                 self.results.append(event)
             return super().dispatch(ctx, event)

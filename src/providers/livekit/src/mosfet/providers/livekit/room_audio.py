@@ -16,6 +16,7 @@ from livekit import rtc
 from mosfet.telemetry import observer, span
 
 from .audio import AudioBridge, AudioFrame
+from mosfet.telemetry.hsm import Traced
 
 _DEFAULT_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _SCOPE = "mosfet.providers.livekit"
@@ -317,7 +318,7 @@ def _has_non_audio_track_subscribed_data(
     return isinstance(data, RoomAudioTrackSubscribedData) and not _is_audio_track(data.track)
 
 
-class RoomAudioTrackPath(hsm.Instance):
+class RoomAudioTrackPath(Traced):
     """LiveKit room/SIP audio track path for a stateforward.mosfet-owned audio bridge."""
 
     _bridge: AudioBridge[rtc.AudioFrame]
@@ -372,12 +373,12 @@ class RoomAudioTrackPath(hsm.Instance):
         self._local_track_sid = None
         self._track_listener_registered = False
 
-    def connect_room(self, ctx: hsm.Context, data: RoomAudioConnectData) -> collections.abc.Awaitable[None]:
+    def connect_room(self, ctx: hsm.Context, data: RoomAudioConnectData) -> collections.abc.Awaitable[bool]:
         """Start the LiveKit room audio track path."""
 
         return self.dispatch(ctx, RoomAudioConnectEvent.with_data(data))
 
-    def disconnect_room(self, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
+    def disconnect_room(self, ctx: hsm.Context) -> collections.abc.Awaitable[bool]:
         """Stop the LiveKit room audio track path."""
 
         return self.dispatch(ctx, RoomAudioDisconnectEvent)

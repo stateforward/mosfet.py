@@ -23,6 +23,7 @@ import hsm
 
 from mosfet.telemetry import span
 from mosfet.telemetry.configure import otlp_endpoint
+from mosfet.telemetry.hsm import EventContextBinding
 
 
 class State(typing.TypedDict):
@@ -225,6 +226,10 @@ def model_publish_enabled() -> bool:
 def define(name: str, *elements: hsm.Element) -> hsm.Model:
     """Define a model through ``hsm.define``; publish its topology only when opted in.
 
+    Every behavior and guard is bound to its triggering event's trace context
+    (``mosfet.telemetry.EventContextBinding``), so one stimulus stays one trace however many
+    machines it crosses.
+
     Model definition runs at import time across the package, so publishing here must
     never be implicit: without ``BOT_MODEL_PUBLISH=1`` this is pure construction with
     zero network I/O. Explicit runtime callers use ``publish`` directly.
@@ -236,7 +241,8 @@ def define(name: str, *elements: hsm.Element) -> hsm.Model:
         component="define",
         stage="construct",
     ) as active:
-        model = hsm.define(name, *elements)
+        # Every behavior and guard runs in the trace context of the event driving it.
+        model = hsm.define(name, *elements, EventContextBinding())
         outcome = publish(topology(model)) if model_publish_enabled() else _PUBLISH_SKIPPED
         active.set_attribute(_PUBLISH_ATTR, outcome)
         if outcome == _PUBLISH_FAILED:

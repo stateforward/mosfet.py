@@ -479,5 +479,40 @@ def test_operation_records_cancellation_as_its_own_outcome() -> None:
             raise asyncio.CancelledError
 
     record = _spans()[0]
-    assert _attributes(record)["bot.outcome"] == "failed"
-    assert _attributes(record)["bot.failure.kind"] == "cancelled"
+    assert _attributes(record)["bot.outcome"] == "cancelled"
+    assert "bot.failure.kind" not in _attributes(record)
+
+
+def test_operation_records_handoff_cancellation_as_handed_off() -> None:
+    assert mosfet.telemetry.configure() is True
+    with pytest.raises(asyncio.CancelledError):
+        with span.operation(
+            "bot.test.operation",
+            scope="bot.telemetry.test",
+            component="telemetry.test",
+            stage="match",
+        ):
+            span.expect_handoff("bot.test.matched", moved=lambda: True)
+            raise asyncio.CancelledError
+
+    attributes = _attributes(_spans()[0])
+    assert attributes["bot.outcome"] == "handed_off"
+    assert attributes["bot.handoff.event"] == "bot.test.matched"
+    assert "bot.failure.kind" not in attributes
+
+
+def test_operation_cancelled_after_handoff_whose_machine_did_not_move_reads_cancelled() -> None:
+    assert mosfet.telemetry.configure() is True
+    with pytest.raises(asyncio.CancelledError):
+        with span.operation(
+            "bot.test.operation",
+            scope="bot.telemetry.test",
+            component="telemetry.test",
+            stage="match",
+        ):
+            span.expect_handoff("bot.test.matched", moved=lambda: False)
+            raise asyncio.CancelledError
+
+    attributes = _attributes(_spans()[0])
+    assert attributes["bot.outcome"] == "cancelled"
+    assert "bot.handoff.event" not in attributes

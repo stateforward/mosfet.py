@@ -8,8 +8,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
-
 
 class Decoder(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
     """Decoder interface."""
@@ -152,7 +150,6 @@ class Decoding(ability.Ability[ability.TInput, ability.TOutput]):
                 hsm.target("/Decoding/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(

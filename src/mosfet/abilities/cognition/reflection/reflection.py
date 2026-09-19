@@ -49,10 +49,10 @@ from mosfet.behavior import (
 from mosfet.behavior import storage as behavior_storage
 from mosfet.behavior.instance import Instance
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 from .. import episodes
+from .. import inventory
 from .. import input
 from .. import types
 from . import revision
@@ -335,20 +335,6 @@ def _load_all_behaviors(store: memory.Memory) -> tuple[Instance, ...]:
     return behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
 
 
-def _store_behavior(
-    store: memory.Memory,
-    *,
-    behavior: Instance,
-    context_ref: str | None,
-) -> None:
-    """Upsert behavior inventory row."""
-
-    del context_ref
-    _ = store.execute(
-        memory.InputData(statements=_compile_behavior_statements(behavior_storage.replace_behavior_clauses(behavior)))
-    )
-
-
 def _store_episode(
     store: memory.Memory,
     episode: CognitiveEpisode,
@@ -363,7 +349,7 @@ def _store_episode(
     _ = store.execute(insert_input)
 
 
-def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | None) -> BreakData:
+def _apply_break(data: BreakData, *, store: memory.Memory) -> BreakData:
     """Set status=BROKEN in inventory; do not delete (change can revive it later)."""
 
     existing = _load_behavior(store, name=data.name)
@@ -371,7 +357,7 @@ def _apply_break(data: BreakData, *, store: memory.Memory, context_ref: str | No
         raise ValueError(f"Reflection break selected unknown behavior: {data.name}.")
     reason = data.reason.strip() if data.reason and data.reason.strip() else None
     retired = behavior_storage.mark_broken(existing, reason=reason)
-    _store_behavior(store, behavior=retired, context_ref=context_ref)
+    inventory.store_behavior(store, retired, cause="break")
     return data
 
 
@@ -1049,7 +1035,7 @@ class Reflection(processing.Processing):
         try:
             raw = typing.cast(object, selected.selection.data)
             data = raw if isinstance(raw, BreakData) else BreakData.model_validate(raw if raw is not None else {})
-            applied = _apply_break(data, store=instance._memory, context_ref=turn.cognition_input.focus)
+            applied = _apply_break(data, store=instance._memory)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1362,7 +1348,6 @@ class Reflection(processing.Processing):
             ),
         ),
         hsm.state("rebooting", hsm.defer(input_event)),
-        hsm.observe(observer),
     )
 
     def __init__(

@@ -36,7 +36,7 @@ class _RecordingSpeaker(audio.Speaker):
         self.received: list[object] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == audio.OutputEvent.name:
             self.received.append(event.data)
         return super().dispatch(ctx, event)

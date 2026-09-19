@@ -28,12 +28,12 @@ class RecordingDevice(Device):
         self.events: list[hsm.Event[typing.Any]] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         del ctx
         self.events.append(event)
 
-        done = asyncio.get_running_loop().create_future()
-        done.set_result(None)
+        done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        done.set_result(True)
         return done
 
 
@@ -173,10 +173,11 @@ class HalfAttachedMicrophone(audio.Microphone):
     """Microphone whose attach handshake never completes, holding it in ``attaching``."""
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         if event.name == attachment.AttachCompleteEvent.name:
-            done = asyncio.get_running_loop().create_future()
-            done.set_result(None)
+            # Dropped: the handshake never reaches the machine.
+            done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            done.set_result(False)
             return done
         return super().dispatch(ctx, event)
 

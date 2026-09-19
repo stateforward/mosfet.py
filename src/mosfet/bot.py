@@ -29,6 +29,7 @@ from mosfet.telemetry import control
 from mosfet.telemetry import observer
 from mosfet.telemetry import span
 from mosfet.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
+from mosfet.telemetry.hsm import Traced, deliver
 
 _LOG = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ _CleanupDoneEvent = hsm.Event[_CleanupData](
 )
 
 
-class _AttachmentOperation(hsm.Instance):
+class _AttachmentOperation(Traced):
     """One-shot graph-visible correlation boundary for a Bot attachment request."""
 
     _owner: hsm.Instance
@@ -175,7 +176,7 @@ def _active_bot_turn_id(instance: "Bot", event: hsm.Event[typing.Any]) -> str | 
     return None
 
 
-class _ProcessingOperation(hsm.Instance):
+class _ProcessingOperation(Traced):
     """Single-shot timer actor scoped to one Bot processing turn.
 
     Identity is closure-bound in the model. The owning state's activity starts the actor and
@@ -288,7 +289,7 @@ def _private_scope(parent: hsm.Context) -> hsm.Context:
     return hsm.Context(parent=parent, values=scope.mark_private(values))
 
 
-class Bot(hsm.Instance, abc.ABC):
+class Bot(Traced, abc.ABC):
     """Interrupt-driven bot that observes and processes events while active."""
 
     _innate_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
@@ -530,7 +531,7 @@ class Bot(hsm.Instance, abc.ABC):
         environment = Environment.from_context(lifetime)
         if cleanup == "reset":
             for member in Bot._lifecycle_attachment_members(instance):
-                await hsm.Instance.dispatch(
+                await deliver(
                     member,
                     lifetime,
                     dataclasses.replace(

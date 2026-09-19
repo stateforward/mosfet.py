@@ -35,7 +35,7 @@ class BroadcastRecorder(hsm.Instance):
         self.seen = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == OBSERVED_EVENT.name:
             self.seen.append((typing.cast(str, event.data), event.target))
         return super().dispatch(ctx, event)

@@ -31,6 +31,9 @@ class FakeChat:
 @dataclasses.dataclass
 class FakeOpenAIClient:
     chat: chat_client.OpenAIChatResource
+    responses: chat_client.OpenAIResponsesResource = dataclasses.field(
+        default_factory=lambda: FakeChatCompletions(response={})
+    )
 
 
 def test_chat_client_uses_injected_sdk_client() -> None:
@@ -147,3 +150,55 @@ def test_chat_client_rejects_non_object_responses() -> None:
         assert str(error) == "OpenAI-compatible chat completion response must be a JSON object."
     else:
         raise AssertionError("Expected TypeError.")
+
+
+def test_chat_client_creates_responses_api_request() -> None:
+    responses = FakeChatCompletions(response={"model": "luna", "status": "completed", "output": []})
+    client = ChatClient(
+        model="luna",
+        api_key="test-api-key",
+        default_body={"store": False},
+        client=FakeOpenAIClient(chat=FakeChat(completions=FakeChatCompletions(response={})), responses=responses),
+    )
+
+    response = client.create_response(
+        input=[{"role": "user", "content": "hello"}],
+        tools=[{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+        tool_choice="required",
+        text_format={"type": "json_object"},
+        reasoning={"effort": "high"},
+        extra_body={"temperature": 0.2},
+    )
+
+    assert response == {"model": "luna", "status": "completed", "output": []}
+    assert responses.calls == [
+        ChatCompletionCall(
+            kwargs={
+                "model": "luna",
+                "input": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+                "tool_choice": "required",
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "high"},
+                "extra_body": {"store": False, "temperature": 0.2},
+            }
+        )
+    ]
+
+
+def test_chat_client_wraps_responses_api_failure() -> None:
+    @dataclasses.dataclass
+    class FailingResponses:
+        def create(self, **kwargs: object) -> object:
+            raise ValueError(f"boom {len(kwargs)}")
+
+    client = ChatClient(
+        model="luna",
+        api_key="test-api-key",
+        client=FakeOpenAIClient(
+            chat=FakeChat(completions=FakeChatCompletions(response={})), responses=FailingResponses()
+        ),
+    )
+
+    with pytest.raises(chat_client.RequestError, match="OpenAI Responses API request failed."):
+        _ = client.create_response(input=[{"role": "user", "content": "hello"}])

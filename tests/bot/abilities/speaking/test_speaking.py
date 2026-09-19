@@ -41,7 +41,7 @@ class RecordingConversation(conversation.Conversation):
         self.outputs: list[conversation.Messages] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
             terminal = event.data
             if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
@@ -194,7 +194,7 @@ def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
         outputs: list[speaking.OutputData] = []
         original = speaking_ability.dispatch
 
-        def capture_terminal(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
+        def capture_terminal(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
             from mosfet.abilities import ability
 
             if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
@@ -230,7 +230,7 @@ def test_speaking_failure_surfaces_on_failed_event() -> None:
         failures: list[str] = []
         original = speaking_ability.dispatch
 
-        def capture(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[None]:
+        def capture(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
             from mosfet.abilities import ability
 
             if event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
@@ -476,7 +476,7 @@ async def _speak_with_listening_peer(
 
     original = peer.dispatch
 
-    def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> typing.Awaitable[None]:
+    def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> typing.Awaitable[bool]:
         if isinstance(event.data, EfferenceData):
             copies.append(event.data)
         return original(ctx, event)

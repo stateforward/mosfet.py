@@ -307,8 +307,10 @@ class _BotActor(hsm.Instance):
     )
 
     @typing.override
-    async def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+    async def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> bool:
+        # Drops every event: nothing is delivered.
         del ctx, event
+        return False
 
 
 class RecordingIntuitionProcessor(processing.Processor):
@@ -667,7 +669,7 @@ class RecordingCognition(cognition.Cognition):
         self.failures = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.output_event.name:
             self.outputs.append(typing.cast(cognition.types.OutputData, event.data))
         if event.name == self.failed_event.name:

@@ -235,6 +235,8 @@ class JsonlFileLogRecordExporter(LogRecordExporter):
                     "body": log_record.body,
                     "attributes": dict(log_record.attributes) if log_record.attributes else {},
                     "severity": _severity(record),
+                    "trace_id": f"{log_record.trace_id:032x}" if log_record.trace_id else None,
+                    "span_id": f"{log_record.span_id:016x}" if log_record.span_id else None,
                 }
             )
         try:
@@ -245,6 +247,11 @@ class JsonlFileLogRecordExporter(LogRecordExporter):
             _LOG.error("otel log export failed records=%d error=%s", len(payloads), type(error).__name__)
             raise
         return LogRecordExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        """Nothing is buffered here: ``export`` writes each batch to the file before returning."""
+        del timeout_millis
+        return True
 
     @typing.override
     def shutdown(self) -> None:

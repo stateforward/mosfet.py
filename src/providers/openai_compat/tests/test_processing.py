@@ -222,6 +222,7 @@ def test_processor_process_records_otel_wire_payload(
     monkeypatch.chdir(tmp_path)
     mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "1")
 
     def _noop_set_logger_provider(_provider: object) -> None:
         return None
@@ -284,7 +285,11 @@ def test_processor_process_records_otel_wire_payload(
     _ = otel_provider.force_flush()
 
     lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == 1
+    assert [json.loads(line)["attributes"]["stage"] for line in lines] == ["request", "response"]
+    response_record = json.loads(lines[1])
+    assert response_record["body"]["response"]["choices"]
+    assert response_record["body"]["error"] is None
+    assert isinstance(response_record["body"]["latency_ms"], float)
     payload = json.loads(lines[0])
     body_text = json.dumps(payload["body"])
     assert instructions in body_text

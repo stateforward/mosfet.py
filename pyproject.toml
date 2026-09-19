@@ -11,7 +11,7 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-grpc>=1.37.0,<2.0.0",
   "opentelemetry-sdk>=1.37.0,<2.0.0",
   "pydantic>=2.10.0,<3.0.0",
-  "stateforward-hsm>=1.3.7,<1.4",
+  "stateforward-hsm>=1.3.9,<1.4",
   "starlark-go>=1.0.1,<2.0.0",
   "sqlalchemy>=2.0.0,<3.0.0",
 ]

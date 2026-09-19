@@ -188,7 +188,7 @@ def test_compiled_behavior_dispatches_output_when_used_as_modeled_event(monkeypa
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
                 sources.append(event.source)
@@ -214,7 +214,7 @@ def test_compiled_behavior_output_event_source_is_behavior_id() -> None:
         recorded: list[str] = []
         original = compiled.dispatch
 
-        def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+        def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 recorded.append(event.source)
             return original(ctx, event)
@@ -297,7 +297,7 @@ def test_compiled_behavior_generated_failure_recovery_preserves_root_initial_eff
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
                 if event.data == {"text": "reset"}:
@@ -443,7 +443,7 @@ def test_compiled_behavior_rejected_guard_settles_without_leaving_source_state(
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
             return original_dispatch(ctx, event)
@@ -504,7 +504,7 @@ def test_direct_hsm_dispatch_remains_delivery_only_during_guard_evaluation(
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name and not output.done():
                 output.set_result(typing.cast(dict[str, object], event.data))
             return original_dispatch(ctx, event)
@@ -727,7 +727,7 @@ def test_cancelled_apply_does_not_cancel_effects_after_dispatch_commit(
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name and not output.done():
                 output.set_result(typing.cast(dict[str, object], event.data))
             return original_dispatch(ctx, event)
@@ -830,7 +830,7 @@ def test_compiled_behavior_ignores_stale_and_duplicate_guard_outcomes(
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
             return original_dispatch(ctx, event)
@@ -893,7 +893,7 @@ def emit_uppercase(event):""",
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
                 if event.data == {"text": "ACTIVITY"}:
@@ -921,7 +921,7 @@ def test_compiled_behavior_concurrent_apply_correlations_settle_independently(
         def recording_dispatch(
             ctx: hsm.Context,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
             return original_dispatch(ctx, event)

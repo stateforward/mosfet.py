@@ -8,8 +8,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
-
 
 class Generator(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
     """Generator interface."""
@@ -152,7 +150,6 @@ class Generative(ability.Ability[ability.TInput, ability.TOutput]):
                 hsm.target("/Generative/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(

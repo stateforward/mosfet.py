@@ -8,14 +8,14 @@ Documented per [CORE-EXC-001](../../../rules/core.rules.md#core-exc-001-must-doc
 | --- | --- |
 | Violated rule | [`rules/python.rules.md#PY-LOG-002`](../../../rules/python.rules.md#py-log-002-should-use-stable-structured-logs) — logs MUST NOT include secrets or unredacted sensitive payloads |
 | Owner | stateforward.mosfet maintainers |
-| Rationale | The OTEL goal allows seeing exact text-generator messages (system/user content, tools) during local development when the runtime opts in. The JSONL file exporter may write full request bodies only under that explicit opt-in; the default omits prompt/tool content. This is not a production collector path. |
-| Risk tests | Payload capture opt-in (`BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`); enablement opt-out (`BOT_OTEL_DISABLED` / `enabled=False`); cwd confinement on configure; file mode `0o600`; symlink / `O_NOFOLLOW` open rejection (`tests/telemetry/`) |
+| Rationale | The OTEL goal allows seeing exact text-generator messages (system/user content, tools) and responses (tool calls with arguments, text, reasoning summary, status) during local development when the runtime opts in. `BOT_OTEL_CAPTURE=full` additionally logs every observed HSM event with its serialized data, ids, and consuming transition, plus dispatch outcomes, so one turn can be reconstructed end to end (`scripts/otel_turns.py`). The JSONL file exporter writes these bodies only under that explicit opt-in; the default omits them. Credentials are masked at every depth (`mosfet.telemetry.capture.jsonable`: credential-named keys and bearer/API-key-shaped values). This is not a production collector path. |
+| Risk tests | Payload capture opt-in (`BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`, `BOT_OTEL_CAPTURE=full`); credential redaction and default-off HSM capture (`tests/telemetry/test_capture.py`); enablement opt-out (`BOT_OTEL_DISABLED` / `enabled=False`); cwd confinement on configure; file mode `0o600`; symlink / `O_NOFOLLOW` open rejection (`tests/telemetry/`) |
 | Expiration | When local file export is removed, or replaced by a redacting production exporter |
 | Removal plan | Delete the `JsonlFileLogRecordExporter` path (and default-on configure wiring), flip the default to disabled, and remove this exception entry |
 
 The span file (`otel-spans.jsonl`) shares the same confined, `O_NOFOLLOW`, `0o600`
 writer but is **not** covered by this exception: span attributes are
-low-cardinality and payload-free by contract (see
+low-cardinality and payload-free by contract, including under `BOT_OTEL_CAPTURE=full` (see
 [`FAILURE_KINDS.md`](FAILURE_KINDS.md) and `bot.telemetry.span`), so no prompt,
 transcript, audio, or credential is written there.
 

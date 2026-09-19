@@ -7,7 +7,6 @@ import typing
 import hsm
 import mosfet
 
-from mosfet.telemetry import observer
 
 _SpeechEncodingApplyCompletedEvent = hsm.Event[bytes](
     name="bot.ability.vocal.speech.encoding.apply.completed",
@@ -124,5 +123,4 @@ class SpeechEncoding(encoding.Encoding[bytes, bytes]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )

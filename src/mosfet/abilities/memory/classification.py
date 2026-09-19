@@ -10,8 +10,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 class MemoryClassificationRetention(enum.StrEnum):
     """Storage policy recommended for a candidate memory."""
@@ -369,5 +367,4 @@ class MemoryClassification(classifying.Classifying[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )

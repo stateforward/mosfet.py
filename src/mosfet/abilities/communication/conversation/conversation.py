@@ -34,7 +34,6 @@ from mosfet import event
 from mosfet.abilities import cognition
 from mosfet.abilities.listening import interpretation
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 Stage: typing.TypeAlias = typing.Literal["memory", "turn_detector", "voice_routing"]
@@ -990,7 +989,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
         hsm.state("inactive"),
         hsm.state("detaching"),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
     _turn_detector_factory: TurnDetectorFactory
@@ -1994,7 +1992,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
             ),
             hsm.state("detaching"),
             hsm.state("degraded"),
-            hsm.observe(observer),
         )
 
     @classmethod

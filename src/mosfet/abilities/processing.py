@@ -44,7 +44,7 @@ from mosfet.event import (
     validate_event_data,
 )
 from .cognition.event import model_facing_xml
-from mosfet.telemetry import observer
+from mosfet.telemetry.hsm import Traced
 
 _LOG = logging.getLogger(__name__)
 
@@ -773,7 +773,7 @@ CancelledEvent = hsm.Event[CancelledData](
 )
 
 
-class Operation(hsm.Instance):
+class Operation(Traced):
     """Operation-scoped actor used as the live capability for one request ID."""
 
 
@@ -1941,7 +1941,6 @@ class Processing(ability.Ability[InputData, CompletionData]):
                 hsm.target("/Processing/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
     def __init__(self, *, processor: Processor, instructions: str | None = None) -> None:

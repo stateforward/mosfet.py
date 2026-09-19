@@ -3,81 +3,25 @@
 from __future__ import annotations
 
 import collections.abc
-import dataclasses
-import enum
-import os
 import typing
 
 from opentelemetry._logs import SeverityNumber
 from opentelemetry.util.types import AnyValue
 
+from mosfet.telemetry import capture
 from mosfet.telemetry.configure import is_enabled, logger_provider
 
 _LOGGER_NAME = "bot.telemetry.generator"
 _COMPONENT = "text.generator"
 _STAGE = "request"
-# Bound recursive walks in ``_jsonable`` (nested mappings/sequences/dataclasses).
-_MAX_JSONABLE_DEPTH = 32
-_JSONABLE_TRUNCATED = "<truncated:max-depth>"
-# Sensitive generator request content (system/user prompts, tools) is never persisted unless the
-# owning runtime explicitly opts in. Telemetry is opt-in for payloads, not a side effect of
-# configuring OTEL export (PY-LOG-002).
-_CAPTURE_PAYLOAD_ENV = "BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD"
-_CAPTURE_VALUES = frozenset({"1", "true", "yes", "on"})
-
-
-def _payload_capture_enabled() -> bool:
-    raw = os.environ.get(_CAPTURE_PAYLOAD_ENV, "").strip().lower()
-    return raw in _CAPTURE_VALUES
+_USAGE_STAGE = "usage"
+_RESPONSE_STAGE = "response"
 
 
 def _size(value: object) -> int | None:
     if isinstance(value, collections.abc.Sized):
         return len(value)
     return None
-
-
-def _pydantic_model_dump(value: object) -> AnyValue | None:
-    try:
-        from pydantic import BaseModel
-    except ImportError:  # pragma: no cover
-        return None
-    if isinstance(value, BaseModel):
-        # PY-TYPE-003: model_dump(mode="json") yields a JSON tree (scalars /
-        # list / dict) that matches OTEL AnyValue; pydantic types it wider.
-        return typing.cast(AnyValue, value.model_dump(mode="json"))
-    return None
-
-
-def _jsonable(value: object, *, _depth: int = 0) -> AnyValue:
-    """Convert a value to an OTEL ``AnyValue``-friendly JSON tree.
-
-    Recursion into mappings, sequences, and dataclasses is bounded by
-    ``_MAX_JSONABLE_DEPTH`` (32). Past that bound, returns
-    ``_JSONABLE_TRUNCATED`` instead of descending further.
-    """
-
-    if _depth > _MAX_JSONABLE_DEPTH:
-        return _JSONABLE_TRUNCATED
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, enum.Enum):
-        # PY-TYPE-003: Enum.value for str/int/float/bool (and nested JSON)
-        # members is AnyValue-compatible; checker types .value as object/Any.
-        return typing.cast(AnyValue, value.value)
-    dumped = _pydantic_model_dump(value)
-    if dumped is not None:
-        return dumped
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return _jsonable(dataclasses.asdict(value), _depth=_depth + 1)
-    if isinstance(value, collections.abc.Mapping):
-        # PY-TYPE-003: isinstance proves Mapping; cast only names key/value as
-        # object so items() iteration type-checks under basedpyright.
-        mapping = typing.cast(collections.abc.Mapping[object, object], value)
-        return {str(key): _jsonable(item, _depth=_depth + 1) for key, item in mapping.items()}
-    if isinstance(value, collections.abc.Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_jsonable(item, _depth=_depth + 1) for item in value]
-    return str(value)
 
 
 def record_generator_request(
@@ -90,7 +34,8 @@ def record_generator_request(
     """Emit an OTEL log for a text-generator request.
 
     Payload (messages/tools) is placed in the log record body only when the runtime
-    explicitly opts in via ``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD``. Without that opt-in the
+    explicitly opts in via ``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`` or ``BOT_OTEL_CAPTURE=full``
+    (credentials redacted, see ``mosfet.telemetry.capture``). Without that opt-in the
     record carries low-cardinality request metadata (counts), never prompt/tool content.
     Attributes stay low-cardinality: component, provider, optional model, and stage.
 
@@ -118,10 +63,10 @@ def record_generator_request(
         attributes["model"] = model
 
     body: dict[str, AnyValue]
-    if _payload_capture_enabled():
+    if capture.payload_enabled():
         body = {
-            "messages": _jsonable(messages),
-            "tools": _jsonable(tools),
+            "messages": capture.jsonable(messages),
+            "tools": capture.jsonable(tools),
         }
     else:
         body = {
@@ -140,4 +85,83 @@ def record_generator_request(
     )
 
 
-__all__ = ["record_generator_request"]
+def record_generator_usage(
+    *,
+    provider: str,
+    model: str | None,
+    usage: collections.abc.Mapping[str, int],
+) -> None:
+    """Emit an OTEL log for text-generator token usage.
+
+    ``usage`` holds token counts only (for example ``input_tokens``, ``output_tokens``,
+    ``reasoning_tokens``), so it is recorded without the payload opt-in. Attributes and
+    no-op conditions match ``record_generator_request``; stage is ``usage``.
+    """
+
+    if not provider or not provider.strip():
+        return
+    if not is_enabled():
+        return
+    provider_instance = logger_provider()
+    if provider_instance is None:
+        return
+
+    attributes: dict[str, str] = {
+        "component": _COMPONENT,
+        "provider": provider,
+        "stage": _USAGE_STAGE,
+    }
+    if model is not None:
+        attributes["model"] = model
+    body: dict[str, AnyValue] = {str(key): int(value) for key, value in usage.items()}
+    logger = provider_instance.get_logger(_LOGGER_NAME)
+    logger.emit(
+        # PY-TYPE-003: body values are ints (AnyValue); emit() types body as AnyValue.
+        body=typing.cast(AnyValue, body),
+        attributes=attributes,
+        severity_number=SeverityNumber.INFO,
+        severity_text="INFO",
+    )
+
+
+def record_generator_response(
+    *,
+    provider: str,
+    model: str | None,
+    response: object,
+    latency_s: float,
+    error: BaseException | None = None,
+) -> None:
+    """Emit an OTEL log for what a text generator or processor answered.
+
+    Recorded only under payload capture (``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`` or
+    ``BOT_OTEL_CAPTURE=full``); default telemetry is unchanged. The body carries the raw
+    provider response (tool calls and arguments, text, reasoning summary, finish/incomplete
+    status) with credentials redacted, the wall-clock latency, and the error text when the call
+    or its mapping failed. Attributes match ``record_generator_request`` with stage ``response``
+    and a low-cardinality ``outcome``.
+    """
+
+    if not provider or not provider.strip() or not capture.payload_enabled():
+        return
+    attributes: dict[str, str | bool | int | float] = {
+        "component": _COMPONENT,
+        "provider": provider,
+        "stage": _RESPONSE_STAGE,
+        "outcome": "failed" if error is not None else "ok",
+    }
+    if model is not None:
+        attributes["model"] = model
+    capture.emit(
+        _LOGGER_NAME,
+        body={
+            "response": response,
+            "latency_ms": round(latency_s * 1000.0, 1),
+            "error": None if error is None else f"{type(error).__name__}: {error}",
+        },
+        attributes=attributes,
+        severity=SeverityNumber.ERROR if error is not None else SeverityNumber.INFO,
+    )
+
+
+__all__ = ["record_generator_request", "record_generator_response", "record_generator_usage"]

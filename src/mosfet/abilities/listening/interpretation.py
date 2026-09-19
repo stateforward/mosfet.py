@@ -46,7 +46,6 @@ import pydantic
 from mosfet.abilities import cognition
 from mosfet.environment import SoundData, SoundEvent
 from mosfet import telemetry
-from mosfet.telemetry import observer
 from mosfet.telemetry import span
 
 _SCOPE = "bot.abilities.listening"
@@ -2256,7 +2255,6 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             ),
         ),
         hsm.state("degraded"),
-        hsm.observe(observer),
     )
 
 

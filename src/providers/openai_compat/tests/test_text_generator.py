@@ -10,6 +10,7 @@ import pathlib
 import pytest
 
 from mosfet.providers.openai_compat import TextGenerationError, TextGenerator
+import mosfet.providers.openai_compat as openai_compat
 
 
 @dataclasses.dataclass
@@ -616,6 +617,7 @@ def test_text_generator_records_otel_request_when_configured(
     monkeypatch.chdir(tmp_path)
     mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "1")
     monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
 
     log_path = pathlib.Path("openai-compat-generator.jsonl")
@@ -668,7 +670,11 @@ def test_text_generator_records_otel_request_when_configured(
     _ = otel_provider.force_flush()
 
     lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == 1
+    assert [json.loads(line)["attributes"]["stage"] for line in lines] == ["request", "response"]
+    response_record = json.loads(lines[1])
+    assert response_record["body"]["response"]["choices"]
+    assert response_record["body"]["error"] is None
+    assert isinstance(response_record["body"]["latency_ms"], float)
     payload = json.loads(lines[0])
     assert payload["body"]["messages"] == [
         {"role": "system", "content": "Be brief."},
@@ -678,3 +684,233 @@ def test_text_generator_records_otel_request_when_configured(
     assert payload["attributes"]["model"] == "compat-model"
     assert payload["attributes"]["stage"] == "request"
     assert "Alice greets Bob" not in json.dumps(payload["attributes"])
+
+
+_TOOL = {
+    "type": "function",
+    "function": {"name": "dispatch", "parameters": {"type": "object"}, "strict": True},
+}
+
+
+def _tool_input(selection: text.ToolSelectionPolicy = text.ToolSelectionPolicy.REQUIRED) -> text.InputData:
+    return text.InputData(
+        messages=(
+            text.TextMessage(role=text.TextRole.SYSTEM, content="be brief"),
+            text.TextMessage(role=text.TextRole.USER, content="hi"),
+        ),
+        tools=(_TOOL,),
+        tool_selection=selection,
+    )
+
+
+def test_chat_text_generator_rejects_reasoning_effort_with_tools() -> None:
+    client = FakeChatClient(response={})
+    generator = TextGenerator(client=client, reasoning_effort=openai_compat.ReasoningEffort.HIGH)
+
+    with pytest.raises(openai_compat.UnsupportedReasoningEffortError, match="reasoning_effort='high'"):
+        _ = asyncio.run(generator.generate(_tool_input()))
+    assert client.calls == []
+
+
+def test_chat_text_generator_sends_requested_reasoning_effort_without_tools() -> None:
+    client = FakeChatClient(
+        response={"model": "m", "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+    )
+    generator = TextGenerator(client=client, reasoning_effort=openai_compat.ReasoningEffort.LOW)
+
+    output = asyncio.run(
+        generator.generate(text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hi"),)))
+    )
+
+    assert output.content == "ok"
+    assert client.calls[0].extra_body == {"reasoning_effort": "low"}
+
+
+@dataclasses.dataclass
+class ResponsesCall:
+    input: list[dict[str, object]]
+    tools: list[object]
+    tool_choice: str | None
+    text_format: collections.abc.Mapping[str, object] | None
+    reasoning: collections.abc.Mapping[str, object] | None
+    extra_body: dict[str, object]
+
+
+@dataclasses.dataclass
+class FakeResponsesClient:
+    response: dict[str, object]
+    model: str = "gpt-luna"
+    calls: list[ResponsesCall] = dataclasses.field(default_factory=list)
+
+    def create_response(
+        self,
+        *,
+        input: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        tool_choice: str | None = None,
+        text_format: collections.abc.Mapping[str, object] | None = None,
+        reasoning: collections.abc.Mapping[str, object] | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ResponsesCall(
+                input=[dict(item) for item in input],
+                tools=list(tools),
+                tool_choice=tool_choice,
+                text_format=text_format,
+                reasoning=reasoning,
+                extra_body=dict(extra_body or {}),
+            )
+        )
+        return self.response
+
+
+def test_responses_text_generator_maps_reasoning_and_function_calls() -> None:
+    client = FakeResponsesClient(
+        response={
+            "model": "gpt-luna-2026",
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Pick dispatch."}]},
+                {"type": "function_call", "call_id": "call_9", "name": "dispatch", "arguments": '{"events": []}'},
+            ],
+            "usage": {"input_tokens": 3, "output_tokens": 9, "output_tokens_details": {"reasoning_tokens": 8}},
+        }
+    )
+    generator = openai_compat.ResponsesTextGenerator(
+        client=client,
+        provider="openai_luna",
+        reasoning_effort=openai_compat.ReasoningEffort.HIGH,
+    )
+
+    output = asyncio.run(generator.generate(_tool_input()))
+
+    assert output == text.OutputData(
+        content="",
+        reasoning="Pick dispatch.",
+        provider="openai_luna",
+        model="gpt-luna-2026",
+        tool_calls=(text.TextToolCall(id="call_9", name="dispatch", args={"events": []}),),
+    )
+    assert client.calls == [
+        ResponsesCall(
+            input=[{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "name": "dispatch", "parameters": {"type": "object"}, "strict": True}],
+            tool_choice="required",
+            text_format=None,
+            reasoning={"effort": "high"},
+            extra_body={},
+        )
+    ]
+
+
+def test_responses_text_generator_maps_tool_history_and_text_output() -> None:
+    client = FakeResponsesClient(
+        response={
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "9am works."}]}],
+        }
+    )
+    generator = openai_compat.ResponsesTextGenerator(
+        client=client,
+        response_format={"type": "json_schema", "json_schema": {"name": "reply", "schema": {"type": "object"}}},
+    )
+    tool_call = text.TextToolCall(id="call_1", name="slots", args={"day": "mon"})
+
+    output = asyncio.run(
+        generator.generate(
+            text.InputData(
+                messages=(
+                    text.TextMessage(role=text.TextRole.ASSISTANT, content="", tool_calls=(tool_call,)),
+                    text.TextMessage(role=text.TextRole.TOOL, content="9am", tool_call_id="call_1"),
+                )
+            )
+        )
+    )
+
+    assert output.content == "9am works."
+    assert client.calls[0].input == [
+        {"type": "function_call", "call_id": "call_1", "name": "slots", "arguments": '{"day":"mon"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": "9am"},
+    ]
+    assert client.calls[0].tool_choice is None
+    assert client.calls[0].reasoning is None
+    assert client.calls[0].text_format == {"type": "json_schema", "name": "reply", "schema": {"type": "object"}}
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "finished unsuccessfully"),
+        ({"status": "completed", "output": [{"type": "message", "content": [{"type": "refusal"}]}]}, "refused"),
+        ({"status": "completed", "output": []}, "did not include a required tool call"),
+    ],
+)
+def test_responses_text_generator_rejects_unusable_responses(response: dict[str, object], message: str) -> None:
+    generator = openai_compat.ResponsesTextGenerator(client=FakeResponsesClient(response=response))
+
+    with pytest.raises(TextGenerationError, match=message):
+        _ = asyncio.run(generator.generate(_tool_input()))
+
+
+@dataclasses.dataclass
+class _ModelChatClient(FakeChatClient):
+    model: str = "compat-model"
+
+
+@pytest.mark.parametrize("path", ["chat", "responses"])
+def test_generator_records_join_the_callers_trace(
+    path: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both request paths hop to a worker thread; their records still belong to the calling span."""
+
+    import json
+
+    import mosfet.telemetry
+    from opentelemetry import _logs
+
+    from mosfet.telemetry.configure import logger_provider
+
+    monkeypatch.chdir(tmp_path)
+    mosfet.telemetry.reset()
+    monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    monkeypatch.setenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", "1")
+    monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
+    log_path = pathlib.Path("generator-trace.jsonl")
+    assert mosfet.telemetry.configure(log_file=log_path) is True
+
+    generator: text.TextGenerator
+    if path == "chat":
+        generator = TextGenerator(
+            client=_ModelChatClient(
+                response={"model": "compat-model", "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+            ),
+            provider="openai_compat",
+        )
+    else:
+        generator = openai_compat.ResponsesTextGenerator(
+            client=FakeResponsesClient(
+                response={
+                    "model": "gpt-luna",
+                    "status": "completed",
+                    "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                }
+            ),
+            provider="openai_luna",
+        )
+
+    async def run() -> tuple[str, str]:
+        with mosfet.telemetry.span.operation("test.turn", scope="tests", component="test", stage="turn") as active:
+            _ = await generator.generate(
+                text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hi"),))
+            )
+            context = active.get_span_context()
+            return format(context.trace_id, "032x"), format(context.span_id, "016x")
+
+    trace_id, span_id = asyncio.run(run())
+    otel_provider = logger_provider()
+    assert otel_provider is not None
+    _ = otel_provider.force_flush()
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert records
+    assert {(record["trace_id"], record["span_id"]) for record in records} == {(trace_id, span_id)}

@@ -927,10 +927,11 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
             dispatch_ctx: hsm.Context | None,
             target: hsm.Dispatchable | None,
             event: hsm.Event[typing.Any],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             if target is reflection and event.name == held_terminal:
-                held = asyncio.get_running_loop().create_future()
-                held.set_result(None)
+                # Held back, not delivered to the machine.
+                held: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+                held.set_result(False)
                 return held
             return dispatch(dispatch_ctx, target, event)
 

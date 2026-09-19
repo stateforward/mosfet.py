@@ -34,7 +34,7 @@ class BroadcastRecorder(hsm.Instance, attachment.Attachment):
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.AttachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         return hsm.dispatch(ctx, self, event)
 
     @typing.override
@@ -42,7 +42,7 @@ class BroadcastRecorder(hsm.Instance, attachment.Attachment):
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.DetachData],
-    ) -> collections.abc.Awaitable[None]:
+    ) -> collections.abc.Awaitable[bool]:
         return hsm.dispatch(ctx, self, event)
 
     @staticmethod
@@ -163,7 +163,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.AttachData],
-    ) -> None:
+    ) -> bool:
         self.attach_calls.append(event)
         self.attach_contexts.append(ctx)
         _ = self.attach_started.set()
@@ -174,7 +174,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
             raise RuntimeError("test attach exception")
         if not self.respond_attach:
             _ = self.attach_finished.set()
-            return
+            return True
         data = event.data
         assert isinstance(data, attachment.AttachData)
         target = data.actor if data.reply_to is None else data.reply_to
@@ -202,13 +202,14 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
             ),
         )
         _ = self.attach_finished.set()
+        return True
 
     @typing.override
     async def detach(
         self,
         ctx: hsm.Context,
         event: hsm.Event[attachment.DetachData],
-    ) -> None:
+    ) -> bool:
         self.detach_calls.append(event)
         self.detach_contexts.append(ctx)
         _ = self.detach_started.set()
@@ -219,7 +220,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
             raise RuntimeError("test detach exception")
         if not self.respond_detach:
             _ = self.detach_finished.set()
-            return
+            return True
         data = event.data
         assert isinstance(data, attachment.DetachData)
         target = data.actor if data.reply_to is None else data.reply_to
@@ -245,6 +246,7 @@ class TestAttachment(hsm.Instance, attachment.Attachment):
             ),
         )
         _ = self.detach_finished.set()
+        return True
 
 
 def test_group_implements_attachment_and_dispatchable_protocols() -> None:
@@ -1752,7 +1754,7 @@ def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination(
             self,
             ctx: hsm.Context,
             event: hsm.Event[attachment.AttachData],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             return hsm.dispatch(ctx, self, event)
 
         @typing.override
@@ -1760,11 +1762,11 @@ def test_group_fans_out_when_name_matches_model_but_payload_is_not_coordination(
             self,
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
-        ) -> collections.abc.Awaitable[None]:
+        ) -> collections.abc.Awaitable[bool]:
             return hsm.dispatch(ctx, self, event)
 
         @typing.override
-        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             self.received.append(event)
             return super().dispatch(ctx, event)
 

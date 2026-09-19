@@ -18,6 +18,7 @@ members = [
     "mosfet-provider-mlx-audio",
     "mosfet-provider-mlx-vlm",
     "mosfet-provider-moonshine",
+    "mosfet-provider-needle",
     "mosfet-provider-openai-compat",
     "mosfet-provider-postgres-memory",
     "mosfet-provider-pyannote",
@@ -214,6 +215,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7a/4b/c1f4e211e50389304d6af32b9280e026a7133e3ad59bbdf8f7a3250f8bee/basedpyright-1.39.9.tar.gz", hash = "sha256:32cbea5fc8273e89df3db20daea56cb7286e419ccdfdc479c64759d2dc071901", size = 24412216, upload-time = "2026-06-27T02:19:49.834Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/d4/e1fa108710d0498a18c77b1e13897f31eab47c69aa8cfe2d2a4df746541e/basedpyright-1.39.9-py3-none-any.whl", hash = "sha256:6b0837b9eba972c71895167ab9b127e6afdbc17abc92312e3f8d15ca82a5611c", size = 13374276, upload-time = "2026-06-27T02:19:54.431Z" },
+]
+
+[[package]]
+name = "cactus-needle"
+version = "3.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/dd/acbf81acc32d23145b8dfea052652c3183089711d3aa9a3d89e6b6073983/cactus_needle-3.0.2.tar.gz", hash = "sha256:a3390dcb5fa6f765e0ce28143e5bd18794eda3e502b0202651382f16a318773a", size = 101328, upload-time = "2026-09-18T16:02:03.703Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/b0/7b2ac5951fc639aa113a8244530f7d236645212bc6144f55a099dd6c594f/cactus_needle-3.0.2-py3-none-any.whl", hash = "sha256:99200776c42b2af93325326f1030b49da6af3fa9d66e5d979b44f5e472e4e739", size = 89986, upload-time = "2026-09-18T16:02:02.354Z" },
 ]
 
 [[package]]
@@ -1668,6 +1681,32 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "moonshine-voice", specifier = ">=0.0.70,<0.1.0" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-needle"
+source = { editable = "src/providers/needle" }
+dependencies = [
+    { name = "cactus-needle" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cactus-needle", specifier = ">=3.0.2,<4.0.0" },
     { name = "stateforward-mosfet", editable = "." },
 ]
 
@@ -3241,11 +3280,11 @@ wheels = [
 
 [[package]]
 name = "stateforward-hsm"
-version = "1.3.7"
+version = "1.3.9"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e3/ea/c37a069fae40c6e07fc378453c4ebe8915e7aa6e8cc49c2801e734d2eeac/stateforward_hsm-1.3.7.tar.gz", hash = "sha256:8656f776c614c6eee48dec637a95bba0aa5fd43a8176bcc034ebaa628add9552", size = 186084, upload-time = "2026-08-28T01:54:14.738Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/d5/2004b514be6b3878c31209b522f3fe57d35c0762c9a722270252b98ac60b/stateforward_hsm-1.3.9.tar.gz", hash = "sha256:76b9ca1b63182d1fd2dfaa2bd008abae30f245079ab887ef0b844eb05c578bae", size = 186924, upload-time = "2026-09-18T00:19:12.694Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/f0/411848079eb479520e8f492c3bbc9e1139f04763441a01af2f630c2489a2/stateforward_hsm-1.3.7-py3-none-any.whl", hash = "sha256:6deda02a002c37782a4ab3ff1f1682d78199e80e18ab0b994416773df6246e01", size = 39555, upload-time = "2026-08-28T01:54:13.566Z" },
+    { url = "https://files.pythonhosted.org/packages/71/c3/b7a5ab583b2a25f8d6bbb280b8c280366a0e0e730e059fe4e0f3735bc7a3/stateforward_hsm-1.3.9-py3-none-any.whl", hash = "sha256:a1e986b2610de2db15a3a87817d31eb85d9c3d06363906a8aa886ae94d4be81e", size = 39881, upload-time = "2026-09-18T00:19:11.698Z" },
 ]
 
 [[package]]
@@ -3276,7 +3315,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.0,<3.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0,<3.0.0" },
     { name = "starlark-go", specifier = ">=1.0.1,<2.0.0" },
-    { name = "stateforward-hsm", specifier = ">=1.3.7,<1.4" },
+    { name = "stateforward-hsm", specifier = ">=1.3.9,<1.4" },
 ]
 
 [package.metadata.requires-dev]

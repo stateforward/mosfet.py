@@ -9,7 +9,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
 from mosfet.environment import SoundData
 
 
@@ -132,7 +131,6 @@ class SoundClassification(classifying.Classifying[SoundData, OutputData]):
                 hsm.target("/SoundClassification/idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

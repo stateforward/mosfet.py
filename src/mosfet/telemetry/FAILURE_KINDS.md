@@ -67,3 +67,14 @@ Per `METRICS > SPANS > Logs`:
 Exception messages, stack frames, provider error codes with embedded IDs,
 hostnames, URLs, participant/track/room identifiers, file paths, model output.
 These are unbounded-cardinality and belong in a log line at most.
+
+## Cancellation is an outcome, not a failure
+
+`span.operation()` records an `asyncio.CancelledError` as `bot.outcome=cancelled` with no
+`ERROR` status and no `bot.failure.kind`. An HSM behavior that dispatches an event to its own
+machine may be cancelled by the transition that event takes. Every such dispatch goes through
+`telemetry.deliver` (the stamping path of `telemetry.Traced`), which marks the stages open in
+that behavior (`span.expect_handoff`); if one of them is then cancelled while the machine is
+still running, the span reads `bot.outcome=handed_off` with `bot.handoff.event=<event name>`.
+A cancellation while the machine is stopping, or of a stage that never handed off, stays
+`cancelled` — so `cancelled` means real cancellation only. Only real exceptions produce `failed`.

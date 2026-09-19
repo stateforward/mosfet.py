@@ -134,7 +134,7 @@ def test_observer_records_metric_and_short_span(monkeypatch: pytest.MonkeyPatch)
     observation = _observation_for(event, source="/TextGeneration/idle/to_applying")
 
     monkeypatch.setattr(telemetry, "_OBSERVATIONS", counter)
-    monkeypatch.setattr(telemetry, "_TRACER", tracer)
+    monkeypatch.setattr(telemetry, "_tracer", lambda: tracer)
 
     telemetry.observer(hsm.Context(), _DemoInstance(), observation)
 
@@ -181,7 +181,7 @@ def test_hsm_observe_records_transition_without_dispatch_telemetry_api(monkeypat
         )
 
     monkeypatch.setattr(telemetry, "_OBSERVATIONS", counter)
-    monkeypatch.setattr(telemetry, "_TRACER", tracer)
+    monkeypatch.setattr(telemetry, "_tracer", lambda: tracer)
 
     async def run() -> None:
         demo = Demo()
@@ -224,7 +224,7 @@ def test_hsm_observe_metric_failure_does_not_block_domain_transition(monkeypatch
 
     monkeypatch.setattr(telemetry, "_OBSERVATIONS", _FailingCounter())
     monkeypatch.setattr(telemetry, "_OBSERVATION_FAILURES", failure_counter)
-    monkeypatch.setattr(telemetry, "_TRACER", tracer)
+    monkeypatch.setattr(telemetry, "_tracer", lambda: tracer)
 
     async def run() -> Demo:
         demo = Demo()

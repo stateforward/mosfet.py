@@ -34,5 +34,16 @@ output = await generator.generate(
 )
 ```
 
+Reasoning effort is a typed `ReasoningEffort` field on both generators. On Chat Completions, OpenAI reasoning models
+accept function tools only with effort `none`: an unset effort defaults to `none` when tools are present, and a
+requested effort other than `none` with tools raises `UnsupportedReasoningEffortError`. Use `ResponsesTextGenerator`
+(the OpenAI Responses API, served by the same `ChatClient`) to combine function tools with reasoning:
+
+```python
+generator = ResponsesTextGenerator(client=client, reasoning_effort=ReasoningEffort.HIGH)
+```
+
+Both generators record token usage (including reasoning tokens) through `mosfet.telemetry.record_generator_usage`.
+
 `Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.

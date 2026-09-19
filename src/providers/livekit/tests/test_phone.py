@@ -182,7 +182,7 @@ class RecordingPhoneEventTarget(hsm.Instance):
         self.events = events
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         if event.name in _FORWARDED_PHONE_EVENT_NAMES:
             self.events.append(event)
         return self.target.dispatch(ctx, event)
@@ -1144,7 +1144,7 @@ def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -
 
         class RecordingPhoneServiceInstance(PhoneService):
             @typing.override
-            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[None]:
+            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
                 recorded_events.append(event)
                 return super().dispatch(ctx, event)
 

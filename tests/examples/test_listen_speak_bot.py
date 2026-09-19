@@ -95,7 +95,7 @@ class _RecordingListening(listening.Listening):
         self.handoffs = []
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if event.name == self.output_event.name and isinstance(event.data, cognition.InputData):
             self.handoffs.append(event.data)
         return super().dispatch(ctx, event)
@@ -184,7 +184,7 @@ class _HandoffProbeBot(ListenSpeakBot):
         return self._handoff_waiter
 
     @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[None]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
         if (
             event.name == cognition.InputEvent.name
             and isinstance(event.data, cognition.InputData)
@@ -223,8 +223,9 @@ class _FakeRunBot:
     async def attach(self, environment: Environment) -> None:
         del environment
 
-    async def dispatch(self, context: hsm.Context, event: hsm.Event) -> None:
+    async def dispatch(self, context: hsm.Context, event: hsm.Event) -> bool:
         del context, event
+        return False
 
     async def wait_for_conversation_processing(self) -> None:
         return

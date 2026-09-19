@@ -11,7 +11,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
 
 VisualClassificationInputKind: typing.TypeAlias = typing.Literal["image", "text"]
 VisualClassificationKind: typing.TypeAlias = typing.Literal["image", "text", "unreadable"]
@@ -226,7 +225,6 @@ class VisualClassification(classifying.Classifying[InputData, OutputData]):
                 hsm.target("/VisualClassification/Unclassified"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 

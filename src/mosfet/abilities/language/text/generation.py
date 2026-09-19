@@ -10,8 +10,6 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet.telemetry import observer
-
 
 def _empty_text_tool_args() -> dict[str, object]:
     return {}
@@ -273,7 +271,6 @@ class TextGeneration(generative.Generative[InputData, OutputData]):
                 hsm.target("../idle"),
             ),
         ),
-        hsm.observe(observer),
     )
 
 
