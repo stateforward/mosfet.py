@@ -542,6 +542,22 @@ class Device(Traced, attachment.Attachment):
                 instance._firmware_cleanup_operation_id = None
 
     @staticmethod
+    def _consume_firmware_cleanup_failure(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
+        """Consume a rollback failure and stay in ``initialization_failing``.
+
+        ``_cleanup_failed_firmware_activity`` reports ``device.firmware.initializing.cleanup_failed``
+        when stopping the half-initialized firmware itself raised. Only
+        ``device.firmware.initializing.cleaned_up`` takes the device to ``failed``, and it is
+        guarded on ``instance._firmware is None``: firmware that would not stop is still attached,
+        so there is no torn-down device to declare failed. The device therefore holds here, with
+        attach and detach requests still deferred by this state, rather than advancing on a
+        teardown that did not happen. The transition exists to say that the report was expected
+        and is deliberately not a progression.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
     def _is_current_firmware_cleanup_completion(
         ctx: hsm.Context,
         instance: "Device",
@@ -619,7 +635,10 @@ class Device(Traced, attachment.Attachment):
                 hsm.guard(_is_current_firmware_cleanup_completion),
                 hsm.target("../failed"),
             ),
-            hsm.transition(hsm.on(_FirmwareInitializingCleanupFailedEvent)),
+            hsm.transition(
+                hsm.on(_FirmwareInitializingCleanupFailedEvent),
+                hsm.effect(_consume_firmware_cleanup_failure),
+            ),
         ),
         hsm.state(
             "failed",

@@ -318,6 +318,38 @@ def _has_non_audio_track_subscribed_data(
     return isinstance(data, RoomAudioTrackSubscribedData) and not _is_audio_track(data.track)
 
 
+def _consume_non_audio_track_subscription(
+    ctx: hsm.Context,
+    instance: "RoomAudioTrackPath",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume a track subscription this path is not the wire for.
+
+    A LiveKit room reports every track it subscribes to, and this path carries audio: a video
+    or data track is somebody else's signal on the same room, not a fault and not a change to
+    the audio wire. It is consumed in ``connected`` and in ``receiving_remote_audio`` alike,
+    because a non-audio track never starts or ends remote audio.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_extra_audio_track_subscription(
+    ctx: hsm.Context,
+    instance: "RoomAudioTrackPath",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume an audio-track subscription that arrives while remote audio is already flowing.
+
+    ``connected`` takes the first audio track into ``receiving_remote_audio``, where
+    ``_run_receive_remote_audio`` is reading it. A further subscription — the room adding a
+    second speaker's track, or re-reporting the one being read — must not restart that
+    activity, and this path receives one remote audio stream at a time.
+    """
+
+    del ctx, instance, event
+
+
 class RoomAudioTrackPath(Traced):
     """LiveKit room/SIP audio track path for a stateforward.mosfet-owned audio bridge."""
 
@@ -611,6 +643,7 @@ class RoomAudioTrackPath(Traced):
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
                 hsm.guard(_has_non_audio_track_subscribed_data),
+                hsm.effect(_consume_non_audio_track_subscription),
             ),
             hsm.transition(
                 hsm.on(_RoomAudioFailedEvent),
@@ -632,10 +665,12 @@ class RoomAudioTrackPath(Traced):
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
                 hsm.guard(_has_audio_track_subscribed_data),
+                hsm.effect(_consume_extra_audio_track_subscription),
             ),
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
                 hsm.guard(_has_non_audio_track_subscribed_data),
+                hsm.effect(_consume_non_audio_track_subscription),
             ),
             hsm.transition(
                 hsm.on(_RoomAudioFailedEvent),

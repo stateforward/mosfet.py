@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import pkgutil
 
 import hsm
 import pytest
 
 import mosfet
+from mosfet import telemetry
 from mosfet.define import topology
 
 _DEFINE = importlib.import_module("mosfet.define")
@@ -132,3 +134,110 @@ def test_define_publish_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(_DEFINE, "post_model", _boom)
     model = _demo()
     assert model.qualified_name == "/Demo"
+
+
+def _consumed_here(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[object]) -> None:
+    """An explicit no-op effect: the event is consumed and deliberately does nothing."""
+
+    del ctx, instance, event
+
+
+def _guard_true(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[object]) -> bool:
+    del ctx, instance, event
+    return True
+
+
+def _consuming_model(*extra: hsm.Element) -> hsm.Model:
+    """A model whose only ``go`` transition has a guard, no target, and no effect."""
+
+    return mosfet.define(
+        "Consuming",
+        hsm.initial(hsm.target("/Consuming/idle")),
+        hsm.state("idle", hsm.transition(hsm.on("go"), hsm.guard(_guard_true))),
+        *extra,
+    )
+
+
+def test_define_rejects_a_transition_with_no_target_and_no_effect() -> None:
+    """``hsm`` requires a target or an effect, and ``mosfet.define`` does not soften that.
+
+    A transition that consumes an event and does nothing has to say so with a named no-op
+    effect; "no target, no effect" is indistinguishable from an unfinished transition.
+    """
+
+    with pytest.raises(hsm.ErrorValidatingModel):
+        _ = _consuming_model()
+
+
+def test_define_rejects_that_transition_even_when_the_model_is_observed() -> None:
+    """Observation must not be what makes a model valid.
+
+    ``hsm`` inserts an observation effect into every matching transition when it *finalizes* a
+    model, which is after it validates it. Binding the event context around behaviors must not
+    reorder those two: a model that only passes once observation has filled in an effect is a
+    model whose validity depends on telemetry being wired.
+    """
+
+    with pytest.raises(hsm.ErrorValidatingModel):
+        _ = _consuming_model(hsm.observe(telemetry.observer))
+
+
+def test_an_explicit_no_op_effect_is_how_a_consuming_transition_is_written() -> None:
+    """The form every such transition in this library uses: a named effect that does nothing."""
+
+    model = mosfet.define(
+        "Consuming",
+        hsm.initial(hsm.target("/Consuming/idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(hsm.on("go"), hsm.guard(_guard_true), hsm.effect(_consumed_here)),
+        ),
+        hsm.observe(telemetry.observer),
+    )
+    assert model.qualified_name == "/Consuming"
+
+
+def _transitions_only_observation_makes_valid(model: hsm.Model) -> list[str]:
+    """Transitions with no target whose every effect was inserted by ``hsm.observe``.
+
+    ``hsm.DefaultModelFinalizer`` inserts each observation's effect under that observation's own
+    namespace, so what the model's author wrote is what is left once those are removed.
+    """
+
+    namespaces = [
+        member.qualified_name for member in model.members.values() if isinstance(member, hsm.ObservationElement)
+    ]
+    offenders: list[str] = []
+    for member in model.members.values():
+        if not isinstance(member, hsm.TransitionElement) or member.target != "":
+            continue
+        authored = [effect for effect in member.effect if not any(effect.startswith(f"{ns}/") for ns in namespaces)]
+        if not authored:
+            offenders.append(member.qualified_name)
+    return offenders
+
+
+def test_library_models_are_valid_without_their_observation_effects() -> None:
+    """No model in the library leans on observation for its validity.
+
+    Walking every model the package defines at import time is what makes this a statement about
+    the library rather than about the models one test happens to build. ``hsm`` validates before
+    it finalizes, so a model that needs its observation effect to pass is a model that would
+    stop defining the moment its owning boundary stopped observing it.
+    """
+
+    models: list[hsm.Model] = []
+    package = importlib.import_module("mosfet")
+    for info in pkgutil.walk_packages(package.__path__, "mosfet."):
+        module = importlib.import_module(info.name)
+        for value in vars(module).values():
+            if not isinstance(value, type):
+                continue
+            member = getattr(value, "model", None)
+            if isinstance(member, hsm.Model) and member not in models:
+                models.append(member)
+    assert models, "no models were discovered under mosfet"
+    offenders = {
+        model.qualified_name: names for model in models if (names := _transitions_only_observation_makes_valid(model))
+    }
+    assert offenders == {}

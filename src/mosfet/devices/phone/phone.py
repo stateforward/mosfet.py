@@ -983,6 +983,45 @@ class Firmware(Traced):
         assert call_id is not None
         instance._closed_call_ids = frozenset((*instance._closed_call_ids, call_id))
 
+    @staticmethod
+    def _consume_repeat_incoming_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        """Consume a repeated announcement of the call this phone is already on.
+
+        A line signals an incoming call until it is picked up or dropped, so
+        ``phone.service.incoming_call`` arrives again for a call already taken through
+        ``_set_current_call`` (which is what ``_matches_current_incoming_call`` recognises).
+        Ringing, answering, answered, and transferring each acted on the first announcement;
+        the repeat says nothing they have not already done, so the phone takes no action on it.
+        The transition exists to say that in the topology: this is an expected repeat the
+        firmware means to drop, not an event nobody thought about.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
+    def _consume_repeat_media_ready(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        """Consume a media-ready notice for media that is already carrying this call.
+
+        ``media_connecting`` answers the first ``phone.service.media_ready`` for the current
+        call by entering ``media_ready``. A later one for the same call (the service
+        re-reporting readiness, a renegotiation settling) finds the phone already there, and
+        re-entering would restart the state for no change in the line's condition.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
+    def _consume_transfer_accepted(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        """Consume the transfer target's acceptance, which does not yet move the call.
+
+        ``phone.service.transfer_accepted`` reports that the target picked up its leg; the call
+        is still on this phone until ``phone.service.transfer_completed`` says the exchange
+        bridged it, which is the transition that leaves ``transferring``. Acceptance is
+        progress worth naming and nothing for the phone to do.
+        """
+
+        del ctx, instance, event
+
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Phone",
         hsm.initial(hsm.target("/Phone/hung_up")),
@@ -1041,6 +1080,7 @@ class Firmware(Traced):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_matches_current_incoming_call),
+                hsm.effect(_consume_repeat_incoming_call),
             ),
             hsm.transition(
                 hsm.on(AnswerCallEvent),
@@ -1083,6 +1123,7 @@ class Firmware(Traced):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_matches_current_incoming_call),
+                hsm.effect(_consume_repeat_incoming_call),
             ),
             hsm.transition(
                 hsm.on(CallConnectedEvent),
@@ -1152,6 +1193,7 @@ class Firmware(Traced):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_matches_current_incoming_call),
+                hsm.effect(_consume_repeat_incoming_call),
             ),
             hsm.transition(
                 hsm.on(HangUpCallEvent),
@@ -1203,6 +1245,7 @@ class Firmware(Traced):
                 hsm.transition(
                     hsm.on(ServiceMediaReadyEvent),
                     hsm.guard(_matches_current_media_ready),
+                    hsm.effect(_consume_repeat_media_ready),
                 ),
                 hsm.transition(
                     hsm.on(ServiceAudioReceivedEvent),
@@ -1229,6 +1272,7 @@ class Firmware(Traced):
             hsm.transition(
                 hsm.on(IncomingCallEvent),
                 hsm.guard(_matches_current_incoming_call),
+                hsm.effect(_consume_repeat_incoming_call),
             ),
             hsm.transition(
                 hsm.on(ServiceTransferFailedEvent),
@@ -1239,6 +1283,7 @@ class Firmware(Traced):
             hsm.transition(
                 hsm.on(TransferAcceptedEvent),
                 hsm.guard(_matches_current_transfer_accepted),
+                hsm.effect(_consume_transfer_accepted),
             ),
             hsm.transition(
                 hsm.on(ServiceAudioReceivedEvent),

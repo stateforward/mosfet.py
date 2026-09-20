@@ -745,10 +745,122 @@ def _has_transfer_failed_completion(
     )
 
 
+def _consume_passive_call_observation(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume an incoming-call or media-ready observation that arrived mid-operation.
+
+    ``ready`` is where these two are turned into phone events. A room keeps reporting them
+    while an operation the phone asked for is still running (``dialing``, ``answering``,
+    ``declining``, ``hanging_up``, ``transferring``), and forwarding one there would tell the
+    phone about a call while it is waiting for the answer to a different question. The
+    observation is therefore dropped for the length of the operation; the room re-reports
+    whatever is still true once the service is back in ``ready``.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_transfer_terminal_observation(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume a transfer completed/failed observation outside the transfer that asked for it.
+
+    ``transferring`` resolves its own transfer through the guarded terminals that match the
+    active operation id. The same observation reaching any other operation's state belongs to
+    a transfer this service is no longer running — a late terminal for one it already
+    resolved, or one the far end drove by itself — so there is nothing left to resolve.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_dial_request_while_busy(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume ``phone.service.dial_requested`` while another operation holds the line.
+
+    This service runs one call operation at a time: the state the request lands in *is* the
+    operation in flight, and its terminals are what free the line. A dial arriving here is a
+    command the exchange cannot take yet, and the phone's own topology is what decides what to
+    do about it — the service does not queue it, and does not fail the operation over it.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_answer_request_while_busy(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume ``phone.service.answer_requested`` while another operation holds the line.
+
+    Answering is only meaningful against a ringing call the service is not already acting on
+    (that transition lives in ``ready``). Arriving during ``dialing``, ``answering``,
+    ``declining``, ``hanging_up``, or ``transferring``, it is a second command on a single-
+    operation line and is dropped rather than queued.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_decline_request_while_busy(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume ``phone.service.decline_requested`` while another operation holds the line.
+
+    ``answering`` is the one in-flight operation a decline overrides, and it has its own
+    guarded transition into ``declining``. Everywhere else the line is already committed to a
+    different operation, so the decline has no call of its own to refuse.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_hang_up_request_while_busy(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume ``phone.service.hang_up_requested`` while a hang-up is already running.
+
+    Only ``hanging_up`` drops this request: the states that can still be cut short take it to
+    ``hanging_up`` instead. A second hang-up arriving during the first asks for what is
+    already happening, and the running one reports for both.
+    """
+
+    del ctx, instance, event
+
+
+def _consume_transfer_request_while_busy(
+    ctx: hsm.Context,
+    instance: "PhoneService",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume ``phone.service.transfer_requested`` while another operation holds the line.
+
+    A transfer needs a connected call to move, which is the ``ready`` transition that starts
+    one. Requested during ``dialing``, ``answering``, ``declining``, ``hanging_up``, or an
+    already running ``transferring``, there is no settled call for this service to hand over.
+    """
+
+    del ctx, instance, event
+
+
 def _ignore_passive_call_observation_transition() -> hsm.Element:
     return hsm.transition(
         hsm.on(ServiceIncomingCallEvent, ServiceMediaReadyEvent),
         hsm.guard(_has_passive_call_observation),
+        hsm.effect(_consume_passive_call_observation),
     )
 
 
@@ -756,6 +868,7 @@ def _ignore_transfer_terminal_observation_transition() -> hsm.Element:
     return hsm.transition(
         hsm.on(ServiceTransferCompletedEvent, ServiceTransferFailedEvent),
         hsm.guard(_has_transfer_terminal_observation),
+        hsm.effect(_consume_transfer_terminal_observation),
     )
 
 
@@ -1665,6 +1778,38 @@ class PhoneService(Traced):
             _LOG.warning("livekit remote audio dropped reason=%s", kind)
 
     @staticmethod
+    def _consume_repeat_service_attachment(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Consume an attach announcement for the phone target already attached.
+
+        ``unconnected`` is where an attachment binds a target and moves the service to
+        ``ready``. ``_matches_service_attachment`` makes this the same target arriving again —
+        a re-attach of an already attached phone — so the binding it asks for is the binding
+        in place, and re-running it would only rebind the service to itself.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
+    def _consume_attachment_rejection(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Consume the rejection this service dispatched to itself for a conflicting attach.
+
+        ``_dispatch_attachment_rejected`` emits ``_ServiceAttachmentRejectedEvent`` so the
+        refusal is an observed event rather than a silent return. Refusing is the whole
+        outcome: the existing attachment stands untouched, so nothing further happens when the
+        record of it comes back round the queue.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
     def _dispatch_attachment_rejected(
         ctx: hsm.Context,
         instance: "PhoneService",
@@ -2123,6 +2268,7 @@ class PhoneService(Traced):
         hsm.transition(
             hsm.on(_ServiceAttachedEvent),
             hsm.guard(_matches_service_attachment),
+            hsm.effect(_consume_repeat_service_attachment),
         ),
         hsm.transition(
             hsm.on(_ServiceAttachedEvent),
@@ -2131,6 +2277,7 @@ class PhoneService(Traced):
         ),
         hsm.transition(
             hsm.on(_ServiceAttachmentRejectedEvent),
+            hsm.effect(_consume_attachment_rejection),
         ),
         hsm.transition(
             hsm.on(_RoomAudioStatusEvent),
@@ -2288,16 +2435,32 @@ class PhoneService(Traced):
         hsm.state(
             "dialing",
             _ignore_passive_call_observation_transition(),
-            hsm.transition(hsm.on(phone.ServiceDialRequestedEvent), hsm.guard(_has_dial_request)),
-            hsm.transition(hsm.on(phone.ServiceAnswerRequestedEvent), hsm.guard(_has_answer_request)),
-            hsm.transition(hsm.on(phone.ServiceDeclineRequestedEvent), hsm.guard(_has_decline_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceDialRequestedEvent),
+                hsm.guard(_has_dial_request),
+                hsm.effect(_consume_dial_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceAnswerRequestedEvent),
+                hsm.guard(_has_answer_request),
+                hsm.effect(_consume_answer_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceDeclineRequestedEvent),
+                hsm.guard(_has_decline_request),
+                hsm.effect(_consume_decline_request_while_busy),
+            ),
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
                 hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
-            hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceTransferRequestedEvent),
+                hsm.guard(_has_transfer_request),
+                hsm.effect(_consume_transfer_request_while_busy),
+            ),
             *_active_call_operation_resolution_transitions(
                 emit_remote_hang_up=_emit_remote_hang_up,
                 emit_call_failed=_emit_call_failed,
@@ -2368,8 +2531,16 @@ class PhoneService(Traced):
         hsm.state(
             "answering",
             _ignore_passive_call_observation_transition(),
-            hsm.transition(hsm.on(phone.ServiceDialRequestedEvent), hsm.guard(_has_dial_request)),
-            hsm.transition(hsm.on(phone.ServiceAnswerRequestedEvent), hsm.guard(_has_answer_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceDialRequestedEvent),
+                hsm.guard(_has_dial_request),
+                hsm.effect(_consume_dial_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceAnswerRequestedEvent),
+                hsm.guard(_has_answer_request),
+                hsm.effect(_consume_answer_request_while_busy),
+            ),
             hsm.transition(
                 hsm.on(phone.ServiceDeclineRequestedEvent),
                 hsm.guard(_has_decline_request),
@@ -2412,16 +2583,32 @@ class PhoneService(Traced):
         hsm.state(
             "declining",
             _ignore_passive_call_observation_transition(),
-            hsm.transition(hsm.on(phone.ServiceDialRequestedEvent), hsm.guard(_has_dial_request)),
-            hsm.transition(hsm.on(phone.ServiceAnswerRequestedEvent), hsm.guard(_has_answer_request)),
-            hsm.transition(hsm.on(phone.ServiceDeclineRequestedEvent), hsm.guard(_has_decline_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceDialRequestedEvent),
+                hsm.guard(_has_dial_request),
+                hsm.effect(_consume_dial_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceAnswerRequestedEvent),
+                hsm.guard(_has_answer_request),
+                hsm.effect(_consume_answer_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceDeclineRequestedEvent),
+                hsm.guard(_has_decline_request),
+                hsm.effect(_consume_decline_request_while_busy),
+            ),
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
                 hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
-            hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceTransferRequestedEvent),
+                hsm.guard(_has_transfer_request),
+                hsm.effect(_consume_transfer_request_while_busy),
+            ),
             hsm.activity(_run_decline_call),
             *_active_call_operation_resolution_transitions(
                 emit_remote_hang_up=_emit_remote_hang_up,
@@ -2450,11 +2637,31 @@ class PhoneService(Traced):
         hsm.state(
             "hanging_up",
             _ignore_passive_call_observation_transition(),
-            hsm.transition(hsm.on(phone.ServiceDialRequestedEvent), hsm.guard(_has_dial_request)),
-            hsm.transition(hsm.on(phone.ServiceAnswerRequestedEvent), hsm.guard(_has_answer_request)),
-            hsm.transition(hsm.on(phone.ServiceDeclineRequestedEvent), hsm.guard(_has_decline_request)),
-            hsm.transition(hsm.on(phone.ServiceHangUpRequestedEvent), hsm.guard(_has_hang_up_request)),
-            hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceDialRequestedEvent),
+                hsm.guard(_has_dial_request),
+                hsm.effect(_consume_dial_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceAnswerRequestedEvent),
+                hsm.guard(_has_answer_request),
+                hsm.effect(_consume_answer_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceDeclineRequestedEvent),
+                hsm.guard(_has_decline_request),
+                hsm.effect(_consume_decline_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceHangUpRequestedEvent),
+                hsm.guard(_has_hang_up_request),
+                hsm.effect(_consume_hang_up_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceTransferRequestedEvent),
+                hsm.guard(_has_transfer_request),
+                hsm.effect(_consume_transfer_request_while_busy),
+            ),
             hsm.activity(_run_hang_up_call),
             *_active_call_operation_resolution_transitions(
                 emit_remote_hang_up=_emit_remote_hang_up,
@@ -2483,16 +2690,32 @@ class PhoneService(Traced):
         hsm.state(
             "transferring",
             _ignore_passive_call_observation_transition(),
-            hsm.transition(hsm.on(phone.ServiceDialRequestedEvent), hsm.guard(_has_dial_request)),
-            hsm.transition(hsm.on(phone.ServiceAnswerRequestedEvent), hsm.guard(_has_answer_request)),
-            hsm.transition(hsm.on(phone.ServiceDeclineRequestedEvent), hsm.guard(_has_decline_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceDialRequestedEvent),
+                hsm.guard(_has_dial_request),
+                hsm.effect(_consume_dial_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceAnswerRequestedEvent),
+                hsm.guard(_has_answer_request),
+                hsm.effect(_consume_answer_request_while_busy),
+            ),
+            hsm.transition(
+                hsm.on(phone.ServiceDeclineRequestedEvent),
+                hsm.guard(_has_decline_request),
+                hsm.effect(_consume_decline_request_while_busy),
+            ),
             hsm.transition(
                 hsm.on(phone.ServiceHangUpRequestedEvent),
                 hsm.guard(_has_hang_up_request),
                 hsm.effect(_set_active_operation),
                 hsm.target("/PhoneService/hanging_up"),
             ),
-            hsm.transition(hsm.on(phone.ServiceTransferRequestedEvent), hsm.guard(_has_transfer_request)),
+            hsm.transition(
+                hsm.on(phone.ServiceTransferRequestedEvent),
+                hsm.guard(_has_transfer_request),
+                hsm.effect(_consume_transfer_request_while_busy),
+            ),
             hsm.activity(_run_transfer_call),
             *_active_call_operation_resolution_transitions(
                 emit_remote_hang_up=_emit_remote_hang_up,

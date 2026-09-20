@@ -332,12 +332,12 @@ class EventContextBinding(hsm.DefaultModelValidator):
     every member, including members a redefine adds, is bound whenever the model is built, not
     only the members present when the model was first defined.
 
-    Binding runs before ``hsm.DefaultModelFinalizer`` (so a class-body ``staticmethod`` activity
-    reads as the coroutine function it wraps) and again after it, so the ``hsm.observe``
-    wrappers that finalizer applies also run in the event's context. The model is validated
-    once, finished: ``hsm`` applies observations when it finalizes, and a guarded transition
-    with no target and no effect (one that consumes a stale or late event) is valid only once
-    its observation effect is in place.
+    ``hsm`` validates a model and then finalizes it, and this keeps that order: validation sees
+    the model as written, so a model is valid on its own terms and never because observation
+    put something there first. Binding runs twice around it — before validation, so a class-body
+    ``staticmethod`` activity reads as the coroutine function it wraps, and again after
+    ``hsm.DefaultModelFinalizer``, so the ``hsm.observe`` wrappers that finalizer applies also
+    run in the event's context.
 
     Entry, exit, effect, activity, operation, and guard callables are wrapped so the event's
     carried context (`event_context`) is the active one while they run: spans they start,
@@ -360,13 +360,14 @@ class EventContextBinding(hsm.DefaultModelValidator):
 
     @typing.override
     def validate(self, model: hsm.Model) -> None:
-        # Validation waits for the finished model (see `finalize`).
+        # Bind first: unwrapping a ``staticmethod`` descriptor is what lets ``hsm`` see an
+        # ``async def`` activity as the coroutine function it validates for.
         self._bind(model)
+        super().validate(model)
 
     def finalize(self, model: hsm.Model) -> hsm.Model:
         finalized = hsm.DefaultModelFinalizer().finalize(model)
         self._bind(finalized)
-        super().validate(finalized)
         return finalized
 
 

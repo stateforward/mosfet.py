@@ -1076,6 +1076,24 @@ class ListenSpeakBot(Bot):
         return isinstance(event.data, ability.FailureData) and event.source == hsm.id(instance._conversation)
 
     @staticmethod
+    def _consume_conversation_failure(
+        ctx: hsm.Context,
+        instance: "ListenSpeakBot",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Consume the conversation ability's own failure without failing the run.
+
+        ``_from_conversation`` narrows this to a failure raised by this bot's conversation. The
+        record of it is kept by ``_observe_conversation_failure_transition``, wired through
+        ``hsm.observe(conversation.FailedEvent, ...)``; this transition is what admits the event
+        into ``active`` so that observation runs. The bot itself does nothing further: a
+        conversation turn that failed is a turn it can decline to continue, not a reason for the
+        run to end, and the terminals that do end it are the deactivation transitions above.
+        """
+
+        del ctx, instance, event
+
+    @staticmethod
     def _observe_conversation_failure(
         ctx: hsm.Context,
         instance: "ListenSpeakBot",
@@ -1195,6 +1213,7 @@ class ListenSpeakBot(Bot):
             hsm.source("active"),
             hsm.on(conversation.FailedEvent),
             hsm.guard(_from_conversation),
+            hsm.effect(_consume_conversation_failure),
         ),
         hsm.transition(
             hsm.source("active"),
