@@ -3579,3 +3579,130 @@ def test_cognition_without_priors_time_to_wire_speech_event_to_conversation() ->
         "fixture processors short-circuit learning; run "
         "tests/examples/test_phone_bot.py::test_phone_bot_e2e_cognition_wires_speech_event_to_conversation"
     )
+
+
+_ROUTINE_START = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.UTC)
+
+
+def _install_routine(store: memory.Memory) -> None:
+    from tests.bot.behavior.support import routine_source
+
+    checked = behavior_events.check(routine_source(schedule="hsm.every(seconds = 300)"))
+    assert checked.value is not None, checked.report.render()
+    _ = store.execute(
+        memory.InputData(
+            statements=memory.compile_statements(
+                *behavior_events.storage.replace_behavior_clauses(checked.value),
+            )
+        )
+    )
+
+
+async def _until_routines(condition: collections.abc.Callable[[], bool], *, timeout: float = 20.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() > deadline:
+            raise TimeoutError("routine condition not reached")
+        await asyncio.sleep(0.01)
+
+
+def _open_routine_waits(timers: object) -> list[datetime.timedelta]:
+    from tests.bot.behavior.support import ManualTimers
+
+    assert isinstance(timers, ManualTimers)
+    return [duration for duration, waiter in timers.pending if not waiter.done()]
+
+
+def test_cognition_reconciles_routines_after_reflection_settles() -> None:
+    from tests.bot.behavior.support import ManualTimers
+
+    async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
+        store = memory.Memory()
+        timers = ManualTimers()
+        intuition, reasoning = cognition_abilities()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
+            routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        try:
+            await _until_routines(lambda: ability.state().endswith("/idle"))
+            before = _open_routine_waits(timers)
+            # Reflection is the inventory writer; whatever it wrote, Routines re-reads after it settles.
+            _install_routine(store)
+            _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
+            await _until_routines(lambda: bool(_open_routine_waits(timers)))
+            return before, _open_routine_waits(timers)
+        finally:
+            await ability.stop(ctx)
+
+    before, after = asyncio.run(run())
+
+    assert before == []
+    assert after == [datetime.timedelta(seconds=300)]
+
+
+class _RoutineTickBody(hsm.Instance):
+    """Body stand-in: records the cognition input handoffs it is given."""
+
+    handoffs: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.handoffs = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "_RoutineTickBody", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.handoffs.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "RoutineTickBody",
+        hsm.initial(hsm.target("ready")),
+        hsm.state("ready", hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_record))),
+    )
+
+
+def test_cognition_hands_routine_ticks_to_the_body_as_observed_input() -> None:
+    from tests.bot.behavior.support import ManualTimers
+
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        store = memory.Memory()
+        _install_routine(store)
+        timers = ManualTimers()
+        intuition, reasoning = cognition_abilities()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
+            routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+        )
+        body = _RoutineTickBody()
+        ctx = shared_hsm_context()
+        _ = await mosfet.started(ctx, body, body.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
+        try:
+            await _until_routines(lambda: bool(_open_routine_waits(timers)))
+            _ = await timers.fire(_ROUTINE_START)
+            await _until_routines(lambda: bool(body.handoffs))
+            return body.handoffs[0], hsm.id(ability)
+        finally:
+            await ability.stop(ctx)
+
+    handoff, cognition_id = asyncio.run(run())
+
+    assert handoff.name == cognition.InputEvent.name
+    assert handoff.source == cognition_id
+    assert handoff.id
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    stimulus = data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == behavior_events.TickEvent.name
+    tick = stimulus.data
+    assert isinstance(tick, behavior_events.TickData)
+    assert tick.name == "MorningBriefing"
+    assert tick.output[0]["event"] == "bot.speaking.say"

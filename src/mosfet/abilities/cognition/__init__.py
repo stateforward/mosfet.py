@@ -1,4 +1,4 @@
-"""Cognitive system: host ability plus autonomy, intuition, reasoning, and reflection.
+"""Cognitive system: host ability plus autonomy, intuition, reasoning, reflection, and routines.
 
 Same-named module ``cognition.cognition`` is re-exported at package level.
 Leaf deliberative processing lives in ``mosfet.abilities.processing``.
@@ -10,7 +10,7 @@ import importlib
 import typing
 
 from . import cognition
-from . import autonomy, directives, episodes, event, input, intuition, reasoning, reflection, types
+from . import autonomy, directives, episodes, event, input, intuition, reasoning, reflection, routines, types
 
 if typing.TYPE_CHECKING:
     from .autonomy import Autonomy
@@ -31,6 +31,7 @@ if typing.TYPE_CHECKING:
     from .intuition import Intuition
     from .reasoning import Reasoning
     from .reflection import Reflection
+    from .routines import Routines
     from .types import EventData, IgnoreData, IgnoreEvent, is_ignore_event, is_output
 
 _LAZY_EXPORT_MODULES = {
@@ -48,6 +49,7 @@ _LAZY_EXPORT_MODULES = {
     "Intuition": ".intuition",
     "Reasoning": ".reasoning",
     "Reflection": ".reflection",
+    "Routines": ".routines",
     "CognitiveEpisode": ".episodes",
     "Directive": ".directives",
     "EventData": ".types",
@@ -72,6 +74,7 @@ __all__ = [
     "Intuition",
     "Reasoning",
     "Reflection",
+    "Routines",
     "CognitiveEpisode",
     "Directive",
     "EventData",
@@ -88,6 +91,7 @@ __all__ = [
     "intuition",
     "reasoning",
     "reflection",
+    "routines",
     "types",
 ]
 

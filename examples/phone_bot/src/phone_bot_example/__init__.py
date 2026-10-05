@@ -18,6 +18,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import functools
 import json
 import logging
 import pathlib
@@ -464,6 +465,8 @@ def _phone_cognition(
         intuition=cognition.Intuition(processor=intuition),
         reasoning=cognition.Reasoning(processor=deliberate, memory=store),
         reflection=cognition.Reflection(processor=reflection_processor, memory=store),
+        # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
+        routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
     )
 
 

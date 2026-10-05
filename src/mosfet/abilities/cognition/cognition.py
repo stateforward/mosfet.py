@@ -17,12 +17,15 @@ import pydantic
 from mosfet import telemetry
 from mosfet.telemetry import span
 
+from mosfet import behavior
+
 from .input import InputData, is_input
 from . import autonomy
 from . import input
 from . import intuition
 from . import reasoning
 from . import reflection
+from . import routines
 from . import types
 from .types import OUTPUT_SCHEMA_CONTRACT, EventData, OutputData, is_output
 
@@ -183,6 +186,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     Chart states are lifecycle phases only. The active turn rides the child request
     and terminal event chain, not instance fields (HSM-COMPLETION-001).
+
+    With ``routines`` composed, Reflection settling a turn sends Routines a reconcile (its
+    inventory writes may have created, changed, or broken a persistent routine), and every
+    routine tick Routines forwards goes to the body as a ``cognition.InputEvent`` observing
+    ``bot.behavior.tick``: a new turn the bot decides on, never a hardcoded reaction.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -197,6 +205,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _intuition: intuition.Intuition
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
+    _routines: routines.Routines | None
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
     _child_operation_timeout: datetime.timedelta | None
@@ -1098,6 +1107,76 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _is_reflection_settled(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return (
+            instance._routines is not None
+            and event.source == hsm.id(instance._reflection)
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _reconcile_routines(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Reflection wrote (or may have written) inventory: let Routines match it."""
+
+        routines_ability = instance._routines
+        assert routines_ability is not None
+        _ = hsm.dispatch(
+            ctx,
+            routines_ability,
+            dataclasses.replace(
+                routines.ReconcileEvent.with_data(routines.ReconcileData()),
+                id=event.id or None,
+                source=hsm.id(instance),
+                target=hsm.id(routines_ability),
+                metadata=_public_metadata(dict(event.metadata)),
+            ),
+        )
+
+    @staticmethod
+    def _is_routine_tick(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        return (
+            instance._routines is not None
+            and isinstance(event.data, behavior.TickData)
+            and event.source == hsm.id(instance._routines)
+            and bool(instance._attachments)
+        )
+
+    @staticmethod
+    def _observe_routine_tick(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Hand a routine tick to the body as an observation; the body grants it a turn when free."""
+
+        owner = instance._attachments[0]
+        stimulus = dataclasses.replace(event, target="", metadata=_public_metadata(dict(event.metadata)))
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                InputEvent.with_data_and_id(InputData(stimulus=stimulus), uuid.uuid4().hex),
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=_public_metadata(dict(event.metadata)),
+            ),
+        )
+
+    @staticmethod
     def _accept_ignore(
         ctx: hsm.Context,
         instance: "Cognition",
@@ -1127,6 +1206,16 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
+            ),
+            hsm.transition(
+                hsm.on(reflection.OutputEvent, ability.FailedEvent),
+                hsm.guard(_is_reflection_settled),
+                hsm.effect(_reconcile_routines),
+            ),
+            hsm.transition(
+                hsm.on(behavior.TickEvent),
+                hsm.guard(_is_routine_tick),
+                hsm.effect(_observe_routine_tick),
             ),
             hsm.transition(
                 hsm.on(mosfet.RebootEvent),
@@ -1164,6 +1253,18 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
+            ),
+            # Reflection of the previous turn and routine ticks keep arriving mid-turn; the body
+            # defers a tick's handoff until this turn ends.
+            hsm.transition(
+                hsm.on(reflection.OutputEvent, ability.FailedEvent),
+                hsm.guard(_is_reflection_settled),
+                hsm.effect(_reconcile_routines),
+            ),
+            hsm.transition(
+                hsm.on(behavior.TickEvent),
+                hsm.guard(_is_routine_tick),
+                hsm.effect(_observe_routine_tick),
             ),
             hsm.transition(
                 hsm.on(mosfet.RebootEvent),
@@ -1364,6 +1465,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         reasoning: reasoning.Reasoning,
         reflection: reflection.Reflection,
         autonomy: autonomy.Autonomy | None = None,
+        routines: routines.Routines | None = None,
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
@@ -1376,6 +1478,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._intuition = intuition
         self._reasoning = reasoning
         self._reflection = reflection
+        self._routines = routines
         self._child_operation_timeout = child_operation_timeout
         self._cancel_teardown_timeout = cancel_teardown_timeout
         children: list[hsm.Instance] = []
@@ -1383,6 +1486,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(autonomy)
         children.extend((intuition, reasoning))
         children.append(reflection)
+        if routines is not None:
+            children.append(routines)
         self._attachment_group = attachment.Group(*children)
 
 
