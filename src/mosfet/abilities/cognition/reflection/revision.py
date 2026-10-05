@@ -58,6 +58,8 @@ CHANGE_INSTRUCTIONS = (
     "hsm.at(time=..., days=[...], tz=...) whose effects hsm.dispatch(output_event, selection) — "
     "a persistent routine is checked by one dry-run tick, not the live turn, and needs no triggers. "
     "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
+    "Callbacks are synchronous one-shot work: to wait for something, hsm.dispatch a request to the "
+    "machine that does the waiting and transition on its reply event (hsm.after for a timeout). "
     "Starlark only: no Python docstrings, type annotations, or imports; callbacks are def name(event): ...\n"
     "Format the source as real multi-line Starlark (newlines are required syntax).\n"
     "If diagnostics is present, prior source failed validation: revise `source` to clear every error "

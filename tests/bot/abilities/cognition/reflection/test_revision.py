@@ -392,3 +392,8 @@ def test_revision_installs_a_persistent_routine_checked_by_one_tick() -> None:
 def test_revision_instructions_describe_persistent_routines() -> None:
     for fragment in ('lifetime = "persistent"', "hsm.every(seconds=...)", "dry-run tick"):
         assert fragment in revision.CHANGE_INSTRUCTIONS
+
+
+def test_revision_instructions_teach_dispatch_and_reply_waiting() -> None:
+    for fragment in ("Callbacks are synchronous one-shot work", "transition on its reply event", "hsm.after"):
+        assert fragment in revision.CHANGE_INSTRUCTIONS

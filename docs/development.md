@@ -93,6 +93,12 @@ cron; occurrences come from stdlib `zoneinfo` and an injected wall clock, so wee
 daylight saving follow the routine's zone. Nothing is replayed after a restart: intervals
 restart from start and `at()` waits for its next occurrence.
 
+Starlark callbacks (`hsm.effect`, `hsm.entry`, `hsm.exit`) are synchronous one-shot work
+under the isolated worker's 2 s budget. Intervals are `hsm.every` / `hsm.at` transitions. To
+wait, a behavior dispatches a request to another machine (an ability or device) that does the
+waiting and dispatches back; the behavior transitions on that reply event, with an
+`hsm.after` transition as an optional timeout.
+
 `cognition.Routines` (memory, wall clock, optional HSM timer clock injected; compose it as
 `Cognition(routines=...)`) starts every ACTIVE persistent routine on attach and stops them
 on detach. Cognition sends it `bot.ability.routines.reconcile` whenever Reflection settles a

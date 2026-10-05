@@ -91,6 +91,11 @@ def test_parse_source_rejects_unapproved_starlark_calls() -> None:
         _ = behavior.parse_source('behavior = open("unsafe.star")')
 
 
+def test_starlark_api_guidance_teaches_synchronous_callbacks_and_dispatch_reply_waiting() -> None:
+    assert "Callbacks are synchronous one-shot work" in behavior.STARLARK_API
+    assert "transition on that reply event" in behavior.STARLARK_API
+
+
 def test_parse_source_rejects_unsupported_schema_keywords() -> None:
     source = greeting_behavior_source().replace(
         '"properties": {"text": {"type": "string"}},',

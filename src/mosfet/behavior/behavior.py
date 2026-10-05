@@ -535,19 +535,6 @@ class Behavior(abilities.Ability[object, object]):
         return lifecycle
 
     @staticmethod
-    def starlark_activity(
-        callback: str,
-    ) -> collections.abc.Callable[[hsm.Context, "Behavior", hsm.Event[object]], collections.abc.Awaitable[None]]:
-        async def activity(ctx: hsm.Context, instance: "Behavior", event: hsm.Event[object]) -> None:
-            try:
-                await instance._callback_runtime.activity(callback, ctx, instance, _callback_event(event))
-            except runtime.CallbackError as error:
-                _dispatch_callback_failure(ctx, instance, event, str(error))
-
-        activity.__name__ = f"_behavior_activity_{callback}"
-        return activity
-
-    @staticmethod
     def fire_tick(
         trigger: typing.Literal["every", "at"],
         tick_event: hsm.Event[events.TickData],
@@ -958,8 +945,6 @@ def _lower_element(
         return hsm.entry(Behavior.starlark_entry(*_callback_names(element)))
     if kind == "exit":
         return hsm.exit(Behavior.starlark_exit(*_callback_names(element)))
-    if kind == "activity":
-        return hsm.activity(*(Behavior.starlark_activity(callback) for callback in _callback_names(element)))
     if kind == "after":
         return hsm.after(_static_after(typing.cast(float | int, element["seconds"])))
     if kind == "final":
@@ -1071,7 +1056,7 @@ def _lower_state_elements(
             if isinstance(element, dict)
         )
 
-    lifecycle_kinds = {"entry", "exit", "activity", "defer"}
+    lifecycle_kinds = {"entry", "exit", "defer"}
     lifecycle: list[hsm.Element] = []
     ready_elements: list[hsm.Element] = []
     structural_elements: list[hsm.Element] = []

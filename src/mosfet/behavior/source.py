@@ -49,7 +49,6 @@ _TIME_OF_DAY_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 _TIMED_KINDS = frozenset({"every", "at"})
 _HSM_NAMESPACE_NAMES = frozenset(
     {
-        "activity",
         "after",
         "at",
         "defer",
@@ -70,7 +69,6 @@ _HSM_NAMESPACE_NAMES = frozenset(
     }
 )
 _ELEMENT_KEYS: dict[str, frozenset[str]] = {
-    "activity": frozenset({"kind", "callbacks"}),
     "after": frozenset({"kind", "seconds"}),
     "at": frozenset({"kind", "time", "days", "tz"}),
     "defer": frozenset({"kind", "events"}),
@@ -306,7 +304,7 @@ class Source(pydantic.BaseModel):
     model: ElementSpec = pydantic.Field(
         description=(
             "SourceData-authored HSM model tree. It mirrors lower-case hsm builders such as define, state, "
-            "transition, on, guard, effect, entry, exit, activity, target, initial, defer, after, every, at, "
+            "transition, on, guard, effect, entry, exit, target, initial, defer, after, every, at, "
             "and final."
         ),
     )
@@ -451,10 +449,6 @@ def _exit_builder(*callbacks: str) -> dict[str, object]:
     return _callback_behavior_builder("exit", *callbacks)
 
 
-def _activity_builder(*callbacks: str) -> dict[str, object]:
-    return _callback_behavior_builder("activity", *callbacks)
-
-
 def _after_builder(*, seconds: float) -> dict[str, object]:
     return _element("after", seconds=seconds)
 
@@ -486,7 +480,6 @@ def starlark_globals() -> dict[str, object]:
     """
 
     return {
-        "activity": _activity_builder,
         "after": _after_builder,
         "at": _at_builder,
         "defer": _defer_builder,
@@ -560,14 +553,14 @@ Builders available in Starlark (hsm. prefix optional after normalize):
 - hsm.initial(target, effect?)   # target required; effect optional
 - hsm.guard("callback_name")     # string callback name only
 - hsm.effect("callback_name", ...)
-- hsm.entry("callback_name", ...) / hsm.exit(...) / hsm.activity(...)
+- hsm.entry("callback_name", ...) / hsm.exit(...)   # one-shot work on state entry/exit
 - hsm.after(seconds=number)
 - hsm.every(seconds=number)       # persistent routines only; fixed interval
 - hsm.at(time="HH:MM", days=["mon", ...], tz="Area/City")  # persistent routines only
 - hsm.defer(*events)
 - hsm.final(name)
 - hsm.dispatch(event, data, target=None)
-  Only inside effect/entry/exit/activity — never in guards.
+  Only inside effect/entry/exit — never in guards.
   event is a declared name or an hsm.event(...) value (name+schema). No ability bindings.
   Every emit stamps source = behavior_id (hsm.id of the live behavior) so devices/abilities
   can reply with target=event["source"] (or target=behavior_id).
@@ -579,13 +572,18 @@ Behavior-only Starlark limits (not full HSM host DSL):
 - Callbacks are string names to top-level def callback(event): ... (no raw function objects)
 - No host-language operations, attributes, submachine models, history, choice, entry/exit points
 - No direct ability bindings or ability-alias dispatch — events only
+- Callbacks are synchronous one-shot work (no async, no sleeping, no waiting):
+  - one-shot work: hsm.entry / hsm.exit / hsm.effect callbacks
+  - intervals: hsm.every / hsm.at transitions (persistent routines)
+  - waiting: hsm.dispatch a request to another machine (an ability or device, target=its id)
+    that does the waiting and dispatches back; transition on that reply event, optionally with
+    an hsm.transition(hsm.after(seconds=N), ...) timeout in the waiting state
 - Guards: def name(event): return bool
 - Event keys: name, data, id, source, target, kind — the full modeled event,
   not data alone (Autonomy builds the behavior input event from the live turn event)
   (metadata is telemetry-only and is intentionally omitted from the Starlark event)
-- Effects/activities must hsm.dispatch(declared_event, payload_dict, target=optional_id)
+- Effects/entry/exit callbacks must hsm.dispatch(declared_event, payload_dict, target=optional_id)
   and must not return a value (returning is a runtime error)
-- To wait on a reply: transition on the reply event after dispatching with source stamped
 
 Lifetime (turn vs persistent routine):
 - turn (default): Autonomy runs the behavior for one matching turn; it is silenced about a second
@@ -1349,7 +1347,7 @@ def _validate_element(element: object, *, path: str, depth: int) -> None:
             raise ValueError(f"{path}.path must be an absolute HSM target path.")
     elif kind == "guard":
         _validate_callback(element_spec.get("callback"), path=f"{path}.callback")
-    elif kind in {"effect", "entry", "exit", "activity"}:
+    elif kind in {"effect", "entry", "exit"}:
         callbacks = element_spec.get("callbacks")
         if not isinstance(callbacks, tuple) or not callbacks:
             raise ValueError(f"{path}.callbacks must contain at least one callback name.")

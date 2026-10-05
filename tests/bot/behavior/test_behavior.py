@@ -229,7 +229,7 @@ def test_compiled_behavior_output_event_source_is_behavior_id() -> None:
     assert source == behavior_id
 
 
-def test_compiled_behavior_runs_starlark_activity_without_async_starlark() -> None:
+def test_compiled_behavior_runs_starlark_entry_callback_on_state_entry() -> None:
     async def run() -> tuple[dict[str, object], str]:
         compiled = behavior.build(
             """
@@ -265,7 +265,7 @@ behavior = hsm.define(
     ),
     hsm.state(
         "responding",
-        hsm.activity("emit_uppercase"),
+        hsm.entry("emit_uppercase"),
         hsm.transition(
             hsm.on(output_event),
             hsm.target("/AnswerGreeting/idle"),
@@ -854,7 +854,7 @@ def test_compiled_behavior_ignores_stale_and_duplicate_guard_outcomes(
     assert state == _behavior_idle_state("AnswerGreeting")
 
 
-def test_compiled_behavior_guard_rejection_preserves_entry_exit_and_activity_lifetime(
+def test_compiled_behavior_guard_rejection_preserves_entry_exit_lifetime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = (
@@ -872,15 +872,12 @@ def test_compiled_behavior_guard_rejection_preserves_entry_exit_and_activity_lif
 def mark_exit(event):
     hsm.dispatch(output_event, {"text": "EXIT"})
 
-def mark_activity(event):
-    hsm.dispatch(output_event, {"text": "ACTIVITY"})
-
 def emit_uppercase(event):""",
             1,
         )
         .replace(
             'hsm.state(\n        "idle",',
-            'hsm.state(\n        "idle",\n        hsm.entry("mark_entry"),\n        hsm.exit("mark_exit"),\n        hsm.activity("mark_activity"),',
+            'hsm.state(\n        "idle",\n        hsm.entry("mark_entry"),\n        hsm.exit("mark_exit"),',
             1,
         )
     )
@@ -888,7 +885,7 @@ def emit_uppercase(event):""",
     async def run() -> list[object]:
         compiled = behavior.build(source)
         outputs: list[object] = []
-        activity_observed = asyncio.Event()
+        entry_observed = asyncio.Event()
         original_dispatch = compiled.dispatch
 
         def recording_dispatch(
@@ -897,13 +894,13 @@ def emit_uppercase(event):""",
         ) -> collections.abc.Awaitable[bool]:
             if event.name == compiled.output_event.name:
                 outputs.append(event.data)
-                if event.data == {"text": "ACTIVITY"}:
-                    activity_observed.set()
+                if event.data == {"text": "ENTRY"}:
+                    entry_observed.set()
             return original_dispatch(ctx, event)
 
         monkeypatch.setattr(compiled, "dispatch", recording_dispatch)
         await start_ability_tree(None, compiled)
-        await asyncio.wait_for(activity_observed.wait(), timeout=1.0)
+        await asyncio.wait_for(entry_observed.wait(), timeout=1.0)
         outputs.clear()
         await compiled.apply({"text": "hello"})
         return outputs
@@ -1130,7 +1127,7 @@ behavior = hsm.define(
     ),
     hsm.state(
         "waiting",
-        hsm.activity("request_peer"),
+        hsm.entry("request_peer"),
         hsm.transition(
             hsm.on(reply_event),
             hsm.effect("emit_reply"),

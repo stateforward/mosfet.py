@@ -142,7 +142,7 @@ class _DispatchHost:
         data: object | None = None,
         target: object | None = None,
     ) -> None:
-        """Dispatch a declared HSM event from a Starlark effect or activity.
+        """Dispatch a declared HSM event from a Starlark effect, entry, or exit callback.
 
         Every emitted event is stamped with ``source=hsm.id(behavior)``. Pass
         ``target`` (an instance id string) to deliver to another live machine so
@@ -165,7 +165,7 @@ class _DispatchHost:
         self._dispatch_event(current, eventspec, projected, target=target_id)
 
     def dispatch_prepared_event(self, current: _CallbackContext, dispatch: _PreparedEventDispatch) -> None:
-        """Dispatch an activity event after the activity batch has passed preflight."""
+        """Dispatch one callback event after the callback's whole batch has passed preflight."""
 
         self._dispatch_event(current, dispatch.eventspec, dispatch.data, target=dispatch.target)
 
@@ -779,7 +779,7 @@ class CallbackRuntime:
 
         HSM entry and exit are synchronous RTC actions. Isolation still happens in
         the callback process; this call returns only after that process finishes and
-        any queued dispatches have been applied, so a later activity cannot observe
+        any queued dispatches have been applied, so later topology cannot observe
         a still-pending entry.
         """
 
@@ -818,37 +818,6 @@ class CallbackRuntime:
             )
             self._dispatch_prepared_callback(call_context, dispatches)
 
-    async def activity(
-        self,
-        name: str,
-        ctx: hsm.Context,
-        instance: _Instance,
-        event: hsm.Event[object],
-    ) -> None:
-        """Run a named Starlark activity callback.
-
-        The callback remains synchronous Starlark; dispatches are queued, preflighted,
-        then applied so a batch fails together before any event side effects.
-        """
-
-        try:
-            call_context, dispatches = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._call_behavior,
-                    name,
-                    ctx,
-                    instance,
-                    event,
-                    queue_dispatches=True,
-                ),
-                timeout=CALLBACK_EVALUATION_SECONDS,
-            )
-        except TimeoutError as error:
-            raise CallbackError(
-                f"Starlark callback evaluation exceeded its {CALLBACK_EVALUATION_SECONDS:g}-second budget."
-            ) from error
-        self._dispatch_prepared_callback(call_context, dispatches)
-
     def _apply_isolated_callback(
         self,
         name: str,
@@ -870,7 +839,7 @@ class CallbackRuntime:
         call_context: _CallbackContext,
         dispatches: tuple[_EventDispatch, ...],
     ) -> None:
-        prepared_dispatches = self._prepare_activity_dispatches(call_context, dispatches)
+        prepared_dispatches = self._preflight_dispatches(call_context, dispatches)
         if prepared_dispatches is None:
             return
         for dispatch in prepared_dispatches:
@@ -945,7 +914,7 @@ class CallbackRuntime:
         finally:
             self._host.unbind()
 
-    def _prepare_activity_dispatches(
+    def _preflight_dispatches(
         self,
         current: _CallbackContext,
         dispatches: tuple[_EventDispatch, ...],
