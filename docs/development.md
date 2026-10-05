@@ -81,6 +81,30 @@ config in code. To add a revision:
 4. Run `tests/bot/abilities/memory/test_store.py`; its drift test fails until the
    migrated schema matches `metadata` again. Never edit a revision that has shipped.
 
+## Persistent routines
+
+A behavior's Starlark `lifetime` global is `turn` (default) or `persistent`, stored in
+`bot_behavior.lifetime` (memory revision `0002`). Autonomy matches only ACTIVE `turn`
+behaviors, one turn at a time, and silences them after `instance.TURN_SILENCE_BOUND`
+(`check()` rejects a turn `hsm.after` longer than that). A persistent routine must schedule
+at least one transition with `hsm.every(seconds=N)` (N at least `check(min_every=...)`,
+60 s by default) or `hsm.at(time="HH:MM", days=[...], tz="Area/City")` — structured, no
+cron; occurrences come from stdlib `zoneinfo` and an injected wall clock, so weekdays and
+daylight saving follow the routine's zone. Nothing is replayed after a restart: intervals
+restart from start and `at()` waits for its next occurrence.
+
+`cognition.Routines` (memory, wall clock, optional HSM timer clock injected; compose it as
+`Cognition(routines=...)`) starts every ACTIVE persistent routine on attach and stops them
+on detach. Cognition sends it `bot.ability.routines.reconcile` whenever Reflection settles a
+turn, and Routines stops broken or removed routines, restarts changed ones, and starts new
+ones. A tick (`bot.behavior.tick`: name, trigger, `scheduled_at`, `fired_at`, and the
+selections the routine emitted) goes from Routines to Cognition to the body as a
+`cognition.InputEvent` observing that tick; the body defers it during a turn, and the next
+turn decides what to do with it. `verify_apply` checks a routine by forcing one tick on a
+fake timer clock. Telemetry: `bot.behavior.routine.tick.count` {trigger, outcome},
+`bot.behavior.routine.active`, and `bot.behavior.routine.reconcile` / `.start` / `.stop`
+spans; routine names are never attributes.
+
 ## Observability
 
 Every HSM-visible behavior is observed at runtime boundaries that opt in
@@ -103,8 +127,8 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts), `bot.devices.audio` (microphone, speaker with placement) |
 | Environment | broadcast scope, typed stimuli (`environment.sound`, …), world snapshots, `bot.environment.space` propagation law |
 | Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Vision, Reading, Language, Memory (STM/register, associative, consolidation, long-term), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
-| Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning — all cancellable, all typed |
-| Behavior | Starlark → HSM compiler, verified seed/native behaviors, durable storage, diagnostics |
+| Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning, Routines — all typed |
+| Behavior | Starlark → HSM compiler, verified seed/native behaviors, persistent routines, durable storage, diagnostics |
 | Telemetry | HSM observation → OpenTelemetry metrics + spans, low-cardinality by contract |
 
 **Provider packages (`src/providers/*`, each owns its own SDK deps)**

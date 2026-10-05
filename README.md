@@ -58,7 +58,9 @@ that answers a real call over LiveKit.
 - **Providers** own transport and SDKs. Core sees provider-neutral IDs, payloads, and
   failure kinds. Eleven ship here, from LiveKit to local MLX audio.
 - **Behaviors** are learned event-only programs, compiled from Starlark and stored, so a
-  rule the bot was taught costs nothing to run again.
+  rule the bot was taught costs nothing to run again. A behavior lives for one turn, or is a
+  persistent **routine** that keeps running on `hsm.every` / `hsm.at` schedules across turns
+  and restarts; each tick it emits is an observation the bot decides on in a new turn.
 
 Every stateful concern is modeled with
 [`stateforward-hsm`](https://github.com/stateforward/hsm.py).
