@@ -3108,22 +3108,27 @@ async def _seed_behavior_record(
 
 
 def test_reflection_change_loads_existing_and_writes_update() -> None:
-    """Select change → changing → replace installed behavior."""
+    """Select change → changing → replace installed behavior.
+
+    The revision retargets the behavior onto the turn's own stimulus, the trigger the
+    bot's evidence can vouch for, so the authored triggers persist unchanged.
+    """
 
     change_intent = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         reason="select change",
     )
+    observed_trigger = mosfet.InputEvent.name
     revised_source = _ANSWER_RING_BEHAVIOR_SOURCE.replace(
         'triggers = ["environment.sound"]',
-        'triggers = ["environment.sound", "phone.ringing"]',
+        f'triggers = ["{observed_trigger}"]',
     ).replace(
         "Select focus_device for the observed pattern.",
         "Also clear focus before answer.",
     )
     written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
-        triggers=("environment.sound", "phone.ringing"),
+        triggers=(observed_trigger,),
         description="Also clear focus before answer.",
         reason="revised from episodes",
         source=revised_source,
@@ -3188,7 +3193,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
     assert latest_behavior.triggers == written.triggers
     assert latest_behavior.description == written.description
     assert latest_behavior.source is not None
-    assert "phone.ringing" in latest_behavior.source
+    assert f'triggers = ["{observed_trigger}"]' in latest_behavior.source
     assert len(sources) == 1
     assert "clear focus" in sources[0]
     assert "hsm.define" in sources[0]
