@@ -146,9 +146,9 @@ def test_phone_bot_startup_does_not_poll_machine_snapshots() -> None:
 
     assert ".state()" not in readiness_source
     assert "wait_for_activation" in readiness_source
-    assert "isinstance(event.data, (bot.ActivatingDoneEventData, bot.ActivatingFailedEventData))" in source
-    assert "bot.ActivatingDoneEventData" in source
-    assert "bot.ActivatingFailedEventData" in source
+    assert "isinstance(event.data, (mosfet.ActivatingDoneEventData, mosfet.ActivatingFailedEventData))" in source
+    assert "mosfet.ActivatingDoneEventData" in source
+    assert "mosfet.ActivatingFailedEventData" in source
     assert "request_id" not in lifecycle_source
     assert '"attach"' not in lifecycle_source
 
@@ -218,7 +218,7 @@ async def main() -> None:
     ):
         ear = Ear(heard)
         ears[name] = ear
-        _ = await bot.started(environment, ear, ear.model, hsm.Config(id=name))
+        _ = await mosfet.started(environment, ear, ear.model, hsm.Config(id=name))
         environment.join(ear, placement=space.Placement(position=position, threshold_db=20.0))
 
     someone = person.Person(
@@ -405,7 +405,7 @@ class Refused(person.Person):
 
     async def enter(self, environment):
         bystander = Bystander()
-        _ = await bot.started(environment, bystander, bystander.model)
+        _ = await mosfet.started(environment, bystander, bystander.model)
         _ = await self._voice.attach(
             environment,
             attachment.AttachEvent.with_data(attachment.AttachData(actor=bystander)),
@@ -1100,12 +1100,12 @@ async def main() -> None:
     conversation_ability = conversation.Conversation()
     ctx = hsm.Context()
     assert conversation_ability.model is not None
-    _ = await bot.started(ctx, conversation_ability, conversation_ability.model)
+    _ = await mosfet.started(ctx, conversation_ability, conversation_ability.model)
     from mosfet.protocols import attachment
     class Owner(hsm.Instance):
         model = mosfet.define("Owner", hsm.initial(hsm.target("/Owner/a")), hsm.state("a"))
     owner = Owner()
-    _ = await bot.started(ctx, owner, owner.model)
+    _ = await mosfet.started(ctx, owner, owner.model)
     _ = await conversation_ability.attach(
         ctx,
         attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
