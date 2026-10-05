@@ -134,3 +134,53 @@ behavior = hsm.define(
         message = str(failure)
         assert "bootstrapping phase" not in message, message
         assert "warmup exceeded" not in message, message
+
+
+_WEEKDAY_AT = 'hsm.at(time = "08:00", days = ["mon", "tue", "wed", "thu", "fri"], tz = "America/New_York")'
+
+
+def test_verify_apply_dry_runs_one_tick_of_a_persistent_routine() -> None:
+    import datetime
+
+    from tests.bot.behavior.support import routine_source
+
+    calls: list[datetime.datetime] = []
+
+    def clock() -> datetime.datetime:
+        now = datetime.datetime(2026, 10, 5, 12, 0, 0, 5000, tzinfo=datetime.UTC)
+        calls.append(now)
+        return now
+
+    checked = verify.verify_apply(routine_source(schedule=_WEEKDAY_AT), input_data={"ignored": True}, clock=clock)
+
+    assert checked.ok, checked.report.render()
+    assert checked.value is not None
+    assert checked.value.lifetime == "persistent"
+    # The forced tick read the injected wall clock (start check, tick stamp, next delay).
+    assert calls
+
+
+def test_verify_apply_rejects_a_routine_tick_without_selections() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    program = routine_source(schedule="hsm.every(seconds = 300)").replace(
+        "def emit(event):\n    hsm.dispatch(output_event, {",
+        'def emit(event):\n    hsm.dispatch(output_event, {"event": ""})\n\ndef unused(event):\n    hsm.dispatch(output_event, {',
+    )
+
+    checked = verify.verify_apply(program, input_data={})
+
+    assert not checked.ok
+    assert checked.report.errors[0].code == "E0008"
+
+
+def test_verify_apply_rejects_a_routine_interval_below_the_minimum() -> None:
+    import datetime
+
+    from tests.bot.behavior.support import routine_source
+
+    program = routine_source(schedule="hsm.every(seconds = 5)")
+
+    rejected = verify.verify_apply(program, input_data={})
+    assert [error.code for error in rejected.report.errors] == ["E0009"]
+    assert verify.verify_apply(program, input_data={}, min_every=datetime.timedelta(seconds=5)).ok

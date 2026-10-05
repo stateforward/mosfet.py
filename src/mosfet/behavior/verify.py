@@ -1,10 +1,16 @@
-"""Dry-run apply of a behavior against a sample input for install-time diagnostics."""
+"""Dry-run apply of a behavior against a sample input for install-time diagnostics.
+
+A turn behavior is applied to the live turn's input. A persistent routine has no input to
+apply: it is started on a timer clock that fires its first schedule wait at once, and the
+tick it emits is checked instead.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import typing
 import uuid
 
@@ -19,9 +25,19 @@ from mosfet.protocols import attachment
 
 from . import compiler
 from . import diagnostic
+from . import events
 from . import instance
+from . import schedule
 from mosfet.telemetry import span
 from mosfet.telemetry.hsm import Traced
+
+
+# Fixed wall time a routine's dry-run tick reads unless the caller injects a clock.
+_VERIFY_NOW = datetime.datetime(2026, 1, 5, 8, 0, tzinfo=datetime.UTC)
+
+
+def _verify_clock() -> datetime.datetime:
+    return _VERIFY_NOW
 
 
 def _error(*, code: str, message: str, stage: diagnostic.Stage) -> diagnostic.Diagnostic:
@@ -100,6 +116,102 @@ class _TerminalOwner(Traced):
         )
 
 
+class _FirstScheduleWaitFires(hsm.Clock):
+    """Timer clock for a routine dry run: once armed, one schedule wait fires at once; no other does.
+
+    The routine's lifecycle waits on this clock too (its attach timeout), so it stays unarmed
+    until the routine reports attach complete; by then the attach wait is cancelled and every
+    open wait belongs to a schedule of the attached routine.
+    """
+
+    _armed: bool
+    _fired: bool
+    _waits: list[asyncio.Future[datetime.datetime]]
+    _wall_clock: schedule.WallClock
+
+    def __init__(self, *, clock: schedule.WallClock) -> None:
+        self._armed = False
+        self._fired = False
+        self._waits = []
+        self._wall_clock = clock
+        super().__init__(after=self._wait)
+
+    def _fire(self, waiter: asyncio.Future[datetime.datetime]) -> None:
+        self._fired = True
+        waiter.set_result(self._wall_clock())
+
+    def _wait(self, duration: datetime.timedelta) -> asyncio.Future[datetime.datetime]:
+        del duration
+        waiter: asyncio.Future[datetime.datetime] = asyncio.get_running_loop().create_future()
+        if self._armed and not self._fired:
+            self._fire(waiter)
+        else:
+            self._waits.append(waiter)
+        return waiter
+
+    def arm(self) -> None:
+        """Fire the oldest open schedule wait now, or the next one the routine opens."""
+
+        self._armed = True
+        for waiter in self._waits:
+            if not self._fired and not waiter.done():
+                self._fire(waiter)
+
+
+class _TickOwner(_TerminalOwner):
+    """Dry-run owner of a routine: arms the timer clock on attach, then settles on the first tick."""
+
+    _timers: _FirstScheduleWaitFires
+
+    def __init__(self, *, timers: _FirstScheduleWaitFires) -> None:
+        super().__init__()
+        self._timers = timers
+
+    @staticmethod
+    def _arm(ctx: hsm.Context, instance: "_TickOwner", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._timers.arm()
+
+    @classmethod
+    def tick_model(cls, failed_event: hsm.Event[typing.Any]) -> hsm.Model:
+        """Wait for attach complete, then for the routine's first tick or failure."""
+
+        return mosfet.define(
+            "BehaviorVerifyTickOwner",
+            hsm.initial(hsm.target("/BehaviorVerifyTickOwner/attaching")),
+            hsm.state(
+                "attaching",
+                hsm.transition(
+                    hsm.on(attachment.AttachCompleteEvent),
+                    hsm.effect(cls._arm),
+                    hsm.target("/BehaviorVerifyTickOwner/waiting"),
+                ),
+                hsm.transition(
+                    hsm.on(failed_event),
+                    hsm.guard(cls._is_failure_data),
+                    hsm.effect(cls._settle_failed),
+                    hsm.target("/BehaviorVerifyTickOwner/done"),
+                ),
+            ),
+            hsm.state(
+                "waiting",
+                hsm.transition(
+                    hsm.on(events.TickEvent),
+                    hsm.guard(cls._is_output_data),
+                    hsm.effect(cls._settle_output),
+                    hsm.target("/BehaviorVerifyTickOwner/done"),
+                ),
+                hsm.transition(
+                    hsm.on(failed_event),
+                    hsm.guard(cls._is_failure_data),
+                    hsm.effect(cls._settle_failed),
+                    hsm.target("/BehaviorVerifyTickOwner/done"),
+                ),
+            ),
+            hsm.final("done"),
+        )
+
+
 async def _apply_once(
     program: str,
     *,
@@ -160,6 +272,55 @@ async def _apply_once(
                 # Tear down is best-effort for a dry-run diagnostic; the behavior outcome
                 # is authoritative, but the owner must still be released below.
                 pass
+        _ = await hsm.stop(owner, ctx)
+
+
+async def _tick_once(
+    program: str,
+    *,
+    clock: schedule.WallClock,
+    timeout: float,
+) -> events.TickData:
+    """Dry-run one routine tick: start it on a timer that fires once, wait for its tick terminal."""
+
+    behavior = compiler.build(program, clock=clock)
+    timers = _FirstScheduleWaitFires(clock=clock)
+    owner = _TickOwner(timers=timers)
+    ctx = hsm.Context()
+    _ = await mosfet.started(ctx, owner, _TickOwner.tick_model(behavior.failed_event))
+    owner_id = hsm.id(owner)
+    attached = False
+    try:
+        model = behavior.model
+        assert model is not None
+        _ = await mosfet.started(ctx, behavior, model, hsm.Config(clock=timers))
+        _ = await behavior.attach(
+            ctx,
+            dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
+                source=owner_id,
+            ),
+        )
+        attached = True
+        output = await asyncio.wait_for(owner.result, timeout=timeout)
+        if not isinstance(output, events.TickData):
+            raise RuntimeError("persistent routine emitted output that is not a bot.behavior.tick.")
+        return output
+    finally:
+        if attached:
+            try:
+                _ = await behavior.detach(
+                    ctx,
+                    dataclasses.replace(
+                        attachment.DetachEvent.with_data(attachment.DetachData(actor=owner, reply_to=owner)),
+                        source=owner_id,
+                        target=hsm.id(behavior),
+                    ),
+                )
+            except Exception:
+                # Tear down is best-effort for a dry-run diagnostic; the tick outcome is authoritative.
+                pass
+        await behavior.stop(ctx)
         _ = await hsm.stop(owner, ctx)
 
 
@@ -251,11 +412,16 @@ def verify_apply(
     event_id: str | None = None,
     source: str | None = None,
     target: str | None = None,
+    min_every: datetime.timedelta = instance.ROUTINE_MIN_EVERY,
+    clock: schedule.WallClock = _verify_clock,
 ) -> diagnostic.Checked[instance.Instance]:
     """Parse/build, then dry-run apply; return structured diagnostics on failure.
 
     Optional ``event_id`` / ``source`` / ``target`` stamp the behavior input event the
-    same way Autonomy does for a live turn event (not metadata).
+    same way Autonomy does for a live turn event (not metadata). A persistent routine is
+    instead started on a timer that fires its first schedule at once (``clock`` is the wall
+    clock its tick reads; ``min_every`` the shortest interval it may use), and the
+    selections its tick emits are checked; ``input_data`` does not apply to it.
     """
 
     checked = instance.check(
@@ -265,9 +431,13 @@ def verify_apply(
         description=description,
         examples=examples,
         require_build=True,
+        min_every=min_every,
     )
     if not checked.ok or checked.value is None:
         return checked
+
+    if checked.value.lifetime == instance.LIFETIME_PERSISTENT:
+        return _verify_tick(program, checked=checked, clock=clock, timeout=timeout)
 
     # metadata is telemetry pass-through into apply_once only — never selection binding.
     meta = dict(metadata or {})
@@ -319,6 +489,37 @@ def verify_apply(
         )
         return diagnostic.Checked[instance.Instance](value=None, report=report)
 
+    return checked
+
+
+def _verify_tick(
+    program: str,
+    *,
+    checked: diagnostic.Checked[instance.Instance],
+    clock: schedule.WallClock,
+    timeout: float,
+) -> diagnostic.Checked[instance.Instance]:
+    try:
+        tick = typing.cast(
+            events.TickData,
+            _run_coroutine(_tick_once(program, clock=clock, timeout=timeout)),
+        )
+    except Exception as error:
+        message = str(error) or "persistent routine did not emit a tick for its first schedule."
+        report = diagnostic.report_of(
+            _error(code=diagnostic.E0008_APPLY, message=message, stage=diagnostic.Stage.APPLY)
+        )
+        return diagnostic.Checked[instance.Instance](value=None, report=report)
+    live_values = _live_binding_values(tick.model_dump(mode="json", exclude={"output"}))
+    binding_errors = _selection_binding_errors(tick.output, live_values=live_values)
+    if binding_errors:
+        report = diagnostic.report_of(
+            *(
+                _error(code=diagnostic.E0008_APPLY, message=message, stage=diagnostic.Stage.APPLY)
+                for message in binding_errors
+            )
+        )
+        return diagnostic.Checked[instance.Instance](value=None, report=report)
     return checked
 
 
