@@ -14,12 +14,16 @@ from __future__ import annotations
 from .. import ability
 
 import dataclasses
+import importlib.resources
 import typing
 import uuid
 
 import hsm
 import mosfet
 import pydantic
+import sqlalchemy
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine
@@ -286,12 +290,64 @@ def _execute_transaction(
     return OutputData(results=tuple(results))
 
 
+# Alembic version table name and the baseline revision (the create_all-era schema).
+VERSION_TABLE = "alembic_version"
+BASELINE_REVISION = "0001"
+
+# Frozen: exactly the tables revision 0001 creates. Later revisions must not change this set;
+# it only identifies databases that ``metadata.create_all`` created before migrations existed.
+_BASELINE_TABLES = frozenset({"bot_behavior", "bot_behavior_trigger", "bot_memory", "bot_stm_memory"})
+
+
+class MigrationError(RuntimeError):
+    """Raised when a memory database matches no known schema revision and cannot be migrated."""
+
+
+def migration_config() -> Config:
+    """Programmatic Alembic config for the packaged ``migrations/`` scripts (no ``alembic.ini``).
+
+    To run a command, set ``config.attributes["connection"]`` to an open SQLAlchemy
+    connection; ``migrations/env.py`` runs online against that connection only.
+    """
+
+    config = Config()
+    config.set_main_option("script_location", str(importlib.resources.files(schema) / "migrations"))
+    return config
+
+
+def migrate(engine: Engine) -> None:
+    """Bring ``engine``'s database to the head memory schema revision (performs database I/O).
+
+    Runs in one transaction. A database ``metadata.create_all`` created before migrations
+    existed (all baseline tables, no ``alembic_version``) is stamped at ``0001`` first — the
+    one-time cutover documented in ``migrations/versions/0001_initial_memory_schema.py``.
+
+    Raises:
+        MigrationError: the database has some baseline tables but no version table.
+    """
+
+    config = migration_config()
+    with engine.begin() as connection:
+        config.attributes["connection"] = connection
+        tables = set(sqlalchemy.inspect(connection).get_table_names())
+        if VERSION_TABLE not in tables and tables & _BASELINE_TABLES:
+            missing = sorted(_BASELINE_TABLES - tables)
+            if missing:
+                message = f"Unversioned memory database lacks baseline tables {missing}; not stamping it."
+                raise MigrationError(message)
+            command.stamp(config, BASELINE_REVISION)
+        command.upgrade(config, "head")
+
+
 def open_sqlite_engine(*, database: str = ":memory:", connection: typing.Any | None = None) -> Engine:
-    """Composition-root factory: open a private SQLite engine with the canonical schema.
+    """Composition-root factory: open a private SQLite engine migrated to the head schema.
 
     The ``sqlite+pysqlite`` URL default lives here — not in :class:`MemoryStore` — so the
     ability stays dialect-agnostic and the sqlite_memory provider (or any explicit root)
     owns the SQLite default. Pass the result as ``MemoryStore(engine=...)``.
+
+    Raises:
+        MigrationError: the database matches no known schema revision.
     """
 
     if connection is not None:
@@ -302,7 +358,7 @@ def open_sqlite_engine(*, database: str = ":memory:", connection: typing.Any | N
             url,
             connect_args={"check_same_thread": False},
         )
-    schema.metadata.create_all(engine)
+    migrate(engine)
     return engine
 
 
@@ -347,7 +403,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         if engine is not None:
             if connection is not None or database != ":memory:":
                 raise ValueError("MemoryStore takes either engine or database/connection, not both.")
-            schema.metadata.create_all(engine)
+            migrate(engine)
             self._engine = engine
             return
         self._engine = open_sqlite_engine(database=database, connection=connection)
@@ -465,16 +521,21 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
 
 
 __all__ = [
+    "BASELINE_REVISION",
     "MEMORY_TABLE",
     "InputData",
     "MemoryRecord",
     "MemoryStore",
+    "MigrationError",
     "OutputData",
     "ParameterValue",
     "Row",
     "Statement",
     "StatementResult",
+    "VERSION_TABLE",
     "compile_statement",
     "compile_statements",
+    "migrate",
+    "migration_config",
     "open_sqlite_engine",
 ]

@@ -2863,6 +2863,7 @@ wheels = [
 name = "stateforward-mosfet"
 source = { editable = "../../" }
 dependencies = [
+    { name = "alembic" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-sdk" },
@@ -2874,6 +2875,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.18,<2" },
     { name = "opentelemetry-api", specifier = ">=1.37.0,<2.0.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.37.0,<2.0.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.37.0,<2.0.0" },

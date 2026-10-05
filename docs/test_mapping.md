@@ -17,6 +17,7 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | `tests/bot/test_event_envelope.py` | `src/mosfet/event.py` (canonical JSON value, raw-media refusal, schema round-trip) |
 | `tests/bot/test_lifecycle.py` | `src/mosfet/lifecycle.py` (unstarted vs started, snapshot coherence) |
 | `tests/bot/abilities/memory/test_store.py::test_memory_store_accepts_injected_engine` | `src/mosfet/abilities/memory/store.py` (injected engine path, exclusive args) |
+| `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_*` | `src/mosfet/abilities/memory/store.py` bring-up via `src/mosfet/abilities/memory/migrations/` (head without drift, create_all-era stamp, partial-DB refusal) |
 | `tests/bot/test_bot.py::test_body_handles_device_reports_in_arrival_order_regardless_of_priority` | `src/mosfet/bot.py` (negative: body never ranks by priority) |
 | `tests/bot/test_bot.py::test_body_never_fans_environment_stimuli_out_to_output_abilities` | `src/mosfet/bot.py` (negative: output abilities off the fan-out path) |
 | `tests/examples/test_listen_speak_bot.py::test_listen_speak_communication_drives_body_conversation_and_speaking` | `examples/listen_speak_bot` composition (replaces constructor-text asserts) |

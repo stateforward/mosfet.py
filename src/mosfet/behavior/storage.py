@@ -2,8 +2,8 @@
 
 Autonomy loads these tables at attach; Reflection create/change/break writes them.
 Autonomy also writes usage counters (used / failed) after behavior outcomes.
-Tables register on the shared memory ``metadata`` so ``create_all`` materializes
-behaviors with the rest of bot storage.
+Tables register on the shared memory ``metadata``; memory migrations
+(``mosfet.abilities.memory.migrations``) bring them up with the rest of bot storage.
 
 Maps to ``behavior.Instance``:
 

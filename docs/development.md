@@ -50,6 +50,37 @@ Scoped provider tests: `uv run --package mosfet-provider-<p> -m pytest src/provi
 
 See [release.md](release.md) for versioning and CI publishing notes.
 
+## Memory schema migrations
+
+Memory storage schema (`src/mosfet/abilities/memory/schema.py` plus
+`src/mosfet/behavior/storage.py`, sharing one `metadata`) is brought up by Alembic
+revisions in `src/mosfet/abilities/memory/migrations/versions/` (package data, not an
+importable package). `open_sqlite_engine` and `MemoryStore(engine=...)` call
+`store.migrate(engine)`, which upgrades to head (and stamps a pre-migration `create_all`
+database at `0001` first). There is no `alembic.ini`; `store.migration_config()` builds the
+config in code. To add a revision:
+
+1. Change the table definitions in `schema.py` / `behavior/storage.py`.
+2. Autogenerate a draft against a database at the current head:
+
+   ```sh
+   uv run --locked python - <<'PY'
+   from alembic import command
+   from mosfet.abilities.memory import store
+   engine = store.open_sqlite_engine()  # in-memory database at the current head
+   config = store.migration_config()
+   with engine.begin() as connection:
+       config.attributes["connection"] = connection
+       command.revision(config, message="<what changed>", autogenerate=True, rev_id="0002")
+   PY
+   ```
+
+3. Review `versions/0002_<slug>.py`: keep it dialect-neutral (e.g. `sa.func.now()`, not
+   SQLite text defaults), give new `NOT NULL` columns a `server_default`, and write a real
+   `downgrade()`. `down_revision` must be the previous head.
+4. Run `tests/bot/abilities/memory/test_store.py`; its drift test fails until the
+   migrated schema matches `metadata` again. Never edit a revision that has shipped.
+
 ## Observability
 
 Every HSM-visible behavior is observed at runtime boundaries that opt in

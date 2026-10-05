@@ -42,7 +42,7 @@ memory_table = Table(
     Index("bot_memory_scope_idx", "scope", "created_at"),
 )
 
-# Register behavior tables on the same MetaData so create_all materializes them.
+# Register behavior tables on the same MetaData so migrations (``migrations/``) track them.
 from mosfet.behavior import storage  # noqa: E402, F401
 
 _ = storage.behavior_table
