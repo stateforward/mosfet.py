@@ -1205,3 +1205,14 @@ def test_reflection_model_uses_group_lifecycle_states_without_synthetic_readines
         for names in model.transition_map.values()
         for name in typing.cast(collections.abc.Iterable[str], typing.cast(object, names))
     }
+
+
+def test_reflection_select_offers_routines_without_forcing_them() -> None:
+    from mosfet.abilities.cognition.reflection import reflection as reflection_module
+
+    instructions = reflection_module.SELECT_INSTRUCTIONS
+    # A recurring/time-based need or an explicit user request are grounds; the choice stays the model's.
+    assert "recurring or time-based need" in instructions
+    assert "user explicitly asking" in instructions
+    assert "Otherwise return an empty selection" in instructions
+    assert "lifetime" in instructions

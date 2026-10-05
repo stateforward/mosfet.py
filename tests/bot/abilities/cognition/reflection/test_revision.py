@@ -103,7 +103,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "66cdc7b7f1611fa5889b377838bbcafdbb0a6d4c064a6c44cd8cd23cd3e45134"
+        == "adc4a2474b578cef1db69822a982f404a72650377b4f3e95990b588bbed43bce"
     )
 
 
@@ -338,3 +338,57 @@ def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
         attempt=0,
     )
     assert _grounded_triggers(evidenceless_write, invented) == ("environment.sound",)
+
+
+def test_revision_installs_a_persistent_routine_checked_by_one_tick() -> None:
+    """A routine is a legitimate create: it is checked by a dry-run tick, not the live turn."""
+
+    from mosfet.behavior import storage as behavior_storage
+    from tests.bot.behavior.support import routine_source
+
+    program = routine_source(
+        schedule='hsm.at(time = "08:00", days = ["mon", "tue", "wed", "thu", "fri"], tz = "America/New_York")'
+    )
+    store = memory.Memory()
+
+    async def run() -> revision.OutputData:
+        actor = revision.Revision(
+            processor=FixedProcessor(write=behavior.ChangeData(name="MorningBriefing", source=program)),
+            memory=store,
+        )
+        output = await dispatch_ability_for_test(
+            actor,
+            None,
+            revision.InputData(
+                cognition_input=cognition_input(),
+                cognition_output=focus_output("phone", "answered"),
+                intent=behavior.CreateData(
+                    name="MorningBriefing",
+                    reason="The user asked for a briefing every weekday morning.",
+                ),
+                parent_operation_id="parent-turn",
+                parent_generation="parent-generation",
+            ),
+        )
+        assert isinstance(output, revision.OutputData)
+        return output
+
+    output = asyncio.run(run())
+    stored = store.execute(
+        memory.InputData(
+            statements=memory.compile_statements(*behavior_storage.select_behavior_by_name_clauses("MorningBriefing"))
+        )
+    )
+    (installed,) = behavior_storage.instances_from_behavior_results(
+        tuple(row.as_mapping() for row in stored.results[0].rows),
+        tuple(row.as_mapping() for row in stored.results[1].rows),
+    )
+
+    assert isinstance(output.applied, behavior.CreateData)
+    assert installed.status == "ACTIVE"
+    assert installed.lifetime == "persistent"
+
+
+def test_revision_instructions_describe_persistent_routines() -> None:
+    for fragment in ('lifetime = "persistent"', "hsm.every(seconds=...)", "dry-run tick"):
+        assert fragment in revision.CHANGE_INSTRUCTIONS

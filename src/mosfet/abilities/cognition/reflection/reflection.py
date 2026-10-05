@@ -62,14 +62,19 @@ stimulus_name = episodes.stimulus_name
 
 SELECT_INSTRUCTIONS = (
     "Select at most one offered behavior inventory event (bot.behavior.create, change, or break) "
-    "when a clear repeated pattern across this turn and prior_episodes should improve future behavior. "
+    "when a clear repeated pattern across this turn and prior_episodes should improve future behavior, "
+    "or when this turn shows a recurring or time-based need — including the user explicitly asking for "
+    "something to happen on a schedule or repeatedly — that a persistent routine would serve. "
     "Otherwise return an empty selection. Use only offered events; data must match the event schema. "
-    "behaviors lists installed inventory with status (ACTIVE|DRAFT|BROKEN), status_reason, status_updated_at, "
+    "behaviors lists installed inventory with lifetime (turn: Autonomy runs it for one matching turn; "
+    "persistent: a routine that keeps running on hsm.every / hsm.at schedules across turns and restarts), "
+    "status (ACTIVE|DRAFT|BROKEN), status_reason, status_updated_at, "
     "and usage: used_count / last_used_at (handled Autonomy runs) and failed_count / last_failed_at. "
     "Prefer change over break when used_count is low (not enough practice evidence). "
     "Prefer break when failures or harm outweigh practice value; include reason. "
     "create delegates a DRAFT behavior revision; change revises an existing behavior; "
-    "break sets status=BROKEN (keeps inventory for later change; Autonomy will not run it). "
+    "break sets status=BROKEN (keeps inventory for later change; Autonomy will not run it and a broken "
+    "routine stops); change a routine to reschedule or revise it, break it to stop it. "
     "Select intent may omit source — do not invent source here."
 )
 

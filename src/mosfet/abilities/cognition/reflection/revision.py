@@ -52,6 +52,11 @@ CHANGE_INSTRUCTIONS = (
     "At runtime, fill selection data from the live event data — "
     "never hardcode identifier values copied from episode examples. "
     "Set triggers to the stimulus names that should propose the behavior. "
+    "Lifetime: a turn behavior (default) answers one matching turn. When the intent or the turn calls for "
+    "something recurring or time-based (or the user asked for it), write a persistent routine instead: "
+    'lifetime = "persistent", with transitions scheduled by hsm.every(seconds=...) or '
+    "hsm.at(time=..., days=[...], tz=...) whose effects hsm.dispatch(output_event, selection) — "
+    "a persistent routine is checked by one dry-run tick, not the live turn, and needs no triggers. "
     "Effects must hsm.dispatch(output_event, selection) and must not return a value. "
     "Starlark only: no Python docstrings, type annotations, or imports; callbacks are def name(event): ...\n"
     "Format the source as real multi-line Starlark (newlines are required syntax).\n"

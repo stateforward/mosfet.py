@@ -27,7 +27,10 @@ class CreateData(pydantic.BaseModel):
             "description": (
                 "Create a new executable behavior. Select may omit source (intent only); the create write "
                 "step must author full Starlark HSM source from the behavior Starlark API and the observed "
-                "pattern — not by copying canned examples."
+                "pattern — not by copying canned examples. The source's lifetime decides how it runs: a turn "
+                'behavior (default) answers one matching turn; a persistent routine (lifetime = "persistent") '
+                "keeps running on hsm.every / hsm.at schedules across turns and restarts, for recurring or "
+                "time-based needs or when the user asked for something recurring."
             ),
             "examples": [
                 {
@@ -36,7 +39,13 @@ class CreateData(pydantic.BaseModel):
                     "triggers": ["environment.sound"],
                     "description": "Say hello when a knock sound arrives.",
                     "reason": "Same knock→greeting pattern across recent episodes.",
-                }
+                },
+                {
+                    "event": "bot.behavior.create",
+                    "name": "MorningBriefing",
+                    "description": "Persistent routine: brief the user at 08:00 on weekdays.",
+                    "reason": "The user asked to hear a briefing every weekday morning.",
+                },
             ],
         },
     )
@@ -79,7 +88,8 @@ class CreateData(pydantic.BaseModel):
             "Starlark HSM behavior source authored for this install. Required on the create write step. "
             "Must declare input_event, output_event, and behavior = hsm.define(Name, ...) (or behavior_program(...)) "
             "with string-named callbacks. Invent names, schemas, guards, and effects from the observed "
-            "pattern using the Starlark behavior API. Select intent may omit this field."
+            'pattern using the Starlark behavior API. A persistent routine also sets lifetime = "persistent" '
+            "and schedules transitions with hsm.every / hsm.at. Select intent may omit this field."
         ),
     )
 
@@ -94,7 +104,9 @@ class ChangeData(pydantic.BaseModel):
             "description": (
                 "Change an existing executable behavior. Select may omit source (intent only); the change "
                 "write step must author full revised Starlark HSM source from the behavior Starlark API, "
-                "the existing behavior, and the observed pattern."
+                "the existing behavior, and the observed pattern. Changing a persistent routine (for example "
+                "its schedule) restarts it with the revised source; the lifetime global may also turn a "
+                "behavior into a routine or back."
             ),
             "examples": [
                 {
@@ -143,7 +155,8 @@ class ChangeData(pydantic.BaseModel):
         description=(
             "Revised Starlark HSM behavior source. Required on the change write step. Must remain a valid "
             "executable behavior declaration whose model name matches this behavior name. Author revisions from "
-            "the Starlark behavior API and existing_behavior.source — do not paste unrelated canned source."
+            "the Starlark behavior API and existing_behavior.source — do not paste unrelated canned source. "
+            'Keep lifetime = "persistent" and its hsm.every / hsm.at schedules for a routine.'
         ),
     )
 
@@ -157,8 +170,8 @@ class BreakData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Break a behavior that no longer improves (or harms) robot behavior. "
-                "Sets inventory status=BROKEN so Autonomy will not run it; the row remains "
-                "for a later bot.behavior.change repair. Optional reason becomes status_reason."
+                "Sets inventory status=BROKEN so Autonomy will not run it and a persistent routine stops; "
+                "the row remains for a later bot.behavior.change repair. Optional reason becomes status_reason."
             ),
             "examples": [
                 {
