@@ -28,6 +28,7 @@ from mosfet.protocols import attachment
 import pydantic
 
 from mosfet import behavior
+from mosfet.behavior.instance import LIFETIME_TURN
 from mosfet.behavior.instance import Instance
 from mosfet.behavior import runtime
 from mosfet.behavior import seed
@@ -1348,9 +1349,12 @@ def _child_operation_id(parent_operation_id: str, index: int) -> str:
 
 
 def _behavior_select_input() -> memory.InputData:
-    """Memory ability input: SELECT ACTIVE behaviors + triggers (skip DRAFT/BROKEN)."""
+    """Memory ability input: SELECT ACTIVE turn behaviors + triggers.
 
-    clauses = behavior_storage.select_active_behaviors_clauses()
+    DRAFT/BROKEN rows never run; persistent routines belong to Routines, not per-turn matching.
+    """
+
+    clauses = behavior_storage.select_active_behaviors_clauses(lifetime=LIFETIME_TURN)
     return memory.InputData(statements=memory.compile_statements(*clauses))
 
 

@@ -974,3 +974,40 @@ def test_autonomy_match_preparation_rereads_learned_inventory_from_memory() -> N
     names = asyncio.run(run())
     # The authored row is in the matcher's inventory for the next turn, via the refresh read.
     assert "LateLearned" in names, names
+
+
+def test_autonomy_never_matches_persistent_routines() -> None:
+    """Persistent routines belong to Routines; Autonomy's per-turn inventory holds turn behaviors only."""
+
+    async def run() -> tuple[str, ...]:
+        store = memory.Memory()
+        instance = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, instance)
+        for installed in (
+            behavior.Instance(name="TurnGreeting", source="", triggers=("environment.sound",), lifetime="turn"),
+            behavior.Instance(name="MorningRoutine", source="", triggers=("environment.sound",), lifetime="persistent"),
+        ):
+            installed = behavior_storage.mark_active(installed)
+            _ = store.execute(
+                memory.InputData(
+                    statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)),
+                )
+            )
+        turn = cognition.types.TurnData(
+            input=cognition.input.InputData(
+                stimulus=SoundEvent.with_data(
+                    SoundData(audio=b"ring-bytes", media_type="audio/wav", sample_rate_hz=16_000, channels=1)
+                ),
+                abilities=(),
+                actors={},
+                focus=None,
+                focus_candidates=(),
+            ),
+            operation_id="persistent-exclusion-probe",
+            generation="persistent-exclusion-gen",
+        )
+        _ = await dispatch_ability_for_test(instance, ctx, turn, timeout=8.0)
+        return tuple(item.name for item in vars(instance)["_behaviors"])
+
+    assert asyncio.run(run()) == ("TurnGreeting",)

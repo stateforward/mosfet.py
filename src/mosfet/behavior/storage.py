@@ -1,17 +1,19 @@
 """Canonical relational storage for Starlark behaviors (SQLAlchemy Core).
 
-Autonomy loads these tables at attach; Reflection create/change/break writes them.
+Autonomy loads the turn behaviors and Routines the persistent routines from these tables;
+Reflection create/change/break writes them.
 Autonomy also writes usage counters (used / failed) after behavior outcomes.
 Tables register on the shared memory ``metadata``; memory migrations
 (``mosfet.abilities.memory.migrations``) bring them up with the rest of bot storage.
 
 Maps to ``behavior.Instance``:
 
-- ``bot_behavior`` — one row per behavior (name PK, source, status, usage telemetry)
+- ``bot_behavior`` — one row per behavior (name PK, source, lifetime, status, usage telemetry)
 - ``bot_behavior_trigger`` — normalized trigger event names for Autonomy matching
 
 DRAFT and BROKEN behaviors stay in inventory so Reflection can change them later.
-Autonomy loads only ``status=ACTIVE`` rows.
+Autonomy loads only ``status=ACTIVE`` rows with ``lifetime=turn``; Routines loads only
+``status=ACTIVE`` rows with ``lifetime=persistent``.
 """
 
 from __future__ import annotations
@@ -35,10 +37,13 @@ from sqlalchemy.sql import ClauseElement
 from mosfet.abilities.memory.schema import metadata
 
 from .instance import (
+    LIFETIME_PERSISTENT,
+    LIFETIME_TURN,
     STATUS_ACTIVE,
     STATUS_BROKEN,
     STATUS_DRAFT,
     Instance,
+    Lifetime,
     Status,
 )
 
@@ -55,7 +60,9 @@ behavior_table = Table(
     Column("description", Text, nullable=False, server_default=""),
     # JSON array of strings (Instance.examples); text for dialect neutrality.
     Column("examples_json", Text, nullable=False, server_default="[]"),
-    # ACTIVE | DRAFT | BROKEN — Autonomy runs ACTIVE only.
+    # turn | persistent — Autonomy runs turn behaviors; Routines keeps persistent routines running.
+    Column("lifetime", Text, nullable=False, server_default=LIFETIME_TURN),
+    # ACTIVE | DRAFT | BROKEN — Autonomy and Routines run ACTIVE only.
     Column("status", Text, nullable=False, server_default=STATUS_ACTIVE),
     # Optional note for current status (validation, break reason, …); empty when unset.
     Column("status_reason", Text, nullable=False, server_default=""),
@@ -143,6 +150,12 @@ def _optional_text_column(value: str | None) -> str:
     return value if value else ""
 
 
+def _parse_lifetime(raw: object) -> Lifetime:
+    if isinstance(raw, str) and raw.strip().lower() == LIFETIME_PERSISTENT:
+        return LIFETIME_PERSISTENT
+    return LIFETIME_TURN
+
+
 def _parse_status(raw: object) -> Status:
     if isinstance(raw, str):
         normalized = raw.strip().upper()
@@ -169,10 +182,15 @@ def select_all_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
     return behaviors, triggers
 
 
-def select_active_behaviors_clauses() -> tuple[ClauseElement, ClauseElement]:
-    """Core clauses: ACTIVE behaviors only (Autonomy runtime load)."""
+def select_active_behaviors_clauses(*, lifetime: Lifetime) -> tuple[ClauseElement, ClauseElement]:
+    """Core clauses: ACTIVE behaviors of one lifetime (Autonomy loads turn, Routines persistent)."""
 
-    behaviors = select(behavior_table).where(behavior_table.c.status == STATUS_ACTIVE).order_by(behavior_table.c.name)
+    behaviors = (
+        select(behavior_table)
+        .where(behavior_table.c.status == STATUS_ACTIVE)
+        .where(behavior_table.c.lifetime == lifetime)
+        .order_by(behavior_table.c.name)
+    )
     triggers = select(behavior_trigger_table).order_by(
         behavior_trigger_table.c.behavior_name,
         behavior_trigger_table.c.trigger,
@@ -205,6 +223,7 @@ def insert_behavior_clauses(instance: Instance) -> tuple[ClauseElement, ...]:
             source=instance.source,
             description=instance.description,
             examples_json=_examples_json(instance.examples),
+            lifetime=instance.lifetime,
             status=instance.status,
             status_reason=_optional_text_column(instance.status_reason),
             status_updated_at=_optional_text_column(instance.status_updated_at),
@@ -347,6 +366,7 @@ def instances_from_behavior_results(
                 description=description if isinstance(description, str) else "",
                 examples=_parse_examples(row.get("examples_json")),
                 triggers=tuple(triggers_by_name.get(name, ())),
+                lifetime=_parse_lifetime(row.get("lifetime")),
                 status=status,
                 status_reason=status_reason,
                 status_updated_at=status_updated_at,

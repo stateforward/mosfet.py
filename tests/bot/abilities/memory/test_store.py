@@ -215,3 +215,30 @@ def test_open_sqlite_engine_rejects_unversioned_partial_database(tmp_path: pathl
         _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
     with pytest.raises(store_module.MigrationError, match="lacks baseline tables"):
         _ = store_module.open_sqlite_engine(database=str(path))
+
+
+def test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime(tmp_path: pathlib.Path) -> None:
+    """Revision 0002 adds ``bot_behavior.lifetime``; behaviors stored before it are turn behaviors."""
+
+    from alembic import command
+    from sqlalchemy import create_engine, text
+
+    from mosfet.abilities.memory import store as store_module
+
+    path = tmp_path / "baseline.db"
+    config = store_module.migration_config()
+    baseline = create_engine(f"sqlite+pysqlite:///{path}")
+    with baseline.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, store_module.BASELINE_REVISION)
+        _ = connection.execute(text("INSERT INTO bot_behavior (name, source) VALUES ('Greeting', 'x')"))
+    baseline.dispose()
+
+    engine = store_module.open_sqlite_engine(database=str(path))
+    current, head, diffs = _schema_revision_state(engine)
+    with engine.connect() as connection:
+        lifetimes = connection.execute(text("SELECT name, lifetime FROM bot_behavior")).all()
+    engine.dispose()
+    assert current == head
+    assert diffs == []
+    assert [tuple(row) for row in lifetimes] == [("Greeting", "turn")]

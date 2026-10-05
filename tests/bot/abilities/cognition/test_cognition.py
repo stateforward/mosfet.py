@@ -3244,7 +3244,9 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
             tuple(row.as_mapping() for row in behavior_out.results[1].rows),
         )
         active_out = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_active_behaviors_clauses()))
+            memory.InputData(
+                statements=memory.compile_statements(*behavior_storage.select_active_behaviors_clauses(lifetime="turn"))
+            )
         )
         active = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in active_out.results[0].rows),

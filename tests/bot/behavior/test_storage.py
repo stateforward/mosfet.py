@@ -1,11 +1,14 @@
 """Behavior inventory storage: status lifecycle and usage telemetry."""
 
 from mosfet.behavior.instance import (
+    LIFETIME_PERSISTENT,
+    LIFETIME_TURN,
     STATUS_ACTIVE,
     STATUS_BROKEN,
     STATUS_DRAFT,
     STATUS_REASON_VALIDATION,
     Instance,
+    Lifetime,
 )
 from mosfet.behavior import storage
 
@@ -154,3 +157,49 @@ def test_legacy_rows_map_safely() -> None:
     assert legacy[0].status == STATUS_BROKEN
     assert legacy[0].status_reason == "draft"
     assert legacy[0].status_updated_at == "2026-01-01T00:00:00Z"
+
+
+def test_instance_defaults_to_turn_lifetime() -> None:
+    assert _base().lifetime == LIFETIME_TURN
+
+
+def test_instances_from_behavior_results_round_trips_lifetime() -> None:
+    rows = [
+        {"name": "Turn", "source": "x", "description": "", "examples_json": "[]", "lifetime": "turn"},
+        {"name": "Morning", "source": "x", "description": "", "examples_json": "[]", "lifetime": "persistent"},
+        {"name": "Unset", "source": "x", "description": "", "examples_json": "[]"},
+    ]
+    loaded = {item.name: item.lifetime for item in storage.instances_from_behavior_results(rows, ())}
+    assert loaded == {"Turn": LIFETIME_TURN, "Morning": LIFETIME_PERSISTENT, "Unset": LIFETIME_TURN}
+
+
+def test_select_active_behaviors_clauses_filters_by_lifetime() -> None:
+    from mosfet.abilities import memory
+
+    engine = memory.store.open_sqlite_engine()
+    store = memory.MemoryStore(engine=engine)
+    behaviors = (
+        _base(name="Greeting"),
+        _base(name="Morning", lifetime=LIFETIME_PERSISTENT),
+        _base(name="Evening", lifetime=LIFETIME_PERSISTENT, status=STATUS_BROKEN),
+    )
+    for behavior in behaviors:
+        _ = store.execute(
+            memory.InputData(statements=memory.compile_statements(*storage.replace_behavior_clauses(behavior)))
+        )
+
+    def active(lifetime: Lifetime) -> tuple[tuple[str, Lifetime], ...]:
+        output = store.execute(
+            memory.InputData(
+                statements=memory.compile_statements(*storage.select_active_behaviors_clauses(lifetime=lifetime))
+            )
+        )
+        loaded = storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in output.results[0].rows),
+            tuple(row.as_mapping() for row in output.results[1].rows),
+        )
+        return tuple((item.name, item.lifetime) for item in loaded)
+
+    assert active(LIFETIME_TURN) == (("Greeting", LIFETIME_TURN),)
+    assert active(LIFETIME_PERSISTENT) == (("Morning", LIFETIME_PERSISTENT),)
+    engine.dispose()

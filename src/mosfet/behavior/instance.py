@@ -21,6 +21,12 @@ STATUS_BROKEN: Status = "BROKEN"
 # Optional status_reason tags (free text also allowed on BROKEN).
 STATUS_REASON_VALIDATION = "validation"
 
+# How long a running behavior lives: one Autonomy turn, or a persistent routine that the
+# Routines ability keeps running across turns and restarts until it is changed or broken.
+Lifetime = typing.Literal["turn", "persistent"]
+LIFETIME_TURN: Lifetime = "turn"
+LIFETIME_PERSISTENT: Lifetime = "persistent"
+
 
 class Instance(pydantic.BaseModel):
     """Installed behavior: starlark source plus inventory metadata.
@@ -40,9 +46,10 @@ class Instance(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Behavior inventory instance: name, triggers, Starlark HSM source, status "
-                "(ACTIVE|DRAFT|BROKEN), and usage telemetry (used_count / last_used_at). "
-                "Autonomy loads only ACTIVE behaviors; DRAFT/BROKEN stay in inventory for Reflection."
+                "Behavior inventory instance: name, triggers, Starlark HSM source, lifetime (turn|persistent), "
+                "status (ACTIVE|DRAFT|BROKEN), and usage telemetry (used_count / last_used_at). "
+                "Autonomy runs ACTIVE turn behaviors; Routines keeps ACTIVE persistent routines running. "
+                "DRAFT/BROKEN stay in inventory for Reflection."
             ),
         },
     )
@@ -63,6 +70,16 @@ class Instance(pydantic.BaseModel):
     examples: tuple[str, ...] = pydantic.Field(
         default=(),
         description="Natural-language examples of when to propose this behavior.",
+    )
+    lifetime: Lifetime = pydantic.Field(
+        default=LIFETIME_TURN,
+        description=(
+            "How long the running behavior lives. turn: Autonomy runs it for one matching turn. "
+            "persistent: a routine the Routines ability keeps running across turns and restarts "
+            "(scheduled with hsm.every / hsm.at), until a change replaces it or a break stops it. "
+            "Taken from the Starlark lifetime global."
+        ),
+        examples=["turn", "persistent"],
     )
     status: Status = pydantic.Field(
         default=STATUS_ACTIVE,
@@ -297,6 +314,9 @@ def _raise_report(report: diagnostic.Report) -> typing.NoReturn:
 
 
 __all__ = [
+    "LIFETIME_PERSISTENT",
+    "LIFETIME_TURN",
+    "Lifetime",
     "STATUS_ACTIVE",
     "STATUS_BROKEN",
     "STATUS_DRAFT",
