@@ -67,3 +67,32 @@ behavior = hsm.define(""",
 def test_compile_rejects_empty_source() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         _ = behavior.build("   ")
+
+
+def test_compile_rejects_routine_events_that_collide_with_generated_tick_events() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    source = routine_source(schedule="hsm.every(seconds = 300)").replace(
+        'name = "bot.behavior.morning_briefing.output"',
+        'name = "bot.behavior.morning_briefing.tick.0"',
+    )
+
+    with pytest.raises(ValueError, match="generated behavior event names"):
+        _ = behavior.build(source)
+
+
+def test_compile_routine_generates_one_tick_event_per_schedule() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    source = routine_source(schedule="hsm.every(seconds = 300)").replace(
+        'hsm.transition(hsm.every(seconds = 300), hsm.effect("emit")),',
+        'hsm.transition(hsm.every(seconds = 300), hsm.effect("emit")),\n'
+        + '        hsm.transition(hsm.at(time = "08:00", tz = "UTC"), hsm.effect("emit")),',
+    )
+    compiled = behavior.build(source)
+
+    assert behavior.behavior.generated_event_names(behavior_spec(compiled)) == (
+        "bot.behavior.morning_briefing.failed",
+        "bot.behavior.morning_briefing.tick.0",
+        "bot.behavior.morning_briefing.tick.1",
+    )

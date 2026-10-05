@@ -5,6 +5,7 @@ import ast
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import json
 import inspect
 import pathlib
@@ -1166,3 +1167,152 @@ behavior = hsm.define(
     assert behavior_id
     assert peer_id
     assert behavior_id != peer_id
+
+
+class _TickRecorder(hsm.Instance):
+    """Attachment owner that records the routine ticks a behavior emits."""
+
+    ticks: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ticks = []
+
+    @staticmethod
+    def record(ctx: hsm.Context, instance: "_TickRecorder", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.ticks.append(event)
+
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "TickRecorder",
+        hsm.initial(hsm.target("/TickRecorder/idle")),
+        hsm.state("idle", hsm.transition(hsm.on(behavior.TickEvent), hsm.effect(record))),
+    )
+
+
+async def _start_routine(
+    program: str,
+    *,
+    clock: "collections.abc.Callable[[], datetime.datetime]",
+    timers: hsm.Clock,
+) -> tuple[behavior.Behavior, _TickRecorder, hsm.Context]:
+    from mosfet.protocols import attachment
+
+    routine = behavior.build(program, clock=clock)
+    recorder = _TickRecorder()
+    ctx = hsm.Context()
+    _ = await mosfet.started(ctx, recorder, typing.cast(hsm.Model, recorder.model))
+    _ = await mosfet.started(ctx, routine, typing.cast(hsm.Model, routine.model), hsm.Config(clock=timers))
+    _ = await routine.attach(
+        ctx,
+        dataclasses.replace(
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
+            source=hsm.id(recorder),
+        ),
+    )
+    return routine, recorder, ctx
+
+
+async def _ticks(recorder: _TickRecorder, count: int, *, timeout: float = 10.0) -> list[behavior.TickData]:
+    deadline = time.monotonic() + timeout
+    while len(recorder.ticks) < count:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"expected {count} ticks, got {len(recorder.ticks)}")
+        await asyncio.sleep(0.01)
+    return [typing.cast(behavior.TickData, event.data) for event in recorder.ticks]
+
+
+def test_persistent_every_routine_ticks_repeatedly_on_its_interval() -> None:
+    from tests.bot.behavior.support import ManualTimers, routine_source
+
+    start = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.UTC)
+    now = [start]
+    timers = ManualTimers()
+
+    async def run() -> tuple[list[datetime.timedelta], list[behavior.TickData], list[hsm.Event[typing.Any]]]:
+        routine, recorder, ctx = await _start_routine(
+            routine_source(schedule="hsm.every(seconds = 90)"), clock=lambda: now[0], timers=timers
+        )
+        waits: list[datetime.timedelta] = []
+        try:
+            for minute in (1.5, 3.0):
+                now[0] = start + datetime.timedelta(minutes=minute)
+                waits.append(await timers.fire(now[0]))
+                _ = await _ticks(recorder, len(waits))
+            waits.append(await timers.next_wait())
+            return waits, await _ticks(recorder, 2), list(recorder.ticks)
+        finally:
+            await routine.stop(ctx)
+            await hsm.stop(recorder, ctx)
+
+    waits, ticks, events = asyncio.run(run())
+
+    assert waits == [datetime.timedelta(seconds=90)] * 3
+    assert [tick.trigger for tick in ticks] == ["every", "every"]
+    assert [tick.fired_at for tick in ticks] == [
+        start + datetime.timedelta(minutes=1.5),
+        start + datetime.timedelta(minutes=3),
+    ]
+    assert all(tick.scheduled_at == tick.fired_at for tick in ticks)
+    assert ticks[0].name == "MorningBriefing"
+    assert ticks[0].output == (
+        {
+            "event": "bot.speaking.say",
+            "target": "speaker",
+            "data": {"text": "Good morning.", "due": "2026-10-05T12:01:30Z"},
+            "reason": "routine every",
+        },
+    )
+    # Each tick is its own correlated operation stamped by the routine.
+    assert len({event.id for event in events}) == 2
+    assert all(event.name == "bot.behavior.tick" for event in events)
+
+
+def test_persistent_at_routine_waits_for_next_weekday_occurrence_across_dst() -> None:
+    import zoneinfo
+
+    from tests.bot.behavior.support import ManualTimers, routine_source
+
+    new_york = zoneinfo.ZoneInfo("America/New_York")
+    # Friday morning, after 08:00 and the weekend before US daylight saving ends (Sun Nov 1).
+    friday = datetime.datetime(2026, 10, 30, 9, 0, tzinfo=new_york)
+    now = [friday]
+    timers = ManualTimers()
+    schedule = 'hsm.at(time = "08:00", days = ["mon", "tue", "wed", "thu", "fri"], tz = "America/New_York")'
+
+    async def run() -> tuple[list[datetime.timedelta], list[behavior.TickData]]:
+        routine, recorder, ctx = await _start_routine(
+            routine_source(schedule=schedule), clock=lambda: now[0], timers=timers
+        )
+        try:
+            first_wait = await timers.next_wait()
+            now[0] = datetime.datetime(2026, 11, 2, 8, 0, 0, 3000, tzinfo=new_york)
+            _ = await timers.fire(now[0])
+            ticks = await _ticks(recorder, 1)
+            second_wait = await timers.next_wait()
+            return [first_wait, second_wait], ticks
+        finally:
+            await routine.stop(ctx)
+            await hsm.stop(recorder, ctx)
+
+    waits, ticks = asyncio.run(run())
+
+    # Fri 09:00 EDT -> Mon 08:00 EST skips the weekend and gains the DST hour: 71 wall hours, 72 elapsed.
+    assert waits[0] == datetime.timedelta(days=3)
+    # Mon 08:00:00.003 -> Tue 08:00 is the next weekday occurrence.
+    assert waits[1] == datetime.timedelta(days=1) - datetime.timedelta(microseconds=3000)
+    assert ticks[0].trigger == "at"
+    assert ticks[0].scheduled_at == datetime.datetime(2026, 11, 2, 8, 0, tzinfo=new_york)
+    assert ticks[0].scheduled_at.utcoffset() == datetime.timedelta(hours=-5)
+
+
+def test_persistent_routine_refuses_to_start_without_a_wall_clock() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    routine = behavior.build(routine_source(schedule="hsm.every(seconds = 90)"))
+
+    async def run() -> None:
+        _ = await mosfet.started(hsm.Context(), routine, typing.cast(hsm.Model, routine.model))
+
+    with pytest.raises(ValueError, match="needs an injected wall clock"):
+        asyncio.run(run())

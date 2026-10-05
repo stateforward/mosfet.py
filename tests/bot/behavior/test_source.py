@@ -470,3 +470,81 @@ def test_parse_source_isolated_workers_complete_under_parallel_spawn() -> None:
         names = list(pool.map(parse_one, range(PARALLEL_SOURCE_WORKERS)))
 
     assert names == ["AnswerGreeting"] * PARALLEL_SOURCE_WORKERS
+
+
+_WEEKDAY_AT = 'hsm.at(time = "08:00", days = ["mon", "tue", "wed", "thu", "fri"], tz = "America/New_York")'
+
+
+def test_parse_source_reads_persistent_lifetime_and_schedules() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    spec = behavior.parse_source(routine_source(schedule=_WEEKDAY_AT))
+
+    assert spec.lifetime == "persistent"
+    timed = behavior_source.timed_elements(spec.model)
+    assert timed == (
+        {"kind": "at", "time": "08:00", "days": ("mon", "tue", "wed", "thu", "fri"), "tz": "America/New_York"},
+    )
+    every = behavior.parse_source(routine_source(schedule="hsm.every(seconds = 300)"))
+    assert behavior_source.timed_elements(every.model) == ({"kind": "every", "seconds": 300},)
+
+
+def test_parse_source_defaults_to_turn_lifetime_and_every_day_at() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    assert behavior.parse_source(greeting_behavior_source()).lifetime == "turn"
+    spec = behavior.parse_source(routine_source(schedule='hsm.at(time = "21:30", tz = "Europe/London")'))
+    assert behavior_source.timed_elements(spec.model)[0]["days"] == ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def test_parse_source_requires_a_schedule_for_persistent_and_none_for_turn() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    unscheduled = greeting_behavior_source().replace("triggers = [", 'lifetime = "persistent"\ntriggers = [')
+    with pytest.raises(behavior.SourceError, match="must schedule at least one transition"):
+        _ = behavior.parse_source(unscheduled)
+    turn_with_schedule = routine_source(schedule="hsm.every(seconds = 300)").replace(
+        'lifetime = "persistent"', 'lifetime = "turn"'
+    )
+    with pytest.raises(behavior.SourceError, match='need lifetime = "persistent"'):
+        _ = behavior.parse_source(turn_with_schedule)
+    with pytest.raises(behavior.SourceError):
+        _ = behavior.parse_source(
+            routine_source(schedule="hsm.every(seconds = 300)").replace('"persistent"', '"daily"')
+        )
+
+
+@pytest.mark.parametrize(
+    ("schedule", "message"),
+    [
+        ('hsm.at(time = "8:00", tz = "UTC")', "HH:MM"),
+        ('hsm.at(time = "24:00", tz = "UTC")', "HH:MM"),
+        ('hsm.at(time = "08:00", tz = "Mars/Olympus")', "not a known IANA time zone"),
+        ('hsm.at(time = "08:00", days = ["monday"], tz = "UTC")', "unknown weekdays monday"),
+        ('hsm.at(time = "08:00", days = ["mon", "mon"], tz = "UTC")', "must not repeat"),
+        ('hsm.at(time = "08:00", days = [], tz = "UTC")', "at least one weekday"),
+        ("hsm.every(seconds = 0)", "positive number"),
+        ("hsm.every(seconds = 60), hsm.on(input_event)", "exactly one hsm.every or hsm.at"),
+        ('hsm.every(seconds = 60), hsm.at(time = "08:00", tz = "UTC")', "exactly one hsm.every or hsm.at"),
+    ],
+)
+def test_parse_source_rejects_invalid_schedules(schedule: str, message: str) -> None:
+    from tests.bot.behavior.support import routine_source
+
+    with pytest.raises(behavior.SourceError, match=message):
+        _ = behavior.parse_source(routine_source(schedule=schedule))
+
+
+def test_parse_source_rejects_schedules_outside_transitions() -> None:
+    from tests.bot.behavior.support import routine_source
+
+    program = routine_source(schedule="hsm.every(seconds = 60)").replace(
+        'hsm.state(\n        "waiting",', 'hsm.state(\n        "waiting",\n        hsm.every(seconds = 60),'
+    )
+    with pytest.raises(behavior.SourceError, match="belong inside hsm.transition"):
+        _ = behavior.parse_source(program)
+
+
+def test_starlark_api_documents_routine_schedules_and_lifetime() -> None:
+    for fragment in ('lifetime = "turn"', "hsm.every(seconds=number)", 'hsm.at(time="HH:MM"', "scheduled_at"):
+        assert fragment in behavior.STARLARK_API

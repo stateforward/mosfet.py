@@ -10,6 +10,7 @@ scope; without a target, the event is processed on the behavior itself.
 
 from . import source
 from . import schema
+from . import events
 from mosfet.abilities import ability
 
 import collections.abc
@@ -270,12 +271,50 @@ class _DispatchHost:
             current=current,
             target=None,
         )
+        terminal: hsm.Event[typing.Any] = output_event
+        tick = current.event.data
+        if isinstance(tick, events.TickData):
+            # Output for a schedule's tick leaves the routine as bot.behavior.tick: the tick the
+            # callbacks ran on, stamped with the selections they emitted for it.
+            from mosfet.abilities import processing
+
+            selections = processing.coerce_event_selections(data)
+            if not selections:
+                self._dispatch_callback_failure(
+                    current,
+                    "persistent routine output must select at least one cognition event "
+                    + "(an object with event, target?, data?, reason?, or a list of them).",
+                )
+                return
+            terminal = _behavior_event(
+                events.TickEvent.with_data(
+                    tick.model_copy(
+                        update={
+                            "output": tuple(
+                                {
+                                    key: value
+                                    for key, value in (
+                                        ("event", selection.event),
+                                        ("target", selection.target),
+                                        ("data", selection.data),
+                                        ("reason", selection.reason),
+                                    )
+                                    if value is not None
+                                }
+                                for selection in selections
+                            )
+                        }
+                    )
+                ),
+                current=current,
+                target=None,
+            )
         behavior = typing.cast(hsm.Dispatchable, current.instance)
         _ = hsm.dispatch(current.ctx, behavior, output_event)
         _ = hsm.dispatch(
             current.ctx,
             typing.cast(abilities.Ability[typing.Any, typing.Any], typing.cast(object, current.instance)),
-            ability.TerminalOutputEvent.with_data(output_event),
+            ability.TerminalOutputEvent.with_data(terminal),
         )
 
     def _dispatch_failure(self, current: _CallbackContext, failure: ability.FailureData) -> None:

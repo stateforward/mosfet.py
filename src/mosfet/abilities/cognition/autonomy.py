@@ -29,6 +29,7 @@ import pydantic
 
 from mosfet import behavior
 from mosfet.behavior.instance import LIFETIME_TURN
+from mosfet.behavior.instance import TURN_SILENCE_BOUND
 from mosfet.behavior.instance import Instance
 from mosfet.behavior import runtime
 from mosfet.behavior import seed
@@ -45,7 +46,7 @@ from mosfet.telemetry.hsm import Traced
 _LOG = logging.getLogger(__name__)
 
 _AUTONOMY_ID_MARKER = ":autonomy:"
-_BEHAVIOR_SILENCE_TIMEOUT = datetime.timedelta(seconds=1)
+_BEHAVIOR_SILENCE_TIMEOUT = TURN_SILENCE_BOUND
 _BEHAVIOR_ATTACH_TIMEOUT = datetime.timedelta(seconds=runtime.CALLBACK_WARMUP_SECONDS + 1)
 _BEHAVIOR_DETACH_TIMEOUT = datetime.timedelta(seconds=1)
 

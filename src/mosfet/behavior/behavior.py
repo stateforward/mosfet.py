@@ -2,11 +2,20 @@
 
 Behaviors compile to event-only HSM machines: Starlark callbacks may dispatch and process
 declared events, never bound abilities.
+
+A persistent routine's ``hsm.every`` / ``hsm.at`` schedules lower to a host timer transition
+on the declaring state (``hsm.every`` with a static interval, or a delay computed from the
+injected wall clock for ``at``) that dispatches a generated per-schedule tick event carrying
+``TickData``; the routine's own transition runs on that tick event, so its callbacks see the
+schedule and every output they emit for it leaves the behavior as ``bot.behavior.tick``.
 """
 
 from . import source
 from . import schema
 from . import runtime
+from . import events
+from . import schedule
+from .instance import LIFETIME_PERSISTENT
 from mosfet.abilities import ability
 
 import collections.abc
@@ -318,6 +327,7 @@ class Behavior(abilities.Ability[object, object]):
     output_event: typing.ClassVar[hsm.Event[object]]
     failed_event: typing.ClassVar[hsm.Event[ability.FailureData]]
     _spec: source.Source
+    _clock: schedule.WallClock | None
     _callback_runtime: runtime.CallbackRuntime
     _guard_evaluator: _GuardEvaluator
     _callback_executor: _CallbackExecutor
@@ -537,19 +547,81 @@ class Behavior(abilities.Ability[object, object]):
         activity.__name__ = f"_behavior_activity_{callback}"
         return activity
 
-    def __init__(self, *, spec: source.Source) -> None:
+    @staticmethod
+    def fire_tick(
+        trigger: typing.Literal["every", "at"],
+        tick_event: hsm.Event[events.TickData],
+        at: schedule.At | None,
+    ) -> collections.abc.Callable[[hsm.Context, "Behavior", hsm.Event[object]], None]:
+        """Host effect of a schedule's timer: stamp the tick and hand it to the routine's transition."""
+
+        def fire(ctx: hsm.Context, instance: Behavior, event: hsm.Event[object]) -> None:
+            clock = instance._clock
+            if clock is None:
+                _dispatch_callback_failure(ctx, instance, event, f"{instance._spec.name} has no injected clock.")
+                return
+            try:
+                fired_at = clock()
+                tick = events.TickData(
+                    name=instance._spec.name,
+                    trigger=trigger,
+                    scheduled_at=fired_at if at is None else at.latest_at_or_before(fired_at),
+                    fired_at=fired_at,
+                )
+            except ValueError as error:
+                _dispatch_callback_failure(ctx, instance, event, f"{instance._spec.name} tick failed: {error}")
+                return
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    tick_event.with_data(tick),
+                    id=uuid.uuid4().hex,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                ),
+            )
+
+        fire.__name__ = f"_behavior_tick_{trigger}"
+        return fire
+
+    @staticmethod
+    def at_delay(
+        at: schedule.At,
+    ) -> collections.abc.Callable[[hsm.Context, "Behavior", hsm.Event[object]], datetime.timedelta]:
+        """Time until the next wall-clock occurrence, re-read from the injected clock each loop."""
+
+        def delay(ctx: hsm.Context, instance: Behavior, event: hsm.Event[object]) -> datetime.timedelta:
+            del ctx, event
+            clock = instance._clock
+            # start() refuses a persistent routine without a clock; a negative delay ends the loop.
+            if clock is None:
+                return datetime.timedelta(seconds=-1)
+            return at.delay_from(clock())
+
+        delay.__name__ = "_behavior_at_delay"
+        return delay
+
+    def __init__(self, *, spec: source.Source, clock: schedule.WallClock | None = None) -> None:
         super().__init__()
         callback_runtime = runtime.CallbackRuntime(
             source=spec.source,
             declared_events=spec.declared_event_specs(failed_event=typing.cast(hsm.Event[object], self.failed_event)),
         )
         self._spec = spec
+        self._clock = clock
         self._callback_runtime = callback_runtime
         self._guard_evaluator = _GuardEvaluator(callback_runtime=callback_runtime, owner=self)
         self._callback_executor = _CallbackExecutor(callback_runtime=callback_runtime, owner=self)
 
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        if self._spec.lifetime == LIFETIME_PERSISTENT:
+            if self._clock is None:
+                raise ValueError(f"persistent routine {self._spec.name} needs an injected wall clock.")
+            now = self._clock()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError(f"persistent routine {self._spec.name} needs a timezone-aware wall clock.")
         await self._callback_runtime.warm()
         instance = await super().start(ctx, data)
         evaluator_model = self._guard_evaluator.model
@@ -706,10 +778,11 @@ def _guard_outcome_event(
 
 
 def generated_event_names(spec: source.Source) -> tuple[str, ...]:
-    """Return generated failure event names for a behavior spec."""
+    """Return generated event names for a behavior spec: its failure event, then one tick event per schedule."""
 
     event_prefix = f"bot.behavior.{_snake_case_model_name(spec.name)}"
-    return (f"{event_prefix}.failed",)
+    ticks = tuple(f"{event_prefix}.tick.{index}" for index, _ in enumerate(source.timed_elements(spec.model)))
+    return (f"{event_prefix}.failed", *ticks)
 
 
 def validate_event_names(spec: source.Source) -> None:
@@ -742,6 +815,11 @@ def define_model(
     event_objects[input_event.name] = input_event
     event_objects[output_event.name] = output_event
     event_objects[failed_event.name] = typing.cast(hsm.Event[object], failed_event)
+    tick_names = generated_event_names(spec)[1:]
+    for tick_name in tick_names:
+        event_objects[tick_name] = typing.cast(
+            hsm.Event[object], hsm.Event[events.TickData](name=tick_name, schema=events.TickData)
+        )
     input_validation_failure = hsm.transition(
         hsm.on(input_event),
         hsm.guard(Behavior.input_invalid),
@@ -762,7 +840,7 @@ def define_model(
     return typing.cast(
         hsm.Model,
         _lower_element(
-            spec.model,
+            _with_schedule_timers(spec.model, tick_names=tick_names),
             event_objects=event_objects,
             input_event_name=input_event.name,
             generated_failed_event=typing.cast(hsm.Event[object], failed_event),
@@ -886,7 +964,80 @@ def _lower_element(
         return hsm.after(_static_after(typing.cast(float | int, element["seconds"])))
     if kind == "final":
         return hsm.final(typing.cast(str, element["name"]))
+    if kind == "timer":
+        return _lower_timer(element, event_objects=event_objects)
     raise ValueError(f"Unsupported behavior hsm element kind: {kind}.")
+
+
+def _with_schedule_timers(model: dict[str, object], *, tick_names: tuple[str, ...]) -> dict[str, object]:
+    """Rewrite each scheduled transition to run on its tick event, adding a host timer beside it.
+
+    Ticks are numbered in ``source.timed_elements`` order, matching ``generated_event_names``.
+    """
+
+    pending = iter(tick_names)
+
+    def rewrite(element: dict[str, object]) -> dict[str, object]:
+        children = element.get("elements")
+        if not isinstance(children, tuple):
+            return element
+        rewritten: list[object] = []
+        timers: list[dict[str, object]] = []
+        for child in typing.cast(tuple[object, ...], children):
+            if not isinstance(child, dict):
+                rewritten.append(child)
+                continue
+            child_spec = typing.cast(dict[str, object], child)
+            timed = (
+                next(
+                    (
+                        item
+                        for item in typing.cast(tuple[object, ...], child_spec.get("elements", ()))
+                        if _is_element_of_kind(item, "every") or _is_element_of_kind(item, "at")
+                    ),
+                    None,
+                )
+                if child_spec.get("kind") == "transition"
+                else None
+            )
+            if timed is None:
+                rewritten.append(rewrite(child_spec))
+                continue
+            tick_name = next(pending)
+            rewritten.append(
+                {
+                    **child_spec,
+                    "elements": tuple(
+                        {"kind": "on", "events": (tick_name,)} if item is timed else item
+                        for item in typing.cast(tuple[object, ...], child_spec["elements"])
+                    ),
+                }
+            )
+            timers.append({"kind": "timer", "schedule": timed, "event": tick_name})
+        return {**element, "elements": (*rewritten, *timers)}
+
+    return rewrite(model)
+
+
+def _lower_timer(
+    element: dict[str, object],
+    *,
+    event_objects: collections.abc.Mapping[str, hsm.Event[object] | str],
+) -> hsm.Element:
+    """Host timer transition for one schedule: internal, so the declaring state keeps its loop running."""
+
+    timed = typing.cast(dict[str, object], element["schedule"])
+    tick_event = typing.cast(hsm.Event[events.TickData], event_objects[typing.cast(str, element["event"])])
+    if timed["kind"] == "every":
+        return hsm.transition(
+            hsm.every(_static_every(typing.cast(float | int, timed["seconds"]))),
+            hsm.effect(Behavior.fire_tick("every", tick_event, None)),
+        )
+    at = schedule.At.from_element(timed)
+    return hsm.transition(
+        hsm.every(Behavior.at_delay(at)),
+        hsm.effect(Behavior.fire_tick("at", tick_event, at)),
+    )
 
 
 def _is_element_of_kind(value: object, kind: str) -> typing.TypeGuard[dict[str, object]]:
@@ -1283,6 +1434,17 @@ def _static_after(
 
     after.__name__ = f"_behavior_after_{seconds:g}_seconds"
     return after
+
+
+def _static_every(
+    seconds: float | int,
+) -> collections.abc.Callable[[hsm.Context, Behavior, hsm.Event[object]], datetime.timedelta]:
+    def every(ctx: hsm.Context, instance: Behavior, event: hsm.Event[object]) -> datetime.timedelta:
+        del ctx, instance, event
+        return datetime.timedelta(seconds=float(seconds))
+
+    every.__name__ = f"_behavior_every_{seconds:g}_seconds"
+    return every
 
 
 __all__ = [

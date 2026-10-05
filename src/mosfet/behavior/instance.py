@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 import typing
 
@@ -26,6 +27,11 @@ STATUS_REASON_VALIDATION = "validation"
 Lifetime = typing.Literal["turn", "persistent"]
 LIFETIME_TURN: Lifetime = "turn"
 LIFETIME_PERSISTENT: Lifetime = "persistent"
+# Autonomy silences a turn behavior this long after it starts; a turn behavior's hsm.after
+# waits must fit inside it or they never fire.
+TURN_SILENCE_BOUND = datetime.timedelta(seconds=1)
+# Default floor for a persistent routine's hsm.every interval: every tick begins a whole turn.
+ROUTINE_MIN_EVERY = datetime.timedelta(seconds=60)
 
 
 class Instance(pydantic.BaseModel):
@@ -162,6 +168,43 @@ def _parse_code(error: BaseException) -> str:
     return diagnostic.E0002_STARLARK
 
 
+def _lifetime_errors(
+    model: dict[str, object],
+    *,
+    lifetime: Lifetime,
+    min_every: datetime.timedelta,
+    turn_after_bound: datetime.timedelta,
+) -> tuple[str, ...]:
+    """Schedule bounds a lifetime implies: turn hsm.after within the silence bound, every() above the floor."""
+
+    errors: list[str] = []
+
+    def visit(element: object) -> None:
+        if not isinstance(element, dict):
+            return
+        spec = typing.cast(dict[str, object], element)
+        kind = spec.get("kind")
+        seconds = spec.get("seconds")
+        if isinstance(seconds, int | float):
+            wait = datetime.timedelta(seconds=float(seconds))
+            if kind == "after" and lifetime == LIFETIME_TURN and wait > turn_after_bound:
+                errors.append(
+                    f"hsm.after(seconds={seconds:g}) never fires in a turn behavior, which is silenced "
+                    + f"{turn_after_bound.total_seconds():g}s after it starts; shorten it or make the "
+                    + "behavior a persistent routine."
+                )
+            if kind == "every" and wait < min_every:
+                errors.append(
+                    f"hsm.every(seconds={seconds:g}) is shorter than the "
+                    + f"{min_every.total_seconds():g}-second minimum routine interval."
+                )
+        for child in typing.cast(tuple[object, ...], spec.get("elements", ())):
+            visit(child)
+
+    visit(model)
+    return tuple(errors)
+
+
 def _check_program(
     program: str,
     *,
@@ -170,6 +213,8 @@ def _check_program(
     description: str | None,
     examples: tuple[str, ...] | None,
     require_build: bool,
+    min_every: datetime.timedelta,
+    turn_after_bound: datetime.timedelta,
 ) -> diagnostic.Checked[Instance]:
     """Validate without shadowing the ``source`` package (program is starlark text)."""
 
@@ -230,6 +275,18 @@ def _check_program(
         )
         return diagnostic.Checked[Instance](value=None, report=report)
 
+    lifetime_errors = _lifetime_errors(
+        spec.model, lifetime=spec.lifetime, min_every=min_every, turn_after_bound=turn_after_bound
+    )
+    if lifetime_errors:
+        report = diagnostic.report_of(
+            *(
+                _error(code=diagnostic.E0009_LIFETIME, message=message, stage=diagnostic.Stage.LIFETIME)
+                for message in lifetime_errors
+            )
+        )
+        return diagnostic.Checked[Instance](value=None, report=report)
+
     if require_build:
         try:
             _ = compiler.build(program)
@@ -249,6 +306,7 @@ def _check_program(
         triggers=triggers if triggers is not None else spec.triggers,
         description=description if description is not None else spec.description,
         examples=examples if examples is not None else spec.examples,
+        lifetime=spec.lifetime,
         status=STATUS_ACTIVE,
         status_reason=None,
         status_updated_at=None,
@@ -264,10 +322,15 @@ def check(
     description: str | None = None,
     examples: tuple[str, ...] | None = None,
     require_build: bool = True,
+    min_every: datetime.timedelta = ROUTINE_MIN_EVERY,
+    turn_after_bound: datetime.timedelta = TURN_SILENCE_BOUND,
 ) -> diagnostic.Checked[Instance]:
     """Validate Starlark behavior source and produce an ``Instance`` or a structured report.
 
-    Does not raise for validation failures — inspect ``result.ok`` / ``result.report``.
+    ``min_every`` is the shortest ``hsm.every`` interval a persistent routine may use;
+    ``turn_after_bound`` is the longest ``hsm.after`` wait a turn behavior may use (Autonomy
+    silences it after that). Does not raise for validation failures — inspect ``result.ok`` /
+    ``result.report``.
     """
 
     return _check_program(
@@ -277,6 +340,8 @@ def check(
         description=description,
         examples=examples,
         require_build=require_build,
+        min_every=min_every,
+        turn_after_bound=turn_after_bound,
     )
 
 
@@ -317,11 +382,13 @@ __all__ = [
     "LIFETIME_PERSISTENT",
     "LIFETIME_TURN",
     "Lifetime",
+    "ROUTINE_MIN_EVERY",
     "STATUS_ACTIVE",
     "STATUS_BROKEN",
     "STATUS_DRAFT",
     "STATUS_REASON_VALIDATION",
     "Status",
+    "TURN_SILENCE_BOUND",
     "Instance",
     "check",
     "start",

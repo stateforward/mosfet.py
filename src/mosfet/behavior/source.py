@@ -1,6 +1,8 @@
 """Starlark source contracts for behavior HSM behaviors."""
 
 from . import schema
+from .instance import LIFETIME_PERSISTENT, LIFETIME_TURN, Lifetime
+from .schedule import WEEKDAYS
 
 import io
 import abc
@@ -13,6 +15,7 @@ import threading
 import time
 import tokenize
 import typing
+import zoneinfo
 from typing import override
 
 import hsm
@@ -42,16 +45,20 @@ SOURCE_WORKER_READY = b'{"ready":true}\n'
 _CALLBACK_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 _MODEL_NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9_]*$")
+_TIME_OF_DAY_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+_TIMED_KINDS = frozenset({"every", "at"})
 _HSM_NAMESPACE_NAMES = frozenset(
     {
         "activity",
         "after",
+        "at",
         "defer",
         "define",
         "dispatch",
         "effect",
         "entry",
         "event",
+        "every",
         "exit",
         "final",
         "guard",
@@ -65,10 +72,12 @@ _HSM_NAMESPACE_NAMES = frozenset(
 _ELEMENT_KEYS: dict[str, frozenset[str]] = {
     "activity": frozenset({"kind", "callbacks"}),
     "after": frozenset({"kind", "seconds"}),
+    "at": frozenset({"kind", "time", "days", "tz"}),
     "defer": frozenset({"kind", "events"}),
     "define": frozenset({"kind", "name", "elements"}),
     "effect": frozenset({"kind", "callbacks"}),
     "entry": frozenset({"kind", "callbacks"}),
+    "every": frozenset({"kind", "seconds"}),
     "exit": frozenset({"kind", "callbacks"}),
     "final": frozenset({"kind", "name"}),
     "guard": frozenset({"kind", "callback"}),
@@ -297,7 +306,8 @@ class Source(pydantic.BaseModel):
     model: ElementSpec = pydantic.Field(
         description=(
             "SourceData-authored HSM model tree. It mirrors lower-case hsm builders such as define, state, "
-            "transition, on, guard, effect, entry, exit, activity, target, initial, defer, after, and final."
+            "transition, on, guard, effect, entry, exit, activity, target, initial, defer, after, every, at, "
+            "and final."
         ),
     )
     triggers: tuple[str, ...] = pydantic.Field(
@@ -316,6 +326,16 @@ class Source(pydantic.BaseModel):
         max_length=SOURCE_MAX_COLLECTION_ITEMS,
         description="Natural-language examples of when the behavior should be proposed.",
         examples=[["answer hello with a matching greeting"]],
+    )
+    lifetime: Lifetime = pydantic.Field(
+        default=LIFETIME_TURN,
+        description=(
+            "How long the running behavior lives. turn (default): Autonomy runs it for one matching "
+            "turn and it may not use hsm.every / hsm.at. persistent: a routine that keeps running "
+            "across turns and restarts; it must schedule at least one transition with hsm.every or "
+            "hsm.at, and each tick it emits begins a new turn."
+        ),
+        examples=["turn", "persistent"],
     )
     source: str = pydantic.Field(
         default="",
@@ -341,6 +361,16 @@ class Source(pydantic.BaseModel):
         if self.model.get("name") != self.name:
             raise ValueError("behavior model name must match the behavior name.")
         _ = self.declared_event_specs()
+        timed = timed_elements(self.model)
+        if self.lifetime == LIFETIME_PERSISTENT and not timed:
+            raise ValueError(
+                "a persistent routine must schedule at least one transition with hsm.every(seconds=...) "
+                + "or hsm.at(time=..., tz=...)."
+            )
+        if self.lifetime == LIFETIME_TURN and timed:
+            raise ValueError(
+                'hsm.every / hsm.at schedules need lifetime = "persistent"; a turn behavior only lives for one turn.'
+            )
         return self
 
     def declared_event_specs(self, *, failed_event: hsm.Event[object] | None = None) -> dict[str, EventContract]:
@@ -429,6 +459,15 @@ def _after_builder(*, seconds: float) -> dict[str, object]:
     return _element("after", seconds=seconds)
 
 
+def _every_builder(*, seconds: float) -> dict[str, object]:
+    return _element("every", seconds=seconds)
+
+
+def _at_builder(*, time: str, tz: str, days: object = WEEKDAYS) -> dict[str, object]:
+    day_names = tuple(typing.cast(list[object] | tuple[object, ...], days)) if isinstance(days, list | tuple) else days
+    return _element("at", time=time, days=day_names, tz=tz)
+
+
 def _dispatch_parse_stub(event: object, data: object | None = None) -> None:
     del event, data
     raise SourceError("dispatch is only available inside behavior callbacks.")
@@ -449,12 +488,14 @@ def starlark_globals() -> dict[str, object]:
     return {
         "activity": _activity_builder,
         "after": _after_builder,
+        "at": _at_builder,
         "defer": _defer_builder,
         "define": _define_builder,
         "dispatch": _dispatch_parse_stub,
         "effect": _effect_builder,
         "entry": _entry_builder,
         "event": _event_builder,
+        "every": _every_builder,
         "exit": _exit_builder,
         "final": _final_builder,
         "guard": _guard_builder,
@@ -480,6 +521,7 @@ Required program shape:
    - triggers = ["external.event.name", ...]
    - description = "..."
    - examples = ["when this should run", ...]
+   - lifetime = "turn" (default) or "persistent" (see Lifetime below)
 4) top-level callback defs: def callback_name(event): ...
 5) behavior = hsm.define(
        "PascalCaseName",
@@ -520,6 +562,8 @@ Builders available in Starlark (hsm. prefix optional after normalize):
 - hsm.effect("callback_name", ...)
 - hsm.entry("callback_name", ...) / hsm.exit(...) / hsm.activity(...)
 - hsm.after(seconds=number)
+- hsm.every(seconds=number)       # persistent routines only; fixed interval
+- hsm.at(time="HH:MM", days=["mon", ...], tz="Area/City")  # persistent routines only
 - hsm.defer(*events)
 - hsm.final(name)
 - hsm.dispatch(event, data, target=None)
@@ -542,6 +586,24 @@ Behavior-only Starlark limits (not full HSM host DSL):
 - Effects/activities must hsm.dispatch(declared_event, payload_dict, target=optional_id)
   and must not return a value (returning is a runtime error)
 - To wait on a reply: transition on the reply event after dispatching with source stamped
+
+Lifetime (turn vs persistent routine):
+- turn (default): Autonomy runs the behavior for one matching turn; it is silenced about a second
+  after it starts, so hsm.after must stay within that bound and hsm.every / hsm.at are rejected.
+- persistent: a routine that keeps running across turns and survives restarts until it is changed
+  or broken. Declare lifetime = "persistent" and schedule at least one transition with
+  hsm.every or hsm.at. Use one when the need is recurring or time-based (or the user asked for
+  something recurring); otherwise keep turn.
+- hsm.transition(hsm.every(seconds=N), hsm.effect("cb")): fires every N seconds while its state is
+  active (N has a minimum; intervals restart from the routine's start, no catch-up for missed ticks).
+- hsm.transition(hsm.at(time="08:00", days=["mon", "tue", "wed", "thu", "fri"], tz="America/New_York"),
+  hsm.effect("cb")): fires at that wall-clock time on those weekdays in that IANA time zone
+  (daylight-saving correct; days defaults to every day). A missed occurrence is not replayed.
+- A scheduled transition has exactly one hsm.every or hsm.at and no hsm.on / hsm.after.
+- Its callbacks receive event["data"] = {"name", "trigger" ("every"|"at"), "scheduled_at",
+  "fired_at", "output": []} (ISO-8601 times). Effects hsm.dispatch(output_event, selection(s));
+  each tick's selections begin a new turn as a bot.behavior.tick observation the bot then decides on.
+- A persistent routine has no live turn: its input_event is never dispatched by Autonomy.
 
 JSON schema for event payloads (object-shaped only):
 - Supported: type, properties, required, additionalProperties, items, enum, const,
@@ -734,6 +796,9 @@ def _restore_model_tree(value: object) -> object:
     callbacks = mapping.get("callbacks")
     if isinstance(callbacks, list):
         restored["callbacks"] = tuple(typing.cast(list[object], callbacks))
+    days = mapping.get("days")
+    if isinstance(days, list):
+        restored["days"] = tuple(typing.cast(list[object], days))
     return restored
 
 
@@ -1227,6 +1292,7 @@ def _behavior_spec_from_result(runtime: Starlark, result: object) -> Source:
             "triggers": _runtime_get(runtime, "triggers", ()),
             "description": _runtime_get(runtime, "description", ""),
             "examples": _runtime_get(runtime, "examples", ()),
+            "lifetime": _runtime_get(runtime, "lifetime", LIFETIME_TURN),
         }
     )
 
@@ -1266,7 +1332,8 @@ def _validate_element(element: object, *, path: str, depth: int) -> None:
         name = element_spec.get("name")
         if name is not None:
             _validate_name(name, path=f"{path}.name")
-        _validate_elements(element_spec.get("elements"), path=f"{path}.elements", depth=depth)
+        _validate_elements(element_spec.get("elements"), path=f"{path}.elements", depth=depth, timed_allowed=True)
+        _validate_transition_triggers(typing.cast(tuple[object, ...], element_spec["elements"]), path=path)
     elif kind == "initial":
         _validate_elements(element_spec.get("elements"), path=f"{path}.elements", depth=depth)
     elif kind in {"on", "defer"}:
@@ -1289,20 +1356,78 @@ def _validate_element(element: object, *, path: str, depth: int) -> None:
         callback_names = typing.cast(tuple[object, ...], callbacks)
         for index, callback in enumerate(callback_names):
             _validate_callback(callback, path=f"{path}.callbacks[{index}]")
-    elif kind == "after":
+    elif kind in {"after", "every"}:
         seconds = element_spec.get("seconds")
-        if not isinstance(seconds, (int, float)) or seconds <= 0:
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
             raise ValueError(f"{path}.seconds must be a positive number.")
+    elif kind == "at":
+        _validate_at(element_spec, path=path)
     elif kind == "final":
         _validate_name(element_spec.get("name"), path=f"{path}.name")
 
 
-def _validate_elements(value: object, *, path: str, depth: int) -> None:
+def _validate_at(element: ElementSpec, *, path: str) -> None:
+    time_of_day = element.get("time")
+    if not isinstance(time_of_day, str) or _TIME_OF_DAY_RE.fullmatch(time_of_day) is None:
+        raise ValueError(f'{path}.time must be a 24-hour "HH:MM" time of day, such as "08:00".')
+    days = element.get("days")
+    if not isinstance(days, tuple) or not days:
+        raise ValueError(f"{path}.days must list at least one weekday ({', '.join(WEEKDAYS)}).")
+    day_names = typing.cast(tuple[object, ...], days)
+    unknown = tuple(str(day) for day in day_names if day not in WEEKDAYS)
+    if unknown:
+        raise ValueError(f"{path}.days has unknown weekdays {', '.join(unknown)}; use {', '.join(WEEKDAYS)}.")
+    if len(set(day_names)) != len(day_names):
+        raise ValueError(f"{path}.days must not repeat a weekday.")
+    tz = element.get("tz")
+    if not isinstance(tz, str) or not tz or len(tz) > 64:
+        raise ValueError(f'{path}.tz must be an IANA time zone name such as "America/New_York".')
+    try:
+        _ = zoneinfo.ZoneInfo(tz)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError) as error:
+        raise ValueError(f"{path}.tz {tz!r} is not a known IANA time zone name.") from error
+
+
+def _validate_transition_triggers(elements: tuple[object, ...], *, path: str) -> None:
+    """A scheduled transition fires on its schedule alone: one every/at and no other trigger."""
+
+    kinds = [typing.cast(ElementSpec, element).get("kind") for element in elements if isinstance(element, dict)]
+    timed = [kind for kind in kinds if kind in _TIMED_KINDS]
+    if not timed:
+        return
+    if len(timed) > 1 or "on" in kinds or "after" in kinds:
+        raise ValueError(f"{path} must be triggered by exactly one hsm.every or hsm.at and nothing else.")
+
+
+def timed_elements(model: ElementSpec) -> tuple[ElementSpec, ...]:
+    """Return the ``every`` / ``at`` schedule elements declared anywhere in a model tree, in order."""
+
+    found: list[ElementSpec] = []
+
+    def visit(element: object, depth: int) -> None:
+        if depth > SOURCE_MAX_NESTING or not isinstance(element, dict):
+            return
+        element_spec = typing.cast(ElementSpec, element)
+        if element_spec.get("kind") in _TIMED_KINDS:
+            found.append(element_spec)
+            return
+        for child in typing.cast(tuple[object, ...], element_spec.get("elements", ())):
+            visit(child, depth + 1)
+
+    visit(model, 0)
+    return tuple(found)
+
+
+def _validate_elements(value: object, *, path: str, depth: int, timed_allowed: bool = False) -> None:
     if not isinstance(value, tuple):
         raise ValueError(f"{path} must be a tuple of hsm elements.")
     elements = typing.cast(tuple[object, ...], value)
     if len(elements) > SOURCE_MAX_COLLECTION_ITEMS:
         raise ValueError(f"{path} exceeds its collection item budget.")
+    if not timed_allowed:
+        for index, candidate in enumerate(elements):
+            if isinstance(candidate, dict) and typing.cast(ElementSpec, candidate).get("kind") in _TIMED_KINDS:
+                raise ValueError(f"{path}[{index}]: hsm.every / hsm.at belong inside hsm.transition(...).")
     for index, element in enumerate(elements):
         _validate_element(element, path=f"{path}[{index}]", depth=depth + 1)
 
@@ -1417,6 +1542,7 @@ __all__ = [
     "normalize_source",
     "parse_source",
     "starlark_globals",
+    "timed_elements",
 ]
 
 

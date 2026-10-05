@@ -667,9 +667,11 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
 ) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         store = memory.Memory()
-        installed = behavior.start(
-            _WAITING_BEHAVIOR_SOURCE,
+        # A turn behavior whose wait outlasts the silence bound: check() refuses to author one,
+        # so the row is installed directly to hold a candidate active while cancel arrives.
+        installed = behavior.Instance(
             name="DelayedRing",
+            source=_WAITING_BEHAVIOR_SOURCE,
             triggers=(SoundEvent.name,),
         )
         _ = store.execute(

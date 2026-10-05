@@ -28,6 +28,7 @@ class Stage(enum.StrEnum):
     PARSE = "parse"
     NAMES = "names"
     BUILD = "build"
+    LIFETIME = "lifetime"
     APPLY = "apply"
 
 
@@ -169,6 +170,7 @@ E0005_EVENT_NAMES = "E0005"
 E0006_NAME_MISMATCH = "E0006"
 E0007_BUILD = "E0007"
 E0008_APPLY = "E0008"
+E0009_LIFETIME = "E0009"
 
 _HELP: dict[str, str] = {
     E0001_EMPTY: "Provide non-empty Starlark behavior source.",
@@ -184,6 +186,11 @@ _HELP: dict[str, str] = {
         "under hsm.state(...). Initial transitions cannot have guards or extra triggers. "
         "Callbacks are string names; payloads are event['data']. Behaviors dispatch declared events only "
         "(no ability bindings)."
+    ),
+    E0009_LIFETIME: (
+        "A turn behavior lives for one turn and is silenced about a second after it starts: keep hsm.after "
+        'within that bound, or declare lifetime = "persistent" and schedule it with hsm.every / hsm.at. '
+        "A persistent routine's hsm.every interval must be at least the minimum the check names."
     ),
     E0008_APPLY: (
         "Dry-run apply failed against the live turn stimulus. Effects must hsm.dispatch(output_event, selection) "
@@ -211,6 +218,7 @@ __all__ = [
     "E0006_NAME_MISMATCH",
     "E0007_BUILD",
     "E0008_APPLY",
+    "E0009_LIFETIME",
     "Level",
     "Report",
     "Stage",
