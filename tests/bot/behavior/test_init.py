@@ -17,3 +17,5 @@ def test_behavior_package_exports_public_domain_api() -> None:
     assert behavior.STARLARK_API is behavior.source.STARLARK_API
     assert "hsm.define" in behavior.STARLARK_API
     assert callable(behavior.define_model)
+    assert behavior.TickEvent.name == "bot.behavior.tick"
+    assert "TickData" in behavior.__all__

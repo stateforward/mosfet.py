@@ -10,6 +10,9 @@ Inventory events (first-class package exports):
 - ``ChangeData`` / ``ChangeEvent`` — ``bot.behavior.change``
 - ``BreakData`` / ``BreakEvent`` — ``bot.behavior.break``
 
+Routine event: ``TickData`` / ``TickEvent`` — ``bot.behavior.tick``, a running persistent
+routine's fired schedule and the selections it emitted.
+
 Heavy modules (behavior, runtime, compiler) load lazily to avoid import cycles
 with abilities/cognition.
 """
@@ -26,6 +29,8 @@ from .events import (
     ChangeEvent,
     CreateData,
     CreateEvent,
+    TickData,
+    TickEvent,
     data_from_event,
     event_for_data,
     is_inventory_event,
@@ -91,6 +96,8 @@ __all__ = [
     "ChangeEvent",
     "CreateData",
     "CreateEvent",
+    "TickData",
+    "TickEvent",
     "Instance",
     "Seed",
     "Behavior",

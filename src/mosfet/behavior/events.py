@@ -1,8 +1,11 @@
-"""Behavior inventory HSM events: create, change, break.
+"""Behavior HSM events: inventory create, change, break, and the routine tick.
 
-First-class behavior-package contracts. Reflection applies these (build Instance,
-validate Starlark source, store); reasoning may record them with episodes.
+First-class behavior-package contracts. Reflection applies the inventory events (build
+Instance, validate Starlark source, store); reasoning may record them with episodes.
 The event is the inventory operation; create/change install executable behavior.
+
+``TickEvent`` is what a running persistent routine emits when one of its ``hsm.every`` /
+``hsm.at`` schedules fires and its callbacks produce output.
 """
 
 from __future__ import annotations
@@ -183,6 +186,94 @@ class BreakData(pydantic.BaseModel):
     )
 
 
+class TickData(pydantic.BaseModel):
+    """Payload for ``bot.behavior.tick``: one fired schedule of a persistent routine and what it emitted."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A persistent routine's schedule fired. name is the routine, trigger is the schedule kind "
+                "(every: fixed interval; at: wall-clock time of day), scheduled_at is the occurrence the "
+                "schedule was due, fired_at is when it actually fired, and output carries the cognition "
+                "event selections the routine emitted for this tick. The tick is an observation: it begins "
+                "a new turn, and the bot decides what (if anything) to do with it."
+            ),
+            "examples": [
+                {
+                    "name": "MorningBriefing",
+                    "trigger": "at",
+                    "scheduled_at": "2026-10-05T08:00:00-04:00",
+                    "fired_at": "2026-10-05T08:00:00.012000-04:00",
+                    "output": [
+                        {
+                            "event": "bot.speaking.say",
+                            "target": "speaker",
+                            "data": {"text": "Good morning. It is eight o'clock."},
+                            "reason": "Weekday morning briefing routine.",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    name: str = pydantic.Field(
+        min_length=1,
+        description="PascalCase name of the persistent routine (its behavior inventory name) that ticked.",
+        examples=["MorningBriefing"],
+    )
+    trigger: typing.Literal["every", "at"] = pydantic.Field(
+        description=(
+            "Schedule kind that fired: every (hsm.every fixed interval) or at (hsm.at wall-clock time "
+            "of day on chosen weekdays in a named time zone)."
+        ),
+        examples=["at", "every"],
+    )
+    scheduled_at: pydantic.AwareDatetime = pydantic.Field(
+        description=(
+            "Timezone-aware ISO-8601 occurrence this tick was due. For at() it is the wall-clock "
+            "occurrence in the routine's time zone; for every() it is the interval deadline, which is "
+            "when the timer fired."
+        ),
+        examples=["2026-10-05T08:00:00-04:00"],
+    )
+    fired_at: pydantic.AwareDatetime = pydantic.Field(
+        description="Timezone-aware ISO-8601 time the schedule actually fired, read from the injected clock.",
+        examples=["2026-10-05T08:00:00.012000-04:00"],
+    )
+    output: tuple[dict[str, object], ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Cognition event selections the routine emitted for this tick, each an object with event "
+            "(required), target, data, and reason. Empty on the routine's own tick event, which its "
+            "callbacks see before they emit."
+        ),
+        examples=[
+            [
+                {
+                    "event": "bot.speaking.say",
+                    "target": "speaker",
+                    "data": {"text": "Good morning."},
+                    "reason": "Weekday morning briefing routine.",
+                }
+            ]
+        ],
+    )
+
+    @pydantic.field_validator("output")
+    @classmethod
+    def validate_selections(cls, value: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
+        """Each selection names the event it selects."""
+
+        for index, selection in enumerate(value):
+            event_name = selection.get("event")
+            if not isinstance(event_name, str) or not event_name:
+                raise ValueError(f"output[{index}] must name a non-empty event.")
+        return value
+
+
 CreateEvent = hsm.Event[CreateData](
     name="bot.behavior.create",
     kind=event.EventKind,
@@ -197,6 +288,12 @@ BreakEvent = hsm.Event[BreakData](
     name="bot.behavior.break",
     kind=event.EventKind,
     schema=BreakData,
+)
+
+
+TickEvent = hsm.Event[TickData](
+    name="bot.behavior.tick",
+    schema=TickData,
 )
 
 
@@ -241,6 +338,8 @@ __all__ = [
     "ChangeEvent",
     "CreateData",
     "CreateEvent",
+    "TickData",
+    "TickEvent",
     "data_from_event",
     "event_for_data",
     "is_inventory_event",
