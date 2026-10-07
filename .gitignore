@@ -37,3 +37,8 @@ test-results/
 
 # internal dev journal
 .blog/
+
+# Generated native extensions (built by hatch_build.py; wheel includes them via pyproject `artifacts`)
+src/**/_native/*.dylib
+src/**/_native/*.dll
+src/**/_native/*.so
