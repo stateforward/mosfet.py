@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as hsm from "../src/hsm.ts";
 
-import { commandEventNameLegal, Dashboard, postCommandHttp, type DashboardSnapshot } from "../src/dashboard.ts";
+import { Dashboard, type DashboardSnapshot } from "../src/dashboard.ts";
 import { Focuser } from "../src/flow/focuser.ts";
 import { getViewportForBounds } from "../src/flow/path.ts";
 import { Panner } from "../src/flow/panner.ts";
@@ -96,30 +96,14 @@ function countGraphSignals(graph: Graph): { draws: string[][]; destroys: number 
   return signals;
 }
 
-function ownedActors(host: { context(): hsm.Context }): hsm.Instance[] {
-  const instances = host.context().Value(hsm.Keys.Instances);
-  if (typeof instances !== "object" || instances === null) return [];
-  const actors: hsm.Instance[] = [];
-  for (const value of Object.values(instances as Record<string, unknown>)) {
-    if (value === host || typeof value !== "object" || value === null) continue;
-    if (typeof (value as { context?: unknown }).context !== "function") continue;
-    if (typeof (value as { state?: unknown }).state !== "function") continue;
-    if ((value as hsm.Instance).context().Value(hsm.Keys.Owner) !== host) continue;
-    actors.push(value as hsm.Instance);
-  }
-  return actors;
-}
-
 function bootDashboard(options: {
   onSnapshot?: (snapshot: DashboardSnapshot) => void;
   connectStream?: Dashboard["connectStream"];
-  postCommand?: Dashboard["postCommand"];
 } = {}): Dashboard {
   const dashboard = new Dashboard();
   dashboard.origin = "http://localhost";
   if (options.onSnapshot !== undefined) dashboard.onSnapshot = options.onSnapshot;
   if (options.connectStream !== undefined) dashboard.connectStream = options.connectStream;
-  if (options.postCommand !== undefined) dashboard.postCommand = options.postCommand;
   dashboard.boot();
   return dashboard;
 }
@@ -856,38 +840,6 @@ describe("companion-style HSM controllers", () => {
     assert.equal(dashboard.state(), "");
   });
 
-  test("dashboard stop then boot attaches a new Command", async () => {
-    const posted: string[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push(command.eventName);
-        return { result: "accepted", detail: "ok" };
-      },
-    });
-    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "{}" });
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.deepEqual(posted, ["phone.ring"]);
-    const prior = ownedActors(dashboard);
-    const commandCount = 1;
-    assert.equal(prior.length, commandCount);
-    const stoppedCommand = prior[0];
-    assert.ok(stoppedCommand !== undefined);
-    assert.notEqual(stoppedCommand.state(), "");
-    await dashboard.stop();
-    assert.equal(dashboard.state(), "");
-    assert.equal(stoppedCommand.state(), "");
-    assert.equal(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: stoppedCommand })?.reason, HOST_STOPPED);
-    dashboard.boot();
-    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.hangup", dataJson: "{}" });
-    await waitFor(() => posted.length === 2);
-    assert.deepEqual(posted, ["phone.ring", "phone.hangup"]);
-    const next = ownedActors(dashboard);
-    assert.equal(next.length, commandCount);
-    assert.notEqual(next[0], stoppedCommand);
-    assert.notEqual(next[0]?.state(), "");
-    await stopDashboard(dashboard);
-  });
-
   test("overlapping dashboard stop both complete without hanging", async () => {
     const dashboard = bootDashboard();
     const first = dashboard.stop();
@@ -897,112 +849,13 @@ describe("companion-style HSM controllers", () => {
     assert.equal(dashboard.state(), "");
   });
 
-  test("requestDetach stops command then stays bound", async () => {
-    const posted: string[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push(command.eventName);
-        return { result: "accepted", detail: "ok" };
-      },
-    });
+  test("requestDetach reaches disconnected then reattaches while staying bound", async () => {
+    const dashboard = bootDashboard();
     dashboard.requestDetach();
     await waitFor(() => dashboard.state().endsWith("/disconnected"));
     assert.notEqual(hsm.hostDropFrom({ error: STARTED_RUNTIME_ERROR, host: dashboard })?.reason, HOST_STOPPED);
     dashboard.requestAttach();
     await waitFor(() => dashboard.state().includes("/session"));
-    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "{}" });
-    await waitFor(() => posted.length === 1);
-    assert.deepEqual(posted, ["phone.ring"]);
-    await stopDashboard(dashboard);
-  });
-
-  test("command event-name charset rejects empty, whitespace, overlong, and non-letter start", async () => {
-    const maxLegal = 128;
-    const overlong = 129;
-    const letter = "a";
-    const legalMax = letter.repeat(maxLegal);
-    const tooLong = letter.repeat(overlong);
-    const leadingSpace = " phone.ring";
-    const trailingSpace = "phone.ring ";
-    const digitFirst = "1phone";
-    const nameIllegal = false;
-    const nameLegal = true;
-    assert.equal(commandEventNameLegal(""), nameIllegal);
-    assert.equal(commandEventNameLegal(legalMax), nameLegal);
-    assert.equal(commandEventNameLegal(tooLong), nameIllegal);
-    assert.equal(commandEventNameLegal(leadingSpace), nameIllegal);
-    assert.equal(commandEventNameLegal(trailingSpace), nameIllegal);
-    assert.equal(commandEventNameLegal(digitFirst), nameIllegal);
-  });
-
-  test("empty command name fails without posting", async () => {
-    const posted: string[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push(command.eventName);
-        return { result: "accepted", detail: "ok" };
-      },
-    });
-    await dashboard.dispatch("dashboard.command.send", { eventName: "", dataJson: "" });
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.deepEqual(posted, []);
-    assert.equal(dashboard.snapshot().commandResult?.detail, "event_name is required");
-    await stopDashboard(dashboard);
-  });
-
-  test("whitespace and digit-first command names fail as not allowed, not required", async () => {
-    const posted: string[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push(command.eventName);
-        return { result: "accepted", detail: "ok" };
-      },
-    });
-    const notAllowed = "event_name is not an allowed command";
-    await dashboard.dispatch("dashboard.command.send", { eventName: " ", dataJson: "" });
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.deepEqual(posted, []);
-    assert.equal(dashboard.snapshot().commandResult?.detail, notAllowed);
-    await dashboard.dispatch("dashboard.command.send", { eventName: "1go", dataJson: "" });
-    await waitFor(() => dashboard.snapshot().commandResult?.detail === notAllowed && dashboard.snapshot().commandEventName === "1go");
-    assert.deepEqual(posted, []);
-    const httpEmpty = await postCommandHttp({ eventName: "", dataJson: "" });
-    const httpSpace = await postCommandHttp({ eventName: " ", dataJson: "" });
-    assert.equal(httpEmpty.detail, "event_name is required");
-    assert.equal(httpSpace.detail, notAllowed);
-    await stopDashboard(dashboard);
-  });
-
-  test("send event posts the named command and records the gateway result", async () => {
-    const posted: Array<{ eventName: string; dataJson: string }> = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push({ eventName: command.eventName, dataJson: command.dataJson });
-        return { result: "no_subscriber", detail: "no subscriber" };
-      },
-    });
-    const afterPrefill = await dashboard.dispatch("dashboard.command.prefill", { eventName: "phone.ring" });
-    assert.equal(afterPrefill.commandEventName, "phone.ring");
-    await dashboard.dispatch("dashboard.command.send", {
-      eventName: "phone.ring",
-      dataJson: "",
-    });
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.deepEqual(posted, [{ eventName: "phone.ring", dataJson: "" }]);
-    assert.equal(dashboard.snapshot().commandResult?.result, "no_subscriber");
-    await stopDashboard(dashboard);
-  });
-
-  test("command send failures complete through dashboard.command.failed", async () => {
-    const dashboard = bootDashboard({
-      postCommand: async () => {
-        return { result: "error", detail: "gateway down" };
-      },
-    });
-    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.equal(dashboard.snapshot().commandResult?.result, "error");
-    assert.equal(dashboard.snapshot().commandResult?.detail, "gateway down");
     await stopDashboard(dashboard);
   });
 
@@ -1028,7 +881,7 @@ describe("companion-style HSM controllers", () => {
     assert.equal(collectorUrl({ origin }), "/v1/traces/stream");
     assert.equal(collectorUrl({ requested: "/v1/traces/stream", origin }), "/v1/traces/stream");
     assert.equal(collectorUrl({ requested: "http://localhost:8080/v1/traces/stream", origin }), "/v1/traces/stream");
-    assert.equal(collectorUrl({ requested: "/v1/traces/stream/../../../v1/commands", origin }), null);
+    assert.equal(collectorUrl({ requested: "/v1/traces/stream/../../../v1/models", origin }), null);
     assert.equal(collectorUrl({ requested: "/v1/traces/streamevil", origin }), null);
     assert.equal(collectorUrl({ requested: "/v1/traces/stream?token=1", origin }), null);
     assert.equal(collectorUrl({ requested: "javascript:alert(1)", origin }), null);
@@ -1141,105 +994,6 @@ describe("companion-style HSM controllers", () => {
     assert.equal(dashboard.snapshot().statePath.includes(viewing), viewingAbsent);
     assert.deepEqual(opened, []);
     assert.match(dashboard.snapshot().errorMessage ?? "", /collector url is not allowed/);
-    await stopDashboard(dashboard);
-  });
-
-  test("typed dashboard.command.send posts through the modeled event", async () => {
-    const posted: string[] = [];
-    const kinds: unknown[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted.push(command.eventName);
-        return { result: "accepted", detail: "ok" };
-      },
-    });
-    const inner = dashboard.dispatch.bind(dashboard) as (event: unknown, data?: unknown) => unknown;
-    dashboard.dispatch = ((eventOrContext: unknown, data?: unknown) => {
-      if (typeof eventOrContext === "object" && eventOrContext !== null && "kind" in eventOrContext) {
-        kinds.push((eventOrContext as { kind: unknown }).kind);
-      }
-      return inner(eventOrContext, data);
-    }) as unknown as Dashboard["dispatch"];
-    await dashboard.dispatch(hsm.typedEvent({ event: { name: "dashboard.command.send", kind: hsm.Kinds.Event }, data: {
-      eventName: "phone.ring",
-      dataJson: "",
-    } }));
-    await waitFor(() => dashboard.snapshot().commandResult !== null);
-    assert.deepEqual(posted, ["phone.ring"]);
-    assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
-    assert.ok(kinds.includes(hsm.Kinds.Event));
-    await stopDashboard(dashboard);
-  });
-
-  test("overlapping command sends ignore stale completion ids", async () => {
-    let releaseFirst = (): void => {
-      return;
-    };
-    const firstHold = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let calls = 0;
-    const dashboard = bootDashboard({
-      postCommand: async () => {
-        calls += 1;
-        if (calls === 1) {
-          await firstHold;
-          return { result: "accepted", detail: "first" };
-        }
-        return { result: "accepted", detail: "second" };
-      },
-    });
-    const first = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "1" });
-    await waitFor(() => calls === 1);
-    const second = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "2" });
-    await waitFor(() => dashboard.snapshot().commandResult?.detail === "second");
-    releaseFirst();
-    await first;
-    await second;
-    assert.equal(dashboard.snapshot().commandResult?.detail, "second");
-    await stopDashboard(dashboard);
-  });
-
-  test("resolved accepted command is not relabeled canceled by later stop", async () => {
-    const seen: DashboardSnapshot[] = [];
-    const dashboard = bootDashboard({
-      postCommand: async () => ({ result: "accepted", detail: "committed" }),
-    });
-    dashboard.onSnapshot = (snapshot) => {
-      seen.push(snapshot);
-    };
-    await dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-    await waitFor(() => dashboard.snapshot().commandResult?.result === "accepted");
-    await stopDashboard(dashboard);
-    assert.equal(seen.some((snapshot) => snapshot.commandResult?.result === "canceled"), false);
-    assert.equal(seen.some((snapshot) => snapshot.commandResult?.detail === "committed"), true);
-  });
-
-  test("stale in-flight send cannot cancel the successor send", async () => {
-    const holds: Array<{
-      resolve: (result: { result: "accepted"; detail: string }) => void;
-    }> = [];
-    const dashboard = bootDashboard({
-      postCommand: async () => {
-        return await new Promise((resolve) => {
-          holds.push({ resolve });
-        });
-      },
-    });
-    void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "1" });
-    await waitFor(() => holds.length === 1);
-    const second = dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "2" });
-    await waitFor(() => holds.length === 2);
-    await new Promise<void>((resolve) => {
-      globalThis.setTimeout(resolve, YIELD_MS);
-    });
-    assert.notEqual(dashboard.snapshot().commandResult?.result, "canceled");
-    holds[1]?.resolve({ result: "accepted", detail: "second" });
-    await waitFor(() => dashboard.snapshot().commandResult?.detail === "second");
-    await second;
-    holds[0]?.resolve({ result: "accepted", detail: "first" });
-    assert.equal(dashboard.snapshot().commandResult?.result, "accepted");
-    assert.equal(dashboard.snapshot().commandResult?.detail, "second");
     await stopDashboard(dashboard);
   });
 
@@ -1431,199 +1185,6 @@ describe("companion-style HSM controllers", () => {
     await stopDashboard(dashboard);
   });
 
-  test("postCommandHttp maps abort to canceled", async () => {
-    const originalFetch = globalThis.fetch;
-    let fetched = false;
-    const abort = new AbortController();
-    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
-      fetched = true;
-      const signal = init?.signal;
-      return await new Promise((_resolve, reject) => {
-        const fail = (): void => {
-          const error = new Error("aborted");
-          error.name = "AbortError";
-          reject(error);
-        };
-        if (signal?.aborted === true) {
-          fail();
-          return;
-        }
-        signal?.addEventListener("abort", fail);
-      });
-    }) as unknown as typeof fetch;
-    abort.abort();
-    try {
-      const result = await postCommandHttp({
-        eventName: "phone.ring",
-        dataJson: "",
-        signal: abort.signal,
-      });
-      const fetchNotEntered = false;
-      assert.equal(result.result, "canceled");
-      assert.equal(fetched, fetchNotEntered);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("postCommandHttp maps abort after fetch is entered to interrupted", async () => {
-    const originalFetch = globalThis.fetch;
-    const abort = new AbortController();
-    let entered = false;
-    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
-      entered = true;
-      const signal = init?.signal;
-      return await new Promise((_resolve, reject) => {
-        const fail = (): void => {
-          const error = new Error("aborted");
-          error.name = "AbortError";
-          reject(error);
-        };
-        if (signal?.aborted === true) {
-          fail();
-          return;
-        }
-        signal?.addEventListener("abort", fail);
-      });
-    }) as unknown as typeof fetch;
-    try {
-      const pending = postCommandHttp({
-        eventName: "phone.ring",
-        dataJson: "",
-        signal: abort.signal,
-      });
-      await waitFor(() => entered);
-      abort.abort();
-      const result = await pending;
-      assert.equal(result.result, "error");
-      assert.equal(result.detail, "command reply interrupted");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("postCommandHttp admits gateway canceled", async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      return {
-        json: async () => ({ result: "canceled", detail: "gateway canceled" }),
-      };
-    }) as unknown as typeof fetch;
-    try {
-      const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
-      assert.equal(result.result, "canceled");
-      assert.equal(result.detail, "gateway canceled");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("postCommandHttp returns parsed accepted when the signal is already aborted", async () => {
-    const originalFetch = globalThis.fetch;
-    const abort = new AbortController();
-    globalThis.fetch = (async () => {
-      abort.abort();
-      return {
-        json: async () => ({ result: "accepted", detail: "committed" }),
-      };
-    }) as unknown as typeof fetch;
-    try {
-      const result = await postCommandHttp({
-        eventName: "phone.ring",
-        dataJson: "",
-        signal: abort.signal,
-      });
-      assert.equal(result.result, "accepted");
-      assert.equal(result.detail, "committed");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("postCommandHttp maps json AbortError after fetch resolve to interrupted", async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      return {
-        json: async () => {
-          const error = new Error("aborted");
-          error.name = "AbortError";
-          throw error;
-        },
-      };
-    }) as unknown as typeof fetch;
-    try {
-      const result = await postCommandHttp({ eventName: "phone.ring", dataJson: "" });
-      assert.equal(result.result, "error");
-      assert.equal(result.detail, "command reply interrupted");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("Command.post abort after fetch is entered is interrupted", async () => {
-    const originalFetch = globalThis.fetch;
-    let entered = false;
-    globalThis.fetch = (async (_input: unknown, init?: { signal?: AbortSignal }) => {
-      entered = true;
-      const signal = init?.signal;
-      return await new Promise((_resolve, reject) => {
-        const fail = (): void => {
-          const error = new Error("aborted");
-          error.name = "AbortError";
-          reject(error);
-        };
-        if (signal?.aborted === true) {
-          fail();
-          return;
-        }
-        signal?.addEventListener("abort", fail);
-      });
-    }) as unknown as typeof fetch;
-    let posted: DashboardSnapshot["commandResult"] | undefined;
-    const dashboard = bootDashboard({
-      postCommand: async (command) => {
-        posted = await postCommandHttp(command);
-        return posted;
-      },
-    });
-    try {
-      void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-      await waitFor(() => entered);
-      await stopDashboard(dashboard);
-      await waitFor(() => posted !== undefined);
-      assert.equal(posted?.result, "error");
-      assert.equal(posted?.detail, "command reply interrupted");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("Command.post through postCommandHttp keeps accepted after stop", async () => {
-    const originalFetch = globalThis.fetch;
-    let fetched = false;
-    globalThis.fetch = (async () => {
-      fetched = true;
-      return {
-        json: async () => ({ result: "accepted", detail: "http committed" }),
-      };
-    }) as unknown as typeof fetch;
-    const dashboard = bootDashboard();
-    const results: DashboardSnapshot["commandResult"][] = [];
-    dashboard.onSnapshot = (snapshot) => {
-      results.push(snapshot.commandResult);
-    };
-    try {
-      void dashboard.dispatch("dashboard.command.send", { eventName: "phone.ring", dataJson: "" });
-      await waitFor(() => fetched && results.some((result) => result?.result === "accepted"));
-      await stopDashboard(dashboard);
-      const accepted = results.find((result) => result?.result === "accepted");
-      assert.equal(accepted?.result, "accepted");
-      assert.equal(accepted?.detail, "http committed");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   test("source.selected without origin does not fall back to instance origin", async () => {
     const dashboard = bootDashboard({
       connectStream: () => ({ close(): void { return; } }),
@@ -1710,16 +1271,16 @@ describe("companion-style HSM controllers", () => {
   });
 
   test("SourceConnect restamp requires origin or urlAllowed, not url alone", () => {
-    const commandPayload = { eventName: "phone.ring", dataJson: "{}" };
-    const commandWithUrl = { eventName: "phone.ring", dataJson: "{}", url: "/v1/traces/stream" };
+    const visibilityPayload = { machineName: "Bot", visible: true };
+    const visibilityWithUrl = { machineName: "Bot", visible: true, url: "/v1/traces/stream" };
     const spoofAllowed = true;
     const payloadIsConnect = true;
     const payloadIsNotConnect = false;
     const restampFailClosed = false;
     assert.equal(isSourceConnectPayload({ origin: "http://localhost" }), payloadIsConnect);
     assert.equal(isSourceConnectPayload({ urlAllowed: spoofAllowed }), payloadIsConnect);
-    assert.equal(isSourceConnectPayload(commandPayload), payloadIsNotConnect);
-    assert.equal(isSourceConnectPayload(commandWithUrl), payloadIsNotConnect);
+    assert.equal(isSourceConnectPayload(visibilityPayload), payloadIsNotConnect);
+    assert.equal(isSourceConnectPayload(visibilityWithUrl), payloadIsNotConnect);
     assert.equal(isSourceConnectPayload({ url: "/v1/traces/stream" }), payloadIsNotConnect);
     const spoofEvent = eventWithSourceConnect({
       name: "source.connect.requested",
@@ -1729,11 +1290,11 @@ describe("companion-style HSM controllers", () => {
     const restamped = sourceConnectFrom(spoofEvent.data);
     assert.equal(restamped.urlAllowed, restampFailClosed);
     const kept = eventWithSourceConnect({
-      name: "dashboard.command.send",
+      name: "dashboard.visibility.set",
       kind: hsm.Kinds.Event,
-      data: commandWithUrl,
+      data: visibilityWithUrl,
     });
-    assert.deepEqual(kept.data, commandWithUrl);
+    assert.deepEqual(kept.data, visibilityWithUrl);
   });
 
   test("event-path connect without origin fails closed instead of staying connecting", async () => {

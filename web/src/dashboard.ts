@@ -32,8 +32,6 @@ import { clampReplayPosition, replayEvents, replayPrefix, type ReplayEvent } fro
 const dashboardCommands = {
   "dashboard.source.selected": { name: "dashboard.source.selected", kind: hsm.Kinds.Event },
   "dashboard.machine.selected": { name: "dashboard.machine.selected", kind: hsm.Kinds.Event },
-  "dashboard.command.prefill": { name: "dashboard.command.prefill", kind: hsm.Kinds.Event },
-  "dashboard.command.send": { name: "dashboard.command.send", kind: hsm.Kinds.Event },
   "dashboard.reset": { name: "dashboard.reset", kind: hsm.Kinds.Event },
   "dashboard.model.published": { name: "dashboard.model.published", kind: hsm.Kinds.Event },
   "dashboard.replay.enter": { name: "dashboard.replay.enter", kind: hsm.Kinds.Event },
@@ -54,41 +52,8 @@ const dashboardCompletions = {
   "dashboard.load.completed": { name: "dashboard.load.completed", kind: hsm.Kinds.CompletionEvent },
   "dashboard.load.failed": { name: "dashboard.load.failed", kind: hsm.Kinds.ErrorEvent },
   "dashboard.stream.dropped": { name: "dashboard.stream.dropped", kind: hsm.Kinds.CompletionEvent },
-  "dashboard.command.completed": { name: "dashboard.command.completed", kind: hsm.Kinds.CompletionEvent },
-  "dashboard.command.failed": { name: "dashboard.command.failed", kind: hsm.Kinds.ErrorEvent },
-  "dashboard.command.canceled": { name: "dashboard.command.canceled", kind: hsm.Kinds.CompletionEvent },
   "dashboard.host.stopped": { name: "dashboard.host.stopped", kind: hsm.Kinds.CompletionEvent },
 } as const;
-
-export type CommandResult = {
-  readonly result: "accepted" | "no_subscriber" | "error" | "canceled";
-  readonly detail: string;
-};
-
-/**
- * HTTP command adapter.
- *
- * Inputs: `eventName`, `dataJson`, optional `signal`.
- * Outputs: a `CommandResult`. A resolved result is final even if `signal` later
- * aborts.
- * Ownership: caller owns `signal` and the returned promise; this type does not
- * retain the command.
- * Lifetime: one HTTP round-trip; settling the promise ends the call.
- * Concurrency: overlapping posts are independent; the dashboard sequences them
- * with `id`.
- * Failure modes:
- * - abort observed before `fetch` is invoked => `canceled` / unsent
- * - abort after `fetch` is invoked => `error` / "command reply interrupted"
- *   (unknown commit); never relabel a sent POST as unsent `canceled`
- * - illegal `eventName` => `error`
- * Units: none.
- * Classification: external-system.
- */
-export type CommandPost = (command: {
-  eventName: string;
-  dataJson: string;
-  signal?: AbortSignal;
-}) => Promise<CommandResult>;
 
 export type VisibilityAction = "show-all" | "hide-all" | "hide-unobserved";
 
@@ -111,52 +76,9 @@ export type DashboardSnapshot = {
   readonly document: OtelDocument | null;
   readonly errorMessage: string | null;
   readonly selectedGraph: MachineGraph | null;
-  readonly commandEventName: string;
-  readonly commandDataJson: string;
-  readonly commandResult: CommandResult | null;
   readonly replay: DashboardReplaySnapshot;
   readonly visibleMachines: Readonly<Record<string, boolean>>;
 };
-
-const COMMAND_NAME_MAX = 128;
-const COMMAND_NAME_FIRST_INDEX = 0;
-const LETTER_A = 65;
-const LETTER_Z = 90;
-const LETTER_a = 97;
-const LETTER_z = 122;
-const DIGIT_0 = 48;
-const DIGIT_9 = 57;
-const CHAR_UNDERSCORE = 95;
-const CHAR_DOT = 46;
-const CHAR_COLON = 58;
-const CHAR_SLASH = 47;
-const CHAR_DASH = 45;
-const EVENT_NAME_REQUIRED = "event_name is required";
-const EVENT_NAME_NOT_ALLOWED = "event_name is not an allowed command";
-
-/**
- * Allocation-free command event-name charset: `A-Za-z` then up to 127 of
- * `A-Za-z0-9_.:/-`. Does not trim. Empty is distinct from whitespace/illegal.
- */
-export function commandEventNameLegal(name: string): boolean {
-  if (name.length === 0 || name.length > COMMAND_NAME_MAX) return false;
-  const first = name.charCodeAt(COMMAND_NAME_FIRST_INDEX);
-  if (!((first >= LETTER_A && first <= LETTER_Z) || (first >= LETTER_a && first <= LETTER_z))) return false;
-  for (let index = 1; index < name.length; index += 1) {
-    const code = name.charCodeAt(index);
-    if ((code >= LETTER_A && code <= LETTER_Z) || (code >= LETTER_a && code <= LETTER_z)) continue;
-    if (code >= DIGIT_0 && code <= DIGIT_9) continue;
-    if (code === CHAR_UNDERSCORE || code === CHAR_DOT || code === CHAR_COLON || code === CHAR_SLASH || code === CHAR_DASH) {
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-
-function commandNameFailureDetail(name: string): string {
-  return name.length === 0 ? EVENT_NAME_REQUIRED : EVENT_NAME_NOT_ALLOWED;
-}
 
 function controllerOf(instance: hsm.Instance): Dashboard | null {
   return instance instanceof Dashboard ? instance : null;
@@ -198,87 +120,11 @@ function machineNameFromEvent(event: hsm.Event): string | null {
   return event.data["machineName"];
 }
 
-function stringField(args: { event: hsm.Event; key: string }): string | null {
-  if (!hsm.isRecord(args.event.data)) {
-    return null;
-  }
-  const value = args.event.data[args.key];
-  return typeof value === "string" ? value : null;
-}
-
 function replayPositionFromEvent(event: hsm.Event): number | null {
   if (!hsm.isRecord(event.data) || typeof event.data["position"] !== "number") {
     return null;
   }
   return event.data["position"];
-}
-
-function signalAborted(signal: AbortSignal | undefined): boolean {
-  return signal !== undefined && signal.aborted;
-}
-
-/**
- * POST `/v1/commands`.
- *
- * Inputs: `eventName`, `dataJson`, optional `signal`.
- * Outputs: `CommandResult`.
- * Ownership: caller owns `signal`; this function does not retain the command.
- * Lifetime: one HTTP round-trip; the promise settling ends the call.
- * Concurrency: overlapping calls are independent fetches.
- * Failure modes:
- * - empty `eventName` => `error` / "event_name is required"
- * - illegal `eventName` => `error` / "event_name is not an allowed command"
- * - abort observed before `fetch` is invoked => `canceled` / "command canceled"
- *   (HTTP did not commit)
- * - abort after `fetch` is invoked, including AbortError before the response
- *   resolves => `error` / "command reply interrupted" (commit unknown)
- * - `fetch` resolves and JSON is a CommandResult, including gateway `canceled`
- *   => that payload as-is even if `signal` is already aborted (HTTP committed;
- *   gateway `canceled` is a domain cancel, not an unsent request)
- * - `fetch` resolves then `json()` throws AbortError => `error` /
- *   "command reply interrupted" (commit unknown)
- * - other fetch/parse failures => `error` / "command request failed" or
- *   "invalid command reply"
- * Classification: external-system.
- */
-export async function postCommandHttp(command: {
-  eventName: string;
-  dataJson: string;
-  signal?: AbortSignal;
-}): Promise<CommandResult> {
-  if (!commandEventNameLegal(command.eventName)) {
-    return { result: "error", detail: commandNameFailureDetail(command.eventName) };
-  }
-  if (signalAborted(command.signal)) {
-    return { result: "canceled", detail: "command canceled" };
-  }
-  try {
-    const response = await fetch("/v1/commands", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-requested-with": "bot-dashboard" },
-      body: JSON.stringify({ event_name: command.eventName, data_json: command.dataJson }),
-      ...(command.signal !== undefined ? { signal: command.signal } : {}),
-    });
-    const payload: unknown = await response.json();
-    if (!hsm.isRecord(payload) || typeof payload["result"] !== "string" || typeof payload["detail"] !== "string") {
-      return { result: "error", detail: "invalid command reply" };
-    }
-    if (
-      payload["result"] === "accepted"
-      || payload["result"] === "no_subscriber"
-      || payload["result"] === "error"
-      || payload["result"] === "canceled"
-    ) {
-      return { result: payload["result"], detail: payload["detail"] };
-    }
-    return { result: "error", detail: payload["detail"] };
-  } catch (error) {
-    const aborted = signalAborted(command.signal) || (error instanceof Error && error.name === "AbortError");
-    if (aborted) {
-      return { result: "error", detail: "command reply interrupted" };
-    }
-    return { result: "error", detail: "command request failed" };
-  }
 }
 
 function rememberSource(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
@@ -324,17 +170,6 @@ function applyMachine(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Even
   controllerOf(instance)?.applyMachine(name);
 }
 
-function applyPrefill(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const eventName = stringField({ event, key: "eventName" });
-  if (eventName === null) {
-    return;
-  }
-  controllerOf(instance)?.applyPrefill({
-    eventName,
-    dataJson: stringField({ event, key: "dataJson" }) ?? "",
-  });
-}
-
 function modelsFromEvent(event: hsm.Event): PublishedModel[] | null {
   if (!hsm.isRecord(event.data)) {
     return null;
@@ -361,44 +196,6 @@ function applyModelsAt(args: { instance: hsm.Instance; event: hsm.Event; replay:
   controllerOf(args.instance)?.applyModels({ models, replay: args.replay });
 }
 
-function forwardCommand(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  controllerOf(instance)?.forwardCommand(event);
-}
-
-function attachCommand(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-  controllerOf(instance)?.attachCommand();
-}
-
-function applyCommandCompleted(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  controllerOf(instance)?.rememberCommand(commandResultFromEvent(event) ?? { result: "error", detail: "invalid command reply" });
-}
-
-function applyCommandFailed(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  controllerOf(instance)?.rememberCommand(commandResultFromEvent(event) ?? { result: "error", detail: "command request failed" });
-}
-
-function applyCommandCanceled(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const result = commandResultFromEvent(event);
-  const id = result?.id ?? (hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined);
-  controllerOf(instance)?.rememberCommand({
-    result: "canceled",
-    detail: result?.detail ?? "command canceled",
-    ...(id !== undefined ? { id } : {}),
-  });
-}
-
-function commandResultFromEvent(event: hsm.Event): (CommandResult & { id?: number }) | null {
-  if (!hsm.isRecord(event.data) || typeof event.data["detail"] !== "string") return null;
-  const result = event.data["result"];
-  if (result !== "accepted" && result !== "no_subscriber" && result !== "error" && result !== "canceled") return null;
-  const id = event.data["id"];
-  return {
-    result,
-    detail: event.data["detail"],
-    ...(typeof id === "number" ? { id } : {}),
-  };
-}
-
 function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
   if (!hsm.isRecord(event.data)) return;
   const machineName = event.data["machineName"];
@@ -408,7 +205,7 @@ function applyVisibility(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.E
 }
 
 function applyVisibilityAction(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-  const action = stringField({ event, key: "action" });
+  const action = hsm.isRecord(event.data) ? event.data["action"] : undefined;
   if (action !== "show-all" && action !== "hide-all" && action !== "hide-unobserved") return;
   controllerOf(instance)?.applyVisibilityAction({ action });
 }
@@ -521,32 +318,8 @@ function consumeStreamDropped(_ctx: hsm.Context, _instance: hsm.Instance, _event
   return;
 }
 
-type HostDetachData = {
-  readonly command: Command | null;
-};
-
-function isHostDetachData(value: unknown): value is HostDetachData {
-  if (!hsm.isRecord(value)) return false;
-  return value["command"] === null || value["command"] instanceof Command;
-}
-
-async function stopCommandActor(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
-  const command = isHostDetachData(event.data) ? event.data.command : null;
-  try {
-    if (command !== null) await hsm.stop(command);
-  } catch (error) {
-    hsm.catchFailure(instance instanceof EventTarget ? instance : undefined)(error);
-  } finally {
-    try {
-      await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
-    } catch (error) {
-      hsm.catchFailure(instance instanceof EventTarget ? instance : undefined)(error);
-    }
-  }
-}
-
-function clearCommandActor(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): void {
-  controllerOf(instance)?.clearCommandActor();
+async function stopHost(_ctx: hsm.Context, instance: hsm.Instance, _event: hsm.Event): Promise<void> {
+  await instance.dispatch(hsm.typedEvent({ event: dashboardCompletions["dashboard.host.stopped"] }));
 }
 
 function replayStep(): number {
@@ -559,7 +332,6 @@ const dashboardModel = hsm.define(
   hsm.state(
     "disconnected",
     hsm.defer("dashboard.source.selected"),
-    hsm.defer("dashboard.command.send"),
     hsm.defer("dashboard.replay.play"),
     hsm.defer("dashboard.replay.enter"),
     hsm.transition(hsm.on("dashboard.host.attach"), hsm.target("../connected")),
@@ -571,13 +343,6 @@ const dashboardModel = hsm.define(
     hsm.state(
       "session",
       hsm.initial(hsm.target("idle")),
-      hsm.entry(attachCommand),
-      hsm.exit(clearCommandActor),
-      hsm.transition(hsm.on("dashboard.command.prefill"), hsm.effect(applyPrefill)),
-      hsm.transition(hsm.on("dashboard.command.send"), hsm.effect(forwardCommand)),
-      hsm.transition(hsm.on("dashboard.command.completed"), hsm.effect(applyCommandCompleted)),
-      hsm.transition(hsm.on("dashboard.command.failed"), hsm.effect(applyCommandFailed)),
-      hsm.transition(hsm.on("dashboard.command.canceled"), hsm.effect(applyCommandCanceled)),
       hsm.transition(hsm.on("dashboard.visibility.set"), hsm.effect(applyVisibility)),
       hsm.transition(hsm.on("dashboard.visibility.action"), hsm.effect(applyVisibilityAction)),
       hsm.transition(
@@ -658,13 +423,8 @@ const dashboardModel = hsm.define(
     hsm.defer("dashboard.host.attach"),
     hsm.defer("dashboard.host.detach"),
     hsm.defer("dashboard.source.selected"),
-    hsm.defer("dashboard.command.send"),
-    hsm.activity(stopCommandActor),
-    hsm.transition(
-      hsm.on("dashboard.host.stopped"),
-      hsm.target("../disconnected"),
-      hsm.effect(clearCommandActor),
-    ),
+    hsm.activity(stopHost),
+    hsm.transition(hsm.on("dashboard.host.stopped"), hsm.target("../disconnected")),
   ),
 );
 
@@ -682,145 +442,6 @@ export function isDashboardEventName(value: string): value is DashboardEventName
   return Object.hasOwn(dashboardCommands, value);
 }
 
-function commandNameLegal(_ctx: hsm.Context, _instance: hsm.Instance, event: hsm.Event): boolean {
-  if (!hsm.isRecord(event.data) || typeof event.data["eventName"] !== "string") return false;
-  return commandEventNameLegal(event.data["eventName"]);
-}
-
-class Command extends hsm.Instance {
-  static readonly sendEvent = { name: "command.send", kind: hsm.Kinds.Event } as const;
-  static readonly completedEvent = dashboardCompletions["dashboard.command.completed"];
-  static readonly failedEvent = dashboardCompletions["dashboard.command.failed"];
-  static readonly canceledEvent = dashboardCompletions["dashboard.command.canceled"];
-
-  static readonly model = hsm.define(
-    "Command",
-    hsm.initial(hsm.target("idle")),
-    hsm.transition(hsm.on(Command.sendEvent.name), hsm.target("validate"), hsm.effect(Command.claim)),
-    hsm.choice(
-      "validate",
-      hsm.transition(hsm.guard(commandNameLegal), hsm.target("sending")),
-      hsm.transition(hsm.target("idle"), hsm.effect(Command.reject)),
-    ),
-    hsm.state("idle"),
-    hsm.state(
-      "sending",
-      hsm.activity(Command.post),
-      hsm.transition(hsm.on(Command.completedEvent.name), hsm.guard(Command.matchesActive), hsm.target("../idle")),
-      hsm.transition(hsm.on(Command.failedEvent.name), hsm.guard(Command.matchesActive), hsm.target("../idle")),
-      hsm.transition(hsm.on(Command.canceledEvent.name), hsm.guard(Command.matchesActive), hsm.target("../idle")),
-    ),
-  );
-
-  readonly post: CommandPost;
-  #activeId: number | null = null;
-
-  constructor(args: { post: CommandPost }) {
-    super();
-    this.post = args.post;
-  }
-
-  static claim(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof Command)) return;
-    instance.#activeId = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : null;
-  }
-
-  static matchesActive(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): boolean {
-    if (!(instance instanceof Command)) return false;
-    const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : null;
-    return id !== null && id === instance.#activeId;
-  }
-
-  static reject(_ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): void {
-    if (!(instance instanceof Command)) return;
-    const name = stringField({ event, key: "eventName" }) ?? "";
-    const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
-    const detail = commandNameFailureDetail(name);
-    void hsm.notifyOwner({
-      instance,
-      event: hsm.typedEvent({
-        event: Command.failedEvent,
-        data: { result: "error", detail, ...(id !== undefined ? { id } : {}) },
-      }),
-    }).catch(hsm.catchFailure(hsm.ownerTarget(instance)));
-  }
-
-  /**
-   * Failure effect: abort observed before `instance.post` is invoked is unsent
-   * `canceled`. `ctx.done` is wired to `CommandPost.signal`. Abort after the
-   * adapter is invoked uses the adapter result: unsent `canceled` only when the
-   * adapter reports that, otherwise unknown-commit `error` / interrupted.
-   * A resolved `CommandResult` is final.
-   */
-  static async post(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event): Promise<void> {
-    if (!(instance instanceof Command)) return;
-    const name = stringField({ event, key: "eventName" }) ?? "";
-    const payload = stringField({ event, key: "dataJson" }) ?? "";
-    const id = hsm.isRecord(event.data) && typeof event.data["id"] === "number" ? event.data["id"] : undefined;
-    const finish = async (args: {
-      event: typeof Command.completedEvent | typeof Command.failedEvent | typeof Command.canceledEvent;
-      result: CommandResult;
-    }): Promise<void> => {
-      await hsm.notifyOwner({
-        instance,
-        event: hsm.typedEvent({
-          event: args.event,
-          data: { ...args.result, ...(id !== undefined ? { id } : {}) },
-        }),
-      });
-    };
-    if (!commandEventNameLegal(name)) {
-      await finish({ event: Command.failedEvent, result: { result: "error", detail: commandNameFailureDetail(name) } });
-      return;
-    }
-    const canceled: CommandResult = { result: "canceled", detail: "command canceled" };
-    const interrupted: CommandResult = { result: "error", detail: "command reply interrupted" };
-    if (ctx.done) {
-      await finish({ event: Command.canceledEvent, result: canceled });
-      return;
-    }
-    const abort = new AbortController();
-    const onDone = (): void => {
-      abort.abort();
-    };
-    ctx.addEventListener("done", onDone);
-    if (ctx.done) {
-      onDone();
-      ctx.removeEventListener("done", onDone);
-      await finish({ event: Command.canceledEvent, result: canceled });
-      return;
-    }
-    let invoked = false;
-    let posted: CommandResult | undefined;
-    try {
-      invoked = true;
-      posted = await instance.post({ eventName: name, dataJson: payload, signal: abort.signal });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        await finish({
-          event: invoked ? Command.failedEvent : Command.canceledEvent,
-          result: invoked ? interrupted : canceled,
-        });
-        return;
-      }
-      await finish({ event: Command.failedEvent, result: { result: "error", detail: "command request failed" } });
-      return;
-    } finally {
-      ctx.removeEventListener("done", onDone);
-    }
-    if (posted === undefined) return;
-    if (posted.result === "accepted" || posted.result === "no_subscriber") {
-      await finish({ event: Command.completedEvent, result: posted });
-      return;
-    }
-    if (posted.result === "error") {
-      await finish({ event: Command.failedEvent, result: posted });
-      return;
-    }
-    await finish({ event: Command.canceledEvent, result: posted });
-  }
-}
-
 export class Dashboard extends hsm.from(HTMLElement) {
   #source: OtelSource | null = null;
   #spans: ObserveSpan[] = [];
@@ -830,16 +451,10 @@ export class Dashboard extends hsm.from(HTMLElement) {
   #skipped = 0;
   #document: OtelDocument | null = null;
   #errorMessage: string | null = null;
-  #commandEventName = "";
-  #commandDataJson = "";
-  #commandResult: CommandResult | null = null;
   #visibleMachines = new Map<string, boolean>();
   origin = "";
-  #commandSeq = 0;
-  #command: Command | null = null;
   onSnapshot: ((snapshot: DashboardSnapshot) => void) | null = null;
   connectStream: OtelStreamConnect = connectOtelStream;
-  postCommand: CommandPost = postCommandHttp;
 
   constructor() {
     super();
@@ -856,10 +471,9 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Outputs: none directly. Topology moves `disconnected` to `connected` only
    * when the host is already disconnected. Attach is ignored unless
    * disconnected, and deferred while stopping so reconnect cannot start until
-   * `dashboard.host.stopped` has cleared the previous Command actor.
-   * Ownership: this dashboard owns the dispatch and the Command actor it later
-   * attaches under `session`. Lifetime: one attach request; the connected
-   * session lasts until detach/stop.
+   * `dashboard.host.stopped` has ended the previous session.
+   * Ownership: this dashboard owns the dispatch. Lifetime: one attach request;
+   * the connected session lasts until detach/stop.
    * Concurrency: runtime-safe. Overlapping attach while connected is ignored
    * (no transition). While stopping, attach is deferred, not dropped.
    * Failure modes: dispatch rejection is classified by `catchFailure` as a
@@ -874,14 +488,11 @@ export class Dashboard extends hsm.from(HTMLElement) {
   /**
    * Request host detach through stopping.
    *
-   * Inputs: none. Dispatches `dashboard.host.detach` with typed `HostDetachData`
-   * (`command` is the live Command actor or `null`). Detach stamps that actor
-   * so `stopCommandActor` stops the payload, not a field lookup.
+   * Inputs: none. Dispatches `dashboard.host.detach`.
    * Outputs: none directly. Topology moves `connected` to `stopping`, then
-   * `disconnected` on `dashboard.host.stopped`. The host stays bound.
-   * Ownership: this dashboard owns the dispatch; the stamped Command actor is
-   * stopped by the stopping activity. Session exit and `host.stopped` null
-   * `#command`.
+   * `disconnected` on `dashboard.host.stopped`. Leaving `connected` cancels the
+   * viewing stream activity. The host stays bound.
+   * Ownership: this dashboard owns the dispatch.
    * Lifetime: one detach request; stopping lasts until `dashboard.host.stopped`.
    * Concurrency: runtime-safe. Detach while stopping is deferred. Detach while
    * disconnected is ignored. Public `stop()` is mixin Host.stop, not detach.
@@ -891,25 +502,7 @@ export class Dashboard extends hsm.from(HTMLElement) {
    * Classification: runtime-safe.
    */
   requestDetach(): void {
-    const data: HostDetachData = { command: this.#command };
-    void super.dispatch(hsm.typedEvent({
-      event: dashboardCommands["dashboard.host.detach"],
-      data,
-    })).catch(hsm.catchFailure(this));
-  }
-
-  /**
-   * Null the Command actor after session exit or `dashboard.host.stopped`.
-   *
-   * Inputs: none. Invoked from session exit and the `dashboard.host.stopped`
-   * effect. Outputs: `#command` is `null`. Ownership: declaring Dashboard
-   * class only. Lifetime: until the next `session` entry attaches a new
-   * Command actor. Concurrency: runtime-safe.
-   * Failure modes: none. Units: none.
-   * Classification: runtime-safe.
-   */
-  clearCommandActor(): void {
-    this.#command = null;
+    void super.dispatch(hsm.typedEvent({ event: dashboardCommands["dashboard.host.detach"] })).catch(hsm.catchFailure(this));
   }
 
   snapshot(): DashboardSnapshot {
@@ -922,9 +515,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
       document,
       errorMessage: this.#errorMessage,
       selectedGraph: document === null ? null : machineByName(document, document.selectedMachine),
-      commandEventName: this.#commandEventName,
-      commandDataJson: this.#commandDataJson,
-      commandResult: this.#commandResult,
       replay: {
         active: statePath.includes("/replay"),
         playing: statePath.endsWith("/playing") && statePath.includes("/replay"),
@@ -1021,15 +611,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
     });
   }
 
-  attachCommand(): void {
-    if (this.#command !== null) return;
-    this.#command = hsm.start({
-      ctx: this.context(),
-      instance: new Command({ post: (command) => this.postCommand(command) }),
-      model: Command.model,
-    });
-  }
-
   hasPlayableReplay(): boolean {
     return this.#replayEvents.length > 0 && this.#replayPosition < this.#replayEvents.length;
   }
@@ -1058,21 +639,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
       ...(typeof url === "string" ? { url } : {}),
       ...(isOtelSource(source) ? { source } : {}),
     };
-  }
-
-  forwardCommand(event: hsm.Event): void {
-    const command = this.#command;
-    if (command === null) return;
-    const name = stringField({ event, key: "eventName" }) ?? this.#commandEventName;
-    const payload = stringField({ event, key: "dataJson" }) ?? this.#commandDataJson;
-    this.#commandEventName = name;
-    this.#commandDataJson = payload;
-    const id = this.#commandSeq + 1;
-    this.#commandSeq = id;
-    void command.dispatch(hsm.typedEvent({
-      event: Command.sendEvent,
-      data: { eventName: name, dataJson: payload, id },
-    })).catch(hsm.catchFailure(this));
   }
 
   applySource(source: OtelSource): void {
@@ -1135,9 +701,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#skipped = 0;
     this.#document = null;
     this.#errorMessage = null;
-    this.#commandEventName = "";
-    this.#commandDataJson = "";
-    this.#commandResult = null;
     this.#visibleMachines.clear();
     this.#emit();
   }
@@ -1219,12 +782,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
     this.#emit();
   }
 
-  rememberCommand(result: CommandResult & { id?: number }): void {
-    if (typeof result.id === "number" && result.id !== this.#commandSeq) return;
-    this.#commandResult = { result: result.result, detail: result.detail };
-    this.#emit();
-  }
-
   /**
    * Apply one machine's visibility flag and its owned subtree.
    *
@@ -1260,20 +817,6 @@ export class Dashboard extends hsm.from(HTMLElement) {
       const visible = args.action === "show-all" || (args.action === "hide-unobserved" && machine.observationCount > 0);
       this.#visibleMachines.set(machine.name, visible);
     }
-    this.#emit();
-  }
-
-  /**
-   * Prefill the command compose fields.
-   *
-   * Inputs: `eventName`, `dataJson`. Outputs: snapshot command fields.
-   * Ownership: this dashboard. Lifetime: until send/clearView/stop.
-   * Concurrency: runtime-safe. Failure modes: none; strings are stored as given.
-   * Classification: runtime-safe.
-   */
-  applyPrefill(args: { eventName: string; dataJson: string }): void {
-    this.#commandEventName = args.eventName;
-    this.#commandDataJson = args.dataJson;
     this.#emit();
   }
 

@@ -519,18 +519,17 @@ test("clicking a member focuses its owned subtree without changing selection or 
   await expect(secondMember).toHaveAttribute("data-visible", "false");
 });
 
-test("command gateway reports no subscriber when no bot is attached", async ({ page, request }) => {
+test("studio observes only: no command gateway and no send-event controls", async ({ page, request }) => {
   await openStudio(page);
   const response = await request.post("/v1/commands", {
     data: { event_name: "phone.ring" },
     headers: { "content-type": "application/json" },
   });
-  expect(response.ok()).toBeTruthy();
-  expect(await response.json()).toEqual({ result: "no_subscriber", detail: "no subscriber" });
+  expect(response.ok()).toBeFalsy();
 
-  await page.getByTestId("event-name").fill("phone.ring");
-  await page.getByTestId("send-event").click();
-  await expect(page.getByTestId("command-result")).toHaveText(/no subscriber/i);
+  await expect(page.getByTestId("event-name")).toHaveCount(0);
+  await expect(page.getByTestId("send-event")).toHaveCount(0);
+  await expect(page.getByTestId("command-result")).toHaveCount(0);
 });
 
 test("populated mobile rails stay contained around the map", async ({ page, request }) => {

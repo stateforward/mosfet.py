@@ -113,7 +113,7 @@ type HostConstructor<T = object> = new (...args: MixinRest) => T;
  * Owner: web/src/hsm.ts (bot-hsm-dashboard). Rationale: no OpenTelemetry JS
  * SDK is approved for this package; do not add one. Substitutes are bounded HSM
  * events and DOM CustomEvents (machine, event kind, stage, outcome) on:
- * command completed/failed/canceled; stream load.failed / stream.dropped; host-drop; renderer
+ * stream load.failed / stream.dropped; host-drop; renderer
  * paint / render_canceled
  * / ErrorEvent; FlowGraph nodes/edges admit and reject; node_activate_click /
  * node_activate_key / flow-node-click click origin; Panner transform_changed

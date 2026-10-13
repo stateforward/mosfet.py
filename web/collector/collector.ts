@@ -36,16 +36,6 @@ export type SpanBatch = {
   skipped: number;
 };
 
-export type CommandPayload = {
-  event_name: string;
-  data_json: string;
-};
-
-export type CommandResult = {
-  result: "accepted" | "no_subscriber" | "error";
-  detail: string;
-};
-
 export class ObserveRing {
   #spans: ObserveSpan[] = [];
   #skipped = 0;
@@ -65,11 +55,6 @@ export class ObserveRing {
     return { observeSpans: [...spans], skipped };
   }
 }
-
-type CommandStream = {
-  write(message: CommandPayload): void;
-  on(event: "cancelled" | "error" | "close", listener: () => void): void;
-};
 
 export class ModelStore {
   #models = new Map<string, PublishedModel>();
@@ -244,35 +229,6 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value;
 }
 
-export class CommandHub {
-  #subscribers = new Set<CommandStream>();
-
-  subscribe(stream: CommandStream): void {
-    this.#subscribers.add(stream);
-    const forget = (): void => {
-      this.#subscribers.delete(stream);
-    };
-    stream.on("cancelled", forget);
-    stream.on("error", forget);
-    stream.on("close", forget);
-  }
-
-  dispatch(command: CommandPayload): CommandResult {
-    const eventName = command.event_name.trim();
-    if (eventName.length === 0) {
-      return { result: "error", detail: "event_name is required" };
-    }
-    const payload: CommandPayload = { event_name: eventName, data_json: command.data_json };
-    if (this.#subscribers.size === 0) {
-      return { result: "no_subscriber", detail: "no subscriber" };
-    }
-    for (const subscriber of this.#subscribers) {
-      subscriber.write(payload);
-    }
-    return { result: "accepted", detail: "accepted" };
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -347,24 +303,12 @@ function protoJson(value: unknown): unknown {
   ) as unknown;
 }
 
-export function commandFromUnknown(value: unknown): CommandPayload | null {
-  if (!isRecord(value) || typeof value["event_name"] !== "string") {
-    return null;
-  }
-  const dataJson = value["data_json"];
-  return {
-    event_name: value["event_name"],
-    data_json: typeof dataJson === "string" ? dataJson : "",
-  };
-}
-
 type UnaryCallback = (error: grpc.ServiceError | null, response: unknown) => void;
 
 export function loadPackage(): grpc.GrpcObject {
   const definition = protoLoader.loadSync(
     [
       path.join(PROTO_ROOT, "opentelemetry/proto/collector/trace/v1/trace_service.proto"),
-      path.join(PROTO_ROOT, "bot/control/v1/control.proto"),
     ],
     {
       keepCase: false,
@@ -411,7 +355,6 @@ export type CollectorHandles = {
 
 export async function createCollector(): Promise<CollectorHandles> {
   const ring = new ObserveRing();
-  const hub = new CommandHub();
   const models = new ModelStore();
   await models.load();
   const subscribers = new Set<ServerResponse>();
@@ -421,19 +364,6 @@ export async function createCollector(): Promise<CollectorHandles> {
     Export: (call: { request: unknown }, callback: UnaryCallback) => {
       exportObserveSpans(call.request, ring, subscribers);
       callback(null, {});
-    },
-  });
-  grpcServer.addService(serviceDefinition(loaded, "bot", "control", "v1", "Control"), {
-    Subscribe: (stream: CommandStream) => {
-      hub.subscribe(stream);
-    },
-    Dispatch: (call: { request: unknown }, callback: UnaryCallback) => {
-      const command = commandFromUnknown(call.request);
-      if (command === null) {
-        callback(null, { result: "error", detail: "event_name is required" });
-        return;
-      }
-      callback(null, hub.dispatch(command));
     },
   });
   await new Promise<void>((resolve, reject) => {
@@ -529,30 +459,6 @@ export async function createCollector(): Promise<CollectorHandles> {
     }
     if (request.method === "GET" && url.pathname === "/v1/models") {
       writeJson(response, 200, { models: models.list() });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/v1/commands") {
-      void (async () => {
-        const contentType = request.headers["content-type"];
-        const contentTypeValue = Array.isArray(contentType) ? contentType[0] : contentType;
-        if (!isJsonContentType(contentTypeValue)) {
-          writeJson(response, 400, { result: "error", detail: "Content-Type application/json required" });
-          return;
-        }
-        let body: unknown;
-        try {
-          body = await readJsonBody(request);
-        } catch {
-          writeJson(response, 400, { result: "error", detail: "malformed JSON body" });
-          return;
-        }
-        const command = commandFromUnknown(body);
-        if (command === null) {
-          writeJson(response, 400, { result: "error", detail: "event_name is required" });
-          return;
-        }
-        writeJson(response, 200, hub.dispatch(command));
-      })();
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/traces/stream") {

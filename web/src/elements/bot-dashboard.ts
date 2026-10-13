@@ -246,34 +246,6 @@ button.tool {
   color: #fecaca;
   font-size: 0.78rem;
 }
-.command {
-  display: grid;
-  gap: 0.35rem;
-}
-.command label {
-  display: grid;
-  gap: 0.2rem;
-  color: var(--bot-muted, #8b93a7);
-  font-size: 0.72rem;
-}
-.command input,
-.command textarea {
-  font: inherit;
-  color: inherit;
-  background: #161922;
-  border: 1px solid var(--bot-line, #2a3140);
-  border-radius: 0.35rem;
-  padding: 0.22rem 0.45rem;
-}
-.command textarea {
-  min-height: 3.2rem;
-  resize: vertical;
-}
-.command-result {
-  margin: 0;
-  color: var(--bot-muted, #8b93a7);
-  font-size: 0.75rem;
-}
 .brand {
   display: grid;
   gap: 0.1rem;
@@ -674,9 +646,6 @@ export class BotDashboard extends Dashboard {
   readonly #lastEvent: HTMLParagraphElement;
   readonly #observes: HTMLParagraphElement;
   readonly #error: HTMLParagraphElement;
-  readonly #eventName: HTMLInputElement;
-  readonly #eventData: HTMLTextAreaElement;
-  readonly #commandResult: HTMLParagraphElement;
   readonly #source: BotOtelSource;
   readonly #graph: BotMachineGraph;
   readonly #shownCount: HTMLSpanElement;
@@ -849,37 +818,6 @@ export class BotDashboard extends Dashboard {
     this.#error = document.createElement("p");
     this.#error.className = "error";
 
-    const commandBlock = document.createElement("div");
-    commandBlock.className = "command";
-    const commandLabel = document.createElement("p");
-    commandLabel.className = "section-label";
-    commandLabel.textContent = "Send event";
-    const nameLabel = document.createElement("label");
-    nameLabel.textContent = "Event name";
-    this.#eventName = document.createElement("input");
-    this.#eventName.type = "text";
-    this.#eventName.setAttribute("aria-label", "Event name");
-    mark({ element: this.#eventName, hook: "event-name" });
-    nameLabel.append(this.#eventName);
-    const dataLabel = document.createElement("label");
-    dataLabel.textContent = "JSON data";
-    this.#eventData = document.createElement("textarea");
-    this.#eventData.setAttribute("aria-label", "Event JSON data");
-    mark({ element: this.#eventData, hook: "event-data" });
-    dataLabel.append(this.#eventData);
-    const send = document.createElement("button");
-    send.type = "button";
-    send.className = "tool";
-    send.dataset["event"] = "dashboard.command.send";
-    send.textContent = "Send";
-    mark({ element: send, hook: "send-event" });
-    this.#commandResult = document.createElement("p");
-    this.#commandResult.className = "command-result";
-    this.#commandResult.setAttribute("role", "status");
-    this.#commandResult.setAttribute("aria-label", "Command result");
-    mark({ element: this.#commandResult, hook: "command-result" });
-    commandBlock.append(commandLabel, nameLabel, dataLabel, send, this.#commandResult);
-
     const details = document.createElement("section");
     details.className = "details";
     mark({ element: details, hook: "details" });
@@ -892,7 +830,6 @@ export class BotDashboard extends Dashboard {
       this.#pathBlock,
       eventBlock,
       observeBlock,
-      commandBlock,
       this.#error,
     );
     inspector.append(members, details);
@@ -1038,7 +975,6 @@ export class BotDashboard extends Dashboard {
     this.#root.addEventListener("click", this.#onGesture, { signal });
     this.#root.addEventListener("change", this.#onGesture, { signal });
     this.#graph.addEventListener("bot-machine-graph-zoom", this.#onZoom, { signal });
-    this.#graph.addEventListener("bot-machine-graph-edge", this.#onEdge, { signal });
     this.#render(this.snapshot());
     this.#source.replayReady();
   }
@@ -1059,16 +995,6 @@ export class BotDashboard extends Dashboard {
     const live = snapshot.phase === "live";
     this.#inspectorStatus.textContent = live ? "live" : snapshot.phase === "error" ? "offline" : snapshot.phase;
     this.#error.textContent = snapshot.errorMessage ?? "";
-    if (this.#eventName.value !== snapshot.commandEventName) {
-      this.#eventName.value = snapshot.commandEventName;
-    }
-    if (this.#eventData.value !== snapshot.commandDataJson) {
-      this.#eventData.value = snapshot.commandDataJson;
-    }
-    this.#commandResult.textContent =
-      snapshot.commandResult === null
-        ? ""
-        : `${snapshot.commandResult.result.replaceAll("_", " ")}: ${snapshot.commandResult.detail}`;
     this.#writeReplay(snapshot);
     this.#picker.replaceChildren();
     this.#machines.replaceChildren();
@@ -1333,13 +1259,6 @@ export class BotDashboard extends Dashboard {
     }).catch(catchFailure(this));
   };
 
-  readonly #onEdge = (event: Event): void => {
-    if (!(event instanceof CustomEvent) || !isEdgeDetail(event.detail)) {
-      return;
-    }
-    void this.dispatch("dashboard.command.prefill", { eventName: event.detail.eventName }).catch(catchFailure(this));
-  };
-
   readonly #onZoom = (event: Event): void => {
     if (!(event instanceof CustomEvent) || !isZoomDetail(event.detail)) {
       return;
@@ -1374,13 +1293,6 @@ export class BotDashboard extends Dashboard {
       void this.dispatch(eventName, { machineName }).catch(catchFailure(this));
       return;
     }
-    if (eventName === "dashboard.command.send") {
-      void this.dispatch(eventName, {
-        eventName: this.#eventName.value,
-        dataJson: this.#eventData.value,
-      }).catch(catchFailure(this));
-      return;
-    }
     if (eventName === "dashboard.replay.seek") {
       const position = control instanceof HTMLInputElement ? Number(control.value) : Number.NaN;
       if (Number.isFinite(position)) {
@@ -1409,15 +1321,6 @@ function isSourceDetail(value: unknown): value is OtelSourceDetail {
 
 function isZoomDetail(value: unknown): value is { zoom: number } {
   return typeof value === "object" && value !== null && "zoom" in value && typeof value.zoom === "number";
-}
-
-function isEdgeDetail(value: unknown): value is { eventName: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "eventName" in value &&
-    typeof value.eventName === "string"
-  );
 }
 
 export function registerBotDashboard(): void {

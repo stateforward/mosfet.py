@@ -248,7 +248,6 @@ describe("bot-dashboard agent accessibility", () => {
     const noBareFit = 0;
     assert.equal(bareFitMatches.length, noBareFit);
     assert.ok(getByRole(host, "button", "Reset") instanceof HTMLElement);
-    assert.ok(getByRole(host, "button", "Send") instanceof HTMLElement);
     assert.ok(getByRole(host, "button", "Replay") instanceof HTMLElement);
     assert.ok(getByRole(host, "button", "Previous replay event") instanceof HTMLElement);
     assert.ok(getByRole(host, "button", "Next replay event") instanceof HTMLElement);
@@ -261,10 +260,12 @@ describe("bot-dashboard agent accessibility", () => {
     assert.ok(getByRole(host, "status", "Current state") instanceof HTMLElement);
     assert.ok(getByRole(host, "status", "Last event") instanceof HTMLElement);
     assert.ok(getByRole(host, "status", "Observes") instanceof HTMLElement);
-    assert.ok(getByRole(host, "status", "Command result") instanceof HTMLElement);
     assert.ok(getByRole(host, "group", "Members") instanceof HTMLElement);
-    assert.ok(getByRole(host, "textbox", "Event name") instanceof HTMLElement);
-    assert.ok(getByRole(host, "textbox", "Event JSON data") instanceof HTMLElement);
+    // The studio observes only: it offers no control that sends an event to a bot.
+    const noSendControls = 0;
+    assert.equal(getAllByRole(host, "button", "Send").length, noSendControls);
+    assert.equal(getAllByRole(host, "textbox", "Event name").length, noSendControls);
+    assert.equal(getAllByRole(host, "textbox", "Event JSON data").length, noSendControls);
     const picker = getByRole(host, "combobox", "Observed machine");
     assert.ok(picker instanceof HTMLElement);
     assert.equal(picker.getAttribute("id"), "observed-machine");

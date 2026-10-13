@@ -6,9 +6,8 @@ environment map. It does not reimplement the Python bot.
 The Vite dev server is the collector. Bots export finished spans to OTLP gRPC
 `TraceService.Export` on `127.0.0.1:4317`. The page subscribes to
 `GET /v1/traces/stream` (SSE) and folds `bot.hsm.observe` spans into the graph.
-JSONL is not a dashboard transport. Commands go back to the bot over a second
-gRPC service on the same listener (`bot.control.v1.Control`); the browser posts
-`POST /v1/commands` as an HTTP gateway.
+JSONL is not a dashboard transport. The studio observes only: it sends nothing
+back to a bot and exposes no command or event-injection path.
 
 The only graph source of truth is `bot.hsm.observe` spans. Low-cardinality
 attributes come from `src/bot/telemetry/hsm.py` `observation_attributes`:
@@ -24,7 +23,7 @@ attributes come from `src/bot/telemetry/hsm.py` `observation_attributes`:
 `flow-graph` custom elements represent slash-separated observed state paths.
 Ownership is shown with nested machine shells, while edges connect consecutive
 observations of the same `hsm.machine.name` when the state changes. The latest
-observed state is highlighted. Clicking an edge prefills the send-event name.
+observed state is highlighted.
 Nothing here hard-codes a PhoneBot topology.
 
 ## Setup
@@ -41,7 +40,7 @@ npm run build
 
 ## Live
 
-Serve the page, the OTLP gRPC collector, and the command gateway:
+Serve the page and the OTLP gRPC collector:
 
 ```sh
 cd web
@@ -57,7 +56,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 Published models are persisted by the collector and reloaded when Vite starts.
 The default store is `.data/models.json` (ignored by git); override it with
 `BOT_MODEL_STORE_PATH` when the collector needs a different durable location.
-The OTLP/control gRPC listener defaults to `127.0.0.1:4317`; override its port
+The OTLP gRPC listener defaults to `127.0.0.1:4317`; override its port
 with `BOT_GRPC_PORT` when an isolated collector is needed.
 Writes use an atomic file replacement. A model POST returns an error if the
 store cannot be updated, so the caller can retry without receiving a false
@@ -67,9 +66,6 @@ are synchronized before a successful write is acknowledged.
 
 Open the printed local URL. The dashboard auto-connects to
 `/v1/traces/stream`. Live observe spans appear as the bot exports them.
-Send a named event from the inspector; with a bot attached to an environment
-the collector fans that command to `Control.Subscribe` and the bot
-`hsm.dispatch_all`s it.
 
 ## Element machines
 
@@ -111,8 +107,7 @@ dispatch tail with graph admission.
 Machines:
 
 - `bot-dashboard` → `Dashboard` (`idle` / `live` / `error`);
-  the live activity opens `EventSource` on the OTLP stream;
-  `dashboard.command.send` posts `/v1/commands`
+  the live activity opens `EventSource` on the OTLP stream
 - `bot-otel-source` → `OtelSource` (`idle` / `connecting` / `live` / `error`);
   the composed `bot-otel-source` event is an **effect** of entering `live`
 - `bot-machine-graph` → `hsm.from(HTMLElement)` host plus `Graph` admission;
@@ -133,5 +128,5 @@ Package exports (TypeScript source):
 - CSS via constructable stylesheets plus `src/dashboard.css`
 - `@stateforward/hsm.ts` 1.3.3 for every element machine
 - Native HTML/SVG rendering through flow node and edge custom elements
-- `@grpc/grpc-js` + `@grpc/proto-loader` for the in-process OTLP/control collector
+- `@grpc/grpc-js` + `@grpc/proto-loader` for the in-process OTLP collector
 - Vite for local serve/build
