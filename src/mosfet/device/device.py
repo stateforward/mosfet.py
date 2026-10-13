@@ -12,6 +12,8 @@ import pydantic
 from mosfet import abilities
 from mosfet import address
 from mosfet import lifecycle
+from mosfet import telemetry
+from mosfet.event import validate_event_data
 from mosfet.protocols import attachment
 
 from mosfet.device.events import (
@@ -86,6 +88,17 @@ class Device(Traced, attachment.Attachment):
     two owned peripherals declaring the same non-``None`` name raise there rather than silently
     resolving by write order in a later snapshot.
     """
+    _command_schemas: typing.ClassVar[tuple[type[pydantic.BaseModel], ...]] = ()
+    """Owner command payloads this device accepts: every one enters firmware, never the shell.
+
+    Empty (the default) means the device takes no owner commands, and :meth:`dispatch` stays the
+    plain shell-and-firmware delivery with no ingress span, so a transducer pays nothing per
+    broadcast. A device a holder commands (a handset) names its command payloads here.
+    """
+    _ingress_scope: typing.ClassVar[str] = "bot.devices"
+    """Tracer scope of the ``bot.device.ingress`` span a commanded device opens; one constant per subclass."""
+    _ingress_component: typing.ClassVar[str] = "device"
+    """Component prefix for this device's ingress span and holder captures; one constant per subclass."""
     _attachment_limit: typing.ClassVar[int | None] = None
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
     required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
@@ -332,28 +345,125 @@ class Device(Traced, attachment.Attachment):
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        """Deliver into device shell and firmware. No event-name routing table.
+        """Deliver into the device. No event-name routing table.
 
-        Shell-only lifecycle payloads (attach/detach) stay on the shell.
-        Other events also reach firmware when present; unmatched triggers are ignored by
-        normal HSM semantics. Dual delivery is intentional for shared device/firmware
-        observations; subclasses (e.g. Phone) may override with narrower routing.
-        Resolves to whether the shell or the firmware accepted the event.
+        A device with no owner commands (empty ``_command_schemas``) delivers into the shell and
+        firmware. Shell-only lifecycle payloads (attach/detach) stay on the shell. Other events
+        also reach firmware when present; unmatched triggers are ignored by normal HSM semantics.
+        Dual delivery is intentional for shared device/firmware observations. No span opens, so a
+        peripheral pays nothing per broadcast.
+
+        A device with owner commands is where a stimulus enters the bot: it opens the turn's
+        ``bot.device.ingress`` span under its ``_ingress_scope`` and routes the event (see
+        ``_route``).
+
+        Resolves to whether the routed machine accepted the event.
         """
 
-        async def _deliver() -> bool:
-            shell_delivered = await deliver(self, ctx, event)
+        if not type(self)._command_schemas:
+
+            async def _deliver() -> bool:
+                shell_delivered = await deliver(self, ctx, event)
+                firmware = self._firmware
+                if firmware is None:
+                    return shell_delivered
+                # Shell-only lifecycle (typed payload, not event.name).
+                if isinstance(event.data, (attachment.AttachData, attachment.DetachData)):
+                    return shell_delivered
+                firmware_delivered = await firmware.dispatch(ctx, event)
+                return shell_delivered or firmware_delivered
+
+            # Match hsm.Instance.dispatch: eager Task so fire-and-forget effect paths still run.
+            return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
+
+        async def _ingress() -> bool:
+            # An event that arrives carrying no trace (a carrier, a test, a browser) starts the
+            # turn's trace here, and every hop it causes joins it. One that carries a trace (a
+            # bot's own command) continues it.
+            component = f"{type(self)._ingress_component}.ingress"
+            with telemetry.span.operation(
+                "bot.device.ingress",
+                scope=type(self)._ingress_scope,
+                component=component,
+                stage="ingress",
+                context=telemetry.event_context(event),
+            ):
+                return await telemetry.capture.record_dispatch(
+                    asyncio.Task(self._route(ctx, event), loop=asyncio.get_running_loop(), eager_start=True),
+                    component=component,
+                    event=event,
+                    source=event.source,
+                    target=hsm.id(self),
+                )
+
+        return asyncio.Task(_ingress(), loop=asyncio.get_running_loop(), eager_start=True)
+
+    async def _route(self, ctx: hsm.Context, event: hsm.Event) -> bool:
+        """Firmware-only for owner command payloads; shell for lifecycle/other.
+
+        Owner commands enter firmware only — not dual-delivered and not name-routed. Typed
+        command payloads pass through; dict/None payloads whose event schema is a command
+        model are coerced via ``validate_event_data`` (JSON/API ingress). Device shell
+        lifecycle and other events stay on the shell HSM. Service observations enter
+        firmware via the service attach target, not through this shell ingress.
+
+        Resolves to whether the routed machine accepted the event: firmware for owner commands
+        (``False`` without firmware), the shell otherwise.
+        """
+
+        command = self._coerce_owner_command(event)
+        if command is not None:
             firmware = self._firmware
             if firmware is None:
-                return shell_delivered
-            # Shell-only lifecycle (typed payload, not event.name).
-            if isinstance(event.data, (attachment.AttachData, attachment.DetachData)):
-                return shell_delivered
-            firmware_delivered = await firmware.dispatch(ctx, event)
-            return shell_delivered or firmware_delivered
+                return False
+            return await firmware.dispatch(ctx, command)
+        # Device shell lifecycle / other events.
+        return await deliver(self, ctx, event)
 
-        # Match hsm.Instance.dispatch: eager Task so fire-and-forget effect paths still run.
-        return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
+    @classmethod
+    def _coerce_owner_command(cls, event: hsm.Event) -> hsm.Event | None:
+        """Return a firmware-bound owner command event, or None when not a command ingress.
+
+        Already-typed command payloads pass through. Unvalidated dict/None payloads are
+        coerced only when the event's declared schema is an owner command model (schema
+        identity, not event.name). An invalid payload is not a command: it never reaches
+        firmware, and ``_route`` leaves it to the shell, which has no command transitions.
+        """
+
+        command_schemas = cls._command_schemas
+        data = event.data
+        if isinstance(data, command_schemas):
+            return event
+        schema = event.schema
+        if not any(schema is command_schema for command_schema in command_schemas):
+            return None
+        try:
+            validated = validate_event_data(event, {} if data is None else data)
+        except ValueError:
+            return None
+        if not isinstance(validated, command_schemas):
+            return None
+        return dataclasses.replace(event, data=validated)
+
+    def _tell_holders(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        """Dispatch ``bot.input`` carrying ``event`` to every bot holding this device."""
+
+        component = f"{type(self)._ingress_component}.holders"
+        for owner in tuple(self._attachments):
+            told = dataclasses.replace(
+                mosfet.InputEvent.with_data(mosfet.InputEventData(observation=mosfet.StimulusData.from_event(event))),
+                id=event.id or uuid.uuid4().hex,
+                source=hsm.id(self),
+                target=hsm.id(owner),
+                metadata=dict(event.metadata),
+            )
+            _ = telemetry.capture.record_dispatch(
+                hsm.dispatch(ctx, owner, told),
+                component=component,
+                event=told,
+                source=told.source,
+                target=told.target,
+            )
 
     @typing.override
     def take_snapshot(self) -> hsm.Snapshot:

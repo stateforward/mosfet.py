@@ -6,16 +6,21 @@ import dataclasses
 import datetime
 import importlib
 import inspect
+import json
+import pathlib
 import typing
 from typing import override
 
 import hsm
 import pydantic
 import pytest
+from opentelemetry import _logs, trace
 
 import mosfet.device.device as device_module
 
 import mosfet.lifecycle
+import mosfet.telemetry
+from mosfet.telemetry.configure import logger_provider, span_file, tracer_provider
 from mosfet.device import Device
 from mosfet.protocols import attachment
 from mosfet.device import (
@@ -770,6 +775,274 @@ def test_device_dispatch_routes_firmware_snapshot_transition_events_to_firmware(
         assert firmware.state() == "/FirmwareProbe/forwarded"
 
     asyncio.run(run())
+
+
+class _CommandData(pydantic.BaseModel):
+    """Test owner-command payload: something a holder tells the device to do."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{"word": "hello"}]},
+    )
+
+    word: str = pydantic.Field(
+        min_length=1,
+        description="What the holder tells the device.",
+        examples=["hello"],
+    )
+
+
+COMMAND_EVENT = hsm.Event[_CommandData](name="test.device.command", schema=_CommandData)
+
+
+class CommandFirmware(hsm.Instance):
+    """Firmware that obeys owner commands and reports each one to the device's holders."""
+
+    commands: list[hsm.Event[typing.Any]]
+    probes: list[hsm.Event[typing.Any]]
+    _notify: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]
+
+    def __init__(self, *, notify: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]) -> None:
+        super().__init__()
+        self.commands = []
+        self.probes = []
+        self._notify = notify
+
+    @staticmethod
+    def _obey(ctx: hsm.Context, instance: "CommandFirmware", event: hsm.Event[typing.Any]) -> None:
+        instance.commands.append(event)
+        instance._notify(ctx, event)
+
+    @staticmethod
+    def _probe(ctx: hsm.Context, instance: "CommandFirmware", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.probes.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "CommandFirmware",
+        hsm.initial(hsm.target("idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(hsm.on(COMMAND_EVENT), hsm.effect(_obey)),
+            hsm.transition(hsm.on(FIRMWARE_PROBE_EVENT), hsm.effect(_probe)),
+        ),
+    )
+
+
+class CommandedDevice(Device):
+    """A device with owner commands; its firmware tells holders through the injected Device method."""
+
+    _command_schemas: typing.ClassVar[tuple[type[pydantic.BaseModel], ...]] = (_CommandData,)
+    firmware_model: typing.ClassVar[hsm.Model] = CommandFirmware.model
+
+    @override
+    def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
+        del ctx, event
+        return CommandFirmware(notify=self._tell_holders)
+
+
+class Holder(hsm.Instance):
+    """Stands in for a bot holding a device: records each ``bot.input`` it is told."""
+
+    told: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.told = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "Holder", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.told.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Holder",
+        hsm.initial(hsm.target("holding")),
+        hsm.state("holding", hsm.transition(hsm.on(mosfet.InputEvent), hsm.effect(_record))),
+    )
+
+
+def command_firmware(device: CommandedDevice) -> CommandFirmware:
+    firmware = device_firmware(device)
+    assert isinstance(firmware, CommandFirmware)
+    return firmware
+
+
+async def started_commanded_device() -> tuple[CommandedDevice, Environment]:
+    device = CommandedDevice()
+    environment = await start_device_in_environment(device)
+    await wait_until(lambda: device.state() == "/Device/detached")
+    return device, environment
+
+
+@pytest.fixture
+def telemetry_files(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> collections.abc.Iterator[None]:
+    """Configure OTEL with full capture into the test's own span and log files."""
+
+    monkeypatch.chdir(tmp_path)
+    mosfet.telemetry.reset()
+    for name in (
+        "BOT_OTEL_DISABLED",
+        "BOT_OTEL_LOG_FILE",
+        "BOT_OTEL_SPAN_FILE",
+        "BOT_OTEL_CAPTURE",
+        "BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "BOT_OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
+    # Keep the exporting provider module-local: a process-global one would trace later tests' dispatches.
+    monkeypatch.setattr(trace, "set_tracer_provider", lambda _provider: None)
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+    yield
+    mosfet.telemetry.reset()
+
+
+def exported_records() -> tuple[list[dict[str, typing.Any]], list[dict[str, typing.Any]]]:
+    """Flush both providers and return ``(spans, logs)`` as exported JSON records."""
+
+    spans_provider = tracer_provider()
+    if spans_provider is not None:
+        _ = spans_provider.force_flush()
+    logs_provider = logger_provider()
+    if logs_provider is not None:
+        _ = logs_provider.force_flush()
+    spans_path = span_file()
+    assert spans_path is not None
+    logs_path = pathlib.Path("otel-logs.jsonl")
+
+    def read(path: pathlib.Path) -> list[dict[str, typing.Any]]:
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    return read(spans_path), read(logs_path)
+
+
+def test_device_routes_typed_and_coerced_owner_commands_to_firmware_only() -> None:
+    """A typed owner command passes through; a raw dict whose schema is a command is coerced (JSON/API ingress)."""
+
+    async def run() -> tuple[bool, bool, list[object], str]:
+        device, _ = await started_commanded_device()
+        typed = await device.dispatch(device.context(), COMMAND_EVENT.with_data(_CommandData(word="typed")))
+        raw = await device.dispatch(device.context(), dataclasses.replace(COMMAND_EVENT, data={"word": "raw"}))
+        return typed, raw, [event.data for event in command_firmware(device).commands], device.state()
+
+    typed, raw, commands, shell_state = asyncio.run(run())
+
+    assert typed is True
+    assert raw is True
+    assert commands == [_CommandData(word="typed"), _CommandData(word="raw")]
+    assert shell_state == "/Device/detached"
+
+
+def test_device_drops_invalid_owner_command_before_firmware() -> None:
+    """An owner-command dict that fails its schema never reaches firmware and moves no shell state."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        device, _ = await started_commanded_device()
+        _ = await device.dispatch(device.context(), dataclasses.replace(COMMAND_EVENT, data={"not": "a command"}))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return command_firmware(device).commands, device.state()
+
+    commands, shell_state = asyncio.run(run())
+
+    assert commands == []
+    assert shell_state == "/Device/detached"
+
+
+def test_device_with_owner_commands_keeps_other_events_on_the_shell() -> None:
+    """A device that declares owner commands does not dual-deliver anything else into firmware."""
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        device, _ = await started_commanded_device()
+        _ = await device.dispatch(device.context(), FIRMWARE_PROBE_EVENT.with_data(_FirmwareProbeData()))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return command_firmware(device).probes
+
+    assert asyncio.run(run()) == []
+
+
+def test_device_tells_every_holder_with_bot_input() -> None:
+    """Each attached holder gets one ``bot.input`` carrying the observation, addressed from the device."""
+
+    async def run() -> tuple[str, list[tuple[str, list[hsm.Event[typing.Any]]]]]:
+        device, environment = await started_commanded_device()
+        holders = (Holder(), Holder())
+        for holder in holders:
+            _ = await mosfet.started(environment, holder, holder.model)
+            _ = await device.attach(environment, attach_event(holder))
+        await wait_until(lambda: device_bots(device) == holders)
+        command = dataclasses.replace(COMMAND_EVENT.with_data(_CommandData(word="hello")), id="command-1")
+        _ = await device.dispatch(device.context(), command)
+        await wait_until(lambda: all(holder.told for holder in holders))
+        return hsm.id(device), [(hsm.id(holder), holder.told) for holder in holders]
+
+    device_id, received = asyncio.run(run())
+
+    for holder_id, told in received:
+        (event,) = told
+        assert event.name == mosfet.InputEvent.name
+        assert (event.id, event.source, event.target) == ("command-1", device_id, holder_id)
+        assert isinstance(event.data, mosfet.InputEventData)
+        observation = event.data.observation
+        assert observation is not None
+        assert (observation.event, observation.data) == (COMMAND_EVENT.name, _CommandData(word="hello"))
+
+
+@pytest.mark.usefixtures("telemetry_files")
+def test_device_without_owner_commands_opens_no_ingress_span() -> None:
+    """A device with no owner commands keeps the plain dispatch path, so peripherals pay no span per broadcast."""
+
+    async def run() -> str:
+        device = FirmwareProbeDevice()
+        _ = await start_device_in_environment(device)
+        _ = await device.dispatch(device.context(), FIRMWARE_PROBE_EVENT.with_data(_FirmwareProbeData()))
+        firmware = device_firmware(device)
+        assert firmware is not None
+        return firmware.state()
+
+    assert asyncio.run(run()) == "/FirmwareProbe/forwarded"
+    spans, _ = exported_records()
+    assert [record for record in spans if record["name"] == "bot.device.ingress"] == []
+
+
+@pytest.mark.usefixtures("telemetry_files")
+def test_device_with_owner_commands_traces_ingress_and_holder_dispatch_under_its_declared_names() -> None:
+    """The ingress span and the holder capture take the device's declared scope and component."""
+
+    async def run() -> None:
+        device, environment = await started_commanded_device()
+        holder = Holder()
+        _ = await mosfet.started(environment, holder, holder.model)
+        _ = await device.attach(environment, attach_event(holder))
+        await wait_until(lambda: device_bots(device) == (holder,))
+        _ = await device.dispatch(device.context(), COMMAND_EVENT.with_data(_CommandData(word="hello")))
+        await wait_until(lambda: bool(holder.told))
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+    spans, logs = exported_records()
+
+    ingress = {
+        (record["scope"], record["attributes"]["bot.component.name"])
+        for record in spans
+        if record["name"] == "bot.device.ingress"
+    }
+    assert ingress == {("bot.devices", "device.ingress")}
+    holder_dispatches = [
+        record
+        for record in logs
+        if record["attributes"].get("component") == "device.holders"
+        and record["attributes"].get("hsm.event.name") == mosfet.InputEvent.name
+    ]
+    assert [record["body"]["accepted"] for record in holder_dispatches] == [True]
 
 
 def test_device_external_actors_attach_only_through_explicit_events() -> None:

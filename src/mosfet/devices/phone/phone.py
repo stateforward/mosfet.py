@@ -13,7 +13,6 @@ import pydantic
 import mosfet.device
 
 from mosfet import lifecycle
-from mosfet.event import validate_event_data
 from mosfet.protocols import attachment
 from mosfet.telemetry import observer
 from mosfet.environment import SoundEvent, Environment, require_environment_scope, space
@@ -79,10 +78,8 @@ from .events import (
     TransferStartedEvent,
     TransferTarget,
 )
-import uuid
 import mosfet
-from mosfet import telemetry
-from mosfet.telemetry.hsm import Traced, deliver
+from mosfet.telemetry.hsm import Traced
 
 RINGER_DB = 80.0
 """How loud a handset ringer is, in dB SPL measured one metre away.
@@ -1371,6 +1368,8 @@ class Phone(mosfet.device.Device):
         TransferCallData,
     )
     """Owner command payloads this handset accepts: every one enters firmware, never the shell."""
+    _ingress_scope: typing.ClassVar[str] = "bot.devices.phone"
+    _ingress_component: typing.ClassVar[str] = "phone"
 
     def __init__(
         self,
@@ -1465,96 +1464,6 @@ class Phone(mosfet.device.Device):
             stimulus,
             origin=None if placement is None else placement.position,
         )
-
-    def _tell_holders(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Dispatch ``bot.input`` carrying ``event`` to every bot holding this phone."""
-
-        for owner in tuple(self._attachments):
-            told = dataclasses.replace(
-                mosfet.InputEvent.with_data(mosfet.InputEventData(observation=mosfet.StimulusData.from_event(event))),
-                id=event.id or uuid.uuid4().hex,
-                source=hsm.id(self),
-                target=hsm.id(owner),
-                metadata=dict(event.metadata),
-            )
-            _ = telemetry.capture.record_dispatch(
-                hsm.dispatch(ctx, owner, told),
-                component="phone.holders",
-                event=told,
-                source=told.source,
-                target=told.target,
-            )
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        """Handset ingress: open the turn's trace here, then route the event (see ``_route``)."""
-
-        async def _deliver() -> bool:
-            # The handset is where a stimulus enters the bot: an event that arrives carrying no
-            # trace (a carrier, a test, a browser) starts the turn's trace here, and every hop it
-            # causes joins it. One that carries a trace (a bot's own command) continues it.
-            with telemetry.span.operation(
-                "bot.device.ingress",
-                scope="bot.devices.phone",
-                component="phone.ingress",
-                stage="ingress",
-                context=telemetry.event_context(event),
-            ):
-                return await telemetry.capture.record_dispatch(
-                    asyncio.Task(self._route(ctx, event), loop=asyncio.get_running_loop(), eager_start=True),
-                    component="phone.ingress",
-                    event=event,
-                    source=event.source,
-                    target=hsm.id(self),
-                )
-
-        return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
-
-    async def _route(self, ctx: hsm.Context, event: hsm.Event) -> bool:
-        """Firmware-only for owner command payloads; shell for lifecycle/other.
-
-        Owner commands enter firmware only — not dual-delivered and not name-routed. Typed
-        command payloads pass through; dict/None payloads whose event schema is a command
-        model are coerced via ``validate_event_data`` (JSON/API ingress). Device shell
-        lifecycle and other events stay on the shell HSM. Service observations enter
-        firmware via the service attach target, not through this shell ingress.
-
-        Resolves to whether the routed machine accepted the event: firmware for owner commands
-        (``False`` without firmware), the shell otherwise.
-        """
-
-        command = self._coerce_owner_command(event)
-        if command is not None:
-            firmware = self._firmware
-            if firmware is None:
-                return False
-            return await firmware.dispatch(ctx, command)
-        # Device shell lifecycle / other events.
-        return await deliver(self, ctx, event)
-
-    @classmethod
-    def _coerce_owner_command(cls, event: hsm.Event) -> hsm.Event | None:
-        """Return a firmware-bound owner command event, or None when not a command ingress.
-
-        Already-typed command payloads pass through. Unvalidated dict/None payloads are
-        coerced only when the event's declared schema is an owner command model (schema
-        identity, not event.name). Invalid payloads are dropped (no shell fall-through).
-        """
-
-        command_schemas = cls._command_schemas
-        data = event.data
-        if isinstance(data, command_schemas):
-            return event
-        schema = event.schema
-        if not any(schema is command_schema for command_schema in command_schemas):
-            return None
-        try:
-            validated = validate_event_data(event, {} if data is None else data)
-        except ValueError:
-            return None
-        if not isinstance(validated, command_schemas):
-            return None
-        return dataclasses.replace(event, data=validated)
 
     @typing.override
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:

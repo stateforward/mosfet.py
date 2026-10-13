@@ -4,13 +4,17 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
+import pathlib
 import typing
 
 import hsm
 import pytest
+from opentelemetry import _logs, trace
 
 import mosfet
+import mosfet.telemetry
 from mosfet.abilities import encoding
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
@@ -45,6 +49,7 @@ from tests.devices.phone.handset import (
     phone_in_a_hand,
     wait_until,
 )
+from mosfet.telemetry.configure import logger_provider, span_file, tracer_provider
 from tests.hsm_model import transition_map
 from tests.type_helpers import invalid_value
 
@@ -1897,37 +1902,73 @@ def test_public_phone_events_do_not_route_back_into_phone_firmware() -> None:
     asyncio.run(run())
 
 
-def test_phone_dispatch_coerces_dict_command_payload_to_firmware() -> None:
-    """Owner DialEvent with raw dict data is coerced and reaches firmware (JSON/API ingress)."""
+def test_phone_ingress_and_holder_telemetry_keep_the_phone_names(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Handset ingress opens ``bot.device.ingress`` under ``bot.devices.phone``; holder telling captures as ``phone.holders``."""
 
-    async def run() -> str:
-        phone = phone_device.Phone()
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        raw = dataclasses.replace(
-            phone_device.DialEvent,
-            data={"number": DIAL_NUMBER},
+    monkeypatch.chdir(tmp_path)
+    mosfet.telemetry.reset()
+    for name in (
+        "BOT_OTEL_DISABLED",
+        "BOT_OTEL_LOG_FILE",
+        "BOT_OTEL_SPAN_FILE",
+        "BOT_OTEL_CAPTURE",
+        "BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "BOT_OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(_logs, "set_logger_provider", lambda _provider: None)
+    # Keep the exporting provider module-local: a process-global one would trace later tests' dispatches.
+    monkeypatch.setattr(trace, "set_tracer_provider", lambda _provider: None)
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+
+    async def run() -> None:
+        phone, firmware, holder, _ = await phone_in_a_hand(Environment())
+        await emit_service_event(
+            phone, phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
         )
-        await phone.dispatch(phone.context(), raw)
-        await wait_until(lambda: (device_firmware(phone) or phone).state() == "/Phone/dialing")
-        return _firmware_state(phone) or ""
+        await wait_until(lambda: firmware.state() == "/Phone/ringing")
+        await answer_call(phone, "call-1")
+        await wait_until(lambda: phone_device.AnsweredEvent.name in occasion_sources(holder))
+        for _ in range(10):
+            await asyncio.sleep(0)
 
-    assert asyncio.run(run()).endswith("/dialing")
+    try:
+        asyncio.run(run())
+        spans_provider = tracer_provider()
+        if spans_provider is not None:
+            _ = spans_provider.force_flush()
+        logs_provider = logger_provider()
+        if logs_provider is not None:
+            _ = logs_provider.force_flush()
+        spans_path = span_file()
+        assert spans_path is not None
+        spans = [json.loads(line) for line in spans_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        logs = [
+            json.loads(line)
+            for line in pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    finally:
+        mosfet.telemetry.reset()
 
-
-def test_phone_dispatch_drops_invalid_dict_command_without_shell_fallthrough() -> None:
-    """Invalid owner-command dict does not reach firmware and is not shell-admitted."""
-
-    async def run() -> str | None:
-        phone = phone_device.Phone()
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        before = phone_current_call_id(firmware_of(phone))
-        raw = dataclasses.replace(phone_device.DialEvent, data={"not": "a dial"})
-        await phone.dispatch(phone.context(), raw)
-        await asyncio.sleep(0.05)
-        assert phone_current_call_id(firmware_of(phone)) == before
-        return _firmware_state(phone)
-
-    assert asyncio.run(run()) == "/Phone/hung_up"
+    ingress = {
+        (record["scope"], record["attributes"]["bot.component.name"])
+        for record in spans
+        if record["name"] == "bot.device.ingress"
+    }
+    assert ingress == {("bot.devices.phone", "phone.ingress")}
+    told = [
+        record["body"]["accepted"]
+        for record in logs
+        if record["attributes"].get("component") == "phone.holders"
+        and record["attributes"].get("hsm.event.name") == mosfet.InputEvent.name
+    ]
+    assert told and all(accepted is True for accepted in told)
 
 
 def test_phone_event_recorder_ignores_local_audio_output_not_service_audio() -> None:
