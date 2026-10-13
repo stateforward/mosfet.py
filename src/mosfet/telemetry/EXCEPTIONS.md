@@ -44,6 +44,6 @@ global API slot.
 ## Dependency floor: OTLP gRPC span exporter
 
 **User-approved:** `opentelemetry-exporter-otlp-proto-grpc>=1.42.1,<2.0.0`
-(same 1.42 floor as api/sdk). Transitive `grpcio` is the Control subscribe
-transport. Dashboard live ingest is OTLP gRPC on `:4317`; JSONL file export
+(same 1.42 floor as api/sdk). Dashboard live ingest is OTLP gRPC on `:4317`;
+the studio observes only and sends nothing back to the bot. JSONL file export
 remains the local recording artifact.

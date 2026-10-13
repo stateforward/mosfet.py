@@ -1001,6 +1001,36 @@ def test_bot_attach_rejects_started_agent_from_another_environment() -> None:
     asyncio.run(run())
 
 
+def test_bot_attach_with_otlp_endpoint_opens_no_event_injection_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The studio observes only: no OTLP-configured bot accepts injected events from it."""
+
+    import grpc
+    import importlib.util
+
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9")
+    opened: list[str] = []
+    real_insecure_channel = grpc.insecure_channel
+
+    def recording_insecure_channel(target: str, *args: object, **kwargs: object) -> grpc.Channel:
+        del args, kwargs
+        opened.append(target)
+        return real_insecure_channel(target)
+
+    monkeypatch.setattr(grpc, "insecure_channel", recording_insecure_channel)
+
+    async def run() -> None:
+        active_bot = basic_agent(devices={})
+        environment = Environment()
+        _ = await active_bot.attach(environment)
+        await asyncio.sleep(0.2)
+        _ = await active_bot.detach(environment)
+
+    asyncio.run(run())
+
+    assert opened == []
+    assert importlib.util.find_spec("mosfet.telemetry.control") is None
+
+
 def test_bot_activation_deduplicates_device_aliases() -> None:
     async def run() -> tuple[str, bool]:
         shared_device = Device()

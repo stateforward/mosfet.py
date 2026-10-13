@@ -310,9 +310,6 @@ def reset() -> None:
             if retained is not None:
                 with contextlib.suppress(Exception):
                     retained.shutdown()
-    from mosfet.telemetry import control
-
-    control.reset()
 
 
 def is_enabled() -> bool:

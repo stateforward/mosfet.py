@@ -25,7 +25,6 @@ from . import events
 
 from mosfet.device import Device
 from mosfet import telemetry
-from mosfet.telemetry import control
 from mosfet.telemetry import observer
 from mosfet.telemetry import span
 from mosfet.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
@@ -379,7 +378,6 @@ class Bot(Traced, abc.ABC):
         # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
         # Unconditional: the already-running branch above swallows its error, and join is idempotent.
         environment.join(self, placement=placement)
-        control.listen(environment)
         await self.dispatch(environment, events.ActivateEvent.with_data(events.ActivateEventData()))
         return self
 
@@ -409,7 +407,6 @@ class Bot(Traced, abc.ABC):
         # detaching and keeps presence. Pairs with the join in attach; no test can observe the
         # removal (a stopped or inactive bot ignores broadcasts either way), so this is ownership
         # completeness and map hygiene. Do not delete it as untested.
-        control.unlisten(environment)
         environment.leave(self)
         return self
 
