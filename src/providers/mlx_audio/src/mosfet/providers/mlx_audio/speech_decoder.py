@@ -156,7 +156,7 @@ class SpeechDecoder(speech.SpeechDecoder):
     hold process shutdown open. Cancelling ``aclose`` is reported after this bounded cleanup.
     """
 
-    model_id: str = "mlx-community/whisper-large-v3-turbo"
+    model_id: str = "mlx-community/whisper-large-v3-turbo-asr-fp16"
     language: str = "en"
     verbose: bool = False
     audio_file_suffix: str = ".wav"

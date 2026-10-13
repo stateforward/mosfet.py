@@ -151,7 +151,11 @@ def test_speech_decoder_default_constructor_uses_mlx_audio_loader(
     output = asyncio.run(await_speech_decoding(decoder.decode(b"audio")))
 
     assert output == b"default transcript"
-    assert loaded_model_ids == ["mlx-community/whisper-large-v3-turbo"]
+    # MLX Audio's Whisper loader builds its tokenizer from the repository's Hugging Face processor
+    # files (preprocessor_config.json, tokenizer.json, ...). The default must name a repository
+    # that ships them; `mlx-community/whisper-large-v3-turbo` carries only config and weights, so
+    # every decode with it fails with "Processor not found".
+    assert loaded_model_ids == ["mlx-community/whisper-large-v3-turbo-asr-fp16"]
     assert len(model.calls) == 1
 
 
