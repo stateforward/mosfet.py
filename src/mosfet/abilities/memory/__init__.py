@@ -48,7 +48,7 @@ from mosfet.abilities.memory.memory import (
 )
 from mosfet.abilities.memory.schema import STM_MEMORY_TABLE, memory_table, metadata, stm_memory_table
 from mosfet.abilities.memory.stm import ObservedEvent, RecordData, StmMemory
-from mosfet.abilities.memory.store import compile_statement, compile_statements
+from mosfet.abilities.memory.store import compile_statement, compile_statements, recent_select
 from mosfet.abilities.memory.payload import (
     DecodeData,
     DecodedData,
@@ -117,6 +117,7 @@ __all__ = [
     "memory_table",
     "metadata",
     "payload",
+    "recent_select",
     "schema",
     "short_term",
     "stm",

@@ -19,7 +19,6 @@ import uuid
 import pydantic
 from sqlalchemy import insert
 from sqlalchemy import or_
-from sqlalchemy import select
 
 # Stable query_tags value for standing directives in bot_memory.
 DIRECTIVE_QUERY = "standing_directive"
@@ -69,14 +68,13 @@ def directive_select_input(
     context_ref: str | None = None,
     limit: int = 50,
 ) -> memory.InputData:
-    """Memory apply input that SELECTs the standing directives the bot was given."""
+    """Memory apply input that SELECTs the ``limit`` most recent standing directives, oldest first."""
 
     table = memory.memory_table
-    clause = select(table).where(table.c.query_tags == DIRECTIVE_QUERY)
+    criteria = [table.c.query_tags == DIRECTIVE_QUERY]
     if context_ref is not None:
-        clause = clause.where(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
-    clause = clause.order_by(table.c.created_at).limit(limit)
-    return memory.InputData(statements=memory.compile_statements(clause))
+        criteria.append(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
+    return memory.InputData(statements=memory.compile_statements(memory.recent_select(*criteria, limit=limit)))
 
 
 def directive_insert_input(

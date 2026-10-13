@@ -27,7 +27,10 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine
+from sqlalchemy import Select
+from sqlalchemy import select
 from sqlalchemy.sql import ClauseElement
+from sqlalchemy.sql import ColumnElement
 
 
 from . import schema
@@ -247,6 +250,25 @@ def compile_statements(
     """Compile one or more Core clauses into a transaction batch."""
 
     return tuple(compile_statement(clause, dialect=dialect) for clause in clauses)
+
+
+def recent_select(*criteria: ColumnElement[bool], limit: int) -> Select[typing.Any]:
+    """SELECT the ``limit`` most recent ``bot_memory`` rows matching ``criteria``, oldest first.
+
+    Recency is ``created_at``. Rows that share a stamp (the column default has one-second
+    resolution) fall back to ``memory_id`` so the window and its order stay deterministic on every
+    dialect. The window is taken newest-first, then re-read in chronological order for consumers.
+    """
+
+    table = schema.memory_table
+    window = (
+        select(table)
+        .where(*criteria)
+        .order_by(table.c.created_at.desc(), table.c.memory_id.desc())
+        .limit(limit)
+        .subquery()
+    )
+    return select(window).order_by(window.c.created_at, window.c.memory_id)
 
 
 def _statement_kind(sql: str) -> str:
@@ -538,4 +560,5 @@ __all__ = [
     "migrate",
     "migration_config",
     "open_sqlite_engine",
+    "recent_select",
 ]

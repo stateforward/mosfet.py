@@ -96,3 +96,26 @@ def test_a_name_is_not_recalled_as_a_standing_directive() -> None:
 
     assert directives.directives_from_output(recalled_directives) == ()
     assert identity.adopted_name(recalled_names) == identity.Name(text="Bob")
+
+
+def test_a_bot_renamed_more_often_than_the_recall_window_answers_to_its_latest_name() -> None:
+    """Recall reaches the newest adoptions, so a long rename history never hides the current name."""
+
+    base = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    store, connection = open_store()
+    try:
+        for index in range(60):
+            _ = store.execute(
+                identity.name_insert_input(
+                    identity.Name(text=f"Name {index:02d}"),
+                    created_at=base + datetime.timedelta(minutes=index),
+                )
+            )
+        recalled = store.execute(identity.name_select_input(limit=50))
+    finally:
+        connection.close()
+
+    assert [name.text for name in identity.names_from_output(recalled)] == [
+        f"Name {index:02d}" for index in range(10, 60)
+    ]
+    assert identity.adopted_name(recalled) == identity.Name(text="Name 59")

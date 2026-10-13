@@ -20,8 +20,6 @@ import uuid
 import pydantic
 from pydantic.config import JsonValue
 from sqlalchemy import insert
-from sqlalchemy import select
-from sqlalchemy.sql import ClauseElement
 
 
 IdentitySet: typing.TypeAlias = value.IdentitySet
@@ -325,7 +323,7 @@ def conversation_memory_recall_input(
     limit: int = 50,
     context_ref: str | None = None,
 ) -> memory_ability.InputData:
-    """Build a generic memory transaction that recalls a relationship's payloads."""
+    """Build a generic memory transaction that recalls a relationship's ``limit`` most recent payloads, oldest first."""
 
     if limit < 1:
         raise ValueError("limit must be at least one.")
@@ -333,12 +331,10 @@ def conversation_memory_recall_input(
         raise ValueError("context_ref must not be blank when provided.")
     table = memory_ability.memory_table
     resolved_context_ref = context_ref or relationship_context_ref(source_ids=source_ids, target_ids=target_ids)
-    clause: ClauseElement = (
-        select(table.c.content)
-        .where(table.c.query_tags == CONVERSATION_MEMORY_QUERY_TAG)
-        .where(table.c.context_ref == resolved_context_ref)
-        .order_by(table.c.created_at, table.c.memory_id)
-        .limit(limit)
+    clause = memory_ability.recent_select(
+        table.c.query_tags == CONVERSATION_MEMORY_QUERY_TAG,
+        table.c.context_ref == resolved_context_ref,
+        limit=limit,
     )
     return memory_ability.InputData(statements=memory_ability.compile_statements(clause))
 

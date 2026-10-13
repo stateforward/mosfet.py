@@ -242,3 +242,43 @@ def test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime(tmp
     assert current == head
     assert diffs == []
     assert [tuple(row) for row in lifetimes] == [("Greeting", "turn")]
+
+
+def test_recent_select_windows_the_newest_rows_oldest_first_and_breaks_ties_by_memory_id() -> None:
+    """Recall reaches the latest rows; within the window they read in the order they happened.
+
+    ``created_at`` decides recency even when ``memory_id`` sorts the other way; equal timestamps
+    fall back to ``memory_id`` so the window and its order are deterministic.
+    """
+
+    from sqlalchemy import insert
+
+    table = memory.memory_table
+    rows = (
+        ("oldest", "2026-01-01 00:00:01", "z"),
+        ("older", "2026-01-01 00:00:02", "y"),
+        ("tied-first", "2026-01-01 00:00:03", "b"),
+        ("tied-second", "2026-01-01 00:00:03", "c"),
+        ("other-tag", "2026-01-01 00:00:04", "a"),
+    )
+    store = memory.Memory()
+    for content, created_at, memory_id in rows:
+        _ = store.execute(
+            memory.InputData(
+                statements=memory.compile_statements(
+                    insert(table).values(
+                        memory_id=memory_id,
+                        content=content,
+                        query_tags="other" if content == "other-tag" else "t",
+                        created_at=created_at,
+                    )
+                )
+            )
+        )
+
+    recalled = store.execute(
+        memory.InputData(statements=memory.compile_statements(memory.recent_select(table.c.query_tags == "t", limit=3)))
+    )
+
+    assert recalled.contents() == ("older", "tied-first", "tied-second")
+    assert [row.as_mapping()["memory_id"] for row in recalled.results[0].rows] == ["y", "b", "c"]

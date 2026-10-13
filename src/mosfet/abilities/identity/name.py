@@ -20,7 +20,6 @@ import uuid
 
 import pydantic
 from sqlalchemy import insert
-from sqlalchemy import select
 
 # Stable query_tags value for adopted names in bot_memory.
 NAME_QUERY = "self_name"
@@ -75,16 +74,10 @@ def adopted_name(output: memory.OutputData, *, statement_index: int = 0) -> Name
 
 
 def name_select_input(*, limit: int = 50) -> memory.InputData:
-    """Memory apply input that SELECTs the names this bot has adopted, oldest first."""
+    """Memory apply input that SELECTs the ``limit`` most recently adopted names, oldest first."""
 
     table = memory.memory_table
-    clause = (
-        select(table)
-        .where(table.c.query_tags == NAME_QUERY)
-        .where(table.c.subject_ref == NAME_SUBJECT)
-        .order_by(table.c.created_at)
-        .limit(limit)
-    )
+    clause = memory.recent_select(table.c.query_tags == NAME_QUERY, table.c.subject_ref == NAME_SUBJECT, limit=limit)
     return memory.InputData(statements=memory.compile_statements(clause))
 
 

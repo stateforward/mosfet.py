@@ -209,3 +209,27 @@ def test_recalled_memory_output_decodes_payload_only() -> None:
     )
 
     assert memory.conversation_memories_from_output(output) == (item,)
+
+
+def test_conversation_recall_returns_the_most_recent_window_oldest_first() -> None:
+    """A long relationship recalls what was said lately, not the same opening lines forever.
+
+    Rows written within the same second tie on ``created_at`` and fall back to ``memory_id``, which
+    these rows carry in insertion order.
+    """
+
+    store = memory_ability.Memory()
+    for index in range(60):
+        item = memory.Memory(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=f"line {index:02d}",
+            content_type="text/plain",
+        )
+        _ = store.execute(memory.conversation_memory_insert_input(item, memory_id=f"memory-{index:02d}"))
+
+    recalled = memory.conversation_memories_from_output(
+        store.execute(memory.conversation_memory_recall_input(source_ids=["caller"], target_ids=["bot"], limit=50))
+    )
+
+    assert [item.content for item in recalled] == [f"line {index:02d}" for index in range(10, 60)]

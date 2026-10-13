@@ -42,7 +42,6 @@ import hsm
 import mosfet
 from mosfet import event
 import pydantic
-from sqlalchemy import select
 
 from mosfet.behavior import ChangeData, CreateData
 from mosfet.protocols import attachment
@@ -682,13 +681,7 @@ def _recall_prior_turns(store: memory.Memory) -> tuple[RememberedTurn, ...]:
     outcomes, and only the caller can turn the former into a typed failure that names the cause.
     """
 
-    table = memory.memory_table
-    clause = (
-        select(table)
-        .where(table.c.query_tags == _REMEMBERED_TURN_QUERY)
-        .order_by(table.c.created_at)
-        .limit(_RECALL_TURN_LIMIT)
-    )
+    clause = memory.recent_select(memory.memory_table.c.query_tags == _REMEMBERED_TURN_QUERY, limit=_RECALL_TURN_LIMIT)
     recalled = store.execute(memory.InputData(statements=memory.compile_statements(clause)))
     return _remembered_turns_from_contents(recalled.contents(statement_index=0))
 

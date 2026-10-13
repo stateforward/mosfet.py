@@ -83,3 +83,25 @@ def test_a_bot_with_nothing_in_memory_recalls_no_directives() -> None:
     recalled = directives.directives_from_output(store.execute(directives.directive_select_input(context_ref="phone")))
 
     assert recalled == ()
+
+
+def test_directive_recall_returns_the_most_recent_window_oldest_first() -> None:
+    """A bot told many things recalls what it was told lately, in the order it was told.
+
+    Rows written within the same second tie on ``created_at`` and fall back to ``memory_id``, which
+    these rows carry in insertion order.
+    """
+
+    store = memory.Memory()
+    for index in range(60):
+        _ = store.execute(
+            directives.directive_insert_input(
+                directives.Directive(text=f"Directive {index:02d}."),
+                context_ref="phone",
+                memory_id=f"directive-{index:02d}",
+            )
+        )
+
+    recalled = directives.directives_from_output(store.execute(directives.directive_select_input(context_ref="phone")))
+
+    assert [directive.text for directive in recalled] == [f"Directive {index:02d}." for index in range(10, 60)]

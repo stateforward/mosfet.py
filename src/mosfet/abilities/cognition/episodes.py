@@ -16,7 +16,6 @@ import uuid
 import pydantic
 from sqlalchemy import insert
 from sqlalchemy import or_
-from sqlalchemy import select
 
 from . import types
 
@@ -79,14 +78,13 @@ def episode_select_input(
     context_ref: str | None = None,
     limit: int = 50,
 ) -> memory.InputData:
-    """Memory apply input that SELECTs prior cognitive episodes for behavior learning."""
+    """Memory apply input that SELECTs the ``limit`` most recent cognitive episodes, oldest first."""
 
     table = memory.memory_table
-    clause = select(table).where(table.c.query_tags == COGNITIVE_EPISODE_QUERY)
+    criteria = [table.c.query_tags == COGNITIVE_EPISODE_QUERY]
     if context_ref is not None:
-        clause = clause.where(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
-    clause = clause.order_by(table.c.created_at).limit(limit)
-    return memory.InputData(statements=memory.compile_statements(clause))
+        criteria.append(or_(table.c.context_ref.is_(None), table.c.context_ref == context_ref))
+    return memory.InputData(statements=memory.compile_statements(memory.recent_select(*criteria, limit=limit)))
 
 
 def episode_insert_input(

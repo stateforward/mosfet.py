@@ -370,6 +370,53 @@ def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
     assert output.behavior.name == "AnswerIncomingRing"
 
 
+def test_learning_grounds_in_the_latest_remembered_turn_beyond_the_recall_window() -> None:
+    """A long-lived bot grounds a lesson in what it did lately, not in its oldest turns.
+
+    Episodes written within the same second tie on ``created_at`` and fall back to ``memory_id``,
+    which these episodes carry in insertion order.
+    """
+
+    async def run() -> learning.OutputData:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = memory.Memory(connection=connection)
+        for index in range(60):
+            episode = episodes.CognitiveEpisode(
+                focus="phone",
+                focus_candidates=("phone",),
+                stimulus_name="environment.sound",
+                output=(
+                    cognition_types.EventData(
+                        event="phone.answer_call",
+                        target="phone",
+                        data={"call_id": f"call-{index:02d}"},
+                        reason="answered from prior turn",
+                    ),
+                ),
+            )
+            _ = store.execute(
+                episodes.episode_insert_input(episode, context_ref="phone", memory_id=f"episode-{index:02d}")
+            )
+        processor = LearningTestProcessor(
+            selection=_generate_selection(),
+            write=_ring_write(),
+        )
+        ability = Learning(
+            decoder=TextDecoder(),
+            processor=processor,
+            memory=store,
+        )
+        return await dispatch_ability_for_test(
+            ability,
+            None,
+            learning.InputData(content="When the phone rings, answer it."),
+            timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
+        )
+
+    output = asyncio.run(run())
+    assert output.runtime_input.expected_data == {"call_id": "call-59"}
+
+
 def _seed_ring_episode(store: memory.Memory) -> None:
     episode = episodes.CognitiveEpisode(
         focus="phone",
