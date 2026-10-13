@@ -429,6 +429,11 @@ def _evidence_trigger_names(write: ChangeWriteInput) -> tuple[str, ...]:
     for episode in write.prior_episodes:
         if episode.stimulus_name:
             names.append(episode.stimulus_name)
+    # An already-installed behavior's own triggers are evidence the bot has *seen* those
+    # stimuli fire: a revision that only edits the program must not silently strip them.
+    for trigger in write.existing_behavior.triggers:
+        if trigger:
+            names.append(trigger)
     seen: set[str] = set()
     ordered: list[str] = []
     for name in names:

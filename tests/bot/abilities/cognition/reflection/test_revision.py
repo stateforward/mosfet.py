@@ -237,6 +237,59 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
     assert output.applied.description == "Answer an incoming ring."
 
 
+def test_revision_keeps_the_existing_behaviors_own_grounded_triggers() -> None:
+    """A program-only revision from an unrelated turn keeps the installed trigger.
+
+    The installed behavior already fires on `environment.sound`; revising it from a turn
+    whose stimulus is a different name must not strip that trigger and retarget the
+    behavior onto the current stimulus. An invented name with no evidence still drops.
+    """
+
+    from mosfet.behavior import storage as behavior_storage
+
+    revised_source = ANSWER_RING_BEHAVIOR_SOURCE.replace(
+        'description = "Answer an incoming ring."',
+        'description = "Answer an incoming ring, revised."',
+    )
+    written = behavior.ChangeData(
+        name="AnswerIncomingRing",
+        triggers=("environment.sound", "phone.ringing"),
+        source=revised_source,
+    )
+
+    async def run() -> revision.OutputData:
+        store = memory.Memory()
+        installed = behavior.start(
+            ANSWER_RING_BEHAVIOR_SOURCE,
+            name="AnswerIncomingRing",
+            triggers=("environment.sound",),
+        )
+        _ = store.execute(
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+        )
+        actor = revision.Revision(processor=FixedProcessor(write=written), memory=store)
+        output = await dispatch_ability_for_test(
+            actor,
+            None,
+            revision.InputData(
+                cognition_input=cognition_input(),
+                cognition_output=focus_output("phone", "answered"),
+                intent=behavior.ChangeData(name="AnswerIncomingRing", reason="revise the program only"),
+                parent_operation_id="parent-turn",
+                parent_generation="parent-generation",
+            ),
+        )
+        assert isinstance(output, revision.OutputData)
+        return output
+
+    output = asyncio.run(run())
+
+    assert isinstance(output.applied, behavior.ChangeData)
+    assert output.applied.name == "AnswerIncomingRing"
+    assert output.applied.triggers == ("environment.sound",)
+    assert output.applied.source == revised_source
+
+
 def _change_intent():
     return behavior.ChangeData(
         name="HandlePhoneCall",
