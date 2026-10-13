@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     name: Test and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -26,7 +26,7 @@ jobs:
           python-version: "3.13"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v8.3.2
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -145,58 +145,7 @@ jobs:
         run: uv build --all-packages --no-sources
 
       - name: Install and import every built wheel in clean environments
-        shell: bash
-        run: |
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          if (( ${#wheels[@]} == 0 )); then
-            echo "No wheels were built."
-            exit 1
-          fi
-
-          core_wheels=(dist/stateforward_bot-*.whl)
-          if (( ${#core_wheels[@]} != 1 )); then
-            echo "Expected exactly one stateforward.mosfet wheel, found ${#core_wheels[@]}."
-            exit 1
-          fi
-          core_wheel="${core_wheels[0]}"
-          smoke_root="$(mktemp -d)"
-          trap 'rm -rf "$smoke_root"' EXIT
-
-          for wheel in "${wheels[@]}"; do
-            filename="$(basename "$wheel")"
-            case "$filename" in
-              stateforward_bot-*.whl) import_name="bot" ;;
-              bot_provider_elevenlabs-*.whl) import_name="bot.providers.elevenlabs" ;;
-              bot_provider_gemini-*.whl) import_name="bot.providers.gemini" ;;
-              bot_provider_livekit-*.whl) import_name="bot.providers.livekit" ;;
-              bot_provider_mlx_audio-*.whl) import_name="bot.providers.mlx_audio" ;;
-              bot_provider_mlx_vlm-*.whl) import_name="bot.providers.mlx_vlm" ;;
-              bot_provider_moonshine-*.whl) import_name="bot.providers.moonshine" ;;
-              bot_provider_openai_compat-*.whl) import_name="bot.providers.openai_compat" ;;
-              bot_provider_postgres_memory-*.whl) import_name="bot.providers.postgres_memory" ;;
-              bot_provider_pyannote-*.whl) import_name="bot.providers.pyannote" ;;
-              bot_provider_sqlite_memory-*.whl) import_name="bot.providers.sqlite_memory" ;;
-              *)
-                echo "No import smoke mapping for built wheel: $filename"
-                exit 1
-                ;;
-            esac
-
-            environment="$smoke_root/${filename%.whl}"
-            uv venv --python "$(command -v python)" "$environment"
-            python_bin="$environment/bin/python"
-            if [[ "$wheel" == "$core_wheel" ]]; then
-              uv pip install --python "$python_bin" "$wheel"
-            else
-              uv pip install --python "$python_bin" "$core_wheel" "$wheel"
-            fi
-            (
-              cd "$environment"
-              PYTHONNOUSERSITE=1 PYTHONPATH= SMOKE_IMPORT="$import_name" \
-                "$python_bin" -c 'import importlib, os; importlib.import_module(os.environ["SMOKE_IMPORT"])'
-            )
-          done
+        run: scripts/smoke_wheels.sh dist
 
       - name: Prune uv cache
         if: always()
@@ -204,7 +153,7 @@ jobs:
 
   web:
     name: Web typecheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6

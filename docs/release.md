@@ -53,8 +53,13 @@ The CI cost tradeoff is deliberate:
 - Do fail CI unless every wheel produced by that build installs with its local
   core wheel into a separate clean virtual environment and its public package
   imports with the repository and user site removed from Python's import path.
-- Keep the wheel-to-import mapping exhaustive: an unknown built wheel fails the
-  smoke gate until its public import is named explicitly.
+- Run that smoke gate through `scripts/smoke_wheels.sh`, so CI and a local run
+  execute the same code; `scripts/smoke_wheels.sh --map-only dist` prints each
+  wheel's import name without installing anything.
+- Derive each wheel's import from the package naming contract: the
+  `stateforward_mosfet` wheel imports `mosfet`, and a `mosfet_provider_<name>`
+  wheel imports `mosfet.providers.<name>`. A built wheel outside that contract
+  fails the smoke gate.
 - Keep the workflow as a package publish-readiness lane until the broader repo
   Ruff and basedpyright baseline is intentionally cleaned up.
 
