@@ -156,6 +156,23 @@ def jsonable(value: object) -> object:
     return value
 
 
+def _content_with_bytes(value: object) -> object:
+    """Project request contents like ``jsonable`` but keep bytes (``inline_data.data``) as raw bytes.
+
+    google-genai ``Blob`` takes raw bytes, so image bytes go to the SDK unchanged: no UTF-8
+    sniffing and no base64 conversion.
+    """
+
+    if isinstance(value, bytes | bytearray):
+        return bytes(value)
+    if isinstance(value, collections.abc.Mapping):
+        mapping = typing.cast(collections.abc.Mapping[object, object], value)
+        return {str(key): _content_with_bytes(item) for key, item in mapping.items()}
+    if isinstance(value, collections.abc.Sequence) and not isinstance(value, str):
+        return [_content_with_bytes(item) for item in value]
+    return jsonable(value)
+
+
 def jsonable_mapping(value: collections.abc.Mapping[str, object]) -> dict[str, object]:
     """Convert a string-keyed mapping to a JSON-compatible dictionary."""
 
@@ -219,7 +236,7 @@ class ChatClient(ContentClient):
 
         kwargs: dict[str, object] = {
             "model": model if model is not None else self.model,
-            "contents": typing.cast(list[object], jsonable(contents)),
+            "contents": [_content_with_bytes(content) for content in contents],
         }
         if request_config:
             kwargs["config"] = request_config

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import collections.abc
 import json
 import pathlib
@@ -11,6 +12,8 @@ import pydantic
 import pytest
 from opentelemetry import _logs
 
+from mosfet import media
+from mosfet.abilities.language import text
 from mosfet.telemetry import capture
 from mosfet.telemetry.configure import logger_provider, tracer_provider
 
@@ -159,3 +162,60 @@ def test_record_dispatch_logs_acceptance_under_full_capture(monkeypatch: pytest.
     assert asyncio.run(run()) is False
     (record,) = _records()
     assert record["body"] == {"event": "bot.input", "id": "e1", "source": "a", "target": "b", "accepted": False}
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
+_PNG_BASE64 = base64.b64encode(_PNG).decode("ascii")
+
+
+def test_jsonable_redacts_data_urls_to_media_type_and_length() -> None:
+    url = f"data:image/png;base64,{_PNG_BASE64}"
+
+    tree = capture.jsonable({"image_url": {"url": url}, "note": f"see {url} here"})
+
+    marker = f"<data-url:image/png:{len(_PNG_BASE64)} chars>"
+    assert tree == {"image_url": {"url": marker}, "note": f"see {marker} here"}
+
+
+def test_jsonable_redacts_images_at_every_depth() -> None:
+    image = media.Image(content=_PNG, media_type="image/png", width_px=1, height_px=1)
+    marker = f"<image:image/png:{len(_PNG)} bytes>"
+    message = text.TextMessage(
+        role=text.TextRole.USER, content=(text.TextPart(text="look"), text.ImagePart(image=image))
+    )
+
+    assert capture.jsonable(image) == marker
+    assert capture.jsonable({"images": [image]}) == {"images": [marker]}
+    tree = capture.jsonable(text.InputData(messages=(message,)))
+
+    assert tree == {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"kind": "text", "text": "look"}, {"kind": "image", "image": marker}],
+                "tool_call_id": None,
+                "tool_calls": [],
+            }
+        ],
+        "tools": [],
+        "tool_selection": "auto",
+    }
+    assert _PNG_BASE64 not in json.dumps(tree)
+
+
+def test_full_capture_never_exports_image_bytes_from_event_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+    image = media.Image(content=_PNG, media_type="image/png")
+    message = text.TextMessage(role=text.TextRole.USER, content=(text.ImagePart(image=image),))
+
+    capture.emit(
+        "bot.telemetry.test",
+        body={"event": hsm.Event(name="demo.image", data=text.InputData(messages=(message,)))},
+        attributes={"component": "test"},
+    )
+
+    (record,) = _records()
+    logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
+    assert _PNG_BASE64 not in logged
+    assert f"<image:image/png:{len(_PNG)} bytes>" in json.dumps(record["body"])

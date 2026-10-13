@@ -15,6 +15,7 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | `tests/bot/abilities/communication/conversation/turn_detector/test_stimuli_turn.py` | `turn_detector/stimuli.py` + `turn_detector/turn.py` (stimulus kinds, boundary source match) |
 | `tests/environment/test_snapshot.py` | `src/mosfet/environment/snapshot.py` (pure envelope rendering, `ModelRepr`) |
 | `tests/bot/test_event_envelope.py` | `src/mosfet/event.py` (canonical JSON value, raw-media refusal, schema round-trip) |
+| `tests/bot/test_media.py` | `src/mosfet/media.py` (`Image` signature and size validation, `ImageCapacity.admit`, `ImageRetention.retain`, `ReleasedImage`) |
 | `tests/bot/test_lifecycle.py` | `src/mosfet/lifecycle.py` (unstarted vs started, snapshot coherence) |
 | `tests/bot/abilities/memory/test_store.py::test_memory_store_accepts_injected_engine` | `src/mosfet/abilities/memory/store.py` (injected engine path, exclusive args) |
 | `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_*` | `src/mosfet/abilities/memory/store.py` bring-up via `src/mosfet/abilities/memory/migrations/` (head without drift, create_all-era stamp, partial-DB refusal) |

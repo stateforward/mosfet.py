@@ -45,5 +45,35 @@ generator = ResponsesTextGenerator(client=client, reasoning_effort=ReasoningEffo
 
 Both generators record token usage (including reasoning tokens) through `mosfet.telemetry.record_generator_usage`.
 
+A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
+Chat Completions receives them as `text` and `image_url` parts and the Responses API as `input_text` and `input_image`
+parts, each image as a base64 `data:` URL. Both generators default to a text-only `image_capacity` because the endpoint
+may front any model; inject the capacity of a vision endpoint. A request over the capacity raises
+`TextGenerationError`.
+
+```python
+from mosfet import media
+from mosfet.abilities.language import text
+from mosfet.providers.openai_compat import TextGenerator
+
+generator = TextGenerator(
+    client=client,
+    image_capacity=media.ImageCapacity(
+        max_images=4, max_total_bytes=8 * 1024 * 1024, media_types=frozenset({"image/png", "image/jpeg"})
+    ),
+)
+photo = media.Image(content=png_bytes, media_type="image/png")
+output = await generator.generate(
+    text.InputData(
+        messages=(
+            text.TextMessage(
+                role=text.TextRole.USER,
+                content=(text.TextPart(text="What is in this photo?"), text.ImagePart(image=photo)),
+            ),
+        )
+    )
+)
+```
+
 `Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.

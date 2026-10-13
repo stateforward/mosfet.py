@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mosfet.media as media
 from mosfet.abilities.language import text
 
 import asyncio
@@ -385,3 +386,56 @@ def test_text_generator_records_otel_request_when_configured(
     assert payload["attributes"]["model"] == "gemini-test-model"
     assert payload["attributes"]["stage"] == "request"
     assert "Alice greets Bob" not in json.dumps(payload["attributes"])
+
+
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+_PNG = media.Image(content=_PNG_BYTES, media_type="image/png")
+_OK: dict[str, object] = {"candidates": [{"finish_reason": "STOP", "content": {"parts": [{"text": "a cat"}]}}]}
+
+
+def _image_input(*images: media.Image) -> text.InputData:
+    parts: tuple[text.ContentPart, ...] = (text.TextPart(text="What is this?"),)
+    parts += tuple(text.ImagePart(image=image) for image in images)
+    return text.InputData(
+        messages=(
+            text.TextMessage(role=text.TextRole.SYSTEM, content="Be brief."),
+            text.TextMessage(role=text.TextRole.USER, content=parts),
+        )
+    )
+
+
+def test_text_generator_sends_image_parts_as_inline_data_with_raw_bytes() -> None:
+    client = FakeContentClient(response=_OK)
+    generator = TextGenerator(client=client)
+
+    output = asyncio.run(generator.generate(_image_input(_PNG)))
+
+    assert output.content == "a cat"
+    assert client.calls[0].system_instruction == "Be brief."
+    assert client.calls[0].contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "What is this?"},
+                {"inline_data": {"mime_type": "image/png", "data": _PNG_BYTES}},
+            ],
+        }
+    ]
+
+
+def test_text_generator_defaults_to_gemini_image_capacity() -> None:
+    assert TextGenerator(client=FakeContentClient(response=_OK)).image_capacity == media.ImageCapacity(
+        max_images=8,
+        max_total_bytes=12 * 1024 * 1024,
+        media_types=frozenset({"image/png", "image/jpeg", "image/webp"}),
+    )
+
+
+def test_text_generator_rejects_requests_over_its_image_capacity() -> None:
+    client = FakeContentClient(response=_OK)
+    capacity = media.ImageCapacity(max_images=1, max_total_bytes=10_000, media_types=frozenset({"image/png"}))
+    generator = TextGenerator(client=client, image_capacity=capacity)
+
+    with pytest.raises(TextGenerationError, match="exceeds the generator's image capacity"):
+        _ = asyncio.run(generator.generate(_image_input(_PNG, _PNG)))
+    assert client.calls == []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mosfet.media as media
 from mosfet.abilities.language import text
 import mosfet.telemetry
 
@@ -113,10 +114,17 @@ def _tool_selection_mode(policy: text.ToolSelectionPolicy) -> str:
     return "AUTO"
 
 
+def _plain_content(message: text.TextMessage) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    raise TextGenerationError(f"Gemini {message.role} message content must be text.")
+
+
 def _message_parts_for_assistant(message: text.TextMessage) -> list[dict[str, object]]:
     parts: list[dict[str, object]] = []
-    if message.content:
-        parts.append({"text": message.content})
+    content = _plain_content(message)
+    if content:
+        parts.append({"text": content})
     for tool_call in message.tool_calls:
         parts.append(
             {
@@ -140,21 +148,33 @@ def _messages_to_gemini(
 
     for message in messages:
         if message.role == text.TextRole.SYSTEM:
-            if message.content.strip():
-                system_chunks.append(message.content)
+            system_content = _plain_content(message)
+            if system_content.strip():
+                system_chunks.append(system_content)
             continue
         if message.role == text.TextRole.USER:
-            contents.append({"role": "user", "parts": [{"text": message.content}]})
+            user_parts: list[dict[str, object]] = (
+                [{"text": message.content}]
+                if isinstance(message.content, str)
+                else [
+                    {"text": part.text}
+                    if isinstance(part, text.TextPart)
+                    else {"inline_data": {"mime_type": part.image.media_type, "data": part.image.content}}
+                    for part in message.content
+                ]
+            )
+            contents.append({"role": "user", "parts": user_parts})
             continue
         if message.role == text.TextRole.ASSISTANT:
             contents.append({"role": "model", "parts": _message_parts_for_assistant(message)})
             continue
         if message.role == text.TextRole.TOOL:
             name = message.tool_call_id or "tool"
+            tool_content = _plain_content(message)
             try:
-                response_payload: object = json.loads(message.content) if message.content else {}
+                response_payload: object = json.loads(tool_content) if tool_content else {}
             except json.JSONDecodeError:
-                response_payload = {"result": message.content}
+                response_payload = {"result": tool_content}
             if not isinstance(response_payload, collections.abc.Mapping):
                 response_payload = {"result": response_payload}
             contents.append(
@@ -252,21 +272,43 @@ def _validate_tool_selection(input: text.InputData, tool_calls: tuple[text.TextT
         raise TextGenerationError("Gemini generate_content included tool calls when tool selection is none.")
 
 
+def _image_capacity() -> media.ImageCapacity:
+    return media.ImageCapacity(
+        max_images=8,
+        max_total_bytes=12 * 1024 * 1024,
+        media_types=frozenset({"image/png", "image/jpeg", "image/webp"}),
+    )
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TextGenerator(text.TextGenerator):
-    """Text generator backed by Google Gemini via the google-genai SDK."""
+    """Text generator backed by Google Gemini via the google-genai SDK.
+
+    ``image_capacity`` defaults to what current Gemini models take in one request (8 images,
+    12 MiB, PNG/JPEG/WebP); a request over it raises ``TextGenerationError``.
+    """
 
     client: ContentClient
     provider: str | None = "gemini"
     response_mime_type: str | None = None
     response_json_schema: collections.abc.Mapping[str, object] | None = None
     config: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_empty_config)
+    image_capacity: media.ImageCapacity = dataclasses.field(default_factory=_image_capacity)
 
     @typing.override
     async def generate(self, input: text.InputData) -> text.OutputData:
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        images = tuple(
+            part.image
+            for message in input.messages
+            if not isinstance(message.content, str)
+            for part in message.content
+            if isinstance(part, text.ImagePart)
+        )
+        if any(omission is not None for omission in self.image_capacity.admit(images)):
+            raise TextGenerationError("Gemini request exceeds the generator's image capacity.")
         system_instruction, contents = _messages_to_gemini(input.messages)
         tools = _tools_to_gemini(input.tools)
         model = getattr(self.client, "model", None)
@@ -277,6 +319,7 @@ class TextGenerator(text.TextGenerator):
             model=model if isinstance(model, str) else None,
             messages={"system_instruction": system_instruction, "contents": contents},
             tools=tools,
+            image_count=len(images),
         )
         tool_config: dict[str, object] | None = None
         if tools:

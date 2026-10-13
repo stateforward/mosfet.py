@@ -10,6 +10,8 @@ import hsm
 import mosfet
 import pydantic
 
+import mosfet.media as media
+
 
 def _empty_text_tool_args() -> dict[str, object]:
     return {}
@@ -58,8 +60,60 @@ class TextToolCall(pydantic.BaseModel):
     )
 
 
+class TextPart(pydantic.BaseModel):
+    """A run of text inside a user message's content parts."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"kind": "text", "text": "What is in this photo?"}]},
+    )
+
+    kind: typing.Literal["text"] = pydantic.Field(
+        default="text",
+        description="Discriminator naming this part as text.",
+        examples=["text"],
+    )
+    text: str = pydantic.Field(
+        min_length=1,
+        description="Text of this part, read in order with the message's other parts.",
+        examples=["What is in this photo?"],
+    )
+
+
+class ImagePart(pydantic.BaseModel):
+    """An image inside a user message's content parts, placed right after the text that refers to it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"kind": "image", "image": {"content": "iVBORw0KGgo=", "media_type": "image/png"}}],
+        },
+    )
+
+    kind: typing.Literal["image"] = pydantic.Field(
+        default="image",
+        description="Discriminator naming this part as an image.",
+        examples=["image"],
+    )
+    image: media.Image = pydantic.Field(
+        description="The typed image this part carries; each provider maps it to its own image content part.",
+    )
+
+
+ContentPart = typing.Annotated[TextPart | ImagePart, pydantic.Field(discriminator="kind")]
+"""One ordered part of a user message's multimodal content, discriminated by ``kind``."""
+
+
 class TextMessage(pydantic.BaseModel):
-    """A single provider-neutral message in a text-generation input."""
+    """A single provider-neutral message in a text-generation input.
+
+    Content is plain text on every role. A user message may instead carry an ordered, non-empty
+    tuple of content parts (text and images). System, assistant, and tool content is always text:
+    tool results never carry images, because a seen frame comes back as a new typed stimulus, not
+    as a tool-result message.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -72,9 +126,12 @@ class TextMessage(pydantic.BaseModel):
         description="Provider-neutral conversation role for this message.",
         examples=[TextRole.USER],
     )
-    content: str = pydantic.Field(
-        description="Text content for this message. Assistant tool-call messages may use an empty string.",
-        examples=["Check availability"],
+    content: str | tuple[ContentPart, ...] = pydantic.Field(
+        description=(
+            "Text content for this message, or, on a user message only, an ordered non-empty tuple of text and "
+            "image content parts. Assistant tool-call messages may use an empty string."
+        ),
+        examples=["Check availability", [{"kind": "text", "text": "What is in this photo?"}]],
     )
     tool_call_id: str | None = pydantic.Field(
         default=None,
@@ -85,6 +142,18 @@ class TextMessage(pydantic.BaseModel):
         default=(),
         description="Tool calls requested by an assistant message.",
     )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_content_parts(self) -> typing.Self:
+        if isinstance(self.content, str):
+            return self
+        if not self.content:
+            raise ValueError("content parts must not be empty; use a string for an empty message")
+        if self.role != TextRole.USER:
+            raise ValueError(
+                "content parts are allowed only on user messages; system, assistant, and tool content is text"
+            )
+        return self
 
 
 class InputData(pydantic.BaseModel):
@@ -151,7 +220,14 @@ class OutputData(pydantic.BaseModel):
 
 
 class TextGenerator(generative.Generator[InputData, OutputData], abc.ABC):
-    """Generator that produces text from text-generation input."""
+    """Generator that produces text from text-generation input.
+
+    ``image_capacity`` states what images the fronted model takes in one request; the default is
+    text-only. Provider generators inject it, and a generator raises its provider error for a
+    request that exceeds it rather than dropping anything.
+    """
+
+    image_capacity: media.ImageCapacity = media.ImageCapacity()
 
 
 _TextGenerationApplyCompletedEvent = hsm.Event[OutputData](

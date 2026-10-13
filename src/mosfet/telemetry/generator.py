@@ -30,13 +30,16 @@ def record_generator_request(
     model: str | None,
     messages: object,
     tools: object = (),
+    image_count: int = 0,
 ) -> None:
     """Emit an OTEL log for a text-generator request.
 
     Payload (messages/tools) is placed in the log record body only when the runtime
     explicitly opts in via ``BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD`` or ``BOT_OTEL_CAPTURE=full``
-    (credentials redacted, see ``mosfet.telemetry.capture``). Without that opt-in the
-    record carries low-cardinality request metadata (counts), never prompt/tool content.
+    (credentials redacted and image content replaced by its size, see
+    ``mosfet.telemetry.capture``). Without that opt-in the record carries low-cardinality
+    request metadata (message, tool, and image counts), never prompt/tool/image content.
+    ``image_count`` is a body value, never an attribute.
     Attributes stay low-cardinality: component, provider, optional model, and stage.
 
     Emission is a no-op until an application boundary calls ``configure()``.
@@ -73,6 +76,7 @@ def record_generator_request(
             "capture": "disabled",
             "message_count": _size(messages) if _size(messages) is not None else 0,
             "tool_count": _size(tools) if _size(tools) is not None else 0,
+            "image_count": image_count,
         }
     logger = provider_instance.get_logger(_LOGGER_NAME)
     logger.emit(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections.abc
 import json
 import pathlib
+import typing
 
 import mosfet.telemetry
 import pytest
@@ -164,3 +165,29 @@ def test_record_generator_usage_emits_token_counts_without_payload_opt_in() -> N
     assert payload["body"] == {"input_tokens": 10, "output_tokens": 7, "reasoning_tokens": 5}
     assert payload["attributes"]["stage"] == "usage"
     assert payload["attributes"]["model"] == "gpt-test"
+
+
+def test_record_generator_request_without_opt_in_counts_images() -> None:
+    log_path = pathlib.Path("images.jsonl")
+    assert mosfet.telemetry.configure(log_file=log_path) is True
+    record_generator_request(
+        provider="gemini",
+        model="gemini-test",
+        messages=[{"role": "user", "content": "look"}],
+        tools=(),
+        image_count=2,
+    )
+    _force_flush()
+    # The exporter writes one JSON object per record line.
+    payload = typing.cast(dict[str, object], json.loads(log_path.read_text(encoding="utf-8").splitlines()[0]))
+    assert payload["body"] == {"capture": "disabled", "message_count": 1, "tool_count": 0, "image_count": 2}
+
+
+def test_record_generator_request_image_count_defaults_to_zero() -> None:
+    log_path = pathlib.Path("no-images.jsonl")
+    assert mosfet.telemetry.configure(log_file=log_path) is True
+    record_generator_request(provider="gemini", model=None, messages=[{"role": "user", "content": "x"}])
+    _force_flush()
+    # The exporter writes one JSON object per record line.
+    payload = typing.cast(dict[str, object], json.loads(log_path.read_text(encoding="utf-8").splitlines()[0]))
+    assert payload["body"] == {"capture": "disabled", "message_count": 1, "tool_count": 0, "image_count": 0}

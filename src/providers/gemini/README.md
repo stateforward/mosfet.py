@@ -26,6 +26,27 @@ output = await generator.generate(
 )
 ```
 
+A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
+Gemini receives them as `text` and `inline_data` parts, with the image's raw bytes. `image_capacity` defaults to 8
+images, 12 MiB, and PNG/JPEG/WebP per request; a request over it raises `TextGenerationError`.
+
+```python
+from mosfet import media
+from mosfet.abilities.language import text
+
+photo = media.Image(content=png_bytes, media_type="image/png")
+output = await generator.generate(
+    text.InputData(
+        messages=(
+            text.TextMessage(
+                role=text.TextRole.USER,
+                content=(text.TextPart(text="What is in this photo?"), text.ImagePart(image=photo)),
+            ),
+        )
+    )
+)
+```
+
 `Processing` turns a stateforward.mosfet deliberative frame into typed JSON / operation tool calls.
 
 ## Speech (TTS / STT)

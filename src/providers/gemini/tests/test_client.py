@@ -275,3 +275,17 @@ def test_chat_client_rejects_non_object_responses() -> None:
         assert str(error) == "Gemini generate_content response must be a JSON object."
     else:
         raise AssertionError("Expected TypeError.")
+
+
+@pytest.mark.parametrize("data", [b"\x89PNG\r\n\x1a\n\xff\xfe binary", b"utf-8 decodable bytes"])
+def test_chat_client_keeps_inline_data_bytes_intact_in_contents(data: bytes) -> None:
+    models = FakeModels(response={"candidates": [{"content": {"parts": [{"text": "a cat"}]}}]})
+    client = ChatClient(api_key="test-api-key", client=FakeSdkClient(models=models))
+    contents: list[object] = [
+        {"role": "user", "parts": [{"text": "look"}, {"inline_data": {"mime_type": "image/png", "data": data}}]}
+    ]
+
+    _ = client.generate_content(contents=contents)
+
+    # bytes never compare equal to str, so equality proves no UTF-8 or base64 conversion happened.
+    assert models.calls[0].kwargs["contents"] == contents

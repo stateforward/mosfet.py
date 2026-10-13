@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import mosfet.media as media
 from mosfet.abilities.language import text
 
 import asyncio
+import base64
 import collections.abc
 import dataclasses
 import pathlib
@@ -914,3 +916,128 @@ def test_generator_records_join_the_callers_trace(
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert records
     assert {(record["trace_id"], record["span_id"]) for record in records} == {(trace_id, span_id)}
+
+
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+_PNG = media.Image(content=_PNG_BYTES, media_type="image/png")
+_PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(_PNG_BYTES).decode("ascii")
+_VISION = media.ImageCapacity(max_images=1, max_total_bytes=len(_PNG_BYTES), media_types=frozenset({"image/png"}))
+_OK_CHAT: dict[str, object] = {"model": "m", "choices": [{"finish_reason": "stop", "message": {"content": "a cat"}}]}
+_OK_RESPONSES: dict[str, object] = {
+    "status": "completed",
+    "output": [{"type": "message", "content": [{"type": "output_text", "text": "a cat"}]}],
+}
+
+
+def _image_input(*images: media.Image) -> text.InputData:
+    parts: tuple[text.ContentPart, ...] = (text.TextPart(text="What is this?"),)
+    parts += tuple(text.ImagePart(image=image) for image in images)
+    return text.InputData(
+        messages=(
+            text.TextMessage(role=text.TextRole.SYSTEM, content="Be brief."),
+            text.TextMessage(role=text.TextRole.USER, content=parts),
+        )
+    )
+
+
+def test_chat_text_generator_sends_image_parts_as_standard_base64_data_urls() -> None:
+    client = FakeChatClient(response=_OK_CHAT)
+    generator = TextGenerator(client=client, image_capacity=_VISION)
+
+    output = asyncio.run(generator.generate(_image_input(_PNG)))
+
+    assert output.content == "a cat"
+    assert "+" in _PNG_DATA_URL and "/" in _PNG_DATA_URL.removeprefix("data:image/png;base64,")
+    assert client.calls[0].messages == [
+        {"role": "system", "content": "Be brief."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": _PNG_DATA_URL}},
+            ],
+        },
+    ]
+
+
+def test_responses_text_generator_sends_input_text_and_input_image_parts() -> None:
+    client = FakeResponsesClient(response=_OK_RESPONSES)
+    generator = openai_compat.ResponsesTextGenerator(client=client, image_capacity=_VISION)
+
+    output = asyncio.run(generator.generate(_image_input(_PNG)))
+
+    assert output.content == "a cat"
+    assert client.calls[0].input == [
+        {"role": "system", "content": "Be brief."},
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is this?"},
+                {"type": "input_image", "image_url": _PNG_DATA_URL},
+            ],
+        },
+    ]
+
+
+@pytest.mark.parametrize("path", ["chat", "responses"])
+def test_generators_reject_requests_over_their_image_capacity(path: str) -> None:
+    chat = FakeChatClient(response=_OK_CHAT)
+    responses = FakeResponsesClient(response=_OK_RESPONSES)
+    generator: text.TextGenerator = (
+        TextGenerator(client=chat, image_capacity=_VISION)
+        if path == "chat"
+        else openai_compat.ResponsesTextGenerator(client=responses, image_capacity=_VISION)
+    )
+
+    with pytest.raises(TextGenerationError, match="exceeds the generator's image capacity"):
+        _ = asyncio.run(generator.generate(_image_input(_PNG, _PNG)))
+    assert chat.calls == []
+    assert responses.calls == []
+
+
+def test_text_only_default_capacity_rejects_images() -> None:
+    client = FakeChatClient(response=_OK_CHAT)
+    generator = TextGenerator(client=client)
+
+    assert generator.image_capacity == media.ImageCapacity()
+    with pytest.raises(TextGenerationError, match="exceeds the generator's image capacity"):
+        _ = asyncio.run(generator.generate(_image_input(_PNG)))
+    assert client.calls == []
+
+
+def test_chat_text_generator_records_image_count_without_payload_capture(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    import mosfet.telemetry
+    from opentelemetry import _logs
+
+    from mosfet.telemetry.configure import logger_provider
+
+    monkeypatch.chdir(tmp_path)
+    mosfet.telemetry.reset()
+    monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
+    monkeypatch.delenv("BOT_OTEL_CAPTURE", raising=False)
+    monkeypatch.delenv("BOT_OTEL_CAPTURE_GENERATOR_PAYLOAD", raising=False)
+
+    def keep_global_logger_provider(_provider: object) -> None:
+        return None
+
+    monkeypatch.setattr(_logs, "set_logger_provider", keep_global_logger_provider)
+    log_path = pathlib.Path("image-count.jsonl")
+    assert mosfet.telemetry.configure(log_file=log_path) is True
+
+    _ = asyncio.run(
+        TextGenerator(client=_ModelChatClient(response=_OK_CHAT), image_capacity=_VISION).generate(_image_input(_PNG))
+    )
+
+    otel_provider = logger_provider()
+    assert otel_provider is not None
+    _ = otel_provider.force_flush()
+    records: list[dict[str, object]] = [
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    (request,) = records
+    assert request["body"] == {"capture": "disabled", "message_count": 2, "tool_count": 0, "image_count": 1}
+    mosfet.telemetry.reset()

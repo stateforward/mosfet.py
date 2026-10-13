@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import mosfet.media as media
 from mosfet.abilities.language import text
 import mosfet.telemetry
 
 import asyncio
+import base64
 import collections.abc
 import dataclasses
 import json
@@ -40,10 +42,45 @@ def _tool_call_to_openai(tool_call: text.TextToolCall) -> dict[str, object]:
     }
 
 
+def _plain_content(message: text.TextMessage) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    raise TextGenerationError(f"OpenAI-compatible {message.role} message content must be text.")
+
+
+def _data_url(image: media.Image) -> str:
+    return f"data:{image.media_type};base64,{base64.b64encode(image.content).decode('ascii')}"
+
+
+def _admitted_images(
+    messages: collections.abc.Sequence[text.TextMessage], capacity: media.ImageCapacity
+) -> tuple[media.Image, ...]:
+    images = tuple(
+        part.image
+        for message in messages
+        if not isinstance(message.content, str)
+        for part in message.content
+        if isinstance(part, text.ImagePart)
+    )
+    if any(omission is not None for omission in capacity.admit(images)):
+        raise TextGenerationError("OpenAI-compatible request exceeds the generator's image capacity.")
+    return images
+
+
 def _message_to_openai(message: text.TextMessage) -> dict[str, object]:
+    content: str | list[dict[str, object]]
+    if message.role == text.TextRole.USER and not isinstance(message.content, str):
+        content = [
+            {"type": "text", "text": part.text}
+            if isinstance(part, text.TextPart)
+            else {"type": "image_url", "image_url": {"url": _data_url(part.image)}}
+            for part in message.content
+        ]
+    else:
+        content = _plain_content(message)
     output: dict[str, object] = {
         "role": str(message.role),
-        "content": message.content,
+        "content": content,
     }
     if message.tool_call_id is not None:
         output["tool_call_id"] = message.tool_call_id
@@ -269,19 +306,26 @@ def _validate_tool_selection(input: text.InputData, tool_calls: tuple[text.TextT
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TextGenerator(text.TextGenerator):
-    """Text generator backed by any provider with an OpenAI-compatible Chat Completions endpoint."""
+    """Text generator backed by any provider with an OpenAI-compatible Chat Completions endpoint.
+
+    ``image_capacity`` defaults to text-only because the endpoint may front any model; the app
+    factory injects the capacity of a vision endpoint. A request over it raises
+    ``TextGenerationError``.
+    """
 
     client: ChatCompletionClient
     provider: str | None = "openai_compat"
     response_format: object | None = None
     extra_body: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_empty_body)
     reasoning_effort: ReasoningEffort | None = None
+    image_capacity: media.ImageCapacity = dataclasses.field(default_factory=media.ImageCapacity)
 
     @typing.override
     async def generate(self, input: text.InputData) -> text.OutputData:
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        images = _admitted_images(input.messages, self.image_capacity)
         messages = [_message_to_openai(message) for message in input.messages]
         tools = _tools_to_openai(input.tools)
         model = getattr(self.client, "model", None)
@@ -292,6 +336,7 @@ class TextGenerator(text.TextGenerator):
             model=model if isinstance(model, str) else None,
             messages=messages,
             tools=tools,
+            image_count=len(images),
         )
         extra_body = _extra_body_for_input(input, self.extra_body, self.reasoning_effort)
         started = time.monotonic()
@@ -334,10 +379,22 @@ def _responses_input(messages: collections.abc.Sequence[text.TextMessage]) -> li
         if message.role == text.TextRole.TOOL:
             if message.tool_call_id is None:
                 raise TextGenerationError("OpenAI Responses tool messages must include a tool_call_id.")
-            items.append({"type": "function_call_output", "call_id": message.tool_call_id, "output": message.content})
+            items.append(
+                {"type": "function_call_output", "call_id": message.tool_call_id, "output": _plain_content(message)}
+            )
             continue
-        if message.content or not message.tool_calls:
-            items.append({"role": str(message.role), "content": message.content})
+        content: str | list[dict[str, object]]
+        if message.role == text.TextRole.USER and not isinstance(message.content, str):
+            content = [
+                {"type": "input_text", "text": part.text}
+                if isinstance(part, text.TextPart)
+                else {"type": "input_image", "image_url": _data_url(part.image)}
+                for part in message.content
+            ]
+        else:
+            content = _plain_content(message)
+        if content or not message.tool_calls:
+            items.append({"role": str(message.role), "content": content})
         items.extend(
             {
                 "type": "function_call",
@@ -414,19 +471,25 @@ def _responses_output(
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ResponsesTextGenerator(text.TextGenerator):
-    """Text generator backed by the OpenAI Responses API (reasoning effort with function tools)."""
+    """Text generator backed by the OpenAI Responses API (reasoning effort with function tools).
+
+    ``image_capacity`` defaults to text-only; the app factory injects the capacity of a vision
+    model. A request over it raises ``TextGenerationError``.
+    """
 
     client: ResponsesClient
     provider: str | None = "openai_compat"
     response_format: object | None = None
     reasoning_effort: ReasoningEffort | None = None
     extra_body: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_empty_body)
+    image_capacity: media.ImageCapacity = dataclasses.field(default_factory=media.ImageCapacity)
 
     @typing.override
     async def generate(self, input: text.InputData) -> text.OutputData:
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        images = _admitted_images(input.messages, self.image_capacity)
         items = _responses_input(input.messages)
         tools = tuple(_responses_tool(tool) for tool in _tools_to_openai(input.tools))
         model = getattr(self.client, "model", None)
@@ -435,6 +498,7 @@ class ResponsesTextGenerator(text.TextGenerator):
             model=model if isinstance(model, str) else None,
             messages=items,
             tools=tools,
+            image_count=len(images),
         )
         started = time.monotonic()
         response: collections.abc.Mapping[str, object] | None = None

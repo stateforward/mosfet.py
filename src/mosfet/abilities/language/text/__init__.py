@@ -1,5 +1,7 @@
 from . import generation
 from .generation import (
+    ContentPart,
+    ImagePart,
     InputEvent,
     OutputEvent,
     TextGeneration,
@@ -7,12 +9,15 @@ from .generation import (
     OutputData,
     TextGenerator,
     TextMessage,
+    TextPart,
     TextRole,
     ToolSelectionPolicy,
     TextToolCall,
 )
 
 __all__ = [
+    "ContentPart",
+    "ImagePart",
     "InputEvent",
     "OutputEvent",
     "TextGeneration",
@@ -20,6 +25,7 @@ __all__ = [
     "OutputData",
     "TextGenerator",
     "TextMessage",
+    "TextPart",
     "TextRole",
     "ToolSelectionPolicy",
     "TextToolCall",

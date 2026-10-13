@@ -1,4 +1,4 @@
-from mosfet import abilities
+from mosfet import abilities, media
 from mosfet.abilities.language import text
 
 import asyncio
@@ -7,15 +7,22 @@ import typing
 from typing import override
 
 import hsm
+import pydantic
+import pytest
 
 from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
 from tests.type_helpers import object_dict
 
 
+_PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"body", media_type="image/png")
+
+
 class EchoTextGenerator(text.TextGenerator):
     @typing.override
     async def generate(self, input: text.InputData) -> text.OutputData:
-        return text.OutputData(content=input.messages[-1].content.upper())
+        content = input.messages[-1].content
+        assert isinstance(content, str)
+        return text.OutputData(content=content.upper())
 
 
 class RecordingTextGeneration(text.TextGeneration):
@@ -171,3 +178,55 @@ def test_text_generation_shape_supports_voice_agent_react_messages() -> None:
     assert output.provider == "openai"
     assert output.model == "gpt-5.4"
     assert output.tool_calls == (tool_call,)
+
+
+def test_user_message_accepts_text_and_image_parts() -> None:
+    parts = (text.TextPart(text="What is this?"), text.ImagePart(image=_PNG))
+
+    message = text.TextMessage(role=text.TextRole.USER, content=parts)
+
+    assert message.content == parts
+    assert text.TextMessage.model_validate_json(message.model_dump_json()) == message
+
+
+def test_string_content_stays_valid_on_every_role() -> None:
+    for role in text.TextRole:
+        assert text.TextMessage(role=role, content="plain").content == "plain"
+
+
+@pytest.mark.parametrize("role", [text.TextRole.SYSTEM, text.TextRole.ASSISTANT, text.TextRole.TOOL])
+def test_content_parts_are_rejected_off_the_user_role(role: text.TextRole) -> None:
+    with pytest.raises(pydantic.ValidationError, match="content parts are allowed only on user messages"):
+        _ = text.TextMessage(role=role, content=(text.TextPart(text="hi"),))
+
+
+def test_empty_content_parts_are_rejected() -> None:
+    with pytest.raises(pydantic.ValidationError, match="content parts must not be empty"):
+        _ = text.TextMessage(role=text.TextRole.USER, content=())
+
+
+def test_text_part_rejects_empty_text() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = text.TextPart(text="")
+
+
+def test_input_schema_exposes_kind_discriminated_content_parts() -> None:
+    schema = text.InputData.model_json_schema()
+    definitions = object_dict(typing.cast(object, schema["$defs"]))
+
+    assert set(definitions) >= {"TextPart", "ImagePart", "Image"}
+    encoded = str(object_dict(definitions["TextMessage"])["properties"])
+    assert "'propertyName': 'kind'" in encoded
+    assert "'text': '#/$defs/TextPart'" in encoded
+    assert "'image': '#/$defs/ImagePart'" in encoded
+
+
+def test_content_parts_are_reexported_on_language_packages() -> None:
+    from mosfet.abilities import language
+
+    assert language.TextPart is text.TextPart is text.generation.TextPart
+    assert language.ImagePart is text.ImagePart is text.generation.ImagePart
+
+
+def test_text_generator_defaults_to_text_only_image_capacity() -> None:
+    assert EchoTextGenerator().image_capacity == media.ImageCapacity()

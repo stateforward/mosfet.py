@@ -2,6 +2,8 @@
 
 from . import text
 from .text import (
+    ContentPart,
+    ImagePart,
     InputEvent,
     OutputEvent,
     TextGeneration,
@@ -9,11 +11,14 @@ from .text import (
     OutputData,
     TextGenerator,
     TextMessage,
+    TextPart,
     TextRole,
     ToolSelectionPolicy,
 )
 
 __all__ = [
+    "ContentPart",
+    "ImagePart",
     "InputEvent",
     "OutputEvent",
     "TextGeneration",
@@ -21,6 +26,7 @@ __all__ = [
     "OutputData",
     "TextGenerator",
     "TextMessage",
+    "TextPart",
     "TextRole",
     "ToolSelectionPolicy",
     "text",
