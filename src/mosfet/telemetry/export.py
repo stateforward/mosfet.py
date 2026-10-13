@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 
 from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogRecordExporter, LogRecordExportResult
+from opentelemetry.sdk.metrics.export import Metric, MetricExporter, MetricExportResult, MetricsData
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
@@ -317,4 +319,73 @@ class JsonlFileSpanExporter(SpanExporter):
         self._file.close()
 
 
-__all__ = ["JsonlFileLogRecordExporter", "JsonlFileSpanExporter"]
+def _metric_payload(resource: Resource, scope: str, metric: Metric) -> dict[str, object]:
+    data = metric.data
+    return {
+        "timestamp": _iso_nanos(max((point.time_unix_nano for point in data.data_points), default=None)),
+        "resource": dict(resource.attributes),
+        "scope": scope,
+        "name": metric.name,
+        "description": metric.description or "",
+        "unit": metric.unit or "",
+        "kind": type(data).__name__,
+        # The SDK's own serialization of the points, temporality and monotonicity.
+        "data": json.loads(data.to_json(indent=None)),
+    }
+
+
+class JsonlFileMetricExporter(MetricExporter):
+    """Write one compact JSON object per exported metric to a local file.
+
+    Each line carries the batch's resource (service identity), the instrumentation
+    scope, the instrument name/description/unit, the data kind (``Sum``, ``Gauge``,
+    ``Histogram``, ``ExponentialHistogram``) and the SDK-serialized data points.
+    Shares the symlink-safe, cwd-confined, ``0o600`` append path used for log
+    records and spans. Metric attributes are low-cardinality by contract, so the
+    file carries no payloads.
+    """
+
+    _file: _JsonlAppendFile
+
+    def __init__(self, path: str | pathlib.Path) -> None:
+        super().__init__()
+        self._file = _JsonlAppendFile(path)
+
+    @typing.override
+    def export(
+        self,
+        metrics_data: MetricsData,
+        timeout_millis: float = 10_000,
+        **kwargs: object,
+    ) -> MetricExportResult:
+        del timeout_millis, kwargs
+        payloads = [
+            _metric_payload(resource_metrics.resource, scope_metrics.scope.name, metric)
+            for resource_metrics in metrics_data.resource_metrics
+            for scope_metrics in resource_metrics.scope_metrics
+            for metric in scope_metrics.metrics
+        ]
+        if not payloads:
+            return MetricExportResult.SUCCESS
+        try:
+            self._file.write(payloads)
+        except Exception as error:
+            # The periodic metric reader swallows exporter errors on its worker
+            # thread, like the log and span processors; say it here or lose it.
+            _LOG.error("otel metric export failed metrics=%d error=%s", len(payloads), type(error).__name__)
+            raise
+        return MetricExportResult.SUCCESS
+
+    @typing.override
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        """Nothing is buffered here: ``export`` writes each batch to the file before returning."""
+        del timeout_millis
+        return True
+
+    @typing.override
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+        self._file.close()
+
+
+__all__ = ["JsonlFileLogRecordExporter", "JsonlFileMetricExporter", "JsonlFileSpanExporter"]

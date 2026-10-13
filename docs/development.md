@@ -119,8 +119,12 @@ attributes only** (component, event kind/name, stage, outcome, normalized failur
 Raw media, credentials, and high-cardinality identifiers never become telemetry
 attributes. Trace context rides `hsm.Event.metadata` end-to-end.
 
-Local JSONL export writes `otel-spans.jsonl` / `otel-logs.jsonl` with `0600` permissions
-(git-ignored). Disable collection with `BOT_OTEL_DISABLED=1`. Opt into the live model
+Local JSONL export writes `otel-spans.jsonl` / `otel-logs.jsonl` / `otel-metrics.jsonl` with
+`0600` permissions (git-ignored). With an OTLP endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`), spans
+and metrics also go to that collector alongside the local files. Metrics
+flow through one process `MeterProvider` installed by the first `configure()`; every export
+carries `service.name` (`OTEL_SERVICE_NAME`, else `stateforward.mosfet`) and, when the
+boundary passes one, `service.instance.id`. Disable collection with `BOT_OTEL_DISABLED=1`. Opt into the live model
 studio (publishes topology into the `web/` studio for inspection) with `BOT_MODEL_PUBLISH=1`.
 
 ## What a Bot is made of

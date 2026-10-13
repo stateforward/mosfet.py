@@ -1,7 +1,7 @@
 """stateforward.mosfet telemetry integrations."""
 
 from mosfet.telemetry import capture, span
-from mosfet.telemetry.configure import configure, reset
+from mosfet.telemetry.configure import configure, meter_provider, metric_file, reset
 from mosfet.telemetry.generator import record_generator_request, record_generator_response, record_generator_usage
 from mosfet.telemetry.hsm import (
     EventContextBinding,
@@ -27,6 +27,8 @@ __all__ = [
     "deliver",
     "event_context",
     "inject_context",
+    "meter_provider",
+    "metric_file",
     "observer",
     "observation_attributes",
     "observed_event",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections.abc
 import json
+import math
 import os
 import pathlib
 import stat
@@ -9,9 +10,12 @@ import stat
 import mosfet.telemetry
 import pytest
 from opentelemetry import _logs
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
 
 from mosfet.telemetry.configure import logger_provider
-from mosfet.telemetry.export import JsonlFileLogRecordExporter
+from mosfet.telemetry.export import JsonlFileLogRecordExporter, JsonlFileMetricExporter
 from mosfet.telemetry.generator import record_generator_request
 
 
@@ -170,3 +174,58 @@ def test_export_rejects_hardlinked_leaf(tmp_path: pathlib.Path) -> None:
     _force_flush()
     assert outside.read_text(encoding="utf-8") == "sentinel-hardlink\n"
     assert "must-not-follow-hardlink" not in outside.read_text(encoding="utf-8")
+
+
+def _record_counter(exporter: JsonlFileMetricExporter, *, increments: int) -> None:
+    """Drive a private (never global) MeterProvider so the exporter sees one real collection."""
+
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=math.inf)
+    provider = MeterProvider(
+        metric_readers=[reader],
+        resource=Resource.create({"service.name": "export-test", "service.instance.id": "host-1"}),
+    )
+    counter = provider.get_meter("bot.telemetry.export.test").create_counter(
+        "bot.telemetry.export.test.count",
+        unit="{event}",
+        description="Counts test events.",
+    )
+    counter.add(increments, {"outcome": "delivered"})
+    _ = provider.force_flush()
+    provider.shutdown()
+
+
+def test_metric_export_writes_one_line_per_metric_with_mode_600() -> None:
+    metric_path = pathlib.Path("otel-metrics.jsonl")
+    _record_counter(JsonlFileMetricExporter(metric_path), increments=3)
+
+    assert metric_path.is_file()
+    assert stat.S_IMODE(metric_path.stat().st_mode) == 0o600
+    lines = [json.loads(line) for line in metric_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = lines[0]
+    assert payload["name"] == "bot.telemetry.export.test.count"
+    assert payload["unit"] == "{event}"
+    assert payload["description"] == "Counts test events."
+    assert payload["scope"] == "bot.telemetry.export.test"
+    assert payload["kind"] == "Sum"
+    assert payload["resource"]["service.name"] == "export-test"
+    assert payload["resource"]["service.instance.id"] == "host-1"
+    assert isinstance(payload["timestamp"], str)
+    points = payload["data"]["data_points"]
+    assert [point["value"] for point in points] == [3]
+    assert points[0]["attributes"] == {"outcome": "delivered"}
+    assert payload["data"]["is_monotonic"] is True
+
+
+def test_metric_export_rejects_replaced_symlink_leaf_outside_cwd(tmp_path: pathlib.Path) -> None:
+    """The metric file shares the confined writer: a swapped leaf symlink is refused."""
+
+    metric_path = pathlib.Path("otel-metrics.jsonl")
+    exporter = JsonlFileMetricExporter(metric_path)
+    outside = tmp_path.parent / f"metric-escape-{tmp_path.name}.jsonl"
+    _ = outside.write_text("sentinel-metric\n", encoding="utf-8")
+    metric_path.symlink_to(outside)
+
+    _record_counter(exporter, increments=1)
+
+    assert outside.read_text(encoding="utf-8") == "sentinel-metric\n"

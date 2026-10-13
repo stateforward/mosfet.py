@@ -6,11 +6,11 @@ from mosfet.abilities.language import text
 from mosfet.environment import SoundData, SoundEvent
 
 import base64
+import pathlib
 import typing
 
 import pydantic
 import pytest
-from opentelemetry.sdk.metrics.export import HistogramDataPoint, NumberDataPoint
 
 from tests import metric_reader
 
@@ -192,50 +192,50 @@ def test_model_facing_content_hostile_text_cannot_forge_a_placeholder() -> None:
     assert "&lt;media:image" in rendered
 
 
-def _image_counts() -> dict[tuple[object, object], int]:
+def _image_counts(metrics: metric_reader.Reader) -> dict[tuple[object, object], int]:
     counts: dict[tuple[object, object], int] = {}
-    for point in metric_reader.points("bot.processing.prompt.image.count"):
-        assert isinstance(point, NumberDataPoint)
-        attributes = dict(point.attributes or {})
-        key = (attributes["outcome"], attributes["media_type"])
+    for point in metrics.points("bot.processing.prompt.image.count"):
+        key = (point.attributes["outcome"], point.attributes["media_type"])
         counts[key] = counts.get(key, 0) + int(point.value)
     return counts
 
 
-def _image_size_total() -> tuple[int, float]:
+def _image_size_total(metrics: metric_reader.Reader) -> tuple[int, float]:
     """Cumulative PNG attachment sizes; other tests in the process may record other media types."""
 
     count, total = 0, 0.0
-    for point in metric_reader.points("bot.processing.prompt.image.size"):
-        assert isinstance(point, HistogramDataPoint)
-        if dict(point.attributes or {}) != {"media_type": "image/png"}:
+    for point in metrics.points("bot.processing.prompt.image.size"):
+        if point.attributes != {"media_type": "image/png"}:
             continue
         count += point.count
         total += point.sum
     return count, total
 
 
-def test_model_facing_content_records_one_image_metric_per_placeholder() -> None:
-    _ = metric_reader.reader()
-    before_counts = _image_counts()
-    before_size = _image_size_total()
-    attached = media.Image(content=_PNG, media_type="image/png")
-    over_capacity = media.Image(content=_PNG + b"older", media_type="image/png")
-    unsupported = media.Image(content=_JPEG, media_type="image/jpeg")
-    released = media.ReleasedImage.of(attached, reason="retention")
-    png_only = media.ImageCapacity(max_images=1, max_total_bytes=1_000_000, media_types=frozenset({"image/png"}))
+def test_model_facing_content_records_one_image_metric_per_placeholder(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before_counts = _image_counts(metrics)
+        before_size = _image_size_total(metrics)
+        attached = media.Image(content=_PNG, media_type="image/png")
+        over_capacity = media.Image(content=_PNG + b"older", media_type="image/png")
+        unsupported = media.Image(content=_JPEG, media_type="image/jpeg")
+        released = media.ReleasedImage.of(attached, reason="retention")
+        png_only = media.ImageCapacity(max_images=1, max_total_bytes=1_000_000, media_types=frozenset({"image/png"}))
 
-    _ = cognition.event.model_facing_content(
-        _Album(images=(over_capacity, unsupported, released, attached)), capacity=png_only
-    )
+        _ = cognition.event.model_facing_content(
+            _Album(images=(over_capacity, unsupported, released, attached)), capacity=png_only
+        )
 
-    after_counts = _image_counts()
+        after_counts = _image_counts(metrics)
+        after_size = _image_size_total(metrics)
+
     delta = {key: after_counts[key] - before_counts.get(key, 0) for key in after_counts}
     assert {key: value for key, value in delta.items() if value} == {
         ("attached", "image/png"): 1,
         ("omitted_capacity", "image/png"): 1,
         ("omitted_media_type", "image/jpeg"): 1,
     }
-    after_size = _image_size_total()
     assert after_size[0] - before_size[0] == 1
     assert after_size[1] - before_size[1] == len(_PNG)

@@ -12,6 +12,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import pathlib
 import typing
 import uuid
 
@@ -19,7 +20,6 @@ import hsm
 import mosfet
 import pydantic
 import pytest
-from opentelemetry.sdk.metrics.export import NumberDataPoint
 
 from tests import metric_reader
 from tests.hsm_instance_state import start_ability_tree
@@ -1791,56 +1791,59 @@ def test_cognition_handoff_on_a_decoderless_detector_takes_text_and_image_turns_
     assert terminal_messages(terminal).messages[-1].attachments == attachments
 
 
-def _released_history_images() -> int:
+def _released_history_images(metrics: metric_reader.Reader) -> int:
     total = 0
-    for point in metric_reader.points("bot.conversation.history.image.released"):
-        assert isinstance(point, NumberDataPoint)
-        assert dict(point.attributes or {}) == {"media_type": "image/png"}
+    for point in metrics.points("bot.conversation.history.image.released"):
+        assert point.attributes == {"media_type": "image/png"}
         total += int(point.value)
     return total
 
 
-def test_history_keeps_image_bytes_only_within_the_injected_retention_budget() -> None:
-    _ = metric_reader.reader()
-    released_before = _released_history_images()
-    retention = media.ImageRetention(max_images=2, max_total_bytes=1_000_000)
-    target = conversation.Conversation(image_retention=retention)
-    context = hsm.Context()
-    asyncio.run(start_ability_tree(context, target))
-    images = tuple(_image(index) for index in range(5))
-    histories: list[conversation.Messages] = []
+def test_history_keeps_image_bytes_only_within_the_injected_retention_budget(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        released_before = _released_history_images(metrics)
+        retention = media.ImageRetention(max_images=2, max_total_bytes=1_000_000)
+        target = conversation.Conversation(image_retention=retention)
+        context = hsm.Context()
+        asyncio.run(start_ability_tree(context, target))
+        images = tuple(_image(index) for index in range(5))
+        histories: list[conversation.Messages] = []
 
-    for image in images:
-        terminal = run_terminal(
-            target,
-            context,
-            conversation.TurnData(
-                source_ids=frozenset({"caller"}),
-                target_ids=frozenset({"bot"}),
-                content=None,
-                content_type="text/plain",
-                attachments=(image,),
-            ),
-        )
-        history = terminal_messages(terminal)
-        histories.append(history)
-        (newest,) = history.messages[-1].attachments
-        assert newest == image
-        older = [attachment for message in history.messages[:-1] for attachment in message.attachments]
-        assert sum(isinstance(attachment, media.Image) for attachment in older) <= retention.max_images
-        held = sum(
-            len(attachment.content)
-            for message in history.messages
-            for attachment in message.attachments
-            if isinstance(attachment, media.Image)
-        )
-        assert held <= media.MAX_TURN_IMAGES * media.MAX_IMAGE_BYTES + retention.max_total_bytes
+        for image in images:
+            terminal = run_terminal(
+                target,
+                context,
+                conversation.TurnData(
+                    source_ids=frozenset({"caller"}),
+                    target_ids=frozenset({"bot"}),
+                    content=None,
+                    content_type="text/plain",
+                    attachments=(image,),
+                ),
+            )
+            history = terminal_messages(terminal)
+            histories.append(history)
+            (newest,) = history.messages[-1].attachments
+            assert newest == image
+            older = [attachment for message in history.messages[:-1] for attachment in message.attachments]
+            assert sum(isinstance(attachment, media.Image) for attachment in older) <= retention.max_images
+            held = sum(
+                len(attachment.content)
+                for message in history.messages
+                for attachment in message.attachments
+                if isinstance(attachment, media.Image)
+            )
+            assert held <= media.MAX_TURN_IMAGES * media.MAX_IMAGE_BYTES + retention.max_total_bytes
 
-    final = histories[-1].messages
-    assert [message.attachments for message in final[2:]] == [(images[2],), (images[3],), (images[4],)]
-    for message, image in zip(final[:2], images[:2], strict=True):
-        assert message.attachments == (media.ReleasedImage.of(image, reason="retention"),)
-    for earlier in histories[:-1]:
-        for kept, committed in zip(final, earlier.messages):
-            assert (kept.sequence, kept.provenance) == (committed.sequence, committed.provenance)
-    assert _released_history_images() - released_before == 2
+        final = histories[-1].messages
+        assert [message.attachments for message in final[2:]] == [(images[2],), (images[3],), (images[4],)]
+        for message, image in zip(final[:2], images[:2], strict=True):
+            assert message.attachments == (media.ReleasedImage.of(image, reason="retention"),)
+        for earlier in histories[:-1]:
+            for kept, committed in zip(final, earlier.messages):
+                assert (kept.sequence, kept.provenance) == (committed.sequence, committed.provenance)
+        released_after = _released_history_images(metrics)
+
+    assert released_after - released_before == 2

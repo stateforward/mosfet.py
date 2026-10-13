@@ -3,18 +3,38 @@ from __future__ import annotations
 import collections.abc
 import concurrent.futures
 import importlib
+import json
 import pathlib
 import threading
+import typing
 
 import mosfet.telemetry
 import pytest
-from opentelemetry import _logs
+from opentelemetry import _logs, metrics
+from opentelemetry.sdk.metrics.export import MetricExporter, MetricExportResult, MetricsData, Sum
 
 from mosfet.telemetry import span
-from mosfet.telemetry.configure import is_enabled, log_file, logger_provider, span_file, tracer_provider
+from mosfet.telemetry.configure import (
+    is_enabled,
+    log_file,
+    logger_provider,
+    meter_provider,
+    metric_file,
+    span_file,
+    tracer_provider,
+)
 from mosfet.telemetry.generator import record_generator_request
 
 _CONFIGURE_MOD = importlib.import_module("mosfet.telemetry.configure")
+
+# Module-level, like the library meters (``telemetry/hsm.py``): a proxy meter taken at import,
+# before any ``configure()`` installs the process MeterProvider.
+_PROBE_NAME = "bot.telemetry.configure.probe.count"
+_PROBE = metrics.get_meter("bot.telemetry.configure.test").create_counter(
+    _PROBE_NAME,
+    unit="{probe}",
+    description="Counts probe increments made by the configure tests.",
+)
 
 
 def _force_flush() -> None:
@@ -32,6 +52,10 @@ def _reset_telemetry(
     mosfet.telemetry.reset()
     monkeypatch.delenv("BOT_OTEL_DISABLED", raising=False)
     monkeypatch.delenv("BOT_OTEL_LOG_FILE", raising=False)
+    monkeypatch.delenv("BOT_OTEL_SPAN_FILE", raising=False)
+    monkeypatch.delenv("BOT_OTEL_METRIC_FILE", raising=False)
+    monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
     monkeypatch.delenv("BOT_OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
@@ -219,7 +243,69 @@ def _capture_otlp_endpoints(monkeypatch: pytest.MonkeyPatch) -> list[str | None]
             super().__init__(endpoint, **kwargs)
 
     monkeypatch.setattr(_CONFIGURE_MOD, "OTLPSpanExporter", _Recording)
+    _ = _capture_otlp_metrics(monkeypatch)
     return seen
+
+
+class _RecordingMetricExporter(MetricExporter):
+    """Stands in for the OTLP gRPC metric exporter; keeps what it is handed."""
+
+    endpoint: str | None
+    batches: list[MetricsData]
+
+    def __init__(self, endpoint: str | None = None) -> None:
+        super().__init__()
+        self.endpoint = endpoint
+        self.batches = []
+
+    @typing.override
+    def export(self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: object) -> MetricExportResult:
+        del timeout_millis, kwargs
+        self.batches.append(metrics_data)
+        return MetricExportResult.SUCCESS
+
+    @typing.override
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        del timeout_millis
+        return True
+
+    @typing.override
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        del timeout_millis, kwargs
+
+
+def _capture_otlp_metrics(monkeypatch: pytest.MonkeyPatch) -> list[_RecordingMetricExporter]:
+    created: list[_RecordingMetricExporter] = []
+
+    def _create(endpoint: str | None = None, **kwargs: object) -> _RecordingMetricExporter:
+        del kwargs
+        exporter = _RecordingMetricExporter(endpoint)
+        created.append(exporter)
+        return exporter
+
+    monkeypatch.setattr(_CONFIGURE_MOD, "OTLPMetricExporter", _create)
+    return created
+
+
+def _probe_payloads(path: pathlib.Path) -> list[dict[str, typing.Any]]:
+    payloads = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [payload for payload in payloads if payload["name"] == _PROBE_NAME]
+
+
+def _probe_values(path: pathlib.Path) -> list[float]:
+    return [float(point["value"]) for payload in _probe_payloads(path) for point in payload["data"]["data_points"]]
+
+
+def _batch_probe_values(batches: list[MetricsData]) -> list[float]:
+    return [
+        float(point.value)
+        for batch in batches
+        for resource_metrics in batch.resource_metrics
+        for scope_metrics in resource_metrics.scope_metrics
+        for metric in scope_metrics.metrics
+        if metric.name == _PROBE_NAME and isinstance(metric.data, Sum)
+        for point in metric.data.data_points
+    ]
 
 
 def test_configure_without_otlp_endpoint_is_jsonl_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -284,3 +370,164 @@ def test_configure_otlp_keeps_jsonl_span_export(monkeypatch: pytest.MonkeyPatch)
     assert path.is_file()
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1
+
+
+def test_module_meter_exports_into_each_configuration_across_reset_cycles() -> None:
+    """Import-time meters bind to the once-installed provider and follow every reconfiguration."""
+
+    assert mosfet.telemetry.configure() is True
+    mosfet.telemetry.reset()
+
+    first = pathlib.Path("a.jsonl")
+    assert mosfet.telemetry.configure(metric_file=first) is True
+    _PROBE.add(3)
+    mosfet.telemetry.reset()
+    assert first.is_file()
+    assert max(_probe_values(first)) >= 3
+    first_contents = first.read_text(encoding="utf-8")
+
+    second = pathlib.Path("b.jsonl")
+    assert mosfet.telemetry.configure(metric_file=second) is True
+    _PROBE.add(2)
+    mosfet.telemetry.reset()
+    assert max(_probe_values(second)) >= 5
+    # The first configuration's exporter was unbound and shut down by the first reset.
+    assert first.read_text(encoding="utf-8") == first_contents
+
+
+def test_reset_never_shuts_down_the_meter_provider() -> None:
+    assert mosfet.telemetry.configure() is True
+    installed = mosfet.telemetry.meter_provider()
+    assert installed is not None
+    assert installed is meter_provider()
+    assert metrics.get_meter_provider() is installed
+
+    mosfet.telemetry.reset()
+    assert mosfet.telemetry.meter_provider() is installed
+    assert mosfet.telemetry.configure(metric_file="again.jsonl") is True
+    assert mosfet.telemetry.meter_provider() is installed
+    assert mosfet.telemetry.metric_file() == pathlib.Path("again.jsonl").resolve()
+    _PROBE.add(1)
+    mosfet.telemetry.reset()
+    assert max(_probe_values(pathlib.Path("again.jsonl"))) >= 1
+
+
+def test_configure_stamps_service_identity_on_logs_spans_and_metrics() -> None:
+    metric_path = pathlib.Path("identity-metrics.jsonl")
+    assert (
+        mosfet.telemetry.configure(metric_file=metric_path, service_name="builder", service_instance_id="host-7")
+        is True
+    )
+    for provider in (logger_provider(), tracer_provider()):
+        assert provider is not None
+        assert provider.resource.attributes.get("service.name") == "builder"
+        assert provider.resource.attributes.get("service.instance.id") == "host-7"
+    _PROBE.add(1)
+    mosfet.telemetry.reset()
+    payloads = _probe_payloads(metric_path)
+    assert payloads
+    identities = {
+        (payload["resource"]["service.name"], payload["resource"]["service.instance.id"]) for payload in payloads
+    }
+    assert identities == {("builder", "host-7")}
+
+
+def test_configure_service_name_falls_back_to_env_then_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert mosfet.telemetry.configure() is True
+    provider = tracer_provider()
+    assert provider is not None
+    assert provider.resource.attributes.get("service.name") == "stateforward.mosfet"
+    assert "service.instance.id" not in provider.resource.attributes
+    mosfet.telemetry.reset()
+
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env")
+    assert mosfet.telemetry.configure() is True
+    provider = tracer_provider()
+    assert provider is not None
+    assert provider.resource.attributes.get("service.name") == "from-env"
+    mosfet.telemetry.reset()
+
+    assert mosfet.telemetry.configure(service_name="from-argument") is True
+    provider = tracer_provider()
+    assert provider is not None
+    assert provider.resource.attributes.get("service.name") == "from-argument"
+
+
+def test_configure_rejects_blank_service_name() -> None:
+    with pytest.raises(ValueError, match="service_name"):
+        _ = mosfet.telemetry.configure(service_name="  ")
+    assert is_enabled() is False
+
+
+def test_configure_rejects_blank_service_instance_id() -> None:
+    with pytest.raises(ValueError, match="service_instance_id"):
+        _ = mosfet.telemetry.configure(service_instance_id="")
+    assert is_enabled() is False
+
+
+def test_metric_file_follows_argument_env_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert mosfet.telemetry.configure() is True
+    assert metric_file() == pathlib.Path("otel-metrics.jsonl").resolve()
+    mosfet.telemetry.reset()
+    assert metric_file() is None
+
+    monkeypatch.setenv("BOT_OTEL_METRIC_FILE", "env-metrics.jsonl")
+    assert mosfet.telemetry.configure() is True
+    assert metric_file() == pathlib.Path("env-metrics.jsonl").resolve()
+    mosfet.telemetry.reset()
+
+    nested = pathlib.Path("metrics") / "nested.jsonl"
+    assert mosfet.telemetry.configure(metric_file=nested) is True
+    assert metric_file() == nested.resolve()
+
+
+def test_disabled_configure_binds_no_metric_export() -> None:
+    metric_path = pathlib.Path("disabled-metrics.jsonl")
+    assert mosfet.telemetry.configure(enabled=False, metric_file=metric_path) is False
+    assert metric_file() is None
+    _PROBE.add(1)
+    mosfet.telemetry.reset()
+    assert not metric_path.exists()
+
+
+def test_configure_rejects_metric_path_outside_cwd(tmp_path: pathlib.Path) -> None:
+    outside = tmp_path.parent / f"outside-metrics-{tmp_path.name}.jsonl"
+    with pytest.raises(ValueError, match="must resolve under the process working directory"):
+        _ = mosfet.telemetry.configure(metric_file=outside)
+    assert is_enabled() is False
+    assert metric_file() is None
+
+
+def test_configure_otlp_endpoint_binds_metric_exporter(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = _capture_otlp_endpoints(monkeypatch)
+    created = _capture_otlp_metrics(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317/v1/traces")
+    assert mosfet.telemetry.configure(service_name="collector-bound") is True
+    assert [exporter.endpoint for exporter in created] == ["http://127.0.0.1:4317"]
+    _PROBE.add(4)
+    mosfet.telemetry.reset()
+    assert max(_batch_probe_values(created[0].batches)) >= 4
+    stamped = {
+        resource_metrics.resource.attributes.get("service.name")
+        for batch in created[0].batches
+        for resource_metrics in batch.resource_metrics
+    }
+    assert stamped == {"collector-bound"}
+
+
+def test_configure_without_otlp_endpoint_binds_no_metric_exporter(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = _capture_otlp_metrics(monkeypatch)
+    assert mosfet.telemetry.configure() is True
+    assert created == []
+
+
+def test_configure_with_otlp_endpoint_keeps_local_jsonl_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = _capture_otlp_endpoints(monkeypatch)
+    _ = _capture_otlp_metrics(monkeypatch)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    assert mosfet.telemetry.configure() is True
+    assert is_enabled() is True
+    assert logger_provider() is not None
+    assert log_file() == pathlib.Path("otel-logs.jsonl").resolve()
+    assert span_file() == pathlib.Path("otel-spans.jsonl").resolve()
+    assert metric_file() == pathlib.Path("otel-metrics.jsonl").resolve()
