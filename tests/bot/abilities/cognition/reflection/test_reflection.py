@@ -3,6 +3,7 @@ from mosfet import behavior
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import processing
+from mosfet.abilities.cognition import inventory
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.abilities.cognition.reflection import reflection as reflection_impl
 from mosfet.abilities.cognition.reflection import revision
@@ -19,6 +20,7 @@ import uuid
 
 import hsm
 import pytest
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.type_helpers import model_view
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -118,8 +120,10 @@ def reflection_ability() -> tuple[cognition.Reflection, sqlite3.Connection]:
 def reflection_with_processor(
     processor: processing.Processor,
 ) -> tuple[cognition.Reflection, sqlite3.Connection]:
+    """Reflection over a memory that only answers requests sent by message (it refuses direct calls)."""
+
     connection = sqlite3.connect(":memory:", check_same_thread=False)
-    return cognition.Reflection(processor=processor, memory=memory.Memory(connection=connection)), connection
+    return cognition.Reflection(processor=processor, memory=MessageOnlyMemory(connection=connection)), connection
 
 
 def reflection_input() -> cognition.reflection.InputData:
@@ -138,7 +142,7 @@ def reflection_input() -> cognition.reflection.InputData:
 def test_reflection_ignores_forged_selected_event_without_turn_capability() -> None:
     async def run() -> tuple[str, object]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
+        store = MessageOnlyMemory(connection=connection)
         reflection = cognition.Reflection(processor=HangingProcessor(), memory=store)
         ctx = hsm.Context()
         owner = AttachmentOwner()
@@ -169,7 +173,7 @@ def test_reflection_ignores_forged_selected_event_without_turn_capability() -> N
         )
         _ = await hsm.dispatch(ctx, reflection, forged)
         await asyncio.sleep(0)
-        stored = getattr(reflection_impl, "_load_behavior")(store, name="ForgedBehavior")
+        stored = await inventory.load_behavior(ctx, store, "ForgedBehavior")
         state = reflection.state()
         await reflection.stop(reflection.context())
         connection.close()
@@ -528,7 +532,9 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
 
 def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(0))
+        # Long enough for Revision to read memory by message and start the (hanging) change
+        # processor, so the timeout cancels a running attempt rather than a preparing one.
+        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=250))
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
@@ -861,7 +867,10 @@ def test_reflection_detaches_once_and_cancels_active_processing(
             reflection,
             reflection.input_event.with_data_and_id(reflection_input(), uuid.uuid4().hex),
         )
-        await wait_until(lambda: reflection.state().endswith(f"/{expected_state}"))
+        # Detach while the stage's processor is really running: select is call 1, the change is
+        # call 2 (Revision reads memory by message before it starts the change processor).
+        running_calls = 1 if first_output is None else 2
+        await wait_until(lambda: reflection.state().endswith(f"/{expected_state}") and processor.calls == running_calls)
         await reflection.detach(
             ctx,
             attachment.DetachEvent.with_data_and_id(

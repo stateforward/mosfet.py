@@ -50,35 +50,6 @@ _BEHAVIOR_ATTACH_TIMEOUT = datetime.timedelta(seconds=runtime.CALLBACK_WARMUP_SE
 _BEHAVIOR_DETACH_TIMEOUT = datetime.timedelta(seconds=1)
 
 
-class _InitializingCompleteData(pydantic.BaseModel):
-    """Typed empty signal that autonomy finished initialization."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        json_schema_extra={
-            "description": "Empty initialization-complete signal for autonomy; carries no payload.",
-            "examples": [{}],
-        },
-    )
-
-
-_InitializingCompleteEvent = hsm.Event[_InitializingCompleteData](
-    name="bot.ability.autonomy.initializing.complete",
-    kind=hsm.CompletionEventKind,
-    schema=_InitializingCompleteData,
-)
-_BehaviorsLoadedEvent = hsm.Event[memory.OutputData](
-    name="bot.ability.autonomy.behaviors.loaded",
-    kind=hsm.CompletionEventKind,
-    schema=memory.OutputData,
-)
-_BehaviorsLoadFailedEvent = hsm.Event[ability.FailureData](
-    name="bot.ability.autonomy.behaviors.load.failed",
-    kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
-)
-
 BehaviorCandidate: typing.TypeAlias = Instance | seed.Seed
 CandidateOrigin: typing.TypeAlias = typing.Literal["native", "learned"]
 _CandidateOutcome: typing.TypeAlias = typing.Literal[
@@ -93,15 +64,19 @@ _CandidateOutcome: typing.TypeAlias = typing.Literal[
 ]
 
 
-class _InitializeData(pydantic.BaseModel):
-    """Private immutable initialization capability prepared inside RTC."""
+class _RefreshData(pydantic.BaseModel):
+    """Private immutable snapshot, taken inside RTC, for one learned-inventory refresh."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
         frozen=True,
     )
 
+    turn: types.TurnData
     store: memory.MemoryStore | None
+    seeded: tuple[seed.Seed, ...]
+    learned: tuple[Instance, ...]
+    reply_to: str | None = None
 
 
 class _MatchData(pydantic.BaseModel):
@@ -114,12 +89,16 @@ class _MatchData(pydantic.BaseModel):
 
     turn: types.TurnData
     inventory: tuple[BehaviorCandidate, ...]
+    learned: tuple[Instance, ...] = pydantic.Field(
+        default=(),
+        description="Learned behaviors this match read from memory (or the last snapshot when the read failed).",
+    )
     reply_to: str | None = None
 
 
-_InitializeEvent = hsm.Event[_InitializeData](
-    name="bot.ability.autonomy.initialize",
-    schema=_InitializeData,
+_RefreshEvent = hsm.Event[_RefreshData](
+    name="bot.ability.autonomy.refresh",
+    schema=_RefreshData,
 )
 _MatchEvent = hsm.Event[_MatchData](
     name="bot.ability.autonomy.match",
@@ -1477,11 +1456,12 @@ def _candidate_dispatch_trust(origin: CandidateOrigin) -> processing.DispatchTru
 
 
 class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
-    """Practiced automatic behavior use: load on attach, then match → run a candidate.
+    """Practiced automatic behavior use: refresh the learned inventory, match, run a candidate.
 
     Chart states are lifecycle phases only. Turn product rides the event chain
-    (match / start-candidate payloads and child request metadata → child terminal)
-    (HSM-COMPLETION-001). ``_behaviors`` holds installed behaviors loaded at attach;
+    (refresh / match / start-candidate payloads and child request metadata → child terminal)
+    (HSM-COMPLETION-001). ``_behaviors`` holds the learned behaviors the last turn read from
+    memory (by message; a failed read keeps it);
     Candidate identity remains on the scoped operation actor and typed capability events.
     ``seeded_behaviors`` are trusted native HSM descriptors injected by the owner; learned
     behaviors are Starlark inventory records loaded from ``memory``. Both produce an
@@ -1496,7 +1476,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     bounded to one second). Seed factories and adapters are synchronous and must be safe for
     concurrent candidate runs. Each factory must return a fresh Ability; Seed is an immutable
     descriptor and does not track or enforce returned identity.
-    Memory load, factory/type, input, dispatch, attach, and detach failures reach
+    Factory/type, input, dispatch, attach, and detach failures reach
     ``failed_event`` as typed ``types.FailureData`` unless an unbuildable learned inventory
     candidate is skipped so a later learned candidate can be tried.
     """
@@ -1549,7 +1529,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         store = data.store
         if store is not None:
             try:
-                inventory.store_behavior(store, updated, cause="usage")
+                await inventory.store_behavior(ctx, store, updated, cause="usage")
             except Exception:
                 telemetry.span.record_current_failure("behavior_usage_persistence")
                 persisted_event = _BehaviorUsagePersistenceFailedEvent
@@ -1638,75 +1618,6 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         event: hsm.Event[typing.Any],
     ) -> None:
         await Autonomy._persist_usage_activity(ctx, instance, event, outcome="failed")
-
-    @staticmethod
-    async def _initialize_activity(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Load installed behaviors through the injected Memory capability."""
-
-        data = event.data
-        assert isinstance(data, _InitializeData)
-        store = data.store
-        if store is None:
-            _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
-            return
-        try:
-            output = store.execute(_behavior_select_input())
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                _BehaviorsLoadFailedEvent.with_data(ability.FailureData(message=str(error))),
-            )
-            return
-        _ = hsm.dispatch(ctx, instance, _BehaviorsLoadedEvent.with_data(output))
-
-    @staticmethod
-    def _prepare_initialization(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Snapshot the injected Memory capability during the owner's RTC step."""
-
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _InitializeEvent.with_data(_InitializeData(store=instance._memory)),
-                id=event.id,
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    def _on_load_behaviors_output(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        output = event.data
-        assert isinstance(output, memory.OutputData)
-        instance._behaviors = _behaviors_from_memory_output(output)
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
-
-    @staticmethod
-    def _on_load_behaviors_failure(
-        ctx: hsm.Context,
-        instance: "Autonomy",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        failure = (
-            event.data
-            if isinstance(event.data, ability.FailureData)
-            else ability.FailureData(message="Autonomy behavior load failed.")
-        )
-        _LOG.warning("Autonomy behavior load failed; continuing without learned behaviors. %s", failure.message)
-        instance._behaviors = ()
-        _ = hsm.dispatch(ctx, instance, _InitializingCompleteEvent.with_data(_InitializingCompleteData()))
 
     @staticmethod
     def _detach_on_detach(
@@ -1821,32 +1732,28 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
 
     @staticmethod
     def _prepare_match(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
-        """Snapshot the complete behavior inventory inside the owner's RTC step.
+        """Snapshot what one match needs inside the owner's RTC step.
 
-        Learned inventory is re-read from the injected Memory each turn: behaviors authored
-        after Autonomy's attach (by Learning or Reflection in the same bot lifetime) are
-        otherwise invisible until re-attach, and the procedural tier must react to what the
-        bot just learned. Seed descriptors always ride along. A failed re-read keeps the
-        last snapshot (an inventory refresh failure is not a reason to drop the matcher).
+        Learned inventory is re-read from the injected Memory every turn (by message, in the
+        refreshing activity): behaviors authored after Autonomy's attach (by Learning or
+        Reflection in the same bot lifetime) are otherwise invisible until re-attach, and the
+        procedural tier must react to what the bot just learned. It is also the only read:
+        Memory is a peer attached by another owner, so there is no load on attach to race it.
+        Seed descriptors always ride along.
         """
 
         turn = event.data
         assert isinstance(turn, types.TurnData)
-        if instance._memory is not None:
-            try:
-                output = instance._memory.execute(_behavior_select_input())
-                instance._behaviors = _behaviors_from_memory_output(output)
-            except Exception as error:
-                _LOG.warning("Autonomy learned-inventory refresh failed; using the last snapshot. %s", error)
-        inventory: tuple[BehaviorCandidate, ...] = (*instance._seeded_behaviors, *instance._behaviors)
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
-                _MatchEvent.with_data(
-                    _MatchData(
+                _RefreshEvent.with_data(
+                    _RefreshData(
                         turn=turn,
-                        inventory=inventory,
+                        store=instance._memory,
+                        seeded=instance._seeded_behaviors,
+                        learned=instance._behaviors,
                         reply_to=event.source if event.target == hsm.id(instance) and event.source else None,
                     )
                 ),
@@ -1856,6 +1763,47 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 metadata=dict(event.metadata),
             ),
         )
+
+    @staticmethod
+    async def _refresh_activity(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
+        """Ask memory, by message, for the learned inventory, then hand the match its candidates.
+
+        A failed read keeps the last snapshot: an inventory refresh failure is not a reason to
+        drop the matcher.
+        """
+
+        data = event.data
+        assert isinstance(data, _RefreshData)
+        learned = data.learned
+        if data.store is not None:
+            try:
+                output = await memory.transact(ctx, data.store, _behavior_select_input(), metadata=dict(event.metadata))
+                learned = _behaviors_from_memory_output(output)
+            except Exception as error:
+                _LOG.warning("Autonomy learned-inventory refresh failed; using the last snapshot. %s", error)
+        inventory: tuple[BehaviorCandidate, ...] = (*data.seeded, *learned)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _MatchEvent.with_data(
+                    _MatchData(turn=data.turn, inventory=inventory, learned=learned, reply_to=data.reply_to)
+                ),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _remember_learned(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
+        """Keep the learned inventory this match read as the snapshot the next failed read falls back to."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, _MatchData)
+        instance._behaviors = data.learned
 
     @staticmethod
     def _dispatch_terminal(
@@ -2530,34 +2478,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Autonomy",
-        hsm.initial(hsm.target("/Autonomy/initializing")),
-        hsm.state(
-            "initializing",
-            hsm.initial(hsm.target("preparing")),
-            hsm.defer(input_event),
-            hsm.exit(_detach_on_detach),
-            hsm.state(
-                "preparing",
-                hsm.entry(_prepare_initialization),
-                hsm.transition(
-                    hsm.on(_InitializeEvent),
-                    hsm.target("/Autonomy/initializing/loading"),
-                ),
-            ),
-            hsm.state("loading", hsm.activity(_initialize_activity)),
-            hsm.transition(
-                hsm.on(_BehaviorsLoadedEvent),
-                hsm.effect(_on_load_behaviors_output),
-            ),
-            hsm.transition(
-                hsm.on(_BehaviorsLoadFailedEvent),
-                hsm.effect(_on_load_behaviors_failure),
-            ),
-            hsm.transition(
-                hsm.on(_InitializingCompleteEvent),
-                hsm.target("/Autonomy/idle"),
-            ),
-        ),
+        hsm.initial(hsm.target("/Autonomy/idle")),
         hsm.state(
             "idle",
             hsm.exit(_detach_on_detach),
@@ -2657,7 +2578,16 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     "preparing",
                     hsm.entry(_prepare_match),
                     hsm.transition(
+                        hsm.on(_RefreshEvent),
+                        hsm.target("/Autonomy/workflow/matching/refreshing"),
+                    ),
+                ),
+                hsm.state(
+                    "refreshing",
+                    hsm.activity(_refresh_activity),
+                    hsm.transition(
                         hsm.on(_MatchEvent),
+                        hsm.effect(_remember_learned),
                         hsm.target("/Autonomy/workflow/matching/classifying"),
                     ),
                 ),
@@ -2908,8 +2838,9 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     ) -> None:
         """Construct Autonomy with an optional MemoryStore inventory and native seed descriptors.
 
-        ``memory`` is the owner-injected MemoryStore capability used to load learned Starlark
-        inventory on attach; it may be ``None`` for seed-only operation. ``seeded_behaviors``
+        ``memory`` is the bot's MemoryStore, a peer state machine attached by another owner;
+        Autonomy asks it, by message, for the learned Starlark inventory on every turn. It may be
+        ``None`` for seed-only operation. ``seeded_behaviors``
         is an immutable tuple of trusted ``Seed`` descriptors. Autonomy does not construct
         or start their machines here: each matching turn must receive a fresh Ability from
         the descriptor's factory, which Autonomy owns through attach/input/terminal/detach.

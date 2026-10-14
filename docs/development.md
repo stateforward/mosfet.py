@@ -124,11 +124,14 @@ waiting and dispatches back; the behavior transitions on that reply event, with 
 `hsm.after` transition as an optional timeout.
 
 `cognition.Routines` (memory, wall clock, optional HSM timer clock injected; compose it as
-`Cognition(routines=...)`) starts every ACTIVE persistent routine on attach and stops them
-on detach. Cognition sends it `bot.ability.routines.reconcile` whenever Reflection settles a
-turn, and Routines stops broken or removed routines, restarts changed ones, and starts new
-ones. A tick (`bot.behavior.tick`: name, trigger, `scheduled_at`, `fired_at`, and the
-selections the routine emitted) goes from Routines to Cognition to the body as a
+`Cognition(routines=...)`) starts nothing on its own attach: memory is a peer another owner
+attaches, so Routines reads the inventory only when Cognition sends it
+`bot.ability.routines.reconcile`. Cognition sends it once its children (memory among them) are
+attached, which starts every ACTIVE persistent routine a restart left behind, and again
+whenever Reflection settles a turn; each time Routines stops broken or removed routines,
+restarts changed ones, and starts new ones. Detaching Routines stops them. A tick
+(`bot.behavior.tick`: name, trigger, `scheduled_at`, `fired_at`, and the selections the
+routine emitted) goes from Routines to Cognition to the body as a
 `cognition.InputEvent` observing that tick; the body defers it during a turn, and the next
 turn decides what to do with it. `verify_apply` checks a routine by forcing one tick on a
 fake timer clock. Telemetry: `bot.behavior.routine.tick.count` {trigger, outcome},

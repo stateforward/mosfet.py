@@ -23,6 +23,7 @@ from . import recognition
 from .name import Name, adopted_name, name_insert_input, name_select_input
 
 import dataclasses
+import datetime
 import typing
 import uuid
 
@@ -33,6 +34,12 @@ import pydantic
 from mosfet import event
 from mosfet.abilities import cognition
 from mosfet.environment import SoundData, SoundEvent
+from mosfet.protocols import attachment
+
+# One recall question is a single-row read. A memory that is up answers it at once; one that is
+# still coming up may not answer at all, so a question is abandoned quickly and asked again.
+_RECALL_ATTEMPT_TIMEOUT = datetime.timedelta(seconds=1)
+_RECALL_RETRY_DELAY = datetime.timedelta(milliseconds=100)
 
 
 class AdoptData(pydantic.BaseModel):
@@ -154,6 +161,11 @@ _AdoptedEvent = hsm.Event[_AdoptedData](
     kind=hsm.CompletionEventKind,
     schema=_AdoptedData,
 )
+_RecallFailedEvent = hsm.Event[ability.FailureData](
+    name="bot.ability.identity.recall.failed",
+    kind=hsm.ErrorEventKind,
+    schema=ability.FailureData,
+)
 _AdoptFailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.identity.adopt.failed",
     kind=hsm.ErrorEventKind,
@@ -192,6 +204,11 @@ def _dispatch_terminal_failure(
     terminal = _with_context(instance.failed_event.with_data(ability.FailureData(message=message)), source)
     terminal = dataclasses.replace(terminal, source=hsm.id(instance))
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+
+
+def _recall_retry_delay(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+    del ctx, instance, event
+    return _RECALL_RETRY_DELAY
 
 
 def _has_recall(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> bool:
@@ -252,36 +269,58 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         super().__init__()
         self._recognizer = recognizer
         # Not owned: the bot's memory is attached elsewhere (Ability attachment is exclusive), so
-        # identity uses it as a store the way Reasoning does rather than taking its lifecycle.
+        # identity is a peer that reaches it by message rather than taking its lifecycle.
         self._memory = memory
         self._name = None
 
     @staticmethod
     async def _recall_name(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
-        """Wake up remembering the name, when there is a memory to have remembered it in.
+        """Ask memory for the name this bot answers to, when there is a memory to have kept it.
 
         A bot with no memory ability is nameless on every bring-up. That is not an error: it is
-        what having no memory means.
+        what having no memory means. A memory that does not answer yet is not an empty one: it is
+        a peer its own owner may still be bringing up, so the question fails and is asked again.
         """
 
         store = instance._memory
-        recalled: Name | None = None
-        if store is not None:
-            try:
-                output = store.execute(name_select_input())
-            except Exception as error:
-                _dispatch_terminal_failure(
-                    ctx,
-                    instance,
+        if store is None:
+            _ = hsm.dispatch(ctx, instance, _with_context(_RecalledEvent.with_data(_RecalledData()), event))
+            return
+        try:
+            output = await memory.transact(
+                ctx,
+                store,
+                name_select_input(),
+                metadata=dict(event.metadata),
+                timeout=_RECALL_ATTEMPT_TIMEOUT,
+            )
+        except memory.RequestError as error:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                _with_context(
+                    _RecallFailedEvent.with_data(
+                        ability.FailureData(message=f"Identity could not recall a name from memory: {error}")
+                    ),
                     event,
-                    f"Identity could not recall a name from memory: {error}",
-                )
-            else:
-                recalled = adopted_name(output)
+                ),
+            )
+            return
         _ = hsm.dispatch(
             ctx,
             instance,
-            _with_context(_RecalledEvent.with_data(_RecalledData(name=recalled)), event),
+            _with_context(_RecalledEvent.with_data(_RecalledData(name=adopted_name(output))), event),
+        )
+
+    @staticmethod
+    def _give_up_recalling(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
+        """The bring-up budget ran out with memory still not answering: wake nameless, and say so."""
+
+        _dispatch_terminal_failure(
+            ctx,
+            instance,
+            event,
+            "Identity could not recall a name: memory did not answer within the bring-up budget.",
         )
 
     @staticmethod
@@ -300,7 +339,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         store = instance._memory
         if store is not None:
             try:
-                _ = store.execute(name_insert_input(adopting))
+                _ = await memory.transact(ctx, store, name_insert_input(adopting), metadata=dict(event.metadata))
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -415,13 +454,33 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         hsm.initial(hsm.target("/Identity/recalling")),
         hsm.state(
             "recalling",
+            hsm.initial(hsm.target("/Identity/recalling/asking")),
             hsm.defer(input_event, AdoptEvent),
-            hsm.activity(_recall_name),
+            # Memory is a peer attached by its own owner, possibly alongside this ability. It has
+            # the same bring-up budget this ability was attached with to start answering.
             hsm.transition(
-                hsm.on(_RecalledEvent),
-                hsm.guard(_has_recall),
-                hsm.effect(_remember_recalled),
+                hsm.after(attachment.Attachment._attachment_timeout_delay),
+                hsm.effect(_give_up_recalling),
                 hsm.target("/Identity/knowing"),
+            ),
+            hsm.state(
+                "asking",
+                hsm.activity(_recall_name),
+                hsm.transition(
+                    hsm.on(_RecalledEvent),
+                    hsm.guard(_has_recall),
+                    hsm.effect(_remember_recalled),
+                    hsm.target("/Identity/knowing"),
+                ),
+                hsm.transition(
+                    hsm.on(_RecallFailedEvent),
+                    hsm.guard(_has_failure),
+                    hsm.target("/Identity/recalling/waiting"),
+                ),
+            ),
+            hsm.state(
+                "waiting",
+                hsm.transition(hsm.after(_recall_retry_delay), hsm.target("/Identity/recalling/asking")),
             ),
         ),
         hsm.state(

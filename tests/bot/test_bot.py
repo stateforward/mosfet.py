@@ -2198,9 +2198,13 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
 
 
 def test_bot_records_environment_stimuli_in_stm_register() -> None:
-    """Admitted environment stimuli land in the short-term register, grounded as observed."""
+    """Admitted environment stimuli land in the short-term register, grounded as observed.
 
-    async def run() -> tuple[memory.StmMemory, memory.ObservedEvent | None]:
+    The body owns the register's lifecycle and records by message: a peer reading it back
+    through ``RecentEvent`` finds the stimulus, so nothing called into the register directly.
+    """
+
+    async def run() -> memory.ObservedEvent | None:
         register = memory.StmMemory()
         ability = IgnoreAbility()
         active_bot = AbilityAgent(devices={}, cognition=ability, input=(), stm_memory=register)
@@ -2209,10 +2213,19 @@ def test_bot_records_environment_stimuli_in_stm_register() -> None:
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
         )
         await active_bot.dispatch(active_bot.context(), sound)
-        recent = register.recent("environment.sound", limit=10)
-        return register, recent[0] if recent else None
+        terminal = await abilities.run_terminal_operation(
+            active_bot.context(),
+            child=register,
+            request=memory.stm.RecentEvent.with_data_and_id(
+                memory.stm.RecentData(stimulus_name="environment.sound", limit=10), "read-register"
+            ),
+            terminals=(memory.stm.RecentOutputEvent, register.failed_event),
+            timeout=datetime.timedelta(seconds=5),
+        )
+        assert isinstance(terminal.data, memory.stm.RecentOutputData), terminal.data
+        return terminal.data.entries[0] if terminal.data.entries else None
 
-    _, observed = asyncio.run(run())
+    observed = asyncio.run(run())
     assert observed is not None
     assert observed.stimulus_name == "environment.sound"
     # Identity-like scalars are kept; media bytes are dropped by the projection.

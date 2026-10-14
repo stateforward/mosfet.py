@@ -1120,12 +1120,24 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _is_attach_complete_with_routines(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        return instance._routines is not None and ability.Ability._is_composite_attach_complete(ctx, instance, event)
+
+    @staticmethod
     def _reconcile_routines(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Reflection wrote (or may have written) inventory: let Routines match it."""
+        """Inventory is reachable or was just written: let Routines match it.
+
+        Sent once every child (memory among them) is attached, which rehydrates the routines a
+        restart left behind, and after Reflection settles a turn (Reflection writes inventory).
+        """
 
         routines_ability = instance._routines
         assert routines_ability is not None
@@ -1193,6 +1205,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "initializing",
             hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
             hsm.activity(ability.Ability._attach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(_is_attach_complete_with_routines),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal, _reconcile_routines),
+                hsm.target("/Cognition/idle"),
+            ),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_attach_complete),

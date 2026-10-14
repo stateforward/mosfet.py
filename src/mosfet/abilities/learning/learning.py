@@ -34,7 +34,6 @@ from ..cognition.reflection import revision
 import asyncio
 import dataclasses
 import datetime
-import logging
 import typing
 import uuid
 
@@ -45,8 +44,6 @@ import pydantic
 
 from mosfet.behavior import ChangeData, CreateData
 from mosfet.protocols import attachment
-
-_LOG = logging.getLogger(__name__)
 
 _GENERATE_EVENT_NAME = "bot.ability.learning.generate"
 # Durable memory query tag for stored turns (same tag writers use when inserting episodes).
@@ -674,16 +671,53 @@ def _remembered_turns_from_contents(contents: tuple[str, ...]) -> tuple[Remember
     return tuple(turns)
 
 
-def _recall_prior_turns(store: memory.Memory) -> tuple[RememberedTurn, ...]:
-    """Load remembered turns from memory for generate grounding.
+async def _recall_prior_turns(
+    ctx: hsm.Context,
+    store: memory.Memory,
+    metadata: dict[str, object],
+) -> tuple[RememberedTurn, ...]:
+    """Ask memory, by message, for the remembered turns that ground a generate selection.
 
-    Store and parse errors propagate: "recall failed" and "nothing is remembered" are different
-    outcomes, and only the caller can turn the former into a typed failure that names the cause.
+    Store, reply, and parse errors propagate: "recall failed" and "nothing is remembered" are
+    different outcomes, and only the caller can turn the former into a typed failure that names
+    the cause.
     """
 
     clause = memory.recent_select(memory.memory_table.c.query_tags == _REMEMBERED_TURN_QUERY, limit=_RECALL_TURN_LIMIT)
-    recalled = store.execute(memory.InputData(statements=memory.compile_statements(clause)))
+    recalled = await memory.transact(
+        ctx, store, memory.InputData(statements=memory.compile_statements(clause)), metadata=metadata
+    )
     return _remembered_turns_from_contents(recalled.contents(statement_index=0))
+
+
+async def _recall_recent_events(
+    ctx: hsm.Context,
+    register: stm.StmMemory,
+    metadata: dict[str, object],
+) -> tuple[stm.ObservedEvent, ...]:
+    """Ask the short-term register, by message, what the bot recently perceived."""
+
+    try:
+        terminal = await ability.run_terminal_operation(
+            ctx,
+            child=register,
+            request=dataclasses.replace(
+                stm.RecentEvent.with_data_and_id(stm.RecentData(limit=_RECENT_EVENT_LIMIT), uuid.uuid4().hex),
+                metadata=dict(metadata),
+            ),
+            terminals=(stm.RecentOutputEvent, register.failed_event),
+            timeout=memory.OPERATION_TIMEOUT,
+        )
+    except TimeoutError as error:
+        raise memory.RequestError("the event register did not answer.") from error
+    except RuntimeError as error:
+        raise memory.RequestError(f"the event register cannot be reached: {error}") from error
+    reply = terminal.data
+    if isinstance(reply, ability.FailureData):
+        raise memory.RequestError(reply.message)
+    if not isinstance(reply, stm.RecentOutputData):
+        raise memory.RequestError(f"the event register answered with {type(reply).__name__}.")
+    return reply.entries
 
 
 class _GroundedTurn(pydantic.BaseModel):
@@ -992,7 +1026,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         # Memory first for selections; the event register for live payload shape. A recall
         # failure is not "nothing is remembered" — surface it as its own typed failure.
         try:
-            prior_turns = _recall_prior_turns(instance._memory)
+            prior_turns = await _recall_prior_turns(ctx, instance._memory, dict(event.metadata))
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1015,7 +1049,7 @@ class Learning(ability.Ability[InputData, OutputData]):
         recent_events: tuple[stm.ObservedEvent, ...] = ()
         if instance._stm_memory is not None:
             try:
-                recent_events = instance._stm_memory.recent(limit=_RECENT_EVENT_LIMIT)
+                recent_events = await _recall_recent_events(ctx, instance._stm_memory, dict(event.metadata))
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -1196,13 +1230,20 @@ class Learning(ability.Ability[InputData, OutputData]):
             )
             return
         # Reconsolidation: the entries whose payload carried this grounding outlive arrival
-        # churn. Reinforcement is best-effort perception upkeep — losing the touch must not
-        # fail a lesson that already grounded (same boundary discipline as the body's record).
+        # churn. Reinforcement is a one-way message — best-effort perception upkeep that never
+        # holds up a lesson that already grounded (same discipline as the body's record); the
+        # register logs a reinforcement it could not write.
         if reinforced_ids and instance._stm_memory is not None:
-            try:
-                _ = instance._stm_memory.reinforce(reinforced_ids)
-            except Exception as error:
-                _LOG.warning("Learning event register reinforcement failed: %r", error)
+            _ = hsm.dispatch(
+                ctx,
+                instance._stm_memory,
+                dataclasses.replace(
+                    stm.ReinforceEvent.with_data(stm.ReinforceData(stm_ids=reinforced_ids)),
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._stm_memory),
+                    metadata=dict(event.metadata),
+                ),
+            )
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1713,9 +1754,9 @@ class Learning(ability.Ability[InputData, OutputData]):
         self._revision = revision.Revision(processor=leaf, memory=memory)
         self._memory = memory
         self._stm_memory = stm_memory
-        # Memory is an injected collaborator, not an attached child: compositions share one
-        # store (Reflection owns its exclusive attachment; Autonomy and Reasoning execute it
-        # directly), so Learning follows the same convention. One exclusive attach per store.
+        # Memory and the event register are peers reached by message, not attached children:
+        # compositions share one store (Reflection owns its exclusive attachment) and the body
+        # owns the register, so Learning only sends them requests. One exclusive attach each.
         self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,

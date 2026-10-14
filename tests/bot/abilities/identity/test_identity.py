@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import collections.abc
+import datetime
 import sqlite3
 import typing
 from typing import override
@@ -25,7 +26,9 @@ from mosfet.abilities import processing
 from mosfet.abilities.cognition import input as cognition_input
 from mosfet.abilities.hearing import speech
 from mosfet.environment import Environment, SoundData, SoundEvent
+from mosfet.protocols import attachment
 
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
 _LISTENING = "/knowing/listening"
@@ -52,7 +55,7 @@ class FailingSpeechDecoder(speech.SpeechDecoder):
         raise RuntimeError("recognizer unavailable")
 
 
-class WriteRefusingMemory(memory.Memory):
+class WriteRefusingMemory(MessageOnlyMemory):
     """Memory that can be read but not written, as a full or read-only store would be."""
 
     @override
@@ -81,9 +84,18 @@ class RecordingIdentity(identity.Identity):
         self.failures = []
 
 
-def open_store(store_type: type[memory.Memory] = memory.Memory) -> tuple[memory.Memory, sqlite3.Connection]:
+def open_store(store_type: type[memory.Memory] = MessageOnlyMemory) -> tuple[memory.Memory, sqlite3.Connection]:
+    """A memory that only answers requests sent by message (a direct call into it fails)."""
+
     connection = sqlite3.connect(":memory:", check_same_thread=False)
     return store_type(connection=connection), connection
+
+
+async def attach_store(ctx: hsm.Context, store: memory.Memory) -> None:
+    """Stand in for the owner that attaches the bot's memory; identity is only its peer."""
+
+    if not store.state():
+        await start_abilities_for_test(ctx, store)
 
 
 def sound(transcript: str) -> SoundData:
@@ -118,6 +130,8 @@ async def start_identity(
     decoder: speech.SpeechDecoder | None = None,
     store: memory.Memory | None = None,
 ) -> RecordingIdentity:
+    if store is not None:
+        await attach_store(ctx, store)
     ability = RecordingIdentity(
         recognizer=identity.SpeechNameRecognizer(decoder=decoder if decoder is not None else RecordingSpeechDecoder()),
         memory=store,
@@ -163,7 +177,7 @@ def test_a_bot_is_born_with_no_name() -> None:
             ctx = shared_hsm_context()
             ability = await start_identity(ctx, store=store)
             await settle()
-            recalled = store.execute(identity.name_select_input())
+            recalled = await memory.transact(ctx, store, identity.name_select_input())
             return ability.state(), identity.names_from_output(recalled), list(ability.failures)
         finally:
             connection.close()
@@ -260,7 +274,7 @@ def test_hearing_a_name_never_adopts_it() -> None:
             await hear(ability, ctx, "You are called Bob. Bob! Bob?", operation_id="told-2")
             # Still nameless, so a sound that says the name outright still means nothing.
             await hear(ability, ctx, "Bob, are you there?", operation_id="sound-1")
-            recalled = store.execute(identity.name_select_input())
+            recalled = await memory.transact(ctx, store, identity.name_select_input())
             return identity.names_from_output(recalled), addressed_products(ability), list(ability.failures)
         finally:
             connection.close()
@@ -430,7 +444,7 @@ def test_a_bot_that_is_never_given_a_name_lives_a_normal_life() -> None:
                 ("your name is Bob", "Bob?", "is anyone there", "hello hello", "Bob, please answer")
             ):
                 await hear(ability, ctx, heard, operation_id=f"sound-{index}")
-            recalled = store.execute(identity.name_select_input())
+            recalled = await memory.transact(ctx, store, identity.name_select_input())
             return (
                 addressed_products(ability),
                 list(ability.failures),
@@ -460,7 +474,7 @@ def test_adopting_a_name_replaces_the_one_before_it() -> None:
             await be_told_a_name(ability, ctx, "Ada")
             await hear(ability, ctx, "Bob, are you there?", operation_id="sound-1")
             await hear(ability, ctx, "Ada, are you there?", operation_id="sound-2")
-            recalled = store.execute(identity.name_select_input())
+            recalled = await memory.transact(ctx, store, identity.name_select_input())
             return addressed_products(ability), identity.names_from_output(recalled)
         finally:
             connection.close()
@@ -533,6 +547,7 @@ def test_being_addressed_reaches_cognition_through_the_body() -> None:
             recorder = CognitionRecorder()
             body = AddressableBot(cognition=recorder, input=(ears,))
             environment = Environment()
+            await attach_store(shared_hsm_context(), store)
             _ = await body.attach(environment)
             await wait_until(lambda: body.state() != "/Bot/activating")
 
@@ -558,3 +573,113 @@ def test_being_addressed_reaches_cognition_through_the_body() -> None:
     assert while_nameless == 0, "a nameless bot hands cognition nothing about being addressed"
     assert stimuli == [identity.AddressedEvent.name]
     assert identity.AdoptEvent.name in offered
+
+
+class _DecidesNothing(processing.Processor):
+    @override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        del input
+        return ()
+
+
+class SlowToAttachMemory(MessageOnlyMemory):
+    """A memory that takes a moment to come up once its owner attaches it, as a large one may."""
+
+    @override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if event.name != attachment.AttachEvent.name:
+            return super().dispatch(ctx, event)
+        attach = super().dispatch
+
+        async def coming_up() -> bool:
+            await asyncio.sleep(0.05)
+            return await attach(ctx, event)
+
+        return coming_up()
+
+
+class MemoryOwningCognition(cognition.Cognition):
+    """Real Cognition owning the bot's one memory; records the turns the body hands it."""
+
+    turns: list[cognition_input.InputData]
+
+    def __init__(self, store: memory.Memory) -> None:
+        self.turns = []
+        super().__init__(
+            intuition=cognition.Intuition(processor=_DecidesNothing()),
+            reasoning=cognition.Reasoning(processor=_DecidesNothing()),
+            reflection=cognition.Reflection(processor=_DecidesNothing(), memory=store),
+        )
+
+    @override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if event.name == cognition.InputEvent.name and isinstance(event.data, cognition_input.InputData):
+            self.turns.append(event.data)
+        return super().dispatch(ctx, event)
+
+
+def test_a_bot_wakes_up_remembering_its_name_when_its_memory_comes_up_alongside_it() -> None:
+    """The body attaches cognition (which owns the memory) and identity together.
+
+    Identity must not decide the bot is nameless because the memory it asked was still coming up.
+    """
+
+    async def run() -> tuple[list[str], str]:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        try:
+            _ = memory.Memory(connection=connection).execute(identity.name_insert_input(identity.Name(text="Bob")))
+            store = SlowToAttachMemory(connection=connection)
+            ears = identity.Identity(
+                recognizer=identity.SpeechNameRecognizer(decoder=RecordingSpeechDecoder()),
+                memory=store,
+            )
+            owner = MemoryOwningCognition(store)
+            body = AddressableBot(cognition=owner, input=(ears,))
+            environment = Environment()
+            _ = await body.attach(environment)
+            async with asyncio.timeout(5):
+                while not ears.state().endswith(_LISTENING):
+                    await asyncio.sleep(0.01)
+
+            await environment.broadcast(SoundEvent.with_data(sound("Bob, are you there?")))
+            await wait_until(lambda: bool(owner.turns))
+            stimuli = [turn.stimulus.name if isinstance(turn.stimulus, hsm.Event) else "" for turn in owner.turns]
+            state = ears.state()
+            _ = await body.detach(environment)
+            return stimuli, state
+        finally:
+            connection.close()
+
+    stimuli, state = asyncio.run(run())
+
+    assert stimuli == [identity.AddressedEvent.name], state
+
+
+def test_a_memory_that_never_answers_leaves_the_bot_nameless_once_its_bring_up_budget_runs_out() -> None:
+    """Asking again is bounded by the budget the owner attached identity with; then it says so."""
+
+    async def run() -> tuple[str, list[object], str]:
+        store, connection = open_store()
+        try:
+            ctx = shared_hsm_context()
+            ability = RecordingIdentity(
+                recognizer=identity.SpeechNameRecognizer(decoder=RecordingSpeechDecoder()),
+                memory=store,
+            )
+            await start_abilities_for_test(ctx, ability, timeout=datetime.timedelta(milliseconds=300))
+            await asyncio.sleep(0.15)
+            while_waiting = ability.state()
+            async with asyncio.timeout(5):
+                while not ability.state().endswith(_LISTENING):
+                    await asyncio.sleep(0.01)
+            await be_told_a_name(ability, ctx, "Bob")
+            return while_waiting, list(ability.failures), ability.state()
+        finally:
+            connection.close()
+
+    while_waiting, failures, state = asyncio.run(run())
+
+    assert "/recalling/" in while_waiting, "a memory that is not answering yet is asked again, not read as empty"
+    # One failure for the recall that ran out of budget, one for the name it then could not write down.
+    assert len(failures) == 2
+    assert state.endswith(_LISTENING)

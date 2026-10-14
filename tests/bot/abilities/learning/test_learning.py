@@ -27,11 +27,13 @@ from mosfet.abilities.cognition import types as cognition_types
 from mosfet.abilities.learning import Learning
 from mosfet.abilities.learning import learning as learning_impl
 from mosfet.protocols import attachment
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory, register_recent, register_record
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
-# One Learning revision performs one isolated Starlark validation with a three-second budget;
-# the host wait includes five seconds for decode, recall, selection, terminal propagation, and teardown.
-_LEARNING_REVISION_HOST_TIMEOUT_SECONDS = 8.0
+# One Learning revision performs one isolated Starlark validation (a cold validation worker can
+# take several seconds on a loaded host, and it blocks the loop while it runs); the host wait also
+# covers decode, recall and register reads by message, selection, terminal propagation, and teardown.
+_LEARNING_REVISION_HOST_TIMEOUT_SECONDS = 30.0
 
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
@@ -98,6 +100,15 @@ class LearningTestProcessor(processing.Processor):
                 ),
             )
         return self.selection
+
+
+async def _attached(*peers: memory.MemoryStore) -> None:
+    """Stand in for the owners that attach the bot's memory and register; Learning is their peer."""
+
+    ctx = shared_hsm_context()
+    for peer in peers:
+        if not peer.state():
+            await start_abilities_for_test(ctx, peer)
 
 
 def _generate_selection(
@@ -211,6 +222,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         return await dispatch_ability_for_test(
             ability,
             None,
@@ -231,11 +243,14 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
     assert output.behavior.name == "AnswerIncomingRing"
 
 
-def _seed_register_knock(register: memory.StmMemory) -> None:
+async def _seed_register_knock(register: memory.StmMemory) -> None:
+    await _attached(register)
     event = hsm.Event[object](name="environment.sound", schema=object).with_data(
         {"kind": "phone.ringing", "call_id": "incoming-call"}
     )
-    _ = register.record(dataclasses.replace(event, id="turn-1", source="phone", target="bot"))
+    await register_record(
+        shared_hsm_context(), register, dataclasses.replace(event, id="turn-1", source="phone", target="bot")
+    )
 
 
 def _selection_with_invented_payload() -> processing.Events:
@@ -277,10 +292,10 @@ def _ring_write() -> behavior.ChangeData:
     )
 
 
-def _grounded_register_entry(register: memory.StmMemory) -> memory.ObservedEvent:
+async def _grounded_register_entry(register: memory.StmMemory) -> memory.ObservedEvent:
     matches = [
         entry
-        for entry in register.recent("environment.sound", limit=10)
+        for entry in await register_recent(shared_hsm_context(), register, "environment.sound", limit=10)
         if entry.payload.get("kind") == "phone.ringing"
     ]
     assert matches, "register lost the grounded entry"
@@ -294,11 +309,11 @@ def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
     invented expected_* fields are dropped rather than authored into standing behavior.
     """
 
-    async def run() -> tuple[learning.OutputData, memory.StmMemory]:
+    async def run() -> tuple[learning.OutputData, memory.ObservedEvent]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
+        store = MessageOnlyMemory(connection=connection)
         register = memory.StmMemory()
-        _seed_register_knock(register)
+        await _seed_register_knock(register)
         processor = LearningTestProcessor(
             selection=_selection_with_invented_payload(),
             write=_ring_write(),
@@ -309,15 +324,16 @@ def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
             memory=store,
             stm_memory=register,
         )
+        await _attached(store, register)
         output = await dispatch_ability_for_test(
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it."),
             timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
-        return output, register
+        return output, await _grounded_register_entry(register)
 
-    output, register = asyncio.run(run())
+    output, grounded = asyncio.run(run())
     assert output.runtime_input.stimulus_name == "environment.sound"
     # The invented payload is replaced by what the register actually observed on that stimulus.
     assert output.runtime_input.payload == {"kind": "phone.ringing", "call_id": "incoming-call"}
@@ -326,7 +342,6 @@ def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
     assert output.runtime_input.expected_event is None
     assert output.runtime_input.expected_data is None
     # Reconsolidation: the entry that carried the grounding carries an access stamp now.
-    grounded = _grounded_register_entry(register)
     assert grounded.last_accessed_at is not None
     assert output.behavior.name == "AnswerIncomingRing"
 
@@ -334,12 +349,16 @@ def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
 def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
     """Memory vouches for stimulus identity and selection; the register vouches for the payload."""
 
-    async def run() -> tuple[learning.OutputData, memory.StmMemory]:
+    async def run() -> tuple[learning.OutputData, memory.ObservedEvent]:
+        # Memory and the register are peers reached by message: the store refuses direct calls.
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        store = MessageOnlyMemory(connection=connection)
+        await _attached(store)
+        _ = await memory.transact(
+            shared_hsm_context(), store, episodes.episode_insert_input(_ring_episode(), context_ref="phone")
+        )
         register = memory.StmMemory()
-        _seed_register_knock(register)
+        await _seed_register_knock(register)
         processor = LearningTestProcessor(
             selection=_selection_with_invented_payload(),
             write=_ring_write(),
@@ -350,22 +369,22 @@ def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
             memory=store,
             stm_memory=register,
         )
+        await _attached(store, register)
         output = await dispatch_ability_for_test(
             ability,
             None,
             learning.InputData(content="When the phone rings, answer it."),
             timeout=_LEARNING_REVISION_HOST_TIMEOUT_SECONDS,
         )
-        return output, register
+        return output, await _grounded_register_entry(register)
 
-    output, register = asyncio.run(run())
+    output, grounded = asyncio.run(run())
     assert output.runtime_input.payload == {"kind": "phone.ringing", "call_id": "incoming-call"}
     # Expected selection still comes from the remembered episode, not from perception.
     assert output.runtime_input.expected_event == "phone.answer_call"
     assert output.runtime_input.expected_target == "phone"
     assert output.runtime_input.expected_data == {"call_id": "from-memory"}
     # The register entry that grounded the payload is reinforced even though memory also spoke.
-    grounded = _grounded_register_entry(register)
     assert grounded.last_accessed_at is not None
     assert output.behavior.name == "AnswerIncomingRing"
 
@@ -406,6 +425,7 @@ def test_learning_grounds_in_the_latest_remembered_turn_beyond_the_recall_window
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         return await dispatch_ability_for_test(
             ability,
             None,
@@ -417,8 +437,8 @@ def test_learning_grounds_in_the_latest_remembered_turn_beyond_the_recall_window
     assert output.runtime_input.expected_data == {"call_id": "call-59"}
 
 
-def _seed_ring_episode(store: memory.Memory) -> None:
-    episode = episodes.CognitiveEpisode(
+def _ring_episode() -> episodes.CognitiveEpisode:
+    return episodes.CognitiveEpisode(
         focus="phone",
         focus_candidates=("phone",),
         stimulus_name="environment.sound",
@@ -431,7 +451,10 @@ def _seed_ring_episode(store: memory.Memory) -> None:
             ),
         ),
     )
-    _ = store.execute(episodes.episode_insert_input(episode, context_ref="phone"))
+
+
+def _seed_ring_episode(store: memory.Memory) -> None:
+    _ = store.execute(episodes.episode_insert_input(_ring_episode(), context_ref="phone"))
 
 
 def test_learning_fails_honestly_without_memory_stimulus() -> None:
@@ -443,11 +466,13 @@ def test_learning_fails_honestly_without_memory_stimulus() -> None:
             selection=_generate_selection(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
+        store = memory.Memory(connection=connection)
         ability = Learning(
             decoder=TextDecoder(),
             processor=processor,
-            memory=memory.Memory(connection=connection),
+            memory=store,
         )
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -482,6 +507,7 @@ def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         return await dispatch_ability_for_test(
             ability,
             None,
@@ -516,6 +542,7 @@ def test_learning_empty_generate_selection_fails() -> None:
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -561,6 +588,7 @@ def test_learning_rejects_lesson_text_as_runtime_input_payload() -> None:
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -634,7 +662,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
     class StubbornLearning(Learning):
         def replace_processing(self, stubborn: processing.Processing) -> None:
             self._select_processing = stubborn
-            self._attachment_group = attachment.Group(stubborn, self._revision, self._memory)
+            self._attachment_group = attachment.Group(stubborn, self._revision)
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         monkeypatch.setattr(learning_impl, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(0))
@@ -646,6 +674,7 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
         ability = StubbornLearning(decoder=TextDecoder(), processor=processor, memory=store)
+        await _attached(store)
         stubborn = StubbornProcessing(processor=processor)
         ability.replace_processing(stubborn)
         ctx = hsm.Context()
@@ -742,6 +771,7 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
             ),
         )
         ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        await _attached(store)
         return await dispatch_ability_for_test(
             ability,
             None,
@@ -806,6 +836,7 @@ def test_learning_recall_failure_is_not_reported_as_missing_memory() -> None:
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
         ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -841,6 +872,7 @@ def test_learning_no_stimulus_message_distinguishes_empty_from_ungroundable() ->
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
         ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -878,6 +910,7 @@ def test_learning_decode_failure_surfaces() -> None:
             processor=processor,
             memory=store,
         )
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -931,6 +964,7 @@ def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_select
             ),
         )
         ability = Learning(decoder=TextDecoder(), processor=processor, memory=store)
+        await _attached(store)
         _ = await dispatch_ability_for_test(
             ability,
             None,
@@ -975,6 +1009,7 @@ def test_learning_input_is_offered_as_a_model_callable_tool() -> None:
             ),
             memory=store,
         )
+        await _attached(store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, ability)
         await wait_until(lambda: ability.state().endswith("/idle"))

@@ -434,8 +434,8 @@ def _phone_cognition(
     from mosfet.abilities import communication as communication_ability
 
     # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
-    # Reflection owns the shared Memory lifecycle. Autonomy and Reasoning use its public
-    # execute capability as injected collaborators without attaching it again.
+    # Reflection owns the shared Memory lifecycle. Autonomy, Reasoning, and Routines are its
+    # peers: they reach it by message and never attach it again.
     intuition = OpenAIProcessor(
         client=_mercury_intuition_client(config),
         provider="mercury2_intuition",

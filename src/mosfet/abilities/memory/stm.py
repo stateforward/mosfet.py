@@ -16,8 +16,10 @@ from __future__ import annotations
 
 from . import schema
 from . import store
+from .. import ability
 
 import collections.abc
+import dataclasses
 import datetime
 import json
 import logging
@@ -26,6 +28,7 @@ import typing
 import uuid
 
 import hsm
+import mosfet
 import pydantic
 from sqlalchemy import delete
 from sqlalchemy import func
@@ -239,8 +242,12 @@ def _payload_projection(data: object) -> ProjectionPayload:
     return fields
 
 
-def _event_record(event: hsm.Event[typing.Any]) -> RecordData:
-    """Build the register record for one admitted stimulus event."""
+def event_record(event: hsm.Event[typing.Any]) -> RecordData:
+    """Build the register record for one admitted stimulus event (what ``RecordEvent`` carries).
+
+    The producer that admitted the stimulus builds it: name, envelope identity, and the bounded
+    scalar projection of the payload. Media, long text, and nested structures never leave here.
+    """
 
     return RecordData(
         stimulus_name=event.name,
@@ -268,15 +275,131 @@ def _optional_text(value: store.ParameterValue | object | None) -> str | None:
     return value if isinstance(value, str) else None
 
 
+class ReinforceData(pydantic.BaseModel):
+    """Register entries that just carried evidence, to stamp with an access time."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Short-term memory reinforcement: the stm_ids of entries grounding just relied on. "
+                "Stamping them moves their effective clock forward so used signals outlive arrival churn."
+            ),
+            "examples": [{"stm_ids": ["6b6f1d7a2c5440eab91c9f8e33a74a10"]}],
+        },
+    )
+
+    stm_ids: tuple[str, ...] = pydantic.Field(
+        min_length=1,
+        max_length=_MAX_LIMIT,
+        description="Register entry handles (ObservedEvent.stm_id) to stamp with the access time.",
+        examples=[("6b6f1d7a2c5440eab91c9f8e33a74a10",)],
+    )
+
+
+class RecentData(pydantic.BaseModel):
+    """Read the register inside its recency window, newest effective clock first."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Short-term memory read: entries inside the recency window ordered by the effective "
+                "clock max(created_at, last_accessed_at), newest first, optionally for one stimulus."
+            ),
+            "examples": [{"stimulus_name": "environment.sound", "limit": 16}, {"limit": 64}],
+        },
+    )
+
+    stimulus_name: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description="Only entries recorded for this stimulus event name; every stimulus when omitted.",
+        examples=["environment.sound"],
+    )
+    limit: int = pydantic.Field(
+        default=_DEFAULT_CAPACITY,
+        ge=1,
+        le=_MAX_LIMIT,
+        description="Maximum number of entries to return.",
+        examples=[16],
+    )
+
+
+class RecentOutputData(pydantic.BaseModel):
+    """The register entries a recent read found."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Short-term memory read result: entries newest effective clock first.",
+            "examples": [
+                {
+                    "entries": [
+                        {
+                            "stm_id": "6b6f1d7a2c5440eab91c9f8e33a74a10",
+                            "stimulus_name": "environment.sound",
+                            "payload": {"kind": "knock"},
+                            "created_at": "2026-07-07T12:00:00.123456+00:00",
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+
+    entries: tuple[ObservedEvent, ...] = pydantic.Field(
+        description="Entries inside the recency window, newest effective clock first; empty when none.",
+    )
+
+
+RecordEvent = hsm.Event[RecordData](
+    name="bot.ability.memory.stm.record",
+    schema=RecordData,
+)
+"""Notification: write one admitted stimulus projection and evict beyond capacity. No reply."""
+
+ReinforceEvent = hsm.Event[ReinforceData](
+    name="bot.ability.memory.stm.reinforce",
+    schema=ReinforceData,
+)
+"""Notification: stamp the access time on entries that just carried evidence. No reply."""
+
+RecentEvent = hsm.Event[RecentData](
+    name="bot.ability.memory.stm.recent",
+    schema=RecentData,
+)
+"""Request: read the register; answered with ``RecentOutputEvent`` or the failed event."""
+
+RecentOutputEvent = hsm.Event[RecentOutputData](
+    name="bot.ability.memory.stm.recent.output",
+    schema=RecentOutputData,
+)
+"""Reply to ``RecentEvent``, sent to the request's ``source`` with the request's ``id``."""
+
+_SettledEvent = hsm.Event[None](
+    name="bot.ability.memory.stm.settled",
+    kind=hsm.CompletionEventKind,
+    schema=type(None),
+)
+
+_REQUESTS = (store.MemoryStore.input_event, RecordEvent, ReinforceEvent, RecentEvent)
+
+
 class StmMemory(store.MemoryStore):
     """Short-term memory of admitted stimuli: capacity-bounded, access-reinforced.
 
-    Public surface is three direct primitives (same role as ``MemoryStore.execute``):
-    ``record`` writes one stimulus projection and evicts beyond capacity inside one
-    transaction; ``recent`` reads entries inside the recency window ordered by the
-    effective clock; ``reinforce`` stamps access times on entries grounding relied on,
-    so used signals outlive arrival churn. The inherited generic transaction surface
-    stays available for maintenance.
+    A state machine reached by message only. ``RecordEvent`` writes one stimulus projection
+    and evicts beyond capacity inside one transaction; ``ReinforceEvent`` stamps access times
+    on entries grounding relied on, so used signals outlive arrival churn. Both are
+    notifications: perception upkeep never blocks its sender, and a failed write is logged
+    here. ``RecentEvent`` reads entries inside the recency window ordered by the effective
+    clock and is answered with ``RecentOutputEvent`` (or the failed event) at the requester.
+    The inherited statement-transaction request stays available for maintenance. Requests
+    are applied one at a time; the rest wait.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = store.InputData
@@ -305,10 +428,7 @@ class StmMemory(store.MemoryStore):
         self._recency_window = recency_window if recency_window is not None else _DEFAULT_RECENCY_WINDOW
         self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.timezone.utc))
 
-    def record(self, event: hsm.Event[typing.Any]) -> RecordData:
-        """Write one admitted stimulus projection and evict beyond capacity in one transaction."""
-
-        data = _event_record(event)
+    def _record(self, data: RecordData) -> None:
         insert_clause = insert(schema.stm_memory_table).values(
             stm_id=uuid.uuid4().hex,
             stimulus_name=data.stimulus_name,
@@ -326,32 +446,16 @@ class StmMemory(store.MemoryStore):
             )
         )
         _ = self.execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
-        return data
 
-    def reinforce(self, stm_ids: tuple[str, ...]) -> int:
-        """Stamp the effective clock on entries that just carried evidence (reconsolidation)."""
-
-        if not stm_ids:
-            raise ValueError("reinforce requires at least one register entry id.")
+    def _reinforce(self, data: ReinforceData) -> None:
         access_clause = (
             update(schema.stm_memory_table)
-            .where(schema.stm_memory_table.c.stm_id.in_(stm_ids))
+            .where(schema.stm_memory_table.c.stm_id.in_(data.stm_ids))
             .values(last_accessed_at=_utc_text(self._clock()))
         )
-        output = self.execute(store.InputData(statements=store.compile_statements(access_clause)))
-        _ = output.results[0].rowcount
-        return output.results[0].rowcount
+        _ = self.execute(store.InputData(statements=store.compile_statements(access_clause)))
 
-    def recent(
-        self,
-        stimulus_name: str | None = None,
-        *,
-        limit: int = _DEFAULT_CAPACITY,
-    ) -> tuple[ObservedEvent, ...]:
-        """Effective-clock recency order, optionally per stimulus, inside the window."""
-
-        if limit < 1 or limit > _MAX_LIMIT:
-            raise ValueError(f"limit must be between 1 and {_MAX_LIMIT}.")
+    def _recent(self, data: RecentData) -> RecentOutputData:
         cutoff = _utc_text(self._clock() - self._recency_window)
         effective = _effective_time(schema.stm_memory_table)
         clause = select(
@@ -364,12 +468,12 @@ class StmMemory(store.MemoryStore):
             schema.stm_memory_table.c.created_at,
             schema.stm_memory_table.c.last_accessed_at,
         ).where(effective >= cutoff)
-        if stimulus_name is not None:
-            clause = clause.where(schema.stm_memory_table.c.stimulus_name == stimulus_name)
-        clause = clause.order_by(effective.desc(), schema.stm_memory_table.c.stm_id.desc()).limit(limit)
+        if data.stimulus_name is not None:
+            clause = clause.where(schema.stm_memory_table.c.stimulus_name == data.stimulus_name)
+        clause = clause.order_by(effective.desc(), schema.stm_memory_table.c.stm_id.desc()).limit(data.limit)
         output = self.execute(store.InputData(statements=store.compile_statements(clause)))
         rows = tuple(row.as_mapping() for row in output.results[0].rows)
-        return tuple(self._observed_from_row(row) for row in rows)
+        return RecentOutputData(entries=tuple(self._observed_from_row(row) for row in rows))
 
     @staticmethod
     def _observed_from_row(row: dict[str, store.ParameterValue]) -> ObservedEvent:
@@ -400,10 +504,85 @@ class StmMemory(store.MemoryStore):
             last_accessed_at=_optional_text(row.get("last_accessed_at")),
         )
 
+    @staticmethod
+    def _is_request(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, store.InputData | RecordData | ReinforceData | RecentData)
+
+    @staticmethod
+    def _reply(
+        ctx: hsm.Context,
+        instance: "StmMemory",
+        request: hsm.Event[typing.Any],
+        reply: hsm.Event[typing.Any],
+    ) -> None:
+        terminal = dataclasses.replace(
+            reply,
+            id=request.id or None,
+            metadata=dict(request.metadata),
+            source=hsm.id(instance),
+            target=store.MemoryStore._requester(instance, request),
+        )
+        carrier = (
+            ability.TerminalErrorEvent if isinstance(reply.data, ability.FailureData) else ability.TerminalOutputEvent
+        )
+        _ = hsm.dispatch(ctx, instance, carrier.with_data(terminal))
+
+    @staticmethod
+    async def _apply_activity(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
+        """Apply one request, answer it when it has a reply contract, then settle."""
+
+        data = event.data
+        try:
+            if isinstance(data, RecordData):
+                instance._record(data)
+            elif isinstance(data, ReinforceData):
+                instance._reinforce(data)
+            elif isinstance(data, RecentData):
+                StmMemory._reply(ctx, instance, event, RecentOutputEvent.with_data(instance._recent(data)))
+            else:
+                assert isinstance(data, store.InputData)
+                StmMemory._reply(ctx, instance, event, instance.output_event.with_data(instance.execute(data)))
+        except Exception as error:
+            if isinstance(data, RecordData | ReinforceData):
+                # Notifications have no requester to tell; the register's own log is the record.
+                _LOG.warning("short-term memory %s failed: %r", event.name, error)
+            else:
+                failure = ability.FailureData(message=f"short-term memory {event.name} failed: {error}")
+                StmMemory._reply(ctx, instance, event, instance.failed_event.with_data(failure))
+        _ = hsm.dispatch(ctx, instance, _SettledEvent.with_data(None))
+
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "StmMemory",
+        hsm.initial(hsm.target("/StmMemory/idle")),
+        hsm.state(
+            "idle",
+            hsm.transition(
+                hsm.on(*_REQUESTS),
+                hsm.guard(_is_request),
+                hsm.target("/StmMemory/applying"),
+            ),
+        ),
+        hsm.state(
+            "applying",
+            hsm.defer(*_REQUESTS),
+            hsm.activity(_apply_activity),
+            hsm.transition(hsm.on(_SettledEvent), hsm.target("/StmMemory/idle")),
+        ),
+    )
+
 
 __all__ = [
     "MAX_PROJECTION_TEXT_LENGTH",
     "ObservedEvent",
+    "RecentData",
+    "RecentEvent",
+    "RecentOutputData",
+    "RecentOutputEvent",
     "RecordData",
+    "RecordEvent",
+    "ReinforceData",
+    "ReinforceEvent",
     "StmMemory",
+    "event_record",
 ]

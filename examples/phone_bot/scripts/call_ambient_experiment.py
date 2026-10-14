@@ -86,12 +86,14 @@ def _selection_names(output: object) -> list[str]:
     return names
 
 
-def _list_behaviors(store: memory.Memory) -> list[dict[str, object]]:
-    """Return inventory rows: name, status, triggers (any status)."""
+async def _list_behaviors(ctx: hsm.Context, store: memory.Memory) -> list[dict[str, object]]:
+    """Ask memory, by message, for inventory rows: name, status, triggers (any status)."""
 
     try:
-        recalled = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
+        recalled = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())),
         )
         results = getattr(recalled, "results", ()) or ()
         behavior_rows = tuple(row.as_mapping() for row in (results[0].rows if len(results) > 0 else ()))
@@ -207,14 +209,14 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
 
     results: list[dict[str, object]] = []
     active_call_id: str | None = None
-    behaviors_before = _list_behaviors(body.memory())
+    behaviors_before = await _list_behaviors(environment, body.memory())
     print(f"behaviors_before={behaviors_before}", flush=True)
 
     for index in range(1, trials + 1):
         kind = rng.choice(("call", "ambient"))
         before = len(body.outputs())
         before_fail = len(body.failures())
-        behaviors_pre = _list_behaviors(body.memory())
+        behaviors_pre = await _list_behaviors(environment, body.memory())
         call_id = f"exp-{index}-{uuid.uuid4().hex[:6]}"
         print(f"\n=== trial {index}/{trials} type={kind} ===", flush=True)
         # Clear previous call so firmware can ring again.
@@ -241,7 +243,7 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
         new_failures = body.failures()[before_fail:]
         # Give reflection time to select create + revise + store after a handled turn.
         await asyncio.sleep(4.0)
-        behaviors_post = _list_behaviors(body.memory())
+        behaviors_post = await _list_behaviors(environment, body.memory())
         names: list[str] = []
         for out in new_outputs:
             names.extend(_selection_names(out))
@@ -279,7 +281,7 @@ async def run_experiment(*, trials: int, seed: int | None, settle_seconds: float
         )
 
     await _hang_up_if_needed(body.phone(), active_call_id)
-    behaviors_after = _list_behaviors(body.memory())
+    behaviors_after = await _list_behaviors(environment, body.memory())
 
     print("\n=== summary ===", flush=True)
     calls = [r for r in results if r.get("type") == "call" and "error" not in r]

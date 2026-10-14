@@ -644,7 +644,7 @@ class Reasoning(processing.Processing):
                         *directives.directive_select_input(context_ref=context_ref).statements,
                     )
                 )
-                recalled = store.execute(select_input)
+                recalled = await memory.transact(ctx, store, select_input, metadata=dict(event.metadata))
                 prior = episodes.episodes_from_output(recalled, statement_index=0)
                 standing = directives.directives_from_output(recalled, statement_index=1)
             except Exception as error:
@@ -879,7 +879,7 @@ class Reasoning(processing.Processing):
                     context_ref=_context_ref_from_input(data.host_input),
                     scope=getattr(type(store), "default_scope", "short_term"),
                 )
-                _ = store.execute(insert_input)
+                _ = await memory.transact(ctx, store, insert_input, metadata=metadata)
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,

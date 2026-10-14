@@ -14,10 +14,12 @@ import collections.abc
 import dataclasses
 import datetime
 import inspect
+import pathlib
 import sqlite3
 import typing
 
 import hsm
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 import pydantic
 import pytest
@@ -2714,10 +2716,12 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
         )
         reasoning = cognition.Reasoning(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reasoning)
+        # The owner that attaches the bot's memory; Reasoning is only its peer.
+        await start_abilities_for_test(ctx, store)
         result = await dispatch_ability_for_test(reasoning, ctx, reasoning_input())
 
         select = cognition.episodes.episode_select_input(context_ref="phone")
-        recalled = store.execute(select)
+        recalled = await memory.transact(ctx, store, select)
         stored = cognition.episodes.episodes_from_output(recalled)
         return result, processor.calls, stored
 
@@ -3083,8 +3087,13 @@ async def _seed_behavior_record(
     triggers: tuple[str, ...] = (),
     description: str = "",
     source: str | None = None,
+    ctx: hsm.Context | None = None,
 ) -> None:
-    """Insert executable behavior into bot_behavior / bot_behavior_trigger tables."""
+    """Insert executable behavior into bot_behavior / bot_behavior_trigger tables.
+
+    With ``ctx`` the row is written by message to an attached store (the way a peer would);
+    without it the store is seeded before anything attaches it.
+    """
 
     from mosfet.behavior import storage as behavior_storage
 
@@ -3102,9 +3111,11 @@ async def _seed_behavior_record(
             name=name,
             triggers=triggers if triggers else None,
         )
-    _ = store.execute(
-        memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(behavior)))
-    )
+    seed = memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(behavior)))
+    if ctx is not None:
+        _ = await memory.transact(ctx, store, seed)
+        return
+    _ = store.execute(seed)
 
 
 def test_reflection_change_loads_existing_and_writes_update() -> None:
@@ -3219,16 +3230,20 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
         int,
     ]:
-        store = memory.Memory()
+        # Break reads and rewrites the inventory row by message: the store refuses direct calls.
+        store = MessageOnlyMemory()
+        processor = FixedProcessor(selection)
+        reflection = cognition.Reflection(processor=processor, memory=store)
+        ctx = await start_cognition_ability_for_test(reflection)
+        # Reflection attaches the memory; it answers once that attach completes.
+        await wait_until(lambda: reflection.state().endswith("/idle"))
         await _seed_behavior_record(
             store,
             name="AnswerIncomingRing",
             triggers=("environment.sound",),
             description="To be broken.",
+            ctx=ctx,
         )
-        processor = FixedProcessor(selection)
-        reflection = cognition.Reflection(processor=processor, memory=store)
-        ctx = await start_cognition_ability_for_test(reflection)
         result = await dispatch_ability_for_test(
             reflection,
             ctx,
@@ -3242,23 +3257,25 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        behavior_out = store.execute(behavior_select)
+        behavior_out = await memory.transact(ctx, store, behavior_select)
         sources = _behavior_sources_from_output(behavior_out)
         behaviors = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in behavior_out.results[0].rows),
             tuple(row.as_mapping() for row in behavior_out.results[1].rows),
         )
-        active_out = store.execute(
+        active_out = await memory.transact(
+            ctx,
+            store,
             memory.InputData(
                 statements=memory.compile_statements(*behavior_storage.select_active_behaviors_clauses(lifetime="turn"))
-            )
+            ),
         )
         active = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in active_out.results[0].rows),
             tuple(row.as_mapping() for row in active_out.results[1].rows),
         )
         select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(store.execute(select))
+        episodes = cognition.episodes.episodes_from_output(await memory.transact(ctx, store, select))
         return (
             result,
             sources,
@@ -3380,7 +3397,8 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
             autonomy=autonomy,
             intuition_processor=intuition_processor,
             reasoning_processor=reasoning_processor,
-            reflection=cognition.Reflection(processor=reflection_processor, memory=memory.Memory()),
+            # One memory per bot: Reflection attaches it, Autonomy reaches it by message.
+            reflection=cognition.Reflection(processor=reflection_processor, memory=store),
         )
         ctx = await start_cognition_ability_for_test(ability)
         turn = cognition.InputData(
@@ -3589,16 +3607,14 @@ def test_cognition_without_priors_time_to_wire_speech_event_to_conversation() ->
 _ROUTINE_START = datetime.datetime(2026, 10, 5, 12, 0, tzinfo=datetime.UTC)
 
 
-def _install_routine(store: memory.Memory) -> None:
+def _routine_install_input() -> memory.InputData:
     from tests.bot.behavior.support import routine_source
 
     checked = behavior_events.check(routine_source(schedule="hsm.every(seconds = 300)"))
     assert checked.value is not None, checked.report.render()
-    _ = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(
-                *behavior_events.storage.replace_behavior_clauses(checked.value),
-            )
+    return memory.InputData(
+        statements=memory.compile_statements(
+            *behavior_events.storage.replace_behavior_clauses(checked.value),
         )
     )
 
@@ -3623,7 +3639,7 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
     from tests.bot.behavior.support import ManualTimers
 
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
-        store = memory.Memory()
+        store = MessageOnlyMemory()
         timers = ManualTimers()
         intuition, reasoning = cognition_abilities()
         ability = cognition.Cognition(
@@ -3637,7 +3653,7 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
             await _until_routines(lambda: ability.state().endswith("/idle"))
             before = _open_routine_waits(timers)
             # Reflection is the inventory writer; whatever it wrote, Routines re-reads after it settles.
-            _install_routine(store)
+            _ = await memory.transact(ctx, store, _routine_install_input())
             _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
             await _until_routines(lambda: bool(_open_routine_waits(timers)))
             return before, _open_routine_waits(timers)
@@ -3671,12 +3687,23 @@ class _RoutineTickBody(hsm.Instance):
     )
 
 
-def test_cognition_hands_routine_ticks_to_the_body_as_observed_input() -> None:
+def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: pathlib.Path) -> None:
+    """A routine a restart left behind rehydrates once Cognition is up, then ticks into the body.
+
+    The previous process wrote the inventory; this one reaches memory by message only, and
+    Cognition asks Routines to reconcile once its children (memory among them) are attached.
+    """
+
     from tests.bot.behavior.support import ManualTimers
 
+    database = str(tmp_path / "bot.db")
+    # The database the previous process left behind, written without any memory machine.
+    with memory.store.open_sqlite_engine(database=database).begin() as connection:
+        for statement in _routine_install_input().statements:
+            _ = connection.exec_driver_sql(statement.sql, statement.parameters)
+
     async def run() -> tuple[hsm.Event[typing.Any], str]:
-        store = memory.Memory()
-        _install_routine(store)
+        store = MessageOnlyMemory(database=database)
         timers = ManualTimers()
         intuition, reasoning = cognition_abilities()
         ability = cognition.Cognition(

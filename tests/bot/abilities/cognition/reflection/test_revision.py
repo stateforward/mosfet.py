@@ -6,13 +6,16 @@ import json
 import hsm
 import pytest
 
+from mosfet.abilities.cognition import inventory
+
 from mosfet import behavior
 from mosfet.abilities import memory
 from mosfet.abilities.cognition.reflection import revision
 from tests.bot.abilities.cognition.test_cognition import FixedProcessor
 from tests.bot.abilities.cognition.test_cognition import cognition_input
 from tests.bot.abilities.cognition.test_cognition import focus_output
-from tests.bot.abilities.support import dispatch_ability_for_test
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
@@ -45,6 +48,29 @@ behavior = hsm.define(
     ),
 )
 """.strip()
+
+
+# Checking a written behavior dry-runs it synchronously; that alone can take seconds on a loaded host.
+_REVISION_TIMEOUT_SECONDS = 60.0
+
+
+async def _attached_memory() -> tuple[hsm.Context, MessageOnlyMemory]:
+    """The bot's memory, attached by its own owner; Revision is only its peer (no direct calls)."""
+
+    store = MessageOnlyMemory()
+    ctx = shared_hsm_context()
+    await start_abilities_for_test(ctx, store)
+    return ctx, store
+
+
+def _revision_input(intent: behavior.CreateData | behavior.ChangeData) -> revision.InputData:
+    return revision.InputData(
+        cognition_input=cognition_input(),
+        cognition_output=focus_output("phone", "answered"),
+        intent=intent,
+        parent_operation_id="parent-turn",
+        parent_generation="parent-generation",
+    )
 
 
 def test_revision_owns_a_typed_ability_boundary() -> None:
@@ -206,9 +232,10 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
             name="AnswerIncomingRing",
             source=ANSWER_RING_BEHAVIOR_SOURCE,
         )
+        _, store = await _attached_memory()
         actor = revision.Revision(
             processor=FixedProcessor(write=written),
-            memory=memory.Memory(),
+            memory=store,
         )
         output = await dispatch_ability_for_test(
             actor,
@@ -223,6 +250,7 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
                 parent_operation_id="parent-turn",
                 parent_generation="parent-generation",
             ),
+            timeout=_REVISION_TIMEOUT_SECONDS,
         )
         assert isinstance(output, revision.OutputData)
         return output
@@ -258,14 +286,18 @@ def test_revision_keeps_the_existing_behaviors_own_grounded_triggers() -> None:
     )
 
     async def run() -> revision.OutputData:
-        store = memory.Memory()
+        ctx, store = await _attached_memory()
         installed = behavior.start(
             ANSWER_RING_BEHAVIOR_SOURCE,
             name="AnswerIncomingRing",
             triggers=("environment.sound",),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+        _ = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(
+                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
+            ),
         )
         actor = revision.Revision(processor=FixedProcessor(write=written), memory=store)
         output = await dispatch_ability_for_test(
@@ -278,6 +310,7 @@ def test_revision_keeps_the_existing_behaviors_own_grounded_triggers() -> None:
                 parent_operation_id="parent-turn",
                 parent_generation="parent-generation",
             ),
+            timeout=_REVISION_TIMEOUT_SECONDS,
         )
         assert isinstance(output, revision.OutputData)
         return output
@@ -396,15 +429,14 @@ def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
 def test_revision_installs_a_persistent_routine_checked_by_one_tick() -> None:
     """A routine is a legitimate create: it is checked by a dry-run tick, not the live turn."""
 
-    from mosfet.behavior import storage as behavior_storage
     from tests.bot.behavior.support import routine_source
 
     program = routine_source(
         schedule='hsm.at(time = "08:00", days = ["mon", "tue", "wed", "thu", "fri"], tz = "America/New_York")'
     )
-    store = memory.Memory()
 
-    async def run() -> revision.OutputData:
+    async def run() -> tuple[revision.OutputData, behavior.Instance | None]:
+        ctx, store = await _attached_memory()
         actor = revision.Revision(
             processor=FixedProcessor(write=behavior.ChangeData(name="MorningBriefing", source=program)),
             memory=store,
@@ -422,22 +454,15 @@ def test_revision_installs_a_persistent_routine_checked_by_one_tick() -> None:
                 parent_operation_id="parent-turn",
                 parent_generation="parent-generation",
             ),
+            timeout=_REVISION_TIMEOUT_SECONDS,
         )
         assert isinstance(output, revision.OutputData)
-        return output
+        return output, await inventory.load_behavior(ctx, store, "MorningBriefing")
 
-    output = asyncio.run(run())
-    stored = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*behavior_storage.select_behavior_by_name_clauses("MorningBriefing"))
-        )
-    )
-    (installed,) = behavior_storage.instances_from_behavior_results(
-        tuple(row.as_mapping() for row in stored.results[0].rows),
-        tuple(row.as_mapping() for row in stored.results[1].rows),
-    )
+    output, installed = asyncio.run(run())
 
     assert isinstance(output.applied, behavior.CreateData)
+    assert installed is not None
     assert installed.status == "ACTIVE"
     assert installed.lifetime == "persistent"
 
@@ -450,3 +475,70 @@ def test_revision_instructions_describe_persistent_routines() -> None:
 def test_revision_instructions_teach_dispatch_and_reply_waiting() -> None:
     for fragment in ("Callbacks are synchronous one-shot work", "transition on its reply event", "hsm.after"):
         assert fragment in revision.CHANGE_INSTRUCTIONS
+
+
+def test_revision_persists_a_draft_by_message_before_retrying_a_failed_check() -> None:
+    """A change that fails its check is written back as a draft, then the fix is accepted."""
+
+    broken = behavior.ChangeData(name="AnswerIncomingRing", source="def broken(:")
+    fixed = behavior.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE)
+
+    async def run() -> tuple[revision.OutputData, behavior.Instance | None]:
+        ctx, store = await _attached_memory()
+        actor = revision.Revision(processor=FixedProcessor(write=[broken, fixed]), memory=store)
+        output = await dispatch_ability_for_test(
+            actor,
+            None,
+            _revision_input(behavior.CreateData(name="AnswerIncomingRing", triggers=("environment.sound",))),
+            timeout=_REVISION_TIMEOUT_SECONDS,
+        )
+        assert isinstance(output, revision.OutputData)
+        return output, await inventory.load_behavior(ctx, store, "AnswerIncomingRing")
+
+    output, stored = asyncio.run(run())
+
+    assert output.applied.source == ANSWER_RING_BEHAVIOR_SOURCE
+    assert stored is not None
+    assert stored.status == "ACTIVE"
+    assert stored.source == ANSWER_RING_BEHAVIOR_SOURCE
+
+
+def test_revision_abandons_a_repeated_failure_after_persisting_the_draft() -> None:
+    broken = behavior.ChangeData(name="AnswerIncomingRing", source="def broken(:")
+
+    async def run() -> tuple[str, behavior.Instance | None]:
+        ctx, store = await _attached_memory()
+        actor = revision.Revision(processor=FixedProcessor(write=[broken, broken]), memory=store)
+        with pytest.raises(RuntimeError) as failure:
+            _ = await dispatch_ability_for_test(
+                actor,
+                None,
+                _revision_input(behavior.CreateData(name="AnswerIncomingRing", triggers=("environment.sound",))),
+                timeout=_REVISION_TIMEOUT_SECONDS,
+            )
+        return str(failure.value), await inventory.load_behavior(ctx, store, "AnswerIncomingRing")
+
+    message, stored = asyncio.run(run())
+
+    assert "abandoned" in message
+    assert stored is not None
+    assert stored.status == "DRAFT"
+
+
+def test_revision_reports_a_typed_failure_when_memory_cannot_be_reached() -> None:
+    """A memory that is not attached anywhere answers nothing; Revision fails the request, typed."""
+
+    async def run() -> None:
+        actor = revision.Revision(
+            processor=FixedProcessor(write=behavior.ChangeData(name="AnswerIncomingRing")),
+            memory=MessageOnlyMemory(),
+        )
+        _ = await dispatch_ability_for_test(
+            actor,
+            None,
+            _revision_input(behavior.CreateData(name="AnswerIncomingRing", triggers=("environment.sound",))),
+            timeout=_REVISION_TIMEOUT_SECONDS,
+        )
+
+    with pytest.raises(RuntimeError, match="cannot be reached"):
+        asyncio.run(run())

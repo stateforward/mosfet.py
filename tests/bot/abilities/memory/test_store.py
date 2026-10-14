@@ -3,12 +3,16 @@
 from mosfet.abilities import memory
 
 import asyncio
+import datetime
 import pathlib
 import typing
 
+import hsm
+import mosfet
 import pytest
 from sqlalchemy.engine import Engine
 
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
@@ -302,3 +306,73 @@ def test_recent_select_returns_same_instant_rows_in_insertion_order() -> None:
     assert window.contents() == ("older", "first", "second", "third")
     assert cut.contents() == ("second", "third")
     assert set(window.results[0].rows[0].as_mapping()) == {column.name for column in table.c}
+
+
+def test_transact_reaches_the_store_by_message_and_returns_its_committed_reply() -> None:
+    async def run() -> memory.OutputData:
+        store = MessageOnlyMemory()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        return await memory.transact(
+            ctx,
+            store,
+            memory.InputData(
+                statements=(
+                    _insert_content(content="by-message", query_tags="m"),
+                    _select_by_query_tags(query_tags="m"),
+                )
+            ),
+        )
+
+    assert asyncio.run(run()).contents(statement_index=1) == ("by-message",)
+
+
+def test_transact_raises_request_error_when_the_store_rolls_back() -> None:
+    async def run() -> tuple[str, ...]:
+        store = MessageOnlyMemory()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        with pytest.raises(memory.RequestError, match="not_a_table"):
+            _ = await memory.transact(
+                ctx,
+                store,
+                memory.InputData(
+                    statements=(
+                        _insert_content(content="rolled-back", query_tags="r"),
+                        memory.Statement(sql="INSERT INTO not_a_table (a) VALUES (1)", parameters=()),
+                    )
+                ),
+            )
+        check = await memory.transact(ctx, store, memory.InputData(statements=(_select_by_query_tags(query_tags="r"),)))
+        return check.contents()
+
+    assert asyncio.run(run()) == ()
+
+
+def test_transact_raises_request_error_for_a_store_that_is_not_started() -> None:
+    async def run() -> None:
+        with pytest.raises(memory.RequestError, match="cannot be reached"):
+            _ = await memory.transact(
+                shared_hsm_context(),
+                MessageOnlyMemory(),
+                memory.InputData(statements=(_select_by_query_tags(query_tags="none"),)),
+            )
+
+    asyncio.run(run())
+
+
+def test_transact_raises_request_error_when_the_store_never_answers() -> None:
+    async def run() -> None:
+        store = MessageOnlyMemory()
+        ctx = shared_hsm_context()
+        # Started but never attached: the request reaches a machine that cannot serve it yet.
+        _ = await mosfet.started(ctx, store, typing.cast(hsm.Model, store.model))
+        with pytest.raises(memory.RequestError, match="did not answer"):
+            _ = await memory.transact(
+                ctx,
+                store,
+                memory.InputData(statements=(_select_by_query_tags(query_tags="none"),)),
+                timeout=datetime.timedelta(milliseconds=50),
+            )
+
+    asyncio.run(run())

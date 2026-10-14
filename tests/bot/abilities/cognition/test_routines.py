@@ -1,4 +1,7 @@
-"""Routines: persistent routines rehydrate on attach, reconcile with inventory, and forward ticks."""
+"""Routines: persistent routines rehydrate when the owner asks, reconcile with inventory, forward ticks.
+
+Memory is a peer reached by message: every store here refuses a direct call.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +21,8 @@ from mosfet.abilities import memory
 from mosfet.behavior import storage as behavior_storage
 from mosfet.protocols import attachment
 
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 from tests.bot.behavior.support import ManualTimers, routine_source
 
 _EVERY = "hsm.every(seconds = 300)"
@@ -45,14 +50,26 @@ class _Owner(hsm.Instance):
     )
 
 
-def _install(store: memory.Memory, program: str) -> behavior.Instance:
+async def _memory(store: memory.Memory) -> hsm.Context:
+    """Stand in for the owner that attaches the bot's memory; Routines is only its peer."""
+
+    ctx = shared_hsm_context()
+    await start_abilities_for_test(ctx, store)
+    return ctx
+
+
+async def _write(ctx: hsm.Context, store: memory.Memory, row: behavior.Instance) -> None:
+    _ = await memory.transact(
+        ctx,
+        store,
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.replace_behavior_clauses(row))),
+    )
+
+
+async def _install(ctx: hsm.Context, store: memory.Memory, program: str) -> behavior.Instance:
     checked = behavior.check(program)
     assert checked.ok and checked.value is not None, checked.report.render()
-    _ = store.execute(
-        memory.InputData(
-            statements=memory.compile_statements(*behavior_storage.replace_behavior_clauses(checked.value))
-        )
-    )
+    await _write(ctx, store, checked.value)
     return checked.value
 
 
@@ -64,10 +81,13 @@ async def _until(predicate: typing.Callable[[], bool], *, timeout: float = 15.0)
         await asyncio.sleep(0.01)
 
 
-async def _attach(store: memory.Memory, timers: ManualTimers) -> tuple[cognition.Routines, _Owner, hsm.Context]:
+async def _attach(
+    ctx: hsm.Context, store: memory.Memory, timers: ManualTimers, *, reconcile: bool = True
+) -> tuple[cognition.Routines, _Owner]:
+    """Attach Routines to a Cognition stand-in that asks for the first reconcile, as Cognition does."""
+
     routines = cognition.Routines(memory=store, clock=lambda: _START, timers=timers)
     owner = _Owner()
-    ctx = hsm.Context()
     _ = await mosfet.started(ctx, owner, typing.cast(hsm.Model, owner.model))
     _ = await routines.attach(
         ctx,
@@ -77,7 +97,9 @@ async def _attach(store: memory.Memory, timers: ManualTimers) -> tuple[cognition
         ),
     )
     await _until(lambda: routines.state().endswith("/active/running"))
-    return routines, owner, ctx
+    if reconcile:
+        await _reconcile(routines, ctx)
+    return routines, owner
 
 
 async def _reconcile(routines: cognition.Routines, ctx: hsm.Context) -> None:
@@ -104,20 +126,22 @@ def test_routines_rehydrate_from_inventory_across_a_restart(tmp_path: pathlib.Pa
     database = str(tmp_path / "bot.db")
 
     async def lifetime(*, install: bool) -> tuple[behavior.TickData, hsm.Event[typing.Any], str]:
-        store = memory.Memory(database=database)
+        store = MessageOnlyMemory(database=database)
+        ctx = await _memory(store)
         if install:
-            _ = _install(store, routine_source(schedule=_EVERY))
+            _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
-        routines, owner, ctx = await _attach(store, timers)
+        routines, owner = await _attach(ctx, store, timers)
         try:
             tick = await _tick(owner, timers)
             return tick, owner.ticks[-1], hsm.id(routines)
         finally:
             await routines.stop(ctx)
             await hsm.stop(owner, ctx)
+            await store.stop(ctx)
 
     first, first_event, first_routines = asyncio.run(lifetime(install=True))
-    # A new process: nothing but the database survives; the routine comes back on attach.
+    # A new process: nothing but the database survives; the routine comes back on the first reconcile.
     second, second_event, second_routines = asyncio.run(lifetime(install=False))
 
     for tick, event, routines_id in ((first, first_event, first_routines), (second, second_event, second_routines)):
@@ -129,20 +153,43 @@ def test_routines_rehydrate_from_inventory_across_a_restart(tmp_path: pathlib.Pa
         assert event.source == routines_id
 
 
-def test_routines_never_run_turn_behaviors_or_drafts(tmp_path: pathlib.Path) -> None:
+def test_routines_wait_for_the_owner_before_reading_inventory() -> None:
+    """Attaching starts nothing: memory is a peer, and only the owner knows when it can answer."""
+
+    async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
+        store = MessageOnlyMemory()
+        ctx = await _memory(store)
+        _ = await _install(ctx, store, routine_source(schedule=_EVERY))
+        timers = ManualTimers()
+        routines, owner = await _attach(ctx, store, timers, reconcile=False)
+        try:
+            await asyncio.sleep(0.05)
+            before = _open_waits(timers)
+            await _reconcile(routines, ctx)
+            await _until(lambda: bool(_open_waits(timers)))
+            return before, _open_waits(timers)
+        finally:
+            await routines.stop(ctx)
+            await hsm.stop(owner, ctx)
+
+    before, after = asyncio.run(run())
+
+    assert before == []
+    assert after == [datetime.timedelta(seconds=300)]
+
+
+def test_routines_never_run_turn_behaviors_or_drafts() -> None:
     from tests.bot.behavior.support import greeting_behavior_source
 
     async def run() -> list[datetime.timedelta]:
-        store = memory.Memory(database=str(tmp_path / "bot.db"))
-        _ = _install(store, greeting_behavior_source())
+        store = MessageOnlyMemory()
+        ctx = await _memory(store)
+        _ = await _install(ctx, store, greeting_behavior_source())
         checked = behavior.check(routine_source(schedule=_EVERY))
         assert checked.value is not None
-        draft = behavior_storage.mark_draft(checked.value)
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.replace_behavior_clauses(draft)))
-        )
+        await _write(ctx, store, behavior_storage.mark_draft(checked.value))
         timers = ManualTimers()
-        routines, owner, ctx = await _attach(store, timers)
+        routines, owner = await _attach(ctx, store, timers)
         try:
             await asyncio.sleep(0.05)
             return _open_waits(timers)
@@ -155,22 +202,15 @@ def test_routines_never_run_turn_behaviors_or_drafts(tmp_path: pathlib.Path) -> 
 
 def test_routines_stop_a_broken_routine_on_reconcile() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta], int]:
-        store = memory.Memory()
-        installed = _install(store, routine_source(schedule=_EVERY))
+        store = MessageOnlyMemory()
+        ctx = await _memory(store)
+        installed = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
-        routines, owner, ctx = await _attach(store, timers)
+        routines, owner = await _attach(ctx, store, timers)
         try:
             _ = await _tick(owner, timers)
             before = _open_waits(timers)
-            _ = store.execute(
-                memory.InputData(
-                    statements=memory.compile_statements(
-                        *behavior_storage.replace_behavior_clauses(
-                            behavior_storage.mark_broken(installed, reason="annoying")
-                        )
-                    )
-                )
-            )
+            await _write(ctx, store, behavior_storage.mark_broken(installed, reason="annoying"))
             await _reconcile(routines, ctx)
             return before, _open_waits(timers), len(owner.ticks)
         finally:
@@ -186,14 +226,15 @@ def test_routines_stop_a_broken_routine_on_reconcile() -> None:
 
 def test_routines_restart_a_changed_routine_and_start_a_new_one_on_reconcile() -> None:
     async def run() -> tuple[str, list[str], list[datetime.timedelta]]:
-        store = memory.Memory()
-        _ = _install(store, routine_source(schedule=_EVERY))
+        store = MessageOnlyMemory()
+        ctx = await _memory(store)
+        _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
-        routines, owner, ctx = await _attach(store, timers)
+        routines, owner = await _attach(ctx, store, timers)
         try:
             first = (await _tick(owner, timers)).output[0]
-            _ = _install(store, routine_source(schedule=_EVERY, text="Rise and shine."))
-            _ = _install(store, routine_source(name="EveningWindDown", schedule="hsm.every(seconds = 600)"))
+            _ = await _install(ctx, store, routine_source(schedule=_EVERY, text="Rise and shine."))
+            _ = await _install(ctx, store, routine_source(name="EveningWindDown", schedule="hsm.every(seconds = 600)"))
             await _reconcile(routines, ctx)
             waits = sorted(_open_waits(timers))
             texts: list[str] = []
@@ -214,10 +255,11 @@ def test_routines_restart_a_changed_routine_and_start_a_new_one_on_reconcile() -
 
 def test_routines_stop_ticking_when_detached() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
-        store = memory.Memory()
-        _ = _install(store, routine_source(schedule=_EVERY))
+        store = MessageOnlyMemory()
+        ctx = await _memory(store)
+        _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
-        routines, owner, ctx = await _attach(store, timers)
+        routines, owner = await _attach(ctx, store, timers)
         try:
             before = _open_waits(timers)
             _ = await routines.detach(

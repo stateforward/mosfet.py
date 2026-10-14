@@ -12,6 +12,7 @@ import typing
 
 import hsm
 
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -89,11 +90,13 @@ def reasoning_input(
 
 
 def test_reasoning_retains_environment_event_stimulus_without_stranding() -> None:
+    """The retain stage sends memory an insert request; it never calls into the memory machine."""
+
     async def run() -> tuple[processing.CompletionData, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
-        store = memory.Memory()
+        store = MessageOnlyMemory()
         reasoning = cognition.Reasoning(processor=EmptyProcessor(), memory=store)
         ctx = shared_hsm_context()
-        await start_abilities_for_test(ctx, reasoning)
+        await start_abilities_for_test(ctx, store, reasoning)
 
         stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
         output = await dispatch_ability_for_test(
@@ -102,7 +105,9 @@ def test_reasoning_retains_environment_event_stimulus_without_stranding() -> Non
             reasoning_input(stimulus),
             timeout=0.2,
         )
-        retained = cognition.episodes.episodes_from_output(store.execute(cognition.episodes.episode_select_input()))
+        retained = cognition.episodes.episodes_from_output(
+            await memory.transact(ctx, store, cognition.episodes.episode_select_input())
+        )
         return output, retained, reasoning.state()
 
     output, retained, state = asyncio.run(run())
@@ -195,25 +200,33 @@ def _reasoning_frame(processor: CapturingProcessor) -> reasoning_module.Processo
 
 
 def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> None:
-    """One apply, one transaction, two statements: the turn never sees half a memory."""
+    """One request, one transaction, two statements: the turn never sees half a memory.
+
+    The recall stage reaches memory by message (the store refuses a direct call).
+    """
 
     async def run() -> reasoning_module.ProcessorInput:
-        store = memory.Memory()
-        _ = store.execute(
+        store = MessageOnlyMemory()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        _ = await memory.transact(
+            ctx,
+            store,
             cognition.episodes.episode_insert_input(
                 cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
                 context_ref=None,
-            )
+            ),
         )
-        _ = store.execute(
+        _ = await memory.transact(
+            ctx,
+            store,
             cognition.directives.directive_insert_input(
                 cognition.directives.Directive(text="Call Bob when you get a chance."),
                 context_ref=None,
-            )
+            ),
         )
         processor = CapturingProcessor()
         reasoning = cognition.Reasoning(processor=processor, memory=store)
-        ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, reasoning)
 
         stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))

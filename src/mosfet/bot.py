@@ -480,8 +480,12 @@ class Bot(Traced, abc.ABC):
 
     @staticmethod
     def _lifecycle_abilities(instance: "Bot") -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
+        # The short-term register is perception machinery the body owns: it attaches with the
+        # body so the fan-out (and peers such as Learning) can reach it by message.
+        register = () if instance._stm_memory is None else (instance._stm_memory,)
         configured = (
             instance._cognition,
+            *register,
             *instance._input,
             *instance._output,
             *instance._innate_ability_instances,
@@ -710,12 +714,19 @@ class Bot(Traced, abc.ABC):
             active.set_attribute("bot.ability.input.count", len(instance._input))
             if instance._stm_memory is not None:
                 # Registration is perception machinery, not interpretation: record what was admitted,
-                # never what it meant. The register is best-effort at this boundary — a peripheral
-                # storage failure must not block admitting the stimulus (body reflex floor).
-                try:
-                    _ = instance._stm_memory.record(event)
-                except Exception as error:
-                    _LOG.warning("Bot stimulus register record failed: %r", error)
+                # never what it meant. The record is a one-way message to the body-owned register,
+                # so register storage never blocks admitting the stimulus (body reflex floor); the
+                # register logs its own failed writes.
+                _ = hsm.dispatch(
+                    ctx,
+                    instance._stm_memory,
+                    dataclasses.replace(
+                        memory.stm.RecordEvent.with_data(memory.stm.event_record(event)),
+                        source=hsm.id(instance),
+                        target=hsm.id(instance._stm_memory),
+                        metadata=dict(event.metadata),
+                    ),
+                )
             for ability in instance._input:
                 # Stamped on the way out: the ability handles this on its own task, where the
                 # ambient context is bring-up's, not this stimulus's.

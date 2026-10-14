@@ -241,17 +241,19 @@ def test_behavior_inventory_writes_record_status_change_in_the_active_trace() ->
     from mosfet.abilities.cognition import inventory
     from mosfet.behavior import storage as behavior_storage
     from mosfet.behavior.instance import Instance
+    from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
     async def run() -> tuple[str, Instance]:
         store = memory.ShortTermMemory()
-        assert store.model is not None
-        _ = await mosfet.started(None, store, store.model)
+        ctx = shared_hsm_context()
+        # The writes reach the store by message, so it is attached by its owner first.
+        await start_abilities_for_test(ctx, store)
         draft = behavior_storage.mark_draft(Instance(name="GreetBack", source="", triggers=("bot.input",)))
         tracer = mosfet.telemetry.span.tracer("tests.telemetry")
         with tracer.start_as_current_span("turn") as turn:
-            inventory.store_behavior(store, draft, cause="draft")
+            await inventory.store_behavior(ctx, store, draft, cause="draft")
             accepted = behavior_storage.mark_active(draft.model_copy(update={"source": "behavior = 1"}))
-            inventory.store_behavior(store, accepted, cause="accept")
+            await inventory.store_behavior(ctx, store, accepted, cause="accept")
             trace_id = format(turn.get_span_context().trace_id, "032x")
         await hsm.stop(store)
         return trace_id, accepted

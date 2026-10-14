@@ -61,14 +61,18 @@ from mosfet.abilities.memory.payload import (
 from mosfet.abilities.memory.short_term import ShortTermMemory
 from mosfet.abilities.memory.store import (
     MEMORY_TABLE,
+    OPERATION_TIMEOUT,
     MemoryRecord,
     MemoryStore,
     ParameterValue,
+    RequestError,
     Row,
+    transact,
 )
 
 __all__ = [
     "MEMORY_TABLE",
+    "OPERATION_TIMEOUT",
     "STM_MEMORY_TABLE",
     "AssociativeMemory",
     "CandidateData",
@@ -100,6 +104,7 @@ __all__ = [
     "OutputData",
     "ParameterValue",
     "RecordData",
+    "RequestError",
     "Row",
     "ShortTermMemory",
     "StmMemory",
@@ -123,4 +128,5 @@ __all__ = [
     "stm",
     "stm_memory_table",
     "store",
+    "transact",
 ]

@@ -18,12 +18,14 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | `tests/bot/test_media.py` | `src/mosfet/media.py` (`Image` signature and size validation, `ImageCapacity.admit`, `ImageRetention.retain`, `ReleasedImage`) |
 | `tests/bot/test_lifecycle.py` | `src/mosfet/lifecycle.py` (unstarted vs started, snapshot coherence) |
 | `tests/bot/abilities/memory/test_store.py::test_memory_store_accepts_injected_engine` | `src/mosfet/abilities/memory/store.py` (injected engine path, exclusive args) |
+| `tests/bot/abilities/memory/test_store.py::test_transact_*` | `src/mosfet/abilities/memory/store.py` (`transact`: a peer reaches the store by message; committed reply, rollback, unreachable and unanswered stores fail as `RequestError`) |
+| `tests/bot/abilities/memory/test_stm.py` | `src/mosfet/abilities/memory/stm.py` (record/reinforce notifications and the recent request/reply, capacity, recency window, reinforcement, failure replies) |
 | `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_*` | `src/mosfet/abilities/memory/store.py` bring-up via `src/mosfet/abilities/memory/migrations/` (head without drift, create_all-era stamp, partial-DB refusal) |
 | `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime` | memory revision `0002` (`bot_behavior.lifetime`, existing rows read as turn behaviors) |
 | `tests/bot/behavior/test_events.py` | `src/mosfet/behavior/events.py` (`TickData` / `TickEvent` routine tick contract) |
 | `tests/bot/behavior/test_instance.py` | `src/mosfet/behavior/instance.py` (`check` lifetime rules: E0009 interval minimum and turn `after` bound) |
 | `tests/bot/behavior/test_schedule.py` | `src/mosfet/behavior/schedule.py` (`at()` occurrences: weekdays, time zones, DST) |
-| `tests/bot/abilities/cognition/test_routines.py` | `src/mosfet/abilities/cognition/routines.py` (rehydrate across restart, reconcile break/change/new, detach, tick forwarding) |
+| `tests/bot/abilities/cognition/test_routines.py` | `src/mosfet/abilities/cognition/routines.py` (owner-driven reconcile reads memory by message: rehydrate across restart, wait for the owner, reconcile break/change/new, detach, tick forwarding) |
 | `tests/bot/test_bot.py::test_body_handles_device_reports_in_arrival_order_regardless_of_priority` | `src/mosfet/bot.py` (negative: body never ranks by priority) |
 | `tests/bot/test_bot.py::test_body_never_fans_environment_stimuli_out_to_output_abilities` | `src/mosfet/bot.py` (negative: output abilities off the fan-out path) |
 | `tests/examples/test_listen_speak_bot.py::test_listen_speak_communication_drives_body_conversation_and_speaking` | `examples/listen_speak_bot` composition (replaces constructor-text asserts) |

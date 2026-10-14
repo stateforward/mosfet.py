@@ -3,6 +3,7 @@ from mosfet.abilities import cognition
 from mosfet.protocols import attachment
 
 import asyncio
+import datetime
 import typing
 import uuid
 import weakref
@@ -31,7 +32,10 @@ def require_model(model: hsm.Model | None) -> hsm.Model:
 async def start_abilities_for_test(
     ctx: hsm.Context,
     *abilities: abilities.Ability[typing.Any, typing.Any],
+    timeout: datetime.timedelta | None = None,
 ) -> None:
+    """Attach each ability to a recording owner; ``timeout`` is the owner's attachment budget."""
+
     for ability in abilities:
         recorder = _AbilityTerminalRecorder(
             output_event=ability.output_event,
@@ -41,7 +45,11 @@ async def start_abilities_for_test(
         _ = await mosfet.started(ctx, recorder, require_model(recorder.model))
         _ = await ability.attach(
             ctx,
-            attachment.AttachEvent.with_data(attachment.AttachData(actor=recorder)),
+            attachment.AttachEvent.with_data(
+                attachment.AttachData(actor=recorder)
+                if timeout is None
+                else attachment.AttachData(actor=recorder, timeout=timeout)
+            ),
         )
         remember_ability_terminal_owner(ability, recorder)
 

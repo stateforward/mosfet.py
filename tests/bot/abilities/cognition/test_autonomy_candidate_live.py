@@ -44,9 +44,11 @@ def test_autonomy_runs_a_late_authored_behavior_on_a_live_turn() -> None:
             memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
         )
         autonomy = cognition.Autonomy(memory=store)
-        from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context
+        from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
         ctx = shared_hsm_context()
+        # Autonomy reaches memory by message, so memory must be up: its owner attaches it.
+        await start_abilities_for_test(ctx, store)
         turn = cognition.types.TurnData(
             input=cognition.input.InputData(
                 stimulus=SoundEvent.with_data(

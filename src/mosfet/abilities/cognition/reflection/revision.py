@@ -15,7 +15,6 @@ import hsm
 import mosfet
 from pydantic.json_schema import SkipJsonSchema
 import pydantic
-from sqlalchemy.sql import ClauseElement
 
 from mosfet.behavior import ChangeData
 from mosfet.behavior import ChangeEvent
@@ -261,6 +260,15 @@ class _CheckedData(pydantic.BaseModel):
     existing: Instance | None = None
 
 
+class _PersistedData(pydantic.BaseModel):
+    """The checked attempt plus the inventory row memory now holds for it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    checked: _CheckedData
+    behavior: Instance
+
+
 class _StartedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
@@ -296,6 +304,11 @@ _CheckedEvent = hsm.Event[_CheckedData](
     kind=hsm.CompletionEventKind,
     schema=_CheckedData,
 )
+_PersistedEvent = hsm.Event[_PersistedData](
+    name="bot.ability.reflection.revision.persisted",
+    kind=hsm.CompletionEventKind,
+    schema=_PersistedData,
+)
 _StartedEvent = hsm.Event[_StartedData](
     name="bot.ability.reflection.revision.started",
     kind=hsm.CompletionEventKind,
@@ -315,23 +328,6 @@ _CancelStartedEvent = hsm.Event[_CancelRequestedData](
     kind=hsm.CompletionEventKind,
     schema=_CancelRequestedData,
 )
-
-
-def _compile_statements(clauses: tuple[ClauseElement, ...]) -> tuple[memory.Statement, ...]:
-    return memory.compile_statements(*clauses)
-
-
-def _load_behavior(store: memory.MemoryStore, name: str) -> Instance | None:
-    output = store.execute(
-        memory.InputData(statements=_compile_statements(behavior_storage.select_behavior_by_name_clauses(name)))
-    )
-    if len(output.results) < 2:
-        return None
-    behaviors = behavior_storage.instances_from_behavior_results(
-        tuple(row.as_mapping() for row in output.results[0].rows),
-        tuple(row.as_mapping() for row in output.results[1].rows),
-    )
-    return behaviors[0] if behaviors else None
 
 
 def _draft(intent: CreateData) -> Instance:
@@ -499,6 +495,8 @@ class Revision(processing.Processing):
             return data.write.operation_id, data.generation
         if isinstance(data, _CheckedData):
             return data.write.operation_id, data.generation
+        if isinstance(data, _PersistedData):
+            return data.checked.write.operation_id, data.checked.generation
         if isinstance(data, _StartedData):
             return data.operation_id, data.generation
         if isinstance(data, _FailedData):
@@ -588,10 +586,10 @@ class Revision(processing.Processing):
             try:
                 if isinstance(data.intent, CreateData):
                     create_intent = data.intent
-                    existing = _load_behavior(instance._memory, create_intent.name)
+                    existing = await inventory.load_behavior(ctx, instance._memory, create_intent.name)
                     if existing is None:
                         existing = _draft(create_intent)
-                        inventory.store_behavior(instance._memory, existing, cause="draft")
+                        await inventory.store_behavior(ctx, instance._memory, existing, cause="draft")
                     intent = ChangeData(
                         name=create_intent.name,
                         triggers=create_intent.triggers,
@@ -601,7 +599,7 @@ class Revision(processing.Processing):
                 else:
                     create_intent = None
                     intent = data.intent
-                    existing = _load_behavior(instance._memory, intent.name)
+                    existing = await inventory.load_behavior(ctx, instance._memory, intent.name)
                     if existing is None:
                         raise ValueError(f"Revision selected unknown behavior: {intent.name}.")
             except Exception as error:
@@ -697,7 +695,7 @@ class Revision(processing.Processing):
             # terminal back to the same typed continuations. The terminal is queued after
             # _StartedEvent (both are synchronous, non-awaited dispatches) so `authoring`
             # consumes it once entered, and `_matches_change_output` / `_matches_change_failure`
-            #  -> `_check_change` / `_fail_child` run unchanged. Nothing runs after the state
+            #  -> `checking` / `_fail_child` run unchanged. Nothing runs after the state
             # -transition-causing dispatch, so the activity is never cancelled mid-work.
             _ = hsm.dispatch(
                 ctx,
@@ -755,26 +753,29 @@ class Revision(processing.Processing):
         )
 
     @staticmethod
-    def _check_change(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
+    async def _check_activity(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
+        """Check the authored change against the inventory row memory holds now."""
+
         completion = event.data
         assert isinstance(completion, processing.CompletionData)
         write = completion.input.input
         assert isinstance(write, ChangeWriteInput)
         operation = processing.active_operation(instance, write.operation_id)
         if operation is None:
+            # Unreachable: paired with hsm.guard(_matches_change_output), which requires the live operation.
             return
         generation = hsm.id(operation)
         try:
             written = _coerce_change(completion.output)
-            existing = _load_behavior(instance._memory, write.existing_behavior.name)
+            existing = await inventory.load_behavior(ctx, instance._memory, write.existing_behavior.name)
             written = written.model_copy(update={"triggers": _grounded_triggers(write, written)})
             checked = _check(write, written)
-            inventory = _inventory_instance(written, checked.value, existing)
+            candidate = _inventory_instance(written, checked.value, existing)
             data = _CheckedData(
                 write=write,
                 generation=generation,
                 written=written,
-                behavior_instance=inventory,
+                behavior_instance=candidate,
                 report=checked.report,
                 existing=existing,
             )
@@ -835,19 +836,66 @@ class Revision(processing.Processing):
         return data.write.previous_messages is not None and messages == data.write.previous_messages
 
     @staticmethod
-    def _persist_draft(instance: "Revision", data: _CheckedData) -> Instance:
-        behavior = data.behavior_instance
-        if behavior is None:
-            behavior = behavior_storage.mark_draft(data.write.existing_behavior, reason=STATUS_REASON_VALIDATION)
-        inventory.store_behavior(instance._memory, behavior, cause="draft")
-        return behavior
+    async def _persist(
+        ctx: hsm.Context,
+        instance: "Revision",
+        event: hsm.Event[typing.Any],
+        *,
+        accepted: bool,
+    ) -> None:
+        """Write the attempt's inventory row by message, then report it persisted or failed."""
+
+        data = event.data
+        assert isinstance(data, _CheckedData)
+        if accepted:
+            assert data.behavior_instance is not None
+            behavior = data.behavior_instance
+        else:
+            behavior = data.behavior_instance or behavior_storage.mark_draft(
+                data.write.existing_behavior, reason=STATUS_REASON_VALIDATION
+            )
+        try:
+            await inventory.store_behavior(ctx, instance._memory, behavior, cause="accept" if accepted else "draft")
+        except Exception as error:
+            terminal = Revision._private_event(
+                instance,
+                event,
+                _FailedEvent,
+                _FailedData(
+                    input=_revision_input(data.write),
+                    operation_id=data.write.operation_id,
+                    generation=data.generation,
+                    message=f"Revision could not write {behavior.name} to inventory: {error}",
+                ),
+            )
+        else:
+            terminal = Revision._private_event(
+                instance,
+                event,
+                _PersistedEvent,
+                _PersistedData(checked=data, behavior=behavior),
+            )
+        _ = hsm.dispatch(ctx, instance, terminal)
+
+    @staticmethod
+    async def _persist_accepted_activity(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
+        await Revision._persist(ctx, instance, event, accepted=True)
+
+    @staticmethod
+    async def _persist_draft_activity(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
+        await Revision._persist(ctx, instance, event, accepted=False)
+
+    @staticmethod
+    def _has_persisted(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, _PersistedData) and Revision._matches_private_operation(instance, event)
 
     @staticmethod
     def _accept(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _CheckedData)
+        persisted = event.data
+        assert isinstance(persisted, _PersistedData)
+        data = persisted.checked
         assert data.behavior_instance is not None
-        inventory.store_behavior(instance._memory, data.behavior_instance, cause="accept")
         written = data.written.model_copy(
             update={
                 "name": data.behavior_instance.name,
@@ -878,9 +926,10 @@ class Revision(processing.Processing):
 
     @staticmethod
     def _retry(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _CheckedData)
-        existing = Revision._persist_draft(instance, data)
+        persisted = event.data
+        assert isinstance(persisted, _PersistedData)
+        data = persisted.checked
+        existing = persisted.behavior
         messages = tuple(item.message for item in data.report.errors)
         write = data.write.model_copy(
             update={
@@ -922,9 +971,9 @@ class Revision(processing.Processing):
 
     @staticmethod
     def _abandon(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
-        assert isinstance(data, _CheckedData)
-        _ = Revision._persist_draft(instance, data)
+        persisted = event.data
+        assert isinstance(persisted, _PersistedData)
+        data = persisted.checked
         Revision._fail(
             ctx,
             instance,
@@ -1209,16 +1258,8 @@ class Revision(processing.Processing):
             hsm.transition(
                 hsm.on(processing.OutputEvent),
                 hsm.guard(_matches_change_output),
-                hsm.effect(_check_change),
+                hsm.target("/Revision/checking"),
             ),
-            hsm.transition(
-                hsm.on(_CheckedEvent), hsm.guard(_accepted), hsm.effect(_accept), hsm.target("/Revision/idle")
-            ),
-            hsm.transition(hsm.on(_CheckedEvent), hsm.guard(_retryable), hsm.effect(_retry)),
-            hsm.transition(
-                hsm.on(_CheckedEvent), hsm.guard(_abandoned), hsm.effect(_abandon), hsm.target("/Revision/idle")
-            ),
-            hsm.transition(hsm.on(_RequestedEvent), hsm.guard(_has_requested), hsm.target("/Revision/starting")),
             hsm.transition(
                 hsm.on(ability.FailedEvent),
                 hsm.guard(_matches_change_failure),
@@ -1229,6 +1270,87 @@ class Revision(processing.Processing):
                 hsm.on(_CancelRequestedEvent),
                 hsm.guard(_has_cancel_requested),
                 hsm.target("/Revision/starting_cancel"),
+            ),
+        ),
+        # The child is done from here on: checking and persisting talk to memory by message, so a
+        # cancel answers at once and abandons the wait (the store applies what it already took).
+        hsm.state(
+            "checking",
+            hsm.defer(input_event),
+            hsm.activity(_check_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Revision/idle"),
+            ),
+            hsm.transition(hsm.on(_CheckedEvent), hsm.guard(_accepted), hsm.target("/Revision/accepting")),
+            hsm.transition(hsm.on(_CheckedEvent), hsm.guard(_retryable), hsm.target("/Revision/retrying")),
+            hsm.transition(hsm.on(_CheckedEvent), hsm.guard(_abandoned), hsm.target("/Revision/abandoning")),
+            hsm.transition(
+                hsm.on(_FailedEvent),
+                hsm.guard(_has_internal_failure),
+                hsm.effect(_fail_internal),
+                hsm.target("/Revision/idle"),
+            ),
+        ),
+        hsm.state(
+            "accepting",
+            hsm.defer(input_event),
+            hsm.activity(_persist_accepted_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Revision/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_PersistedEvent), hsm.guard(_has_persisted), hsm.effect(_accept), hsm.target("/Revision/idle")
+            ),
+            hsm.transition(
+                hsm.on(_FailedEvent),
+                hsm.guard(_has_internal_failure),
+                hsm.effect(_fail_internal),
+                hsm.target("/Revision/idle"),
+            ),
+        ),
+        hsm.state(
+            "retrying",
+            hsm.defer(input_event),
+            hsm.activity(_persist_draft_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Revision/idle"),
+            ),
+            hsm.transition(hsm.on(_PersistedEvent), hsm.guard(_has_persisted), hsm.effect(_retry)),
+            hsm.transition(hsm.on(_RequestedEvent), hsm.guard(_has_requested), hsm.target("/Revision/starting")),
+            hsm.transition(
+                hsm.on(_FailedEvent),
+                hsm.guard(_has_internal_failure),
+                hsm.effect(_fail_internal),
+                hsm.target("/Revision/idle"),
+            ),
+        ),
+        hsm.state(
+            "abandoning",
+            hsm.defer(input_event),
+            hsm.activity(_persist_draft_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(processing.Processing._is_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Revision/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_PersistedEvent), hsm.guard(_has_persisted), hsm.effect(_abandon), hsm.target("/Revision/idle")
+            ),
+            hsm.transition(
+                hsm.on(_FailedEvent),
+                hsm.guard(_has_internal_failure),
+                hsm.effect(_fail_internal),
+                hsm.target("/Revision/idle"),
             ),
         ),
         hsm.state(

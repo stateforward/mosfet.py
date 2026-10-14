@@ -32,7 +32,6 @@ import uuid
 
 import hsm
 import mosfet
-from sqlalchemy.sql import ClauseElement
 
 from mosfet.protocols import attachment
 import pydantic
@@ -169,6 +168,7 @@ class _RecalledEventData(pydantic.BaseModel):
 
     turn: InputData
     prior_episodes: tuple[CognitiveEpisode, ...] = ()
+    behaviors: tuple[Instance, ...] = ()
     operation_id: str = pydantic.Field(min_length=1)
     generation: str = pydantic.Field(min_length=1)
 
@@ -308,29 +308,13 @@ def event_for_data_from_selection(item: types.EventData) -> hsm.Event[typing.Any
     raise TypeError(f"Reflection select returned unsupported event: {item.event}.")
 
 
-def _compile_behavior_statements(clauses: tuple[ClauseElement, ...]) -> tuple[memory.Statement, ...]:
-    return memory.compile_statements(*clauses)
+async def _load_all_behaviors(ctx: hsm.Context, store: memory.MemoryStore) -> tuple[Instance, ...]:
+    """Ask memory, by message, for the full behavior inventory (any status) for select context."""
 
-
-def _load_behavior(store: memory.MemoryStore, *, name: str) -> Instance | None:
-    out = store.execute(
-        memory.InputData(
-            statements=_compile_behavior_statements(behavior_storage.select_behavior_by_name_clauses(name))
-        )
-    )
-    if len(out.results) < 2:
-        return None
-    behavior_rows = tuple(row.as_mapping() for row in out.results[0].rows)
-    trigger_rows = tuple(row.as_mapping() for row in out.results[1].rows)
-    loaded = behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
-    return loaded[0] if loaded else None
-
-
-def _load_all_behaviors(store: memory.MemoryStore) -> tuple[Instance, ...]:
-    """Load full behavior inventory (any status) for Reflection select context."""
-
-    out = store.execute(
-        memory.InputData(statements=_compile_behavior_statements(behavior_storage.select_all_behaviors_clauses()))
+    out = await memory.transact(
+        ctx,
+        store,
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())),
     )
     if len(out.results) < 2:
         return ()
@@ -339,29 +323,31 @@ def _load_all_behaviors(store: memory.MemoryStore) -> tuple[Instance, ...]:
     return behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
 
 
-def _store_episode(
+async def _store_episode(
+    ctx: hsm.Context,
     store: memory.MemoryStore,
     episode: CognitiveEpisode,
     *,
     context_ref: str | None,
+    metadata: dict[str, object],
 ) -> None:
     insert_input = episodes.episode_insert_input(
         episode,
         context_ref=context_ref,
         scope=getattr(type(store), "default_scope", "short_term"),
     )
-    _ = store.execute(insert_input)
+    _ = await memory.transact(ctx, store, insert_input, metadata=metadata)
 
 
-def _apply_break(data: BreakData, *, store: memory.MemoryStore) -> BreakData:
-    """Set status=BROKEN in inventory; do not delete (change can revive it later)."""
+async def _apply_break(ctx: hsm.Context, data: BreakData, *, store: memory.MemoryStore) -> BreakData:
+    """Set status=BROKEN in inventory by message; do not delete (change can revive it later)."""
 
-    existing = _load_behavior(store, name=data.name)
+    existing = await inventory.load_behavior(ctx, store, data.name)
     if existing is None:
         raise ValueError(f"Reflection break selected unknown behavior: {data.name}.")
     reason = data.reason.strip() if data.reason and data.reason.strip() else None
     retired = behavior_storage.mark_broken(existing, reason=reason)
-    inventory.store_behavior(store, retired, cause="break")
+    await inventory.store_behavior(ctx, store, retired, cause="break")
     return data
 
 
@@ -669,7 +655,7 @@ class Reflection(processing.Processing):
             generation = hsm.id(active)
             try:
                 select_input = episodes.episode_select_input(context_ref=turn.cognition_input.focus)
-                recalled = instance._memory.execute(select_input)
+                recalled = await memory.transact(ctx, instance._memory, select_input, metadata=dict(event.metadata))
                 prior = episodes.episodes_from_output(recalled)
             except Exception as error:
                 _ = hsm.dispatch(
@@ -690,6 +676,12 @@ class Reflection(processing.Processing):
                     ),
                 )
                 return
+            # Select context, read here (not in processing) so a cancel during either read finds
+            # no child to wait for. A behavior-inventory read failure leaves select without it.
+            try:
+                behaviors = await _load_all_behaviors(ctx, instance._memory)
+            except Exception:
+                behaviors = ()
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -698,6 +690,7 @@ class Reflection(processing.Processing):
                         _RecalledEventData(
                             turn=turn,
                             prior_episodes=prior,
+                            behaviors=behaviors,
                             operation_id=operation_id,
                             generation=generation,
                         )
@@ -715,16 +708,12 @@ class Reflection(processing.Processing):
         assert isinstance(data, _RecalledEventData)
         turn = data.turn
         operation_id = data.operation_id
-        try:
-            behaviors = _load_all_behaviors(instance._memory)
-        except Exception:
-            behaviors = ()
         select_input = processing.InputData(
             input=SelectInput(
                 cognition_input=turn.cognition_input,
                 cognition_output=turn.cognition_output,
                 prior_episodes=data.prior_episodes,
-                behaviors=behaviors,
+                behaviors=data.behaviors,
                 operation_id=operation_id,
                 generation=data.generation,
             ),
@@ -1030,8 +1019,8 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
-    def _on_break_event(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        """BreakEvent → set inventory status=BROKEN (no write phase)."""
+    async def _break_activity(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        """BreakEvent → ask memory to set inventory status=BROKEN (no write phase)."""
 
         selected = event.data
         assert isinstance(selected, _SelectedEventData)
@@ -1039,7 +1028,7 @@ class Reflection(processing.Processing):
         try:
             raw = typing.cast(object, selected.selection.data)
             data = raw if isinstance(raw, BreakData) else BreakData.model_validate(raw if raw is not None else {})
-            applied = _apply_break(data, store=instance._memory)
+            applied = await _apply_break(ctx, data, store=instance._memory)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -1085,7 +1074,13 @@ class Reflection(processing.Processing):
             assert isinstance(data, _AppliedEventData)
             try:
                 episode = episode_from_turn(data.turn, behavior=data.behavior)
-                _store_episode(instance._memory, episode, context_ref=data.turn.cognition_input.focus)
+                await _store_episode(
+                    ctx,
+                    instance._memory,
+                    episode,
+                    context_ref=data.turn.cognition_input.focus,
+                    metadata=dict(event.metadata),
+                )
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -1203,7 +1198,7 @@ class Reflection(processing.Processing):
             hsm.transition(
                 hsm.on(_SelectedEvent),
                 hsm.guard(_selected_is_break),
-                hsm.effect(_on_break_event),
+                hsm.target("/Reflection/breaking"),
             ),
             hsm.transition(
                 hsm.on(_AppliedEvent),
@@ -1227,6 +1222,28 @@ class Reflection(processing.Processing):
                 hsm.guard(_is_select_hop_timeout),
                 hsm.effect(_cancel_select_timeout),
                 hsm.target("/Reflection/timing_out"),
+            ),
+        ),
+        hsm.state(
+            "breaking",
+            hsm.defer(input_event),
+            hsm.activity(_break_activity),
+            hsm.transition(
+                hsm.on(processing.CancelEvent),
+                hsm.guard(_is_reflection_cancel_request),
+                hsm.effect(processing.Processing._emit_cancelled),
+                hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_AppliedEvent),
+                hsm.guard(_has_reflection_applied),
+                hsm.target("/Reflection/storing"),
+            ),
+            hsm.transition(
+                hsm.on(_StageFailedEvent),
+                hsm.guard(_has_stage_failure),
+                hsm.effect(_fail_from_stage),
+                hsm.target("/Reflection/idle"),
             ),
         ),
         hsm.state(

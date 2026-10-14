@@ -1,8 +1,9 @@
 """The one write path for behavior inventory rows, and the record each write leaves.
 
-Autonomy (usage), Reflection (break), and Revision (draft, accept) all replace a behavior row
-straight in memory rather than through a transition another machine observes. Every such write
-goes through `store_behavior`, which reads the row it replaces and reports the change once:
+Autonomy (usage), Reflection (break), and Revision (draft, accept) all replace a behavior row in
+memory from one of their own activities. Memory is a state machine, so every read and write here is
+a request sent to it by message (`memory.transact`), awaited inside the caller's activity. Every
+such write goes through `store_behavior`, which reads the row it replaces and reports the change once:
 
 - metric ``bot.behavior.inventory.write.count`` with low-cardinality ``bot.behavior.status.from``,
   ``bot.behavior.status.to``, and ``bot.behavior.write.cause``;
@@ -16,6 +17,8 @@ import hashlib
 import typing
 
 from opentelemetry import metrics
+
+import hsm
 
 from mosfet.abilities import memory
 from mosfet.behavior import storage as behavior_storage
@@ -43,9 +46,17 @@ def revision(behavior: Instance) -> str:
     return hashlib.sha256(behavior.source.encode("utf-8")).hexdigest()[:12]
 
 
-def _load(store: memory.MemoryStore, name: str) -> Instance | None:
-    output = store.execute(
-        memory.InputData(statements=memory.compile_statements(*behavior_storage.select_behavior_by_name_clauses(name)))
+async def load_behavior(ctx: hsm.Context, store: memory.MemoryStore, name: str) -> Instance | None:
+    """Ask ``store`` for the inventory row named ``name`` (any status); ``None`` when absent.
+
+    Raises:
+        memory.RequestError: the store failed the read or did not answer.
+    """
+
+    output = await memory.transact(
+        ctx,
+        store,
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.select_behavior_by_name_clauses(name))),
     )
     if len(output.results) < 2:
         return None
@@ -56,12 +67,18 @@ def _load(store: memory.MemoryStore, name: str) -> Instance | None:
     return loaded[0] if loaded else None
 
 
-def store_behavior(store: memory.MemoryStore, behavior: Instance, *, cause: Cause) -> None:
-    """Replace ``behavior``'s inventory row and record the status change it makes."""
+async def store_behavior(ctx: hsm.Context, store: memory.MemoryStore, behavior: Instance, *, cause: Cause) -> None:
+    """Replace ``behavior``'s inventory row and record the status change it makes.
 
-    previous = _load(store, behavior.name)
-    _ = store.execute(
-        memory.InputData(statements=memory.compile_statements(*behavior_storage.replace_behavior_clauses(behavior)))
+    Raises:
+        memory.RequestError: the store failed the read or the write, or did not answer.
+    """
+
+    previous = await load_behavior(ctx, store, behavior.name)
+    _ = await memory.transact(
+        ctx,
+        store,
+        memory.InputData(statements=memory.compile_statements(*behavior_storage.replace_behavior_clauses(behavior))),
     )
     source = previous.status if previous is not None else _ABSENT
     _WRITES.add(
@@ -88,4 +105,4 @@ def store_behavior(store: memory.MemoryStore, behavior: Instance, *, cause: Caus
         )
 
 
-__all__ = ["Cause", "revision", "store_behavior"]
+__all__ = ["Cause", "load_behavior", "revision", "store_behavior"]

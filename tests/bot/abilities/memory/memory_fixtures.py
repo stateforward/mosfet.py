@@ -6,7 +6,9 @@ from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
+import datetime
 import typing
+import uuid
 
 import hsm
 import mosfet
@@ -272,3 +274,59 @@ def require_model(ability: abilities.Ability[typing.Any, typing.Any] | hsm.Model
         return ability.model
     assert ability is not None
     return ability
+
+
+class MessageOnlyMemory(memory.Memory):
+    """Memory that refuses every transaction that did not arrive as its input event.
+
+    A peer that calls ``execute`` directly hands it a payload no request carried; the call
+    raises, so the peer's typed failure path fires instead of a silent success. Tests seed and
+    read it the way production does: ``memory.transact`` once it is attached.
+    """
+
+    requested: list[memory.InputData]
+
+    def __init__(self, **kwargs: typing.Any) -> None:
+        super().__init__(**kwargs)
+        self.requested = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+        if isinstance(event.data, memory.InputData):
+            self.requested.append(event.data)
+        return super().dispatch(ctx, event)
+
+    @typing.override
+    def execute(self, data: memory.InputData) -> memory.OutputData:
+        if not any(requested is data for requested in self.requested):
+            raise AssertionError(f"a peer called into {type(self).__name__} directly instead of sending a request")
+        return super().execute(data)
+
+
+async def register_recent(
+    ctx: hsm.Context,
+    register: memory.StmMemory,
+    stimulus_name: str | None = None,
+    *,
+    limit: int,
+) -> tuple[memory.ObservedEvent, ...]:
+    """Read the short-term register the way a peer does: a RecentEvent and its correlated reply."""
+
+    terminal = await abilities.run_terminal_operation(
+        ctx,
+        child=register,
+        request=memory.stm.RecentEvent.with_data_and_id(
+            memory.stm.RecentData(stimulus_name=stimulus_name, limit=limit), uuid.uuid4().hex
+        ),
+        terminals=(memory.stm.RecentOutputEvent, register.failed_event),
+        timeout=datetime.timedelta(seconds=5),
+    )
+    assert isinstance(terminal.data, memory.stm.RecentOutputData), terminal.data
+    return terminal.data.entries
+
+
+async def register_record(ctx: hsm.Context, register: memory.StmMemory, event: hsm.Event[typing.Any]) -> None:
+    """Record one stimulus by message; the read that follows is answered only after it lands."""
+
+    _ = await hsm.dispatch(ctx, register, memory.stm.RecordEvent.with_data(memory.stm.event_record(event)))
+    _ = await register_recent(ctx, register, limit=1)

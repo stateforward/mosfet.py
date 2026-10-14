@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from .. import ability
 
+import collections.abc
 import dataclasses
+import datetime
 import importlib.resources
 import typing
 import uuid
@@ -435,13 +437,18 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     def execute(self, data: InputData) -> OutputData:
         """Run one SQL transaction on this store's engine and return per-statement results.
 
-        This is the store's public transaction primitive (same role as ``Encoder.encode``).
-        Ability apply drives the same work through HSM lifecycle events for event-driven
-        coordination; nested cognition inventory/episode ops may call ``execute`` directly
-        when the store is already owned and a concurrent apply would re-enter the machine.
+        This is the machine's own transaction primitive, run by its applying activity. Peer
+        machines never call it: a store is a state machine and is reached by message only
+        (:func:`transact` sends ``input_event`` and awaits the correlated reply).
         """
 
         return _execute_transaction(self._engine, data.statements)
+
+    @staticmethod
+    def _requester(instance: "MemoryStore", event: hsm.Event[typing.Any]) -> str:
+        """The address that asked: the reply goes back to it, never to the owner instead."""
+
+        return event.source if event.source and event.source != hsm.id(instance) else ""
 
     @staticmethod
     def _has_input(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> bool:
@@ -467,6 +474,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=MemoryStore._requester(instance, event),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
@@ -479,6 +487,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             id=event.id or None,
             metadata=dict(event.metadata),
             source=hsm.id(instance),
+            target=MemoryStore._requester(instance, event),
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
@@ -499,6 +508,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
                 dataclasses.replace(
                     instance._apply_failed_event.with_data(ability.FailureData(message=str(error))),
                     id=event.id or None,
+                    source=event.source,
                     metadata=dict(event.metadata),
                 ),
             )
@@ -509,6 +519,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             dataclasses.replace(
                 instance._apply_completed_event.with_data(output),
                 id=event.id or None,
+                source=event.source,
                 metadata=dict(event.metadata),
             ),
         )
@@ -544,15 +555,75 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     )
 
 
+# How long a peer waits for a store to answer one transaction before the request fails.
+OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+
+
+class RequestError(RuntimeError):
+    """A transaction sent to a store came back failed, or was never answered.
+
+    Raised by :func:`transact` when the store replies with its failure event (the transaction
+    rolled back), when the store is not started in an addressable scope, or when no correlated
+    reply arrives within the timeout.
+    """
+
+
+async def transact(
+    ctx: hsm.Context,
+    store: MemoryStore,
+    data: InputData,
+    *,
+    metadata: collections.abc.Mapping[str, object] | None = None,
+    timeout: datetime.timedelta = OPERATION_TIMEOUT,
+) -> OutputData:
+    """Send one transaction to ``store`` by message and await its correlated reply.
+
+    A store is a state machine, so a peer never calls into it: this dispatches the store's
+    ``input_event`` with a fresh id from a one-shot reply actor parented to ``ctx`` (the
+    caller's activity context, so cancelling the activity abandons the wait) and returns the
+    committed ``OutputData``. The store answers the requesting address directly, applies
+    requests one at a time, and defers the rest, so peers sharing a store are serialized.
+
+    Raises:
+        RequestError: the store replied with a failure (nothing was committed), is not
+            started in an addressable scope, or did not answer within ``timeout``.
+    """
+
+    request = dataclasses.replace(
+        store.input_event.with_data_and_id(data, uuid.uuid4().hex),
+        metadata=dict(metadata) if metadata is not None else {},
+    )
+    try:
+        terminal = await ability.run_terminal_operation(
+            ctx,
+            child=store,
+            request=request,
+            terminals=(store.output_event, store.failed_event),
+            timeout=timeout,
+        )
+    except TimeoutError as error:
+        raise RequestError(f"{type(store).__name__} did not answer within {timeout.total_seconds():g}s.") from error
+    except RuntimeError as error:
+        raise RequestError(f"{type(store).__name__} cannot be reached: {error}") from error
+    reply = terminal.data
+    if isinstance(reply, ability.FailureData):
+        raise RequestError(reply.message)
+    if not isinstance(reply, OutputData):
+        raise RequestError(f"{type(store).__name__} answered with {type(reply).__name__}, not OutputData.")
+    return reply
+
+
 __all__ = [
     "BASELINE_REVISION",
     "MEMORY_TABLE",
+    "OPERATION_TIMEOUT",
     "InputData",
     "MemoryRecord",
     "MemoryStore",
     "MigrationError",
     "OutputData",
     "ParameterValue",
+    "RequestError",
     "Row",
     "Statement",
     "StatementResult",
@@ -563,4 +634,5 @@ __all__ = [
     "migration_config",
     "open_sqlite_engine",
     "recent_select",
+    "transact",
 ]

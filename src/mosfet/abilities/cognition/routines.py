@@ -1,13 +1,16 @@
 """Routines: the persistent routines cognition keeps running across turns and restarts.
 
 A routine is a behavior whose inventory ``lifetime`` is ``persistent`` (see
-``mosfet.behavior``). Routines loads every ACTIVE persistent row from the injected MemoryStore
-when it attaches, builds each one with the injected wall clock, and starts it under its own
-lifetime context with itself as the attachment owner, so the routine's schedules run until
-it is stopped. Nothing is replayed after a restart: intervals restart from start and
-``at()`` schedules wait for their next occurrence.
+``mosfet.behavior``). On every ``ReconcileEvent`` Routines asks the injected MemoryStore, by
+message, for every ACTIVE persistent row, builds each one with the injected wall clock, and
+starts it under its own lifetime context with itself as the attachment owner, so the routine's
+schedules run until it is stopped. Nothing is replayed after a restart: intervals restart from
+start and ``at()`` schedules wait for their next occurrence.
 
-Cognition dispatches ``ReconcileEvent`` after Reflection settles a turn (Reflection is the
+The owner says when the inventory is reachable. Memory is a peer state machine attached by
+another owner, so Routines does not read it on its own attach; Cognition dispatches
+``ReconcileEvent`` once its children (memory among them) are attached, which rehydrates the
+routines a restart left behind, and again after Reflection settles a turn (Reflection is the
 inventory writer): Routines re-reads the persistent rows and stops a routine that is gone,
 broken, or no longer ACTIVE, restarts one whose source changed, and starts one that is new.
 Each tick a running routine emits (``bot.behavior.tick``) is forwarded to Cognition, which
@@ -168,7 +171,6 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
 
     @staticmethod
     async def _reconcile_activity(ctx: hsm.Context, instance: "Routines", event: hsm.Event[typing.Any]) -> None:
-        del event
         with span.operation(
             "bot.behavior.routine.reconcile",
             scope=_SCOPE,
@@ -179,12 +181,15 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
             while instance._stopping:
                 await Routines._stop_routine(lifetime, instance._stopping.pop())
             try:
-                output = instance._memory.execute(
+                output = await memory.transact(
+                    ctx,
+                    instance._memory,
                     memory.InputData(
                         statements=memory.compile_statements(
                             *behavior_storage.select_active_behaviors_clauses(lifetime=LIFETIME_PERSISTENT)
                         )
-                    )
+                    ),
+                    metadata=dict(event.metadata),
                 )
                 desired = {
                     row.name: row
@@ -297,7 +302,8 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
         hsm.initial(hsm.target("/Routines/active")),
         hsm.state(
             "active",
-            hsm.initial(hsm.target("/Routines/active/reconciling")),
+            # Nothing runs until the owner asks for a reconcile: it knows when memory can answer.
+            hsm.initial(hsm.target("/Routines/active/running")),
             hsm.exit(_detach_routines),
             hsm.state(
                 "reconciling",

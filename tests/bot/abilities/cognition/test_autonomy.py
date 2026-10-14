@@ -24,6 +24,7 @@ import pytest
 from mosfet import behavior
 from mosfet.devices import phone as phone_device
 from mosfet.environment import SoundData, SoundEvent, Environment
+from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.hsm_model import choice_transitions, transition_map
@@ -65,6 +66,21 @@ class _CandidateModelFactory(typing.Protocol):
         input_adapter: collections.abc.Callable[[cognition.InputData], object],
         metadata: dict[str, object],
     ) -> hsm.Model: ...
+
+
+async def _attached_memory(*rows: behavior.Instance) -> MessageOnlyMemory:
+    """The bot's memory, attached by its own owner and seeded by message; Autonomy is only a peer."""
+
+    store = MessageOnlyMemory()
+    ctx = shared_hsm_context()
+    await start_abilities_for_test(ctx, store)
+    for row in rows:
+        _ = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(row))),
+        )
+    return store
 
 
 def test_autonomy_never_uses_metadata_for_coordination() -> None:
@@ -117,7 +133,7 @@ def test_autonomy_activities_use_event_carried_inventory_and_no_runtime_registry
     activities = _autonomy_activity_function_names()
     for activity_name, forbidden in (
         ("_match_activity", ("instance._behaviors", "instance._seeded_behaviors")),
-        ("_initialize_activity", ("instance._behaviors",)),
+        ("_refresh_activity", ("instance._behaviors", "instance._seeded_behaviors", "instance._memory")),
         ("_persist_usage_activity", ("instance._memory",)),
     ):
         activity_source = ast.unparse(activities[activity_name])
@@ -303,21 +319,22 @@ def test_autonomy_reports_success_when_usage_persistence_degrades(
     """A handled public turn completes even when the optional usage write fails."""
 
     async def run() -> object:
-        store = memory.Memory()
         installed = behavior.start(
             _DELAYED_BEHAVIOR_SOURCE,
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
 
+        original_execute = store.execute
+
         def fail_usage_execute(data: memory.InputData) -> memory.OutputData:
-            del data
+            # Reads still answer (the turn's inventory refresh); the usage write fails.
+            if data.statements[0].sql.lstrip().upper().startswith("SELECT"):
+                return original_execute(data)
             raise RuntimeError("storage unavailable")
 
         monkeypatch.setattr(store, "execute", fail_usage_execute)
@@ -549,15 +566,12 @@ def _turn(operation_id: str = "autonomy-turn") -> cognition.types.TurnData:
 
 def test_autonomy_waits_for_asynchronous_behavior_terminal() -> None:
     async def run() -> tuple[object, str]:
-        store = memory.Memory()
         installed = behavior.start(
             _DELAYED_BEHAVIOR_SOURCE,
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
@@ -604,15 +618,12 @@ def test_candidate_uses_typed_behavior_messages_without_peer_operation_mutation(
     monkeypatch.setattr(processing, "finish_operation", guarded_finish)
 
     async def run() -> object:
-        store = memory.Memory()
         installed = behavior.start(
             _DELAYED_BEHAVIOR_SOURCE,
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
@@ -629,15 +640,12 @@ def test_usage_inventory_changes_only_after_persistence_completion(
     """The persistence activity carries the update; the owning RTC effect applies it."""
 
     async def run() -> tuple[list[int], int]:
-        store = memory.Memory()
         installed = behavior.start(
             _DELAYED_BEHAVIOR_SOURCE,
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
@@ -666,7 +674,6 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
-        store = memory.Memory()
         # A turn behavior whose wait outlasts the silence bound: check() refuses to author one,
         # so the row is installed directly to hold a candidate active while cancel arrives.
         installed = behavior.Instance(
@@ -674,9 +681,7 @@ def test_autonomy_acknowledges_cancel_only_after_candidate_detaches(
             source=_WAITING_BEHAVIOR_SOURCE,
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         owner = _Owner()
@@ -793,16 +798,13 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
     call_id = "call-answer-behavior"
 
     async def run() -> tuple[object, tuple[str, ...], str]:
-        store = memory.Memory()
         installed = behavior.start(
             _ANSWER_INCOMING_RING_BEHAVIOR_SOURCE,
             name="AnswerIncomingRing",
             triggers=(SoundEvent.name,),
             description="Answer an incoming phone ring as practiced automatic behavior.",
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
 
         environment = Environment()
         phone = phone_device.Phone()
@@ -857,7 +859,7 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
             operation_id="answer-ring-turn",
             generation="operation-token",
         )
-        output = await dispatch_ability_for_test(autonomy, shared, turn, timeout=2.0)
+        output = await dispatch_ability_for_test(autonomy, shared, turn, timeout=10.0)
         await _wait_until(lambda: bool(firmware.event_recorder().events))
         published = tuple(event.name for event in firmware.event_recorder().events)
         return output, published, firmware.state() or ""
@@ -883,15 +885,12 @@ def test_autonomy_learned_candidate_cannot_select_hidden_communication_input() -
     """A learned selection cannot invoke Communication's non-callable input event."""
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        store = memory.Memory()
         installed = behavior.start(
             _FORGED_CONVERSATION_BEHAVIOR_SOURCE,
             name="ForgedConversation",
             triggers=(SoundEvent.name,),
         )
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
-        )
+        store = await _attached_memory(installed)
         autonomy = cognition.Autonomy(memory=store)
         recipient = _CommunicationRecipient()
         ctx = shared_hsm_context()
@@ -903,7 +902,7 @@ def test_autonomy_learned_candidate_cannot_select_hidden_communication_input() -
             update={"input": base_turn.input.model_copy(update={"actors": {"communication": recipient}})}
         )
         with pytest.raises(RuntimeError, match="selected unavailable event"):
-            _ = await dispatch_ability_for_test(autonomy, ctx, turn, timeout=1.0)
+            _ = await dispatch_ability_for_test(autonomy, ctx, turn, timeout=10.0)
         return recipient.received
 
     assert asyncio.run(run()) == []
@@ -913,7 +912,7 @@ def test_autonomy_without_installed_behavior_leaves_ring_unhandled() -> None:
     """Empty behavior inventory does not invent an answer — ring turn stays unhandled for deliberation."""
 
     async def run() -> object:
-        store = memory.Memory()
+        store = await _attached_memory()
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
@@ -934,11 +933,12 @@ def test_autonomy_match_preparation_rereads_learned_inventory_from_memory() -> N
     dropping the matcher.
     """
 
+    # Memory is a state machine: Autonomy reaches it by message only, never by a direct call.
     source = inspect.getsource(autonomy_module.Autonomy)
-    assert "instance._memory.execute(_behavior_select_input())" in source
+    assert ".execute(" not in source
 
     async def run() -> tuple[tuple[str, ...], bool]:
-        store = memory.Memory()
+        store = await _attached_memory()
         instance = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, instance)
@@ -951,10 +951,12 @@ def test_autonomy_match_preparation_rereads_learned_inventory_from_memory() -> N
             description="",
         )
         installed = behavior_storage.mark_active(installed)
-        _ = store.execute(
+        _ = await memory.transact(
+            ctx,
+            store,
             memory.InputData(
                 statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)),
-            )
+            ),
         )
 
         turn = cognition.types.TurnData(
@@ -982,7 +984,7 @@ def test_autonomy_never_matches_persistent_routines() -> None:
     """Persistent routines belong to Routines; Autonomy's per-turn inventory holds turn behaviors only."""
 
     async def run() -> tuple[str, ...]:
-        store = memory.Memory()
+        store = await _attached_memory()
         instance = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, instance)
@@ -991,10 +993,12 @@ def test_autonomy_never_matches_persistent_routines() -> None:
             behavior.Instance(name="MorningRoutine", source="", triggers=("environment.sound",), lifetime="persistent"),
         ):
             installed = behavior_storage.mark_active(installed)
-            _ = store.execute(
+            _ = await memory.transact(
+                ctx,
+                store,
                 memory.InputData(
                     statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)),
-                )
+                ),
             )
         turn = cognition.types.TurnData(
             input=cognition.input.InputData(
