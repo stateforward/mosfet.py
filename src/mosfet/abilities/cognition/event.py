@@ -1,4 +1,16 @@
-"""Cognition-owned projections of typed events for model input."""
+"""Cognition-owned projections of typed events for model input.
+
+``model_facing_content`` renders a typed stimulus as pseudo-XML text and attaches the images it
+carries as image content parts. Each ``media.Image`` found anywhere in the payload renders as a
+``<media:image …/>`` placeholder and never as bytes; the images the model's injected
+``media.ImageCapacity`` admits follow their placeholder as an ``ImagePart``.
+
+Metrics (scope ``bot.abilities.processing``, recorded once per image placeholder):
+
+- ``bot.processing.prompt.image.count`` with ``outcome`` (``attached``, ``omitted_capacity``,
+  ``omitted_media_type``) and ``media_type`` (the three ``media.ImageMediaType`` values);
+- ``bot.processing.prompt.image.size`` (bytes, attached images only) with ``media_type``.
+"""
 
 import collections.abc
 import dataclasses
@@ -9,7 +21,10 @@ import xml.etree.ElementTree as ElementTree
 
 import hsm
 import pydantic
-from mosfet import event
+from opentelemetry import metrics
+
+from mosfet import event, media
+from mosfet.abilities.language import text
 
 
 # Source-tree layer packages. These name where a domain *lives*, never the domain itself, so a
@@ -26,6 +41,18 @@ _MAX_PROMPT_PROJECTION_BYTES: typing.Final = 262_144
 _MAX_PROMPT_PROJECTION_NODES: typing.Final = 4_096
 _MAX_PROMPT_PROJECTION_ITEMS: typing.Final = 4_096
 _MAX_PROMPT_PROJECTION_SCALAR_CHARACTERS: typing.Final = 65_536
+_METRIC_SCOPE: typing.Final = "bot.abilities.processing"
+
+_IMAGE_COUNT = metrics.get_meter(_METRIC_SCOPE).create_counter(
+    "bot.processing.prompt.image.count",
+    unit="{image}",
+    description="Images met while projecting a stimulus for a model, by outcome and media type.",
+)
+_IMAGE_SIZE = metrics.get_meter(_METRIC_SCOPE).create_histogram(
+    "bot.processing.prompt.image.size",
+    unit="By",
+    description="Encoded size of each image attached to a model prompt, by media type.",
+)
 
 
 @dataclasses.dataclass
@@ -33,6 +60,11 @@ class _ProjectionBudget:
     encoded_bytes: int = 0
     nodes: int = 0
     collection_items: int = 0
+    # Placeholders for ``media.Image`` values met while rendering, each with the image it stands
+    # for; capacity is applied once the whole payload is rendered.
+    images: list[tuple[ElementTree.Element, media.Image]] = dataclasses.field(
+        default_factory=list[tuple[ElementTree.Element, media.Image]]
+    )
 
     def consume_node(self, name: str) -> None:
         self.nodes += 1
@@ -74,6 +106,41 @@ def _set_attribute(element: ElementTree.Element, name: str, value: str, budget: 
     budget.consume_markup(name)
     budget.consume_scalar(value)
     element.set(name, value)
+
+
+def _set_image_attributes(
+    element: ElementTree.Element,
+    image: media.Image | media.ReleasedImage,
+    budget: _ProjectionBudget,
+    *,
+    ref: str | None = None,
+    omitted: media.ImageOmission | None = None,
+) -> None:
+    """Describe an image on its placeholder: ``ref`` leads, any envelope attributes trail."""
+
+    carried = dict(element.attrib)
+    element.attrib.clear()
+    if ref is not None:
+        _set_attribute(element, "ref", ref, budget)
+    _set_attribute(element, "media_type", image.media_type, budget)
+    if image.width_px is not None:
+        _set_attribute(element, "width_px", str(image.width_px), budget)
+    if image.height_px is not None:
+        _set_attribute(element, "height_px", str(image.height_px), budget)
+    if omitted is not None:
+        _set_attribute(element, "omitted", omitted, budget)
+    element.attrib.update(carried)
+
+
+def _image_placeholder(image: media.Image | media.ReleasedImage, budget: _ProjectionBudget) -> ElementTree.Element:
+    """Render an image as an empty placeholder element; its bytes are never rendered."""
+
+    placeholder = _element(_payload_tag(media.Image), budget)
+    if isinstance(image, media.ReleasedImage):
+        _set_image_attributes(placeholder, image, budget, omitted=image.reason)
+    else:
+        budget.images.append((placeholder, image))
+    return placeholder
 
 
 def _excluded_field_names(level: object) -> frozenset[str]:
@@ -153,9 +220,15 @@ def _model_element(
 
     Typed causal parents remain part of the runtime and canonical event data, but they are not
     rendered into the terminal-event prompt projection. Payload inheritance is still represented
-    structurally, one element per model level.
+    structurally, one element per model level. A ``media.Image`` or ``media.ReleasedImage``
+    renders as an image placeholder.
     """
 
+    if isinstance(model, media.Image | media.ReleasedImage):
+        placeholder = _image_placeholder(model, budget)
+        if envelope is not None:
+            _set_event_attributes(placeholder, envelope, budget)
+        return placeholder
     if getattr(type(model), "__model_facing_event_data__", False):
         serialized_model = (
             typing.cast(collections.abc.Mapping[str, object], serialized)
@@ -292,12 +365,44 @@ def _fill_field(
         raise TypeError(f"canonical event field {name!r} is not XML-presentable")
 
 
-def model_facing_xml(value: object) -> str:
-    """Render the terminal event/Data payload as pseudo-XML for model prompts.
+def _attach_images(
+    root: ElementTree.Element, capacity: media.ImageCapacity, budget: _ProjectionBudget
+) -> list[media.Image]:
+    """Apply ``capacity`` to the placeholders in document order; return the admitted images in order."""
+
+    order = {id(element): index for index, element in enumerate(root.iter())}
+    placed = sorted(budget.images, key=lambda entry: order[id(entry[0])])
+    admitted: list[media.Image] = []
+    for (placeholder, image), omission in zip(placed, capacity.admit([image for _, image in placed]), strict=True):
+        if omission is None:
+            admitted.append(image)
+            _set_image_attributes(placeholder, image, budget, ref=f"image-{len(admitted)}")
+            _IMAGE_COUNT.add(1, attributes={"outcome": "attached", "media_type": image.media_type})
+            _IMAGE_SIZE.record(len(image.content), attributes={"media_type": image.media_type})
+        else:
+            _set_image_attributes(placeholder, image, budget, omitted=omission)
+            _IMAGE_COUNT.add(1, attributes={"outcome": f"omitted_{omission}", "media_type": image.media_type})
+    return admitted
+
+
+def model_facing_content(value: object, *, capacity: media.ImageCapacity) -> tuple[text.ContentPart, ...]:
+    """Render the terminal event/Data payload for a model: pseudo-XML text with images attached.
 
     Typed causal parents are intentionally omitted from this presentation projection. They remain
     intact in the event/Data objects and canonical JSON serialization used for routing and
     telemetry; ordinary non-causal fields named ``parent`` render normally.
+
+    Every ``media.Image`` in the payload renders as ``<media:image media_type="…" …/>`` and never
+    as bytes. ``capacity.admit`` decides, newest in document order first, which images attach:
+    an admitted placeholder gains ``ref="image-N"`` (numbered in document order among admitted
+    images) and its ``ImagePart`` follows it directly; an omitted one gains
+    ``omitted="capacity"`` or ``omitted="media_type"``. A ``media.ReleasedImage`` renders as a
+    placeholder with ``omitted="<reason>"`` and is never offered to ``capacity``. The result
+    alternates text and image parts, starting with text; with no admitted image it is exactly
+    one ``TextPart``.
+
+    Raises ``TypeError`` for raw bytes outside a ``media.Image`` and ``ValueError`` when the
+    rendered text exceeds the projection budgets.
     """
 
     budget = _ProjectionBudget()
@@ -316,10 +421,24 @@ def model_facing_xml(value: object) -> str:
             _fill_field(root, "content", payload, event.event_json_value(payload), budget)
         if envelope is not None:
             _set_event_attributes(root, envelope, budget)
+    admitted = _attach_images(root, capacity, budget)
     ElementTree.indent(root, space="  ")
     rendered = ElementTree.tostring(root, encoding="unicode")
     budget.verify_rendered(rendered)
-    return rendered
+    # Every rendered value is escaped, so ``<`` opens only real elements: a payload cannot forge
+    # the start of a placeholder, and an empty placeholder's own markup ends at its first ``/>``.
+    tag = _payload_tag(media.Image)
+    parts: list[text.ContentPart] = []
+    cursor = 0
+    for ref, image in enumerate(admitted, start=1):
+        start = rendered.index(f'<{tag} ref="image-{ref}"', cursor)
+        end = rendered.index("/>", start) + len("/>")
+        parts.append(text.TextPart(text=rendered[cursor:end]))
+        parts.append(text.ImagePart(image=image))
+        cursor = end
+    if cursor < len(rendered):
+        parts.append(text.TextPart(text=rendered[cursor:]))
+    return tuple(parts)
 
 
-__all__ = ["model_facing_xml"]
+__all__ = ["model_facing_content"]

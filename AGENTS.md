@@ -169,15 +169,20 @@
 - **Providers** own transport, SDKs, and raw provider errors. Core sees provider-neutral IDs, payloads, failure kinds,
   and service protocols.
 - **Abilities** are the composition unit: typed input/output/failure events, optional nested abilities. Processing is
-  one kind of ability. Model-facing deliberative inputs stay free of raw media, credentials, and high-cardinality
-  diagnostics.
+  one kind of ability. Model-facing deliberative inputs stay free of raw audio and every other non-image media,
+  credentials, and high-cardinality diagnostics. Images are the one exception: an image travels only as a typed
+  `mosfet.media.Image` inside a typed product and reaches the model as an image content part bounded by the model's
+  injected `media.ImageCapacity` — never as bytes or base64 inside rendered text.
 
 ### Stimulus and product flow
 
 - Environment stimuli are explicit typed events only—not catch-all ingress. The body fans those stimuli to **input**
   abilities in parallel; **output** abilities are effectors, not on that fan-out path.
 - Input abilities produce typed products for the body; the body hands cognition an explicit cognition input event after
-  enriching live body context. Cognition never receives raw environment/device media as deliberative ingress.
+  enriching live body context. Cognition never receives raw environment/device media as deliberative ingress. The one
+  exception is images: a `mosfet.media.Image` carried by an input ability's typed product (for example a conversation
+  attachment) may reach cognition and the model. Environment stimuli themselves — including `environment.visual` —
+  still fan out only to input abilities, never to cognition directly. Audio never reaches the model as media.
 - When a boundary elevates device-plane observations into environment stimuli, that elevation is the contract: body and
   cognition consume the environment form, not a parallel denylist of device event names on the body.
 - Body-owned abilities attach under body lifetime with private instance maps so they are not double-delivered via environment

@@ -29,6 +29,7 @@ import weakref
 
 import mosfet
 from mosfet import lifecycle
+import mosfet.media as media
 from mosfet.define import define
 from mosfet.start import started
 import hsm
@@ -43,7 +44,8 @@ from mosfet.event import (
     event_schema_json_schema,
     validate_event_data,
 )
-from .cognition.event import model_facing_xml
+from .cognition.event import model_facing_content
+from .language import text
 from mosfet.telemetry.hsm import Traced
 
 _LOG = logging.getLogger(__name__)
@@ -1131,14 +1133,21 @@ class InputData(pydantic.BaseModel):
 
         return event_json_value(value)
 
-    def model_facing_payload(self) -> str:
-        """Project this turn exactly as a model may see it: the stimulus, as one XML element.
+    def model_facing_content(self, capacity: media.ImageCapacity) -> tuple[text.ContentPart, ...]:
+        """Project this turn exactly as a model may see it: the stimulus as content parts.
 
-        The terminal stimulus is the root element — nothing wraps it. Typed causal parents are
-        retained in runtime and canonical event data but omitted from this prompt projection. Its
-        envelope (event name, and the
-        ``id`` / ``source`` / ``target`` it was stamped with) rides on that same root under the
-        ``stimulus:`` prefix.
+        The text parts carry the stimulus as one pseudo-XML element. The terminal stimulus is the
+        root element — nothing wraps it. Typed causal parents are retained in runtime and
+        canonical event data but omitted from this prompt projection. Its envelope (event name,
+        and the ``id`` / ``source`` / ``target`` it was stamped with) rides on that same root
+        under the ``stimulus:`` prefix.
+
+        Images the stimulus carries as ``media.Image`` render as ``<media:image …/>``
+        placeholders, and the ones ``capacity`` admits follow their placeholder as image parts.
+        ``capacity`` is the receiving model's injected ``media.ImageCapacity``; a text-only
+        capacity yields exactly one text part. Images are bounded only by ``capacity`` and never
+        count toward the text budget. Providers call this once per ``process``; every call
+        records the image metrics of ``cognition.event``.
 
         This is an explicit presentation projection for processors that render a prompt. The
         canonical Pydantic serialization of this model remains ``model_dump``; this helper is
@@ -1151,9 +1160,12 @@ class InputData(pydantic.BaseModel):
         ``dispatch`` function — so repeating them in the prompt body was a second copy of the tool
         menu, competing with the authoritative one for the same context window. The stimulus is
         what this content is for; the tool menu is what the tool channel is for.
+
+        Raises ``ValueError`` when instructions, text parts, and the dispatch tool together exceed
+        the provider-neutral prompt budgets.
         """
 
-        rendered = model_facing_xml(self.input)
+        parts = model_facing_content(self.input, capacity=capacity)
         instructions = self.instructions or ""
         if len(instructions) > _MAX_MODEL_PROMPT_SCALAR_CHARACTERS:
             raise ValueError("prompt projection scalar length budget exceeded")
@@ -1163,10 +1175,11 @@ class InputData(pydantic.BaseModel):
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        encoded_bytes = sum(len(part.encode("utf-8")) for part in (instructions, rendered, tool))
+        rendered = (part.text for part in parts if isinstance(part, text.TextPart))
+        encoded_bytes = sum(len(part.encode("utf-8")) for part in (instructions, *rendered, tool))
         if encoded_bytes > _MAX_MODEL_PROMPT_BYTES:
             raise ValueError("prompt projection cumulative encoded byte budget exceeded")
-        return rendered
+        return parts
 
 
 class CompletionData(pydantic.BaseModel):
@@ -1405,7 +1418,13 @@ def _producer_stamped_fields(value: object) -> tuple[str, ...]:
     if not isinstance(names, frozenset):
         return ()
     field_names = typing.cast(frozenset[str], names)
-    return tuple(name for name in field_names if getattr(value, name, None) is not None)
+    # A stamped field counts as set when it carries a value: neither ``None`` nor an empty collection.
+    return tuple(
+        name
+        for name in field_names
+        if (stamped := getattr(value, name, None)) is not None
+        and not (isinstance(stamped, collections.abc.Collection) and not stamped)
+    )
 
 
 def _reject_untrusted_provenance(value: object, *, trust: DispatchTrust) -> None:
@@ -1587,7 +1606,14 @@ _FailedEvent = hsm.Event[FailureData](
 
 
 class Processor(abc.ABC):
-    """Like Encoder / Decoder: map input to selected events."""
+    """Like Encoder / Decoder: map input to selected events.
+
+    ``image_capacity`` states what images this processor's model takes in one request; the
+    default is text-only. A model-facing processor stamps it from its injected generator and
+    passes it to ``InputData.model_facing_content``.
+    """
+
+    image_capacity: media.ImageCapacity = media.ImageCapacity()
 
     @abc.abstractmethod
     def process(self, input: InputData) -> collections.abc.Awaitable[Events]:

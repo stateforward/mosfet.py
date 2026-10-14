@@ -7,6 +7,8 @@ import collections.abc
 import typing
 
 import hsm
+import mosfet.media
+import pydantic
 import pytest
 
 from mosfet.abilities import cognition, processing
@@ -158,3 +160,27 @@ def test_nothing_offered_skips_the_engine() -> None:
     turn = processing.InputData(input=_notification(), schemas=(), actors={}, authority=None)
     assert asyncio.run(needle.Processor(engine=engine).process(turn)) == ()
     assert engine.turns == []
+
+
+class _Snapshot(pydantic.BaseModel):
+    image: mosfet.media.Image
+
+
+def test_engine_receives_one_text_part_with_images_as_omitted_placeholders() -> None:
+    """The engine cannot see: an image reaches it only as a placeholder, never as bytes."""
+
+    engine = _StubEngine({"function_calls": [], "confidence": 0.0})
+    png = b"\x89PNG\r\n\x1a\n" + b"png-body"
+    turn = processing.InputData(
+        input=_Snapshot(image=mosfet.media.Image(content=png, media_type="image/png")),
+        schemas=_offered(),
+        actors={},
+        authority=None,
+    )
+
+    _ = asyncio.run(needle.Processor(engine=engine).process(turn))
+
+    (sent,) = engine.turns
+    text = typing.cast(str, sent["text"])
+    assert '<media:image media_type="image/png" omitted="media_type" />' in text
+    assert "png-body" not in text

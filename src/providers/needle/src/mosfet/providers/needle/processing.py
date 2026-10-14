@@ -7,8 +7,10 @@ The mapping is structural, not behavioral:
   description. Needle tool names must be identifiers, so canonical event names are mapped to
   identifier-safe names and mapped back on return. Deliberative handoff events are not
   offered: the reflex tier's way of deferring is to call nothing.
-- **text** is the turn exactly as a model may see it (``InputData.model_facing_payload``);
-  ``instructions`` are the system prompt.
+- **text** is the turn exactly as a model may see it (``InputData.model_facing_content``) under
+  the inherited text-only ``image_capacity``: the engine cannot see, so the projection is one
+  text part and any image renders only as an omitted placeholder. ``instructions`` are the
+  system prompt.
 - **calls** become ``SelectedEvent`` values carrying the engine-authored arguments as payload
   data. The engine's grammar keeps arguments inside each schema; the host's dispatch
   validation remains the final boundary. Calls the engine flags as ungrounded
@@ -35,6 +37,7 @@ import hsm
 import mosfet.telemetry
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import intuition as cognition_intuition
+from mosfet.abilities.language import text
 from mosfet.telemetry import span
 
 from . import engine as needle_engine
@@ -99,7 +102,10 @@ class Processor(processing.Processor):
 
         tools = [_tool(event, name) for name, event in offered.items()]
         system = input.instructions or _DEFAULT_INSTRUCTIONS
-        payload = input.model_facing_payload()
+        parts = input.model_facing_content(self.image_capacity)
+        if len(parts) != 1 or not isinstance(parts[0], text.TextPart):
+            raise ProcessingError("Needle takes text only; its projection must be exactly one text part.")
+        payload = parts[0].text
         mosfet.telemetry.record_generator_request(
             provider="needle",
             model=None,

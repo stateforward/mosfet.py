@@ -3,10 +3,13 @@ from __future__ import annotations
 from mosfet.abilities import processing
 from mosfet.abilities.language import text
 from mosfet.environment import SoundData
+from mosfet.media import Image, ImageCapacity
 from mosfet.protocols import attachment
 from mosfet.providers.gemini.processing import Processor, ProcessingError
+from mosfet.providers.gemini import TextGenerator
 
 import asyncio
+import collections.abc
 import dataclasses
 import json
 import typing
@@ -36,6 +39,7 @@ class RecordingGenerator(text.TextGenerator):
     reasoning: str = ""
     tool_calls: tuple[text.TextToolCall, ...] = ()
     inputs: list[text.generation.InputData] = dataclasses.field(default_factory=list)
+    image_capacity: ImageCapacity = dataclasses.field(default_factory=ImageCapacity)
 
     @typing.override
     async def generate(self, input: text.generation.InputData) -> text.generation.OutputData:
@@ -115,7 +119,9 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
         kind=hsm.CompletionEventKind,
     )
     input = processing.InputData(input=stimulus, schemas=(_AnswerCallEvent,))
-    content = input.model_facing_payload()
+    (part,) = input.model_facing_content(ImageCapacity())
+    assert isinstance(part, text.TextPart)
+    content = part.text
     # Raw media never reaches the prompt, in any encoding; owning Data retains only metadata.
     assert "Hey I'm Gabe how are you" not in content
     assert "bytes:" not in content
@@ -126,6 +132,69 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
     assert "phone.answer_call" not in content
     assert "phone.answer_call" in json.dumps(processing.dispatch_tool(input.schemas))
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"png-body"
+
+
+class _Snapshot(pydantic.BaseModel):
+    image: Image
+
+
+def test_processor_user_message_carries_projection_parts_within_the_generator_capacity() -> None:
+    image = Image(content=_PNG, media_type="image/png")
+    capacity = ImageCapacity(max_images=1, max_total_bytes=len(_PNG), media_types=frozenset({"image/png"}))
+    generator = RecordingGenerator(content="[]", image_capacity=capacity)
+    processor = Processor(generator=generator)
+    assert processor.image_capacity == capacity
+    input = processing.InputData(input=_Snapshot(image=image), instructions="Select events from schemas.")
+
+    _ = asyncio.run(process_for_test(processor, input))
+
+    user = next(message for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER)
+    assert isinstance(user.content, tuple)
+    assert [type(part) for part in user.content] == [text.TextPart, text.ImagePart, text.TextPart]
+    assert isinstance(user.content[1], text.ImagePart) and user.content[1].image == image
+
+
+class _UnusedContentClient:
+    """A ContentClient that only exists to build the provider generator; it is never called."""
+
+    def generate_content(
+        self,
+        *,
+        contents: collections.abc.Sequence[object],
+        model: str | None = None,
+        system_instruction: str | None = None,
+        tools: collections.abc.Sequence[object] = (),
+        tool_config: collections.abc.Mapping[str, object] | None = None,
+        response_mime_type: str | None = None,
+        response_json_schema: collections.abc.Mapping[str, object] | None = None,
+        config: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del contents, model, system_instruction, tools, tool_config, response_mime_type, response_json_schema, config
+        raise AssertionError("not called")
+
+    def create_interaction(
+        self,
+        *,
+        model: str | None = None,
+        input: object | None = None,
+        response_format: object | None = None,
+        generation_config: collections.abc.Mapping[str, object] | None = None,
+        system_instruction: str | None = None,
+        store: bool = False,
+        extra: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del model, input, response_format, generation_config, system_instruction, store, extra
+        raise AssertionError("not called")
+
+
+def test_processor_built_from_client_takes_the_provider_generator_capacity() -> None:
+    client = _UnusedContentClient()
+
+    assert Processor(client=client).image_capacity == TextGenerator(client=client).image_capacity
+    assert Processor(client=client).image_capacity.max_images == 8
 
 
 def test_processor_returns_empty_events_without_schemas() -> None:

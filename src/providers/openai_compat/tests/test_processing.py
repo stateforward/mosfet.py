@@ -3,6 +3,7 @@ from __future__ import annotations
 from mosfet.abilities import processing
 from mosfet.abilities.language import text
 from mosfet.environment import SoundData
+from mosfet.media import Image, ImageCapacity
 from mosfet.protocols import attachment
 from mosfet.providers.openai_compat import Processor, ProcessingError, TextGenerator
 
@@ -41,6 +42,7 @@ class RecordingGenerator(text.TextGenerator):
     reasoning: str = ""
     tool_calls: tuple[text.TextToolCall, ...] = ()
     inputs: list[text.generation.InputData] = dataclasses.field(default_factory=list)
+    image_capacity: ImageCapacity = dataclasses.field(default_factory=ImageCapacity)
 
     @typing.override
     async def generate(self, input: text.generation.InputData) -> text.generation.OutputData:
@@ -138,9 +140,11 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     )
     output = asyncio.run(process_for_test(processor, input))
     assert output == ()
-    content = next(
+    parts = next(
         message.content for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER
     )
+    assert isinstance(parts, tuple)
+    content = "".join(part.text for part in parts if isinstance(part, text.TextPart))
     # Raw media never reaches the prompt, in any encoding; owning Data retains only metadata.
     assert "Hey I'm Gabe how are you" not in content
     assert "bytes:" not in content
@@ -151,6 +155,46 @@ def test_processor_user_content_describes_media_stimulus_without_raw_bytes() -> 
     # The offered event reaches the model as the dispatch tool, not as a second copy in the body.
     assert "phone.answer_call" not in content
     assert "phone.answer_call" in json.dumps(generator.inputs[0].tools)
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"png-body"
+
+
+class _Snapshot(pydantic.BaseModel):
+    image: Image
+
+
+def test_processor_user_message_carries_projection_parts_within_the_generator_capacity() -> None:
+    image = Image(content=_PNG, media_type="image/png")
+    capacity = ImageCapacity(max_images=1, max_total_bytes=len(_PNG), media_types=frozenset({"image/png"}))
+    generator = RecordingGenerator(content="[]", image_capacity=capacity)
+    processor = Processor(generator=generator)
+    assert processor.image_capacity == capacity
+    input = processing.InputData(input=_Snapshot(image=image), instructions="Select events from schemas.")
+
+    _ = asyncio.run(process_for_test(processor, input))
+
+    user = next(message for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER)
+    assert isinstance(user.content, tuple)
+    assert [type(part) for part in user.content] == [text.TextPart, text.ImagePart, text.TextPart]
+    assert isinstance(user.content[1], text.ImagePart) and user.content[1].image == image
+
+
+def test_processor_text_only_generator_receives_one_text_part() -> None:
+    generator = RecordingGenerator(content="[]")
+    processor = Processor(generator=generator)
+    input = processing.InputData(
+        input=_Snapshot(image=Image(content=_PNG, media_type="image/png")),
+        instructions="Select events from schemas.",
+    )
+
+    _ = asyncio.run(process_for_test(processor, input))
+
+    user = next(message for message in generator.inputs[0].messages if message.role is text.generation.TextRole.USER)
+    assert isinstance(user.content, tuple)
+    (part,) = user.content
+    assert isinstance(part, text.TextPart)
+    assert 'omitted="media_type"' in part.text
 
 
 def test_processor_maps_dispatch_tool_to_events() -> None:
@@ -300,3 +344,9 @@ def test_processor_process_records_otel_wire_payload(
     assert payload["attributes"]["stage"] == "request"
     assert user_input not in json.dumps(payload["attributes"])
     mosfet.telemetry.reset()
+
+
+def test_processor_built_from_client_takes_the_provider_generator_capacity() -> None:
+    client = _FakeChatClient(response={})
+
+    assert Processor(client=client).image_capacity == TextGenerator(client=client).image_capacity

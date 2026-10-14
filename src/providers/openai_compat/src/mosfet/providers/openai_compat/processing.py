@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mosfet.media
 from mosfet.abilities import processing
 from mosfet.abilities.language import text
 
@@ -589,9 +590,14 @@ def _same_typed_completion_value(value: object, validated: object) -> bool:
 
 
 class Processor(processing.Processor):
-    """OpenAI-compatible transport: input (+ stamped instructions) → events array."""
+    """OpenAI-compatible transport: input (+ stamped instructions) → events array.
+
+    ``image_capacity`` is stamped once from the generator, so the projection attaches exactly the
+    images that generator accepts.
+    """
 
     _generator: text.generation.TextGenerator
+    image_capacity: mosfet.media.ImageCapacity
 
     def __init__(
         self,
@@ -612,6 +618,7 @@ class Processor(processing.Processor):
                 extra_body=extra_body or {},
             )
         self._generator = generator
+        self.image_capacity = generator.image_capacity
 
     @typing.override
     async def process(self, input: processing.InputData) -> processing.Events:
@@ -632,7 +639,7 @@ class Processor(processing.Processor):
                 text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
-                    content=input.model_facing_payload(),
+                    content=input.model_facing_content(self.image_capacity),
                 ),
             ),
             tools=operation_tools,

@@ -10,7 +10,7 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | Test | Source under test |
 | --- | --- |
 | `tests/bot/abilities/communication/test_seed_behaviors.py` | `src/mosfet/abilities/communication/behaviors.py` (trusted SpeechHeard seed: descriptor, admit, decline) |
-| `tests/bot/abilities/cognition/test_event_projection.py` | `src/mosfet/abilities/cognition/event.py` (`model_facing_xml`, envelope identity, raw-media refusal, budgets) |
+| `tests/bot/abilities/cognition/test_event_projection.py` | `src/mosfet/abilities/cognition/event.py` (`model_facing_content`, envelope identity, image placeholders and capacity trimming, raw non-image media refusal, budgets, image metrics) |
 | `tests/bot/abilities/communication/conversation/test_decision_input.py` | `src/mosfet/abilities/communication/conversation/decision_input.py` (host mapping, neutral priority) |
 | `tests/bot/abilities/communication/conversation/turn_detector/test_stimuli_turn.py` | `turn_detector/stimuli.py` + `turn_detector/turn.py` (stimulus kinds, boundary source match) |
 | `tests/environment/test_snapshot.py` | `src/mosfet/environment/snapshot.py` (pure envelope rendering, `ModelRepr`) |
