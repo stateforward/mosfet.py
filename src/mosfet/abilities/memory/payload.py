@@ -858,6 +858,104 @@ class AssociationsData(pydantic.BaseModel):
     )
 
 
+_MAX_RECALLED: typing.Final = 8
+"""Most memories one deliberate recall brings to mind in full (one fetch)."""
+
+
+class RecallData(pydantic.BaseModel):
+    """Think about a memory deliberately: about something in plain words, or one surfaced memory in full.
+
+    Name exactly one of ``about`` and ``node``. What comes to mind arrives later as its own
+    observation (``bot.ability.memory.recollected``): the memories in full, images included, and
+    what they are linked to. Recalling a memory makes it more likely to surface again.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"about": "what Ada said about the noon call", "limit": 3},
+                {"node": "5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f"},
+            ]
+        },
+    )
+
+    about: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="What to think about, in plain words. Leave unset when naming a node.",
+        examples=["what Ada said about the noon call"],
+    )
+    node: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "The ref of one memory surfaced this turn, to look at it in full with its images. "
+            "Leave unset when thinking about something."
+        ),
+        examples=["5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f"],
+    )
+    limit: int = pydantic.Field(
+        default=5,
+        ge=1,
+        le=_MAX_RECALLED,
+        description="Most memories to bring to mind when thinking about something.",
+        examples=[3],
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_one_subject(self) -> typing.Self:
+        if (self.about is None) == (self.node is None):
+            raise ValueError("name exactly one of about or node")
+        return self
+
+
+class RecollectionData(pydantic.BaseModel):
+    """What came to mind when the bot deliberately recalled a memory.
+
+    ``nodes`` and ``neighbors`` are recalled context: a prompt that cannot hold them all keeps the
+    best and counts the rest. Memory keeps only what was thought about; the memories themselves
+    are already kept.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {
+        "nodes": "head",
+        "neighbors": "head",
+    }
+    __memory_fields__: typing.ClassVar[frozenset[str]] = frozenset({"about"})
+
+    about: str | None = pydantic.Field(
+        default=None, description="What the bot thought about, when it recalled by words.", examples=["the noon call"]
+    )
+    nodes: tuple[Node, ...] = pydantic.Field(
+        default=(),
+        max_length=_MAX_RECALLED,
+        description=(
+            "The memories recalled in full, best first. Image bytes ride the newest memories, at most "
+            f"{media.MAX_TURN_IMAGES} in all; older images are placeholders."
+        ),
+    )
+    neighbors: tuple[Association, ...] = pydantic.Field(
+        default=(), max_length=MAX_ASSOCIATIONS, description="Memories linked to the recalled ones, by their refs."
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_images(self) -> typing.Self:
+        carried = sum(
+            isinstance(image, media.Image)
+            for node in self.nodes
+            if node.episode is not None
+            for image in node.episode.images
+        )
+        if carried > media.MAX_TURN_IMAGES:
+            raise ValueError(f"a recollection carries image bytes for at most {media.MAX_TURN_IMAGES} images")
+        return self
+
+
 class Weights(pydantic.BaseModel):
     """How Associative scores a candidate; a capacity of the composition, never a per-turn choice.
 
@@ -908,7 +1006,9 @@ __all__ = [
     "Node",
     "NodeKind",
     "Outcome",
+    "RecallData",
     "RecentData",
+    "RecollectionData",
     "ReleaseData",
     "ReleasedData",
     "RememberedData",

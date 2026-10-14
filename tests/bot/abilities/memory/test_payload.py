@@ -160,3 +160,72 @@ def test_approximate_tokens_counts_four_utf8_bytes_per_token_rounded_up() -> Non
     assert memory.approximate_tokens("abcd") == 1
     assert memory.approximate_tokens("abcde") == 2
     assert memory.approximate_tokens("é" * 2) == 1
+
+
+def test_a_recall_names_exactly_one_of_about_or_node() -> None:
+    about = memory.RecallData(about="what Ada said about noon")
+    assert (about.node, about.limit) == (None, 5)
+    assert memory.RecallData(node="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f").about is None
+    with pytest.raises(pydantic.ValidationError, match="exactly one"):
+        _ = memory.RecallData()
+    with pytest.raises(pydantic.ValidationError, match="exactly one"):
+        _ = memory.RecallData(about="noon", node="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f")
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.RecallData(about="x" * 501)
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.RecallData(about="noon", limit=9)
+    schema = memory.RecallData.model_json_schema()
+    assert schema.get("examples")
+    assert all("description" in field for field in schema["properties"].values())
+
+
+def _recalled_node(words: str, *images: media.Image) -> memory.Node:
+    created = datetime.datetime(2026, 10, 14, tzinfo=datetime.UTC)
+    return memory.Node(
+        node_id="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f",
+        kind=memory.NodeKind.EPISODE,
+        text=words,
+        created_at=created,
+        episode=memory.Episode(
+            node_id="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f",
+            stimulus="bot.ability.conversation.messages",
+            text=words,
+            images=images,
+            outcome=memory.Outcome.COMPLETED,
+            turn_id="turn-1",
+            created_at=created,
+        ),
+    )
+
+
+def test_a_recollection_carries_image_bytes_within_the_turn_bound() -> None:
+    image = media.Image(content=_PNG, media_type="image/png")
+    recollection = memory.RecollectionData(about="the gate", nodes=(_recalled_node("the gate", image),))
+    assert recollection.nodes[0].episode is not None
+    assert recollection.nodes[0].episode.images == (image,)
+    with pytest.raises(pydantic.ValidationError, match="image bytes"):
+        _ = memory.RecollectionData(
+            nodes=(_recalled_node("one", *(image,) * 5), _recalled_node("two", *(image,) * 4)),
+        )
+
+
+def test_a_recollection_is_recalled_context_and_memory_keeps_only_what_was_thought_about() -> None:
+    """A recollection never fails the prompt it rides, and remembering it does not copy the memories again."""
+
+    image = media.Image(content=_PNG, media_type="image/png")
+    recollection = memory.RecollectionData(
+        about="the gate",
+        nodes=(_recalled_node("x" * 60_000, image), *(_recalled_node("y" * 60_000) for _ in range(4))),
+    )
+
+    assert memory.RecollectionData.__model_facing_budgeted_fields__ == {"nodes": "head", "neighbors": "head"}
+    capacity = media.ImageCapacity(max_images=8, max_total_bytes=1024, media_types=frozenset({"image/png"}))
+    parts = projection.model_facing_content(recollection, capacity=capacity)
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    assert 'omitted="' in rendered
+    assert [part.image for part in parts if isinstance(part, text.ImagePart)] == [image]
+
+    (kept,) = projection.memory_content(recollection, capacity=capacity)
+    assert isinstance(kept, text.TextPart)
+    assert 'about="the gate"' in kept.text
+    assert "x" * 100 not in kept.text

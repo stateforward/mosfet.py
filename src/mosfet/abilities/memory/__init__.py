@@ -6,11 +6,12 @@ against ``memory_table`` and friends, compile them with ``compile_statement(s)``
 with ``transact``), and it keeps every cognition turn as an episode node of a graph, linked to the
 persons it involves, with a canonical vector per node in its embedder's space (``Index`` /
 ``ExactIndex`` search it). ``Associative`` surfaces what memory associates with a turn, scored and
-fit to a token budget. ``StmMemory`` is the short-term register of admitted stimuli.
+fit to a token budget, and brings a memory to mind in full when the bot deliberately recalls it
+(the model-callable ``RecallEvent``, answered by a ``RecollectedEvent`` observation). ``StmMemory`` is the short-term register of admitted stimuli.
 """
 
 from . import associative, graph, index, memory, payload, schema, stm, store
-from .associative import AssociateEvent, AssociatedEvent, Associative
+from .associative import AssociateEvent, AssociatedEvent, Associative, RecallEvent, RecollectedEvent
 from .index import ExactIndex, Index, Neighbor
 from .memory import (
     REQUESTS,
@@ -62,7 +63,9 @@ from .payload import (
     Node,
     NodeKind,
     Outcome,
+    RecallData,
     RecentData,
+    RecollectionData,
     ReleaseData,
     ReleasedData,
     RememberedData,
@@ -146,9 +149,13 @@ __all__ = [
     "Outcome",
     "OutputData",
     "ParameterValue",
+    "RecallData",
+    "RecallEvent",
     "RecentData",
     "RecentEvent",
     "RecentOutputEvent",
+    "RecollectedEvent",
+    "RecollectionData",
     "RecordData",
     "ReleaseData",
     "ReleaseEvent",

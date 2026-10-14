@@ -135,6 +135,17 @@ ride the turn to intuition and reasoning (their frame's `processing.InputData.re
 after the stimulus and trimmed, never a failure) and to reflection; a failed association leaves
 the turn without them. Reasoning, Reflection, and Conversation never read or write episodes.
 
+Reasoning can also recall a memory deliberately. Cognition adds `memory.Associative` to every
+frame it builds, and its effort (`M`) keeps it out of Intuition's frames, so only Reasoning is
+offered the model-callable `bot.ability.memory.recall` (`memory.RecallData`: `about` something in
+plain words, or one association's `node` ref). Associative reads the chosen memories in full,
+images included and reinforced, and tells its owner with `memory.RecollectedEvent`
+(`memory.RecollectionData`), or with a typed `ability.FailedEvent` when memory cannot serve it.
+Cognition hands either to the body as a `cognition.InputEvent` observing it, the way it hands a
+routine tick: a new turn the bot decides on. A recollection's nodes are recalled context
+(trimmed to the prompt, never a failure), and remembering that turn keeps only what was thought
+about.
+
 All SQL runs on one database worker thread per Memory, for the object's lifetime. Without an
 embedder (`embedder=None`) nothing is indexed and the nearest lane is skipped. A node the
 embedder cannot take (too long, unsupported, invalid) is kept unindexed and recorded in

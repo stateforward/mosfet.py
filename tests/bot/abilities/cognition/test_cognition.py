@@ -4149,3 +4149,136 @@ def test_a_hung_embedder_does_not_reboot_the_next_turn() -> None:
     assert [event.name for event in lifecycle] == []
     assert state.endswith("/idle")
     assert remembered == ["first", "next"]
+
+
+# --- deliberate recall --------------------------------------------------------------------------
+
+
+def _recall_output(recall: memory.RecallData) -> cognition.types.OutputData:
+    return (
+        cognition.types.EventData(
+            event=memory.RecallEvent.name,
+            data=recall.model_dump(exclude_none=True),
+            reason="think about it",
+        ),
+    )
+
+
+async def _recalling_cognition(
+    associative: memory.Associative, store: memory.Memory
+) -> tuple[
+    cognition.Cognition,
+    hsm.Context,
+    _RoutineTickBody,
+    RecordingIntuitionProcessor,
+    RecordingReasoningProcessor,
+]:
+    intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+    reasoning_processor = RecordingReasoningProcessor(no_output("placeholder"))
+    intuition, reasoning = cognition_abilities(
+        intuition_processor=intuition_processor, reasoning_processor=reasoning_processor
+    )
+    ability = cognition.Cognition(
+        intuition=intuition,
+        reasoning=reasoning,
+        reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+        memory=store,
+        associative=associative,
+    )
+    body = _RoutineTickBody()
+    ctx = shared_hsm_context()
+    _ = await mosfet.started(ctx, body, body.model)
+    await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
+    await wait_until(lambda: ability.state().endswith("/idle"))
+    return ability, ctx, body, intuition_processor, reasoning_processor
+
+
+def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observation() -> None:
+    """Recall is offered to reasoning (effort M) and not to intuition; what comes to mind is a new turn."""
+
+    async def run() -> tuple[
+        list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str, str, str
+    ]:
+        store = memory.Memory()
+        associative = memory.Associative(memory=store)
+        ability, ctx, body, intuition_processor, reasoning_processor = await _recalling_cognition(associative, store)
+        try:
+            await _remember_by_message(
+                ctx,
+                store,
+                memory.EpisodeData(
+                    turn_id="earlier",
+                    parts=(text.TextPart(text="Ada asked for a call at noon."),),
+                    participants=(_ADA,),
+                    outcome=memory.Outcome.COMPLETED,
+                ),
+            )
+            (earlier,) = await _remembered(ctx, store)
+            reasoning_processor.output = cognition.reasoning.OutputData(
+                result=_recall_output(memory.RecallData(node=earlier.node_id))
+            )
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
+            return (
+                intuition_processor.calls,
+                reasoning_processor.calls,
+                body.handoffs[0],
+                earlier.node_id,
+                hsm.id(ability),
+                hsm.id(associative),
+            )
+        finally:
+            await ability.stop(ctx)
+
+    intuition_calls, reasoning_calls, handoff, node_id, cognition_id, associative_id = asyncio.run(run())
+
+    assert memory.RecallEvent.name not in {event.name for event in intuition_calls[0].schemas}
+    (reasoning_frame,) = reasoning_calls
+    assert memory.RecallEvent.name in {event.name for event in reasoning_frame.schemas}
+    assert hsm.id(reasoning_frame.actors["memory"]) == associative_id
+    assert handoff.name == cognition.InputEvent.name
+    assert handoff.source == cognition_id
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    assert data.participants == ()
+    stimulus = data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == memory.RecollectedEvent.name
+    assert stimulus.source == associative_id
+    recollection = stimulus.data
+    assert isinstance(recollection, memory.RecollectionData)
+    assert [node.node_id for node in recollection.nodes] == [node_id]
+    assert recollection.nodes[0].text == "Ada asked for a call at noon."
+
+
+def test_a_recall_that_fails_is_observed_too_never_silently_dropped() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        store = memory.Memory()
+        # Its memory is never attached or started: every recall fails, typed.
+        associative = memory.Associative(memory=memory.Memory())
+        ability, ctx, body, _, reasoning_processor = await _recalling_cognition(associative, store)
+        try:
+            reasoning_processor.output = cognition.reasoning.OutputData(
+                result=_recall_output(memory.RecallData(about="the noon call"))
+            )
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
+            return body.handoffs[0], hsm.id(associative)
+        finally:
+            await ability.stop(ctx)
+
+    handoff, associative_id = asyncio.run(run())
+
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    stimulus = data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == abilities.FailedEvent.name
+    assert stimulus.source == associative_id
+    failure = stimulus.data
+    assert isinstance(failure, abilities.FailureData)
+    assert failure.message.startswith("unavailable")

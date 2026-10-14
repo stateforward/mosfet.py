@@ -6,6 +6,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import itertools
 import typing
 
 import hsm
@@ -13,7 +14,7 @@ import mosfet
 import pytest
 
 from mosfet import environment, media
-from mosfet.abilities import ability, embedding, memory
+from mosfet.abilities import ability, embedding, memory, processing
 from mosfet.abilities.ability import Effort
 from mosfet.abilities.cognition import event as projection
 from mosfet.abilities.language import text
@@ -68,7 +69,7 @@ class Owner(hsm.Instance):
         self.changed = asyncio.Event()
 
     def replies(self, request_id: str) -> list[hsm.Event[typing.Any]]:
-        names = {memory.AssociatedEvent.name, ability.FailedEvent.name}
+        names = {memory.AssociatedEvent.name, memory.RecollectedEvent.name, ability.FailedEvent.name}
         return [event for event in self.events if event.id == request_id and event.name in names]
 
     async def until(self, predicate: collections.abc.Callable[[], bool]) -> None:
@@ -115,6 +116,28 @@ class Harness:
                 target=hsm.id(self.associative),
             ),
         )
+
+    async def recall(self, recall: memory.RecallData, request_id: str) -> None:
+        _ = await hsm.dispatch(
+            self.ctx,
+            self.associative,
+            dataclasses.replace(
+                memory.RecallEvent.with_data_and_id(recall, request_id),
+                source=hsm.id(self.owner),
+                target=hsm.id(self.associative),
+            ),
+        )
+
+    async def episodes(self) -> tuple[memory.Episode, ...]:
+        reply = await ability.run_terminal_operation(
+            self.ctx,
+            child=self.memory,
+            request=memory.RecentEvent.with_data_and_id(memory.RecentData(limit=16), "recent"),
+            terminals=(memory.RecentOutputEvent, memory.FailedEvent),
+            timeout=datetime.timedelta(seconds=_WAIT),
+        )
+        assert isinstance(reply.data, memory.EpisodesData), reply.data
+        return reply.data.episodes
 
     async def reply(self, request_id: str) -> hsm.Event[typing.Any]:
         await self.owner.until(lambda: bool(self.owner.replies(request_id)))
@@ -179,7 +202,10 @@ def test_associative_attaches_through_its_empty_group_and_owns_a_detaching_state
     for state in ("initializing", "idle", "busy", "detaching", "degraded"):
         assert f"/AssociativeLifecycle/attached/behavior/{state}" in model.members
     assert memory.Associative.effort is Effort.M
-    assert memory.Associative.detached_requests == (memory.AssociateEvent,)
+    assert memory.Associative.detached_requests == (memory.AssociateEvent, memory.RecallEvent)
+    # Recall is a model-callable tool; associating is not.
+    assert memory.RecallEvent.kind == processing.EventKind
+    assert memory.AssociateEvent.kind != processing.EventKind
 
 
 # --- scoring and budget -------------------------------------------------------------------------
@@ -324,7 +350,7 @@ def test_detach_answers_the_request_in_flight_and_the_one_waiting_exactly_once()
         await harness.attach_memory()
         await harness.attach()
         await harness.send(memory.CueData(cue=(text.TextPart(text="noon"),)), "in-flight")
-        await harness.owner.until(lambda: harness.associative.state().endswith("/busy"))
+        await harness.owner.until(lambda: "/busy/" in harness.associative.state())
         await harness.send(memory.CueData(), "waiting")
         await harness.detach()
         await harness.owner.until(lambda: harness.associative.state() == "/AssociativeLifecycle/detached")
@@ -354,3 +380,188 @@ def test_detach_answers_the_request_in_flight_and_the_one_waiting_exactly_once()
 def test_budget_tokens_must_be_positive(budget_tokens: int) -> None:
     with pytest.raises(ValueError, match="budget_tokens"):
         _ = memory.Associative(memory=memory.Memory(), budget_tokens=budget_tokens)
+
+
+# --- deliberate recall --------------------------------------------------------------------------
+
+
+def _offered(associative: memory.Associative) -> set[str]:
+    return {event.name for event in processing.enabled_call_events(associative)}
+
+
+def test_recall_is_offered_while_idle_and_only_then() -> None:
+    async def scenario() -> tuple[set[str], set[str]]:
+        gate = asyncio.Event()
+        harness = await _harness(embedder=GatedEmbedder(gate))
+        await harness.attach_memory()
+        await harness.attach()
+        idle = _offered(harness.associative)
+        await harness.send(memory.CueData(cue=(text.TextPart(text="noon"),)), "a-1")
+        await harness.owner.until(lambda: "/busy" in harness.associative.state())
+        busy = _offered(harness.associative)
+        gate.set()
+        _ = await harness.reply("a-1")
+        return idle, busy
+
+    idle, busy = asyncio.run(scenario())
+
+    assert idle == {memory.RecallEvent.name}
+    assert busy == set()
+
+
+def test_recalling_a_node_tells_the_requester_in_full_with_image_bytes_and_reinforces_it() -> None:
+    image = media.Image(content=_PNG, media_type="image/png")
+
+    async def scenario() -> tuple[hsm.Event[typing.Any], tuple[memory.Episode, ...], str, str]:
+        harness = await _harness()
+        await harness.attach_memory()
+        await harness.remember(
+            memory.EpisodeData(
+                turn_id="photo",
+                parts=(text.TextPart(text="the gate"), text.ImagePart(image=image)),
+                participants=(_ADA,),
+                outcome=memory.Outcome.COMPLETED,
+            )
+        )
+        (episode,) = await harness.episodes()
+        await harness.attach()
+        await harness.recall(memory.RecallData(node=episode.node_id), "r-1")
+        reply = await harness.reply("r-1")
+        return reply, await harness.episodes(), hsm.id(harness.owner), hsm.id(harness.associative)
+
+    reply, after, requester, associative = asyncio.run(scenario())
+
+    assert reply.name == memory.RecollectedEvent.name
+    # The recollection goes to the owner (in a bot, Cognition), not to the stage that selected it.
+    assert (reply.source, reply.target) == (associative, requester)
+    recollection = reply.data
+    assert isinstance(recollection, memory.RecollectionData)
+    assert recollection.about is None
+    (node,) = recollection.nodes
+    assert node.text == "the gate"
+    assert node.episode is not None
+    assert node.episode.images == (image,)
+    # Deliberate recall reinforces what it brought to mind.
+    (episode,) = after
+    assert episode.recall_count == 1
+    assert episode.recalled_at is not None
+
+
+def test_recalling_about_something_brings_the_best_memories_to_mind_within_the_image_bound() -> None:
+    """At most ``limit`` memories, best first; image bytes for at most MAX_TURN_IMAGES, newest first."""
+
+    image = media.Image(content=_PNG, media_type="image/png")
+    # Three remembers, then the recall's reinforcement stamp.
+    times = itertools.chain(
+        (_NOW - datetime.timedelta(days=4), _NOW - datetime.timedelta(days=2)), itertools.repeat(_NOW)
+    )
+
+    async def scenario() -> hsm.Event[typing.Any]:
+        harness = await _harness(times=times)
+        await harness.attach_memory()
+        await harness.remember(_episode("The kettle boiled.", "oldest"))
+        for words, turn_id in (("the gate at dusk", "older"), ("the gate at dawn", "newest")):
+            await harness.remember(
+                memory.EpisodeData(
+                    turn_id=turn_id,
+                    parts=(text.TextPart(text=words), *(text.ImagePart(image=image),) * 5),
+                    outcome=memory.Outcome.COMPLETED,
+                )
+            )
+        await harness.attach()
+        await harness.recall(memory.RecallData(about="the gate", limit=2), "r-1")
+        return await harness.reply("r-1")
+
+    reply = asyncio.run(scenario())
+
+    assert reply.name == memory.RecollectedEvent.name, reply.data
+    recollection = reply.data
+    assert isinstance(recollection, memory.RecollectionData)
+    assert recollection.about == "the gate"
+    assert [node.text for node in recollection.nodes] == ["the gate at dawn", "the gate at dusk"]
+    newest, older = (node.episode for node in recollection.nodes)
+    assert newest is not None and older is not None
+    assert all(isinstance(kept, media.Image) for kept in newest.images)
+    assert [isinstance(kept, media.Image) for kept in older.images] == [True, True, True, False, False]
+    assert all(kept.reason == "memory" for kept in older.images if isinstance(kept, media.ReleasedImage))
+
+
+def test_a_recall_memory_cannot_serve_is_a_typed_failure_to_the_owner() -> None:
+    async def scenario() -> hsm.Event[typing.Any]:
+        harness = await _harness()
+        await harness.attach()
+        await harness.recall(memory.RecallData(about="noon"), "r-1")
+        return await harness.reply("r-1")
+
+    reply = asyncio.run(scenario())
+
+    assert reply.name == ability.FailedEvent.name
+    assert reply.target
+    assert isinstance(reply.data, ability.FailureData)
+    assert reply.data.message.startswith("unavailable")
+
+
+def test_a_reply_goes_where_its_payload_says_never_where_its_name_says() -> None:
+    """A recall's outcome is the owner's observation; any other request is answered at its requester.
+
+    The routing reads the payload: a request sent under the recall event's name that carries a
+    cue is not a recall, so its invalid-input failure goes back to the requester that sent it.
+    """
+
+    async def scenario() -> dict[str, tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]]:
+        harness = await _harness()
+        await harness.attach()
+        requester = Owner()
+        _ = await mosfet.started(harness.ctx, requester, Owner.model)
+        requests: tuple[hsm.Event[typing.Any], ...] = (
+            memory.RecallEvent.with_data_and_id(memory.RecallData(about="noon"), "recall"),
+            memory.RecallEvent.with_data_and_id(memory.CueData(), "cue"),
+        )
+        for request in requests:
+            _ = await hsm.dispatch(
+                harness.ctx,
+                harness.associative,
+                dataclasses.replace(request, source=hsm.id(requester), target=hsm.id(harness.associative)),
+            )
+        await harness.owner.until(lambda: bool(harness.owner.replies("recall")))
+        await requester.until(lambda: bool(requester.replies("cue")))
+        await asyncio.sleep(0.05)
+        return {request: (harness.owner.replies(request), requester.replies(request)) for request in ("recall", "cue")}
+
+    replies = asyncio.run(scenario())
+
+    to_owner, to_requester = replies["recall"]
+    assert [reply.name for reply in to_owner] == [ability.FailedEvent.name]
+    assert to_requester == []
+    to_owner, to_requester = replies["cue"]
+    assert to_owner == []
+    (invalid,) = to_requester
+    assert isinstance(invalid.data, ability.FailureData)
+    assert invalid.data.message.startswith("invalid_input")
+
+
+def test_a_recall_waiting_at_detach_and_one_after_it_are_answered_unavailable_once() -> None:
+    async def scenario() -> dict[str, list[hsm.Event[typing.Any]]]:
+        gate = asyncio.Event()
+        harness = await _harness(embedder=GatedEmbedder(gate))
+        await harness.attach_memory()
+        await harness.attach()
+        await harness.recall(memory.RecallData(about="noon"), "in-flight")
+        await harness.owner.until(lambda: harness.associative.state().endswith("/busy/recalling"))
+        await harness.recall(memory.RecallData(about="dusk"), "waiting")
+        await harness.detach()
+        await harness.owner.until(lambda: harness.associative.state() == "/AssociativeLifecycle/detached")
+        await harness.recall(memory.RecallData(about="dawn"), "after")
+        _ = await harness.reply("after")
+        gate.set()
+        await asyncio.sleep(0.2)
+        return {request: harness.owner.replies(request) for request in ("in-flight", "waiting", "after")}
+
+    replies = asyncio.run(scenario())
+
+    for request, answered in replies.items():
+        assert len(answered) == 1, (request, answered)
+        assert answered[0].name == ability.FailedEvent.name
+        failure = answered[0].data
+        assert isinstance(failure, ability.FailureData)
+        assert failure.message.startswith("unavailable"), (request, failure)

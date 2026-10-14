@@ -263,6 +263,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     their frames' ``recalled`` context) and to reflection. An association that fails or times out
     leaves the turn without associations; it never fails the turn.
 
+    Every frame Cognition builds also holds ``associative`` (under ``memory``), so a stage whose
+    effort ceiling admits it (Reasoning, not Intuition) is offered ``bot.ability.memory.recall``.
+    What a recall brings to mind (``memory.RecollectedEvent``), or its typed failure, comes back to
+    Cognition and goes to the body as a ``cognition.InputEvent`` observing it: a new turn the bot
+    decides on, the way a routine tick is.
+
     With ``routines`` composed, Reflection settling a turn sends Routines a reconcile (its
     inventory writes may have created, changed, or broken a persistent routine), and every
     routine tick Routines forwards goes to the body as a ``cognition.InputEvent`` observing
@@ -340,7 +346,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
         max_effort: Effort | None = None,
         recalled: memory.AssociationsData | None = None,
     ) -> processing.InputData:
-        frame = input.build_processing_input(cognition_input, authority=instance, max_effort=max_effort)
+        associative = instance._associative
+        frame = input.build_processing_input(
+            cognition_input,
+            # Deliberate recall: offered to a stage whose effort ceiling admits the associative.
+            extra_actors=None if associative is None else {"memory": associative},
+            authority=instance,
+            max_effort=max_effort,
+        )
         return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
     @staticmethod
@@ -1483,12 +1496,28 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _observe_routine_tick(
+    def _is_recall_outcome(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """What the bot's own recall brought to mind, or why it could not: from Associative, by data type."""
+
+        del ctx
+        return (
+            instance._associative is not None
+            and event.source == hsm.id(instance._associative)
+            and isinstance(event.data, memory.RecollectionData | ability.FailureData)
+            and bool(instance._attachments)
+        )
+
+    @staticmethod
+    def _observe(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Hand a routine tick to the body as an observation; the body grants it a turn when free."""
+        """Hand a routine tick or a recall outcome to the body as an observation; the body grants it a turn when free."""
 
         owner = instance._attachments[0]
         stimulus = dataclasses.replace(event, target="", metadata=_public_metadata(dict(event.metadata)))
@@ -1548,7 +1577,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(behavior.TickEvent),
                 hsm.guard(_is_routine_tick),
-                hsm.effect(_observe_routine_tick),
+                hsm.effect(_observe),
+            ),
+            hsm.transition(
+                hsm.on(memory.RecollectedEvent, ability.FailedEvent),
+                hsm.guard(_is_recall_outcome),
+                hsm.effect(_observe),
             ),
             hsm.transition(
                 hsm.on(mosfet.RebootEvent),
@@ -1597,8 +1631,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
             ),
-            # Reflection of the previous turn and routine ticks keep arriving mid-turn; the body
-            # defers a tick's handoff until this turn ends.
+            # Reflection of the previous turn, routine ticks and recall outcomes keep arriving
+            # mid-turn; the body defers their handoff until this turn ends.
             hsm.transition(
                 hsm.on(reflection.OutputEvent, ability.FailedEvent),
                 hsm.guard(_is_reflection_settled),
@@ -1607,7 +1641,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(behavior.TickEvent),
                 hsm.guard(_is_routine_tick),
-                hsm.effect(_observe_routine_tick),
+                hsm.effect(_observe),
+            ),
+            hsm.transition(
+                hsm.on(memory.RecollectedEvent, ability.FailedEvent),
+                hsm.guard(_is_recall_outcome),
+                hsm.effect(_observe),
             ),
             hsm.transition(
                 hsm.on(mosfet.RebootEvent),
