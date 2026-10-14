@@ -5,13 +5,12 @@ from mosfet.abilities.language import text
 import mosfet.telemetry
 
 import asyncio
-import base64
 import collections.abc
 import dataclasses
 import json
 import typing
 
-from .client import ChatCompletionClient, jsonable
+from .client import ChatCompletionClient, data_url, jsonable
 import time
 from .client import ReasoningEffort, ResponsesClient
 
@@ -48,10 +47,6 @@ def _plain_content(message: text.TextMessage) -> str:
     raise TextGenerationError(f"OpenAI-compatible {message.role} message content must be text.")
 
 
-def _data_url(image: media.Image) -> str:
-    return f"data:{image.media_type};base64,{base64.b64encode(image.content).decode('ascii')}"
-
-
 def _admitted_images(
     messages: collections.abc.Sequence[text.TextMessage], capacity: media.ImageCapacity
 ) -> tuple[media.Image, ...]:
@@ -73,7 +68,7 @@ def _message_to_openai(message: text.TextMessage) -> dict[str, object]:
         content = [
             {"type": "text", "text": part.text}
             if isinstance(part, text.TextPart)
-            else {"type": "image_url", "image_url": {"url": _data_url(part.image)}}
+            else {"type": "image_url", "image_url": {"url": data_url(part.image)}}
             for part in message.content
         ]
     else:
@@ -388,7 +383,7 @@ def _responses_input(messages: collections.abc.Sequence[text.TextMessage]) -> li
             content = [
                 {"type": "input_text", "text": part.text}
                 if isinstance(part, text.TextPart)
-                else {"type": "input_image", "image_url": _data_url(part.image)}
+                else {"type": "input_image", "image_url": data_url(part.image)}
                 for part in message.content
             ]
         else:

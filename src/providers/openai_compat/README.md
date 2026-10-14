@@ -1,6 +1,6 @@
 # mosfet-provider-openai-compat
 
-OpenAI-compatible provider package for stateforward.mosfet text generation and processing abilities.
+OpenAI-compatible provider package for stateforward.mosfet text generation, processing, and embedding abilities.
 
 ## Live Mercury tool-call eval
 
@@ -77,3 +77,50 @@ output = await generator.generate(
 
 `Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.
+
+## Embeddings
+
+`Embedder` implements the core `embedding.Embedder` against a remote `/v1/embeddings` endpoint, so an
+`embedding.Embedding` ability can embed through it. `EmbeddingClient` has its own `model`, `base_url`, and `api_key`
+because an embedding model is served separately from a chat model; every request asks for float vectors. The operator
+declares what the served model accepts in `capacity` (its `Space`, item limit, and image budget), and `instructions`
+carries the model's task prefixes, applied once by the embedder.
+
+```python
+from mosfet import media
+from mosfet.abilities import embedding
+from mosfet.providers.openai_compat import Embedder, EmbeddingClient
+
+embedder = Embedder(
+    client=EmbeddingClient(base_url="http://spark.local:8080/v1", model="embeddinggemma-2"),
+    capacity=embedding.Capacity(
+        space=embedding.Space(model="google/embeddinggemma-2", dimensions=768),
+        max_items=16,
+        max_input_tokens=None,
+        images=media.ImageCapacity(max_images=4, max_total_bytes=8 * 1024 * 1024, media_types=frozenset({"image/png"})),
+        interleaved=True,
+    ),
+    instructions=embedding.EMBEDDING_GEMMA_2,
+)
+ability = embedding.Embedding(embedder=embedder)
+```
+
+A text-only item is sent as one prefixed string. An item with images is sent as an OAI content array
+(`{"content": [{"type": "text", ...}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}`),
+which llama-server accepts on `/v1/embeddings` from llama.cpp `4fbc76de`. Images are sent only within the declared
+`capacity.images`; the default capacity is text-only. Vectors longer than `space.dimensions` are truncated
+(Matryoshka) and every vector is L2-normalized client-side; set `send_dimensions=True` to ask the server for
+`dimensions` instead. A response with the wrong row count, indices, length, or non-finite values fails with
+`INVALID_RESPONSE`, and SDK failures map to closed kinds (`TIMEOUT`, `UNAVAILABLE`, `UNAUTHORIZED`, `OVERLOADED`,
+`INVALID_INPUT`, `EMBED_FAILED`).
+
+EmbeddingGemma-2 is non-causal, so llama-server must take the longest input in one batch: serve it with `-b` and
+`-ub` at least that many tokens.
+
+```sh
+llama-server -m embeddinggemma-2-Q8_0.gguf --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
+  --embeddings --pooling mean -ub 2048 -b 2048 --host 0.0.0.0 --port 8080
+```
+
+`tests/test_embeddings_live.py` checks a served model when `BOT_OPENAI_COMPAT_EMBEDDINGS_BASE_URL` and
+`BOT_OPENAI_COMPAT_EMBEDDINGS_MODEL` are set (`-m live`).

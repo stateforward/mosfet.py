@@ -2,9 +2,13 @@ from .client import (
     ChatCompletionClient,
     OpenAI,
     ChatClient,
+    EmbeddingClient,
+    EmbeddingsClient,
+    OpenAIEmbeddingsSDK,
     RequestError,
     OpenAIClient,
 )
+from .embedder import Embedder
 from .processing import Processor, ProcessingError
 from .text_generator import TextGenerationError, TextGenerator
 from .client import ReasoningEffort, ResponsesClient
@@ -16,6 +20,10 @@ __all__ = [
     "ChatCompletionClient",
     "OpenAI",
     "ChatClient",
+    "Embedder",
+    "EmbeddingClient",
+    "EmbeddingsClient",
+    "OpenAIEmbeddingsSDK",
     "Processor",
     "ProcessingError",
     "ReasoningEffort",
