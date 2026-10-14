@@ -386,13 +386,12 @@ def test_build_processing_input_without_devices_leaves_instructions_unset() -> N
     assert built.instructions is None
 
 
-def test_frame_filters_over_effort_ceiling() -> None:
-    """Stage capacity filters effort-rated actors from the frame offer.
+def test_within_effort_narrows_a_frame_to_a_stage_ceiling() -> None:
+    """A stage's ceiling drops effort-rated actors above it from the frame's offer and dispatch map.
 
-    Intuition's ceiling is S: the M-effort probe actor drops from the offered schemas
-    (the authoring-tier boundary). With no ceiling, every actor stays offered — and
-    when ceiling unbounded (reasoning default), keep-all. The Device stays offered:
-    it has no effort rating (peripheral transducer).
+    Intuition's ceiling is S: the M-effort probe actor drops, and with it the events only it
+    enabled. The Device stays: it has no effort rating (peripheral transducer). The authority
+    always stays. No ceiling, or a ceiling every actor fits, returns the frame unchanged.
     """
 
     async def run() -> None:
@@ -400,29 +399,25 @@ def test_frame_filters_over_effort_ceiling() -> None:
         ctx = shared_hsm_context()
         assert probe.model is not None
         _ = await mosfet.started(ctx, probe, probe.model)
-        probe_input = cognition_input.InputData(
-            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
-            actors={"probe": probe, "phone": Device()},
-            focus_candidates=("phone",),
+        frame = cognition_input.build_processing_input(
+            cognition_input.InputData(
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
+                actors={"probe": probe, "phone": Device()},
+                focus_candidates=("phone",),
+            )
         )
-        intuition_frame = cognition_input.build_processing_input(
-            probe_input,
-            max_effort=Effort.S,
-        )
-        names_intuition = {event.name for event in intuition_frame.schemas}
-        assert mosfet.FocusDeviceEvent.name not in names_intuition
+        assert mosfet.FocusDeviceEvent.name in {event.name for event in frame.schemas}
 
-        reasoning_frame = cognition_input.build_processing_input(
-            probe_input,
-            max_effort=None,
-        )
-        names_reasoning = {event.name for event in reasoning_frame.schemas}
-        assert mosfet.FocusDeviceEvent.name in names_reasoning
+        narrowed = cognition_input.within_effort(frame, Effort.S)
+        assert set(narrowed.actors) == {"phone"}
+        assert mosfet.FocusDeviceEvent.name not in {event.name for event in narrowed.schemas}
+        assert mosfet.FocusDeviceEvent.name not in narrowed.actor_events
 
-        # Device without effort rating: never filtered.
-        assert any(
-            actor is not None and key == "phone" or key == "probe" for key, actor in reasoning_frame.actors.items()
-        )
+        assert cognition_input.within_effort(frame, None) is frame
+        assert cognition_input.within_effort(frame, Effort.M) is frame
+
+        hosted = frame.model_copy(update={"authority": probe})
+        assert cognition_input.within_effort(hosted, Effort.S) is hosted
 
     asyncio.run(run())
 

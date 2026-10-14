@@ -363,3 +363,43 @@ def _selection_gate(*, value: object, confidence: int) -> processing.Events:
             confidence=confidence,
         ),
     )
+
+
+class _DeliberateActor(hsm.Instance):
+    """An M-effort actor: above intuition's default ceiling, so intuition must never offer it."""
+
+    effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "IntuitionDeliberateActor",
+        hsm.initial(hsm.target("/IntuitionDeliberateActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(_SelectionEvent), hsm.effect(_accept_selection))),
+    )
+
+
+def test_intuition_offers_only_what_its_own_effort_ceiling_admits() -> None:
+    """The host sends the whole frame; intuition applies its own ceiling to what it offers and dispatches."""
+
+    async def run() -> processing.InputData:
+        ctx = shared_hsm_context()
+        deliberate = _DeliberateActor()
+        assert deliberate.model is not None
+        _ = await mosfet.started(ctx, deliberate, deliberate.model)
+        stimulus = mosfet.InputEventData(target_device="phone", priority=0)
+        turn_input = cognition_input.InputData(stimulus=stimulus, actors={"deliberate": deliberate})
+        processor = _SequenceProcessor(())
+        _ = await dispatch_ability_for_test(
+            intuition.Intuition(processor=processor, max_effort=ability_module.Effort.S),
+            ctx,
+            intuition.InputData(
+                turn=types.TurnData(input=turn_input, operation_id="ceiling-turn", generation="ceiling-generation"),
+                processing_input=cognition_input.build_processing_input(turn_input),
+            ),
+        )
+        (frame,) = processor.calls
+        return frame
+
+    frame = asyncio.run(run())
+
+    assert "deliberate" not in frame.actors
+    assert _SelectionEvent.name not in {schema.name for schema in frame.schemas}
+    assert _SelectionEvent.name not in frame.actor_events

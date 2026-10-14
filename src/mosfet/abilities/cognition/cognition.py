@@ -1,5 +1,4 @@
 from .. import ability
-from ..ability import Effort
 from .. import memory
 from .. import processing
 
@@ -375,7 +374,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         cognition_input: InputData,
         *,
-        max_effort: Effort | None = None,
         recalled: memory.AssociationsData | None = None,
     ) -> processing.InputData:
         associative = instance._associative
@@ -384,7 +382,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
             # Deliberate recall: offered to a stage whose effort ceiling admits the associative.
             extra_actors=None if associative is None else {"memory": associative},
             authority=instance,
-            max_effort=max_effort,
         )
         return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
@@ -566,7 +563,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
             input = Cognition._build_processing_input(
                 instance,
                 cognition_input,
-                max_effort=instance._intuition.effort_ceiling(),
                 recalled=associations,
             )
         except Exception as error:
@@ -994,7 +990,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 input = Cognition._build_processing_input(
                     instance,
                     cognition_input,
-                    max_effort=instance._reasoning.effort_ceiling(),
                     recalled=associations,
                 )
             except Exception as error:

@@ -16,6 +16,7 @@ from mosfet import telemetry
 from mosfet.telemetry import span
 
 from mosfet.behavior import BreakData, ChangeData, CreateData
+from . import input as cognition_input
 from . import types
 
 # No static system prose: deliberative turns use the same per-turn world XML on the system
@@ -493,20 +494,22 @@ class Reasoning(processing.Processing):
                 )
 
             request = Reasoning._input_from_event(event)
-            host_input = request.processing_input
-            # Keep host tools/actors, the host's live instructions (device-state block), and what
-            # memory surfaced for this turn; nest the reasoning payload as the process input.
-            child_input = processing.Processing._input_for_processor(
-                instance,
-                processing.InputData(
-                    input=ProcessorInput(host_input=host_input),
-                    schemas=host_input.schemas,
-                    actors=host_input.actors,
-                    instructions=host_input.instructions,
-                    recalled=host_input.recalled,
-                ),
-            )
             try:
+                # The host's frame narrowed to this stage's effort ceiling. Narrowing reads live
+                # actor snapshots, so a frame that cannot be read fails the turn.
+                host_input = cognition_input.within_effort(request.processing_input, instance._max_effort)
+                # Keep host tools/actors, the host's live instructions (device-state block), and what
+                # memory surfaced for this turn; nest the reasoning payload as the process input.
+                child_input = processing.Processing._input_for_processor(
+                    instance,
+                    processing.InputData(
+                        input=ProcessorInput(host_input=host_input),
+                        schemas=host_input.schemas,
+                        actors=host_input.actors,
+                        instructions=host_input.instructions,
+                        recalled=host_input.recalled,
+                    ),
+                )
                 raw = await instance._processor.process(child_input)
                 reasoned = Reasoning._coerce_reasoned(raw)
             except Exception as error:
@@ -639,11 +642,6 @@ class Reasoning(processing.Processing):
             ),
         ),
     )
-
-    def effort_ceiling(self) -> Effort | None:
-        """The stage's effort ceiling, read by the host when building the deliberate frame."""
-
-        return self._max_effort
 
     def __init__(
         self,

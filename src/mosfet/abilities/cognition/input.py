@@ -126,7 +126,6 @@ def build_processing_input(
     *,
     extra_actors: collections.abc.Mapping[str, hsm.Instance] | None = None,
     authority: hsm.Instance | None = None,
-    max_effort: Effort | None = None,
 ) -> processing.InputData:
     """Build the deliberative input and callable schemas for one cognition turn.
 
@@ -141,19 +140,14 @@ def build_processing_input(
     The per-turn instructions open a live device-state block (same snapshots), which the
     provider sends as the system message; any static Processing policy is stamped ahead of
     it at apply time.
+
+    The frame offers every actor; each stage narrows it to its own capacity with
+    ``within_effort`` when the frame reaches it.
     """
 
     actors: dict[str, hsm.Instance] = dict(cognition_input.actors)
     if extra_actors:
         actors.update(extra_actors)
-    if max_effort is not None:
-        # Stage capacity: abilities beyond the stage's effort ceiling drop from this frame's
-        # offer (and from its dispatch map). Default None keeps every actor byte-identical.
-        actors = {
-            key: actor
-            for key, actor in actors.items()
-            if effort_within(getattr(actor, "effort", Effort.XS), max_effort)
-        }
     if authority is not None and not any(actor is authority for actor in actors.values()):
         # Host call surface (ignore, …) comes from Cognition's snapshot, not a schema allowlist.
         actors = {**actors, "cognition": authority}
@@ -168,9 +162,40 @@ def build_processing_input(
     )
 
 
+def within_effort(frame: processing.InputData, ceiling: Effort | None) -> processing.InputData:
+    """``frame`` as a stage whose effort ceiling is ``ceiling`` may use it.
+
+    Stage capacity: an actor rated above the ceiling drops from the frame's actors, so from its
+    offered events and its dispatch map, which are collected again from the actors left. The
+    authority (the host's own call surface) is never dropped, and the device-state block stays
+    unless the bot actor it is rendered from was dropped. ``None`` is unbounded, and a frame
+    that loses no actor is returned as it is.
+    """
+
+    if ceiling is None:
+        return frame
+    actors = {
+        key: actor
+        for key, actor in frame.actors.items()
+        if actor is frame.authority or effort_within(getattr(actor, "effort", Effort.XS), ceiling)
+    }
+    if len(actors) == len(frame.actors):
+        return frame
+    schemas, actor_events = processing.collect_offered_events(actors)
+    return frame.model_copy(
+        update={
+            "actors": actors,
+            "schemas": schemas,
+            "actor_events": actor_events,
+            "instructions": frame.instructions if "bot" in actors else None,
+        }
+    )
+
+
 __all__ = [
     "InputData",
     "build_processing_input",
     "is_input",
     "stimulus_name",
+    "within_effort",
 ]

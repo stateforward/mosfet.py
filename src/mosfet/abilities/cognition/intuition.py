@@ -14,6 +14,7 @@ import pydantic
 from mosfet import telemetry
 from mosfet.telemetry import span
 
+from . import input as cognition_input
 from . import types
 
 # Absolute floor used only during tuner warmup (few samples). After warmup the
@@ -609,9 +610,11 @@ class Intuition(processing.Processing):
 
     @staticmethod
     def _intuition_input_for_processor(instance: "Intuition", input: processing.InputData) -> processing.InputData:
-        """Stamp instructions and intuition EventPatch (confidence) onto the processing input."""
+        """Narrow the host's frame to this stage's effort ceiling; stamp instructions and the EventPatch."""
 
-        stamped = processing.Processing._input_for_processor(instance, input)
+        stamped = processing.Processing._input_for_processor(
+            instance, cognition_input.within_effort(input, instance._max_effort)
+        )
         updates: dict[str, object] = {}
         if stamped.patch is None:
             updates["patch"] = EventPatch
@@ -636,9 +639,6 @@ class Intuition(processing.Processing):
                 if retry is not None or (event.target == hsm.id(instance) and bool(event.source))
                 else hsm.id(instance)
             )
-            input = Intuition._intuition_input_for_processor(instance, data.processing_input)
-            if retry is not None:
-                input = _processor_feedback(input, retry.message)
             attempt = retry.attempt + 1 if retry is not None else 0
             previous_normalized = retry.normalized if retry is not None else None
             operation_id = event.id if event.id else uuid.uuid4().hex
@@ -646,6 +646,10 @@ class Intuition(processing.Processing):
                 _ = await processing.start_operation(instance, operation_id)
             metadata = dict(event.metadata)
             try:
+                # Narrowing reads live actor snapshots, so a frame that cannot be read fails the turn.
+                input = Intuition._intuition_input_for_processor(instance, data.processing_input)
+                if retry is not None:
+                    input = _processor_feedback(input, retry.message)
                 raw = await instance._processor.process(input)
                 product, confidence, event_confidences = _product_from_processor_output(raw)
             except Exception as error:
@@ -1013,11 +1017,6 @@ class Intuition(processing.Processing):
             ),
         ),
     )
-
-    def effort_ceiling(self) -> Effort | None:
-        """The stage's effort ceiling, read by the host when building the reflex frame."""
-
-        return self._max_effort
 
     def __init__(
         self,

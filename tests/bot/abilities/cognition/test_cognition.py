@@ -3869,14 +3869,38 @@ class _UnreadableActor(hsm.Instance):
         raise RuntimeError("actor state unavailable")
 
 
-class _DeliberateUnreadableActor(_UnreadableActor):
-    """Offered only to reasoning: its effort is above intuition's ceiling."""
+class _BreaksAfterIntuition(hsm.Instance):
+    """Readable while intuition decides; unreadable once intuition escalates, so the reasoning frame fails."""
 
-    effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XL
+    effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XS
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "BreaksAfterIntuition",
+        hsm.initial(hsm.target("/BreaksAfterIntuition/active")),
+        hsm.state("active"),
+    )
+    broken: bool = False
+
+    @typing.override
+    def take_snapshot(self) -> hsm.Snapshot:
+        if self.broken:
+            raise RuntimeError("actor state unavailable")
+        return super().take_snapshot()
+
+
+class _EscalatingThenBreaking(RecordingIntuitionProcessor):
+    def __init__(self, actor: _BreaksAfterIntuition) -> None:
+        super().__init__(cognition.intuition.OutputData(reason="escalate"))
+        self.actor = actor
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        output = await super().process(input)
+        self.actor.broken = True
+        return output
 
 
 async def _remembered_after_unframed_turn(
-    ability: RecordingCognition, store: memory.Memory, actor: _UnreadableActor
+    ability: RecordingCognition, store: memory.Memory, actor: _UnreadableActor | _BreaksAfterIntuition
 ) -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
     """Run one turn whose frame offers ``actor``; return the failures and what memory kept."""
 
@@ -3909,11 +3933,9 @@ def test_cognition_remembers_a_failed_turn_whose_intuition_frame_cannot_be_built
 def test_cognition_remembers_a_failed_turn_whose_reasoning_frame_cannot_be_built() -> None:
     async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
         store = memory.Memory()
-        ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
-            store=store,
-        )
-        return await _remembered_after_unframed_turn(ability, store, _DeliberateUnreadableActor())
+        actor = _BreaksAfterIntuition()
+        ability = RecordingCognition(intuition_processor=_EscalatingThenBreaking(actor), store=store)
+        return await _remembered_after_unframed_turn(ability, store, actor)
 
     failures, episodes = asyncio.run(run())
 

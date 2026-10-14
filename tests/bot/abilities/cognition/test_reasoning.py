@@ -12,6 +12,9 @@ import inspect
 import typing
 
 import hsm
+import mosfet
+import pydantic
+from mosfet import event
 
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
@@ -222,3 +225,73 @@ def test_reasoning_passes_what_memory_surfaced_to_its_processor() -> None:
 
     assert processed.recalled == surfaced
     assert isinstance(processed.input, reasoning_module.ProcessorInput)
+
+
+def _accept(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+    del ctx, instance, event
+
+
+class _DeliberateData(pydantic.BaseModel):
+    value: str
+
+
+_DeliberateEvent = hsm.Event[_DeliberateData](
+    name="tests.reasoning.deliberate", kind=event.EventKind, schema=_DeliberateData
+)
+
+
+class _DeliberateActor(hsm.Instance):
+    """An XL-effort actor: above a reasoning ceiling of M."""
+
+    effort: typing.ClassVar[ability.Effort] = ability.Effort.XL
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "ReasoningDeliberateActor",
+        hsm.initial(hsm.target("/ReasoningDeliberateActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(_DeliberateEvent), hsm.effect(_accept))),
+    )
+
+
+class RecordingProcessor(processing.Processor):
+    calls: list[processing.InputData]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        self.calls.append(input)
+        return ()
+
+
+def test_reasoning_offers_only_what_its_own_effort_ceiling_admits() -> None:
+    """The host sends the whole frame; reasoning applies its own ceiling to what it offers and dispatches."""
+
+    async def run() -> processing.InputData:
+        ctx = shared_hsm_context()
+        deliberate = _DeliberateActor()
+        assert deliberate.model is not None
+        _ = await mosfet.started(ctx, deliberate, deliberate.model)
+        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+        turn_input = cognition.InputData(stimulus=stimulus, actors={"deliberate": deliberate})
+        processor = RecordingProcessor()
+        reasoning = cognition.Reasoning(processor=processor, max_effort=ability.Effort.M)
+        await start_abilities_for_test(ctx, reasoning)
+        _ = await dispatch_ability_for_test(
+            reasoning,
+            ctx,
+            cognition.reasoning.InputData(
+                turn=cognition.types.TurnData(input=turn_input, operation_id="ceiling-turn", generation="token"),
+                processing_input=cognition.input.build_processing_input(turn_input),
+            ),
+            timeout=0.5,
+        )
+        (frame,) = processor.calls
+        return frame
+
+    frame = asyncio.run(run())
+
+    host = frame.input
+    assert isinstance(host, cognition.reasoning.ProcessorInput)
+    for offered in (frame, host.host_input):
+        assert "deliberate" not in offered.actors
+        assert _DeliberateEvent.name not in {schema.name for schema in offered.schemas}
