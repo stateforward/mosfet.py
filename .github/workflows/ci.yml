@@ -107,6 +107,7 @@ jobs:
             src/providers/*/src \
             src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
@@ -118,6 +119,7 @@ jobs:
             src/providers/*/src \
             src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
@@ -129,6 +131,7 @@ jobs:
             src/providers/elevenlabs/src/mosfet/providers/elevenlabs/__init__.py \
             src/providers/elevenlabs/tests/test_package_metadata.py \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
           # Per-provider typecheck derived via glob so new providers are covered automatically.
@@ -153,8 +156,13 @@ jobs:
       - name: Build packages
         run: uv build --all-packages --no-sources
 
+      - name: Build the pinned llama-cpp-python wheel
+        # mosfet-provider-llama-cpp pins llama-cpp-python==0.3.36+mosfet.4fbc76de, which no index serves; its build
+        # recipe is not a workspace member, so the wheel is built separately for the smoke installs.
+        run: uv build --wheel --out-dir dist-native src/providers/llama_cpp/vendor/llama-cpp-python
+
       - name: Install and import every built wheel in clean environments
-        run: scripts/smoke_wheels.sh dist
+        run: scripts/smoke_wheels.sh --find-links dist-native dist
 
       - name: Prune uv cache
         if: always()

@@ -43,6 +43,21 @@ remaining gaps without duplicating them.
 | `tests/bot/abilities/embedding/test_embedder.py` | `src/mosfet/abilities/embedding/embedder.py` (`Instructions.render` prefixes, `EMBEDDING_GEMMA_2`, `Capacity` bounds, `Error.failure_kind`, plain-attribute `Embedder` satisfied by a frozen dataclass) |
 | `tests/bot/abilities/embedding/test_embedding.py` | `src/mosfet/abilities/embedding/embedding.py` (HSM runtime: admission, FIFO queue, overload, `hsm.after` timeout with a late result ignored, invalid responses, composite attach/detach of the embedder's attachments, `UNAVAILABLE` while not serving, metric attribute sets) |
 
+## llama.cpp provider build
+
+Paths are relative to `src/providers/llama_cpp/`.
+
+| Test | Source under test |
+| --- | --- |
+| `tests/test_package_metadata.py` | `pyproject.toml` (pinned `llama-cpp-python` path source, dynamic version, wheel ships only `src/mosfet`, recipe is not a workspace member) and `src/mosfet/providers/llama_cpp/__init__.py` (`__all__`) |
+| `tests/test_library.py` | `src/mosfet/providers/llama_cpp/library.py` (system info → `Accelerator`, any build but `0.3.36+mosfet.4fbc76de` → `LibraryError(initialization)`; the `live` case loads the installed build) |
+| `tests/test_weights.py` | `src/mosfet/providers/llama_cpp/weights.py` |
+| `tests/test_backend.py` | `vendor/llama-cpp-python/_build/backend.py`, `recipe.toml` and the recipe `pyproject.toml` (synthetic archives: sha256, pax commit, ABI headers, unsafe members, local sources, upstream metadata drift, version rewrite; the measured pins) |
+| `tests/scripts/test_smoke_wheels.py` (repository root) | `scripts/smoke_wheels.sh` `--find-links` (a fake `uv` records every install) |
+
+The PEP 517 hooks that run scikit-build-core are proven by `uv sync --locked --package
+mosfet-provider-llama-cpp`, not by a unit test.
+
 ## Process runtime and `mosfet run`
 
 | Test | Source under test |

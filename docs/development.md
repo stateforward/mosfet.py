@@ -50,6 +50,30 @@ Scoped provider tests: `uv run --package mosfet-provider-<p> -m pytest src/provi
 
 See [release.md](release.md) for versioning and CI publishing notes.
 
+## Building the pinned llama.cpp provider
+
+`mosfet-provider-llama-cpp` depends on `llama-cpp-python==0.3.36+mosfet.4fbc76de`, which
+`uv` compiles from the build recipe at `src/providers/llama_cpp/vendor/llama-cpp-python/`
+(see that provider's README). Each machine compiles once into its `uv` cache. It needs a
+C/C++ toolchain; scikit-build-core fetches `cmake` and `ninja` when the host lacks them.
+
+```sh
+uv sync --package mosfet-provider-llama-cpp                       # macOS arm64: Metal by default
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=121" \
+  uv sync --package mosfet-provider-llama-cpp                     # Linux + CUDA (nvcc); set the GPU's arch
+uv sync --package mosfet-provider-llama-cpp                       # Linux CPU (CI): no flags
+```
+
+`CMAKE_ARGS` and `CMAKE_BUILD_PARALLEL_LEVEL` are cache keys: changing either rebuilds.
+Offline builds read the two pinned source archives from `BOT_LLAMA_CPP_SOURCES=<dir>`.
+Each file is named as the last segment of its pinned URL, and it is used only when its
+sha256 matches. The wheel smoke installs that provider against a locally built wheel:
+
+```sh
+uv build --wheel --out-dir dist-native src/providers/llama_cpp/vendor/llama-cpp-python
+scripts/smoke_wheels.sh --find-links dist-native dist
+```
+
 ## Memory schema migrations
 
 Memory storage schema (`src/mosfet/abilities/memory/schema.py` plus
@@ -150,6 +174,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-gemini` | Gemini text generation & processing |
 | `mosfet-provider-elevenlabs`, `mosfet-provider-mlx-audio`, `mosfet-provider-moonshine` | speech synthesis & recognition (cloud / Apple-Silicon-local / on-device) |
 | `mosfet-provider-mlx-vlm` | local VLM reading (Apple Silicon) |
+| `mosfet-provider-llama-cpp` | in-process llama.cpp on a pinned `llama-cpp-python` build (Metal / CUDA / CPU) |
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
 | `mosfet-provider-sqlite-memory`, `mosfet-provider-postgres-memory` | turnkey SQLite / Postgres(+PGlite) durable memory |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |

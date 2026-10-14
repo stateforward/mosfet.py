@@ -90,3 +90,63 @@ def test_map_only_requires_exactly_one_core_wheel(
 
     assert result.returncode == 1
     assert message in result.stderr
+
+
+def fake_uv(bin_dir: pathlib.Path, log: pathlib.Path) -> None:
+    """Install a ``uv`` that records its arguments and makes venvs whose python always imports successfully."""
+    bin_dir.mkdir()
+    uv = bin_dir / "uv"
+    _ = uv.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$*" >> "{log}"\n'
+        'if [[ "$1" == venv ]]; then\n'
+        '  environment="${@: -1}"\n'
+        '  mkdir -p "$environment/bin"\n'
+        "  printf '#!/bin/sh\\nexit 0\\n' > \"$environment/bin/python\"\n"
+        '  chmod +x "$environment/bin/python"\n'
+        "fi\n"
+    )
+    uv.chmod(0o755)
+
+
+def smoke(arguments: list[str], tmp_path: pathlib.Path) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    log = tmp_path / "uv.log"
+    fake_uv(tmp_path / "bin", log)
+    environment = {"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    result = subprocess.run([SCRIPT, *arguments], capture_output=True, text=True, check=False, env=environment)
+    return result, log.read_text().splitlines() if log.exists() else []
+
+
+def test_find_links_reaches_every_provider_install(tmp_path: pathlib.Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    provider_wheel = wheel_filename("mosfet-provider-llama-cpp", "py3-none-any")
+    (dist / CORE_WHEEL).touch()
+    (dist / provider_wheel).touch()
+    native = tmp_path / "dist-native"
+
+    result, calls = smoke(["--find-links", str(native), str(dist)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    installs = [call for call in calls if call.startswith("pip install")]
+    assert len(installs) == 2
+    provider_install = next(call for call in installs if provider_wheel in call)
+    assert f"--find-links {native}" in provider_install
+
+
+def test_installs_use_only_the_index_without_find_links(tmp_path: pathlib.Path) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / CORE_WHEEL).touch()
+
+    result, calls = smoke([str(dist)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not any("--find-links" in call for call in calls)
+
+
+def test_find_links_requires_a_directory(tmp_path: pathlib.Path) -> None:
+    result, _ = smoke(["--find-links"], tmp_path)
+
+    assert result.returncode == 2
+    assert "--find-links needs a directory" in result.stderr

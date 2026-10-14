@@ -1,0 +1,29 @@
+# Build recipe for the mosfet build of llama-cpp-python 0.3.36 against llama.cpp 4fbc76de. It is a path source of
+# mosfet-provider-llama-cpp, not a workspace member, and is never published. The metadata below is static so
+# `uv lock` never compiles; `_build/backend.py` refuses a build whose upstream metadata differs from it.
+[project]
+name = "llama-cpp-python"
+version = "0.3.36+mosfet.4fbc76de"
+description = "llama-cpp-python 0.3.36 rebuilt against llama.cpp 4fbc76de for mosfet-provider-llama-cpp."
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+  "typing-extensions>=4.5.0",
+  "numpy>=1.20.0",
+  "diskcache>=5.6.1",
+  "jinja2>=2.11.3",
+]
+
+[build-system]
+requires = ["scikit-build-core==1.1.1"]
+build-backend = "backend"
+backend-path = ["_build"]
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "recipe.toml" },
+  { file = "_build/backend.py" },
+  { env = "CMAKE_ARGS" },
+  { env = "CMAKE_BUILD_PARALLEL_LEVEL" },
+]

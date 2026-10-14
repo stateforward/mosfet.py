@@ -1,0 +1,27 @@
+# Pins for the mosfet build of llama-cpp-python: the upstream 0.3.36 release rebuilt against llama.cpp 4fbc76de.
+# `_build/backend.py` reads this file and fails the build on any mismatch. Re-pinning is a reviewed change here.
+local_version = "mosfet.4fbc76de"
+
+[build]
+# The exact scikit-build-core that resolves against upstream's `scikit-build-core[pyproject]>=0.9.2`; it is also
+# the `[build-system] requires` pin in `pyproject.toml`. The `pyproject` extra no longer exists in 1.x.
+scikit_build_core = "1.1.1"
+
+[llama_cpp_python]
+version = "0.3.36"
+sdist_url = "https://files.pythonhosted.org/packages/source/l/llama_cpp_python/llama_cpp_python-0.3.36.tar.gz"
+# Equal to PyPI's published sha256 digest for llama_cpp_python-0.3.36.tar.gz.
+sdist_sha256 = "832db0699007f1be95a7e41ef12e88926b02ba836461e36a36372db2760c1a2e"
+
+[llama_cpp]
+# The archive's pax `comment` header must equal this commit.
+commit = "4fbc76dec51d0add466f0210855c0596589b60d4"
+archive_url = "https://github.com/ggml-org/llama.cpp/archive/4fbc76dec51d0add466f0210855c0596589b60d4.tar.gz"
+archive_sha256 = "4ea37c28e9d6a74e6ffb34ff33a6555b33f0398e75814f0e2f362407d79ecb36"
+
+[abi]
+# The 0.3.36 ctypes bindings were proven against exactly these headers; a newer llama.cpp that moves a struct
+# changes a hash here and stops the build instead of loading a library whose layout the bindings no longer match.
+"include/llama.h" = "c9a5f025ad7dbf07eda6660c8ff2c32cd80c07ba440d80728707a9c9d13c1bc3"
+"tools/mtmd/mtmd.h" = "ff6798e8ec56a409b8f2e99821cdbdb857286ca085a762b7ed3e5599c1cc77d5"
+"tools/mtmd/mtmd-helper.h" = "893b42990d4b386b8c52d8078499f5615c2d7b0c92d0c30501816d65cab8db6c"

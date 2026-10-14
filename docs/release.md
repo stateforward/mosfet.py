@@ -10,6 +10,9 @@ This repo uses Hatchling dynamic version metadata with a package-owned
   `src/providers/gemini/src/mosfet/providers/gemini/__init__.py`.
 - `mosfet-provider-livekit` reads its version from
   `src/providers/livekit/src/mosfet/providers/livekit/__init__.py`.
+- `mosfet-provider-llama-cpp` reads its version from
+  `src/providers/llama_cpp/src/mosfet/providers/llama_cpp/__init__.py`. It is built and
+  tested like every provider but is **never published** (see below).
 - `mosfet-provider-mlx-audio` reads its version from
   `src/providers/mlx_audio/src/mosfet/providers/mlx_audio/__init__.py`.
 - `mosfet-provider-mlx-vlm` reads its version from
@@ -56,6 +59,10 @@ The CI cost tradeoff is deliberate:
 - Run that smoke gate through `scripts/smoke_wheels.sh`, so CI and a local run
   execute the same code; `scripts/smoke_wheels.sh --map-only dist` prints each
   wheel's import name without installing anything.
+- Build the pinned `llama-cpp-python` wheel into `dist-native/` and pass
+  `--find-links dist-native` to the smoke gate. `mosfet-provider-llama-cpp` depends on
+  `llama-cpp-python==0.3.36+mosfet.4fbc76de`, which no index serves, and its build recipe
+  is not a workspace member, so `uv build --all-packages` does not build it.
 - Derive each wheel's import from the package naming contract: the
   `stateforward_mosfet` wheel imports `mosfet`, and a `mosfet_provider_<name>`
   wheel imports `mosfet.providers.<name>`. A built wheel outside that contract
@@ -85,6 +92,17 @@ Ruff, scoped basedpyright, package metadata tests, provider tests, builds all
 packages, and publishes with `uv publish --trusted-publishing always`.
 Configure the `pypi` GitHub environment and PyPI Trusted Publisher before
 pushing a release tag.
+
+### Packages excluded from publish
+
+`mosfet-provider-llama-cpp` is removed from `dist/` before `uv publish`. It pins
+`llama-cpp-python==0.3.36+mosfet.4fbc76de`, a local build of upstream 0.3.36 against
+llama.cpp `4fbc76de` that its build recipe compiles on each machine. An index cannot
+serve that requirement, so a published wheel could not be installed. The exclusion
+step fails the release if it does not find exactly that provider's wheel and sdist.
+The exclusion ends when an upstream `llama-cpp-python` release vendors llama.cpp at or
+after `4fbc76de`. At that point one change pins that release exactly, deletes
+`src/providers/llama_cpp/vendor/llama-cpp-python/`, and drops the exclusion step.
 
 ## Open Decisions Before External Publish
 

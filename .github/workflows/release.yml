@@ -49,6 +49,7 @@ jobs:
             src/providers/*/src \
             src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
@@ -60,6 +61,7 @@ jobs:
             src/providers/*/src \
             src/providers/*/tests \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
 
@@ -71,6 +73,7 @@ jobs:
             src/providers/elevenlabs/src/mosfet/providers/elevenlabs/__init__.py \
             src/providers/elevenlabs/tests/test_package_metadata.py \
             src/providers/sqlite_memory/hatch_build.py \
+            src/providers/llama_cpp/vendor/llama-cpp-python/_build/backend.py \
             tests/scripts/test_check_release_version.py \
             tests/test_init.py
           # Per-provider typecheck derived via glob so new providers are covered automatically.
@@ -94,6 +97,18 @@ jobs:
 
       - name: Build packages
         run: uv build --all-packages --no-sources
+
+      - name: Exclude packages that cannot be published
+        # mosfet-provider-llama-cpp pins llama-cpp-python==0.3.36+mosfet.4fbc76de, a local build no index serves.
+        # It stays out of every release until an upstream llama-cpp-python release replaces the pinned build.
+        run: |
+          shopt -s nullglob
+          excluded=(dist/mosfet_provider_llama_cpp-*)
+          if (( ${#excluded[@]} != 2 )); then
+            echo "Expected the mosfet-provider-llama-cpp wheel and sdist in dist, found: ${excluded[*]}" >&2
+            exit 1
+          fi
+          rm -- "${excluded[@]}"
 
       - name: Publish packages
         run: uv publish --trusted-publishing always
