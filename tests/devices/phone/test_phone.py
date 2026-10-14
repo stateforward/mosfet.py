@@ -485,6 +485,8 @@ def test_phone_broadcasts_committed_ringing_observation_in_current_environment()
     assert sound.audio.startswith(b"RIFF")
     assert sound.audio == phone_device.RING_SOUND_WAV
     assert sound.caller == "Front desk"
+    # The caller ID is a non-unique display label, not a producer-stable identity: the ringer stamps no one.
+    assert sound.participants == ()
     assert inside_events[0].metadata.get("traceparent") == "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
     assert outside_events == []
 

@@ -8,6 +8,7 @@ Bot forwards live robot state — not a prebuilt decision input:
 - ``abilities``: innate and acquired ability instances on the bot
 - ``actors``: named HSM instances (devices, innate, and acquired abilities) the cognition may snapshot/dispatch to
 - ``focus``: name of the instance the bot is looking at, if any
+- ``participants``: who took part in the stimulus, as the producer of this input stamped them
 """
 
 from __future__ import annotations
@@ -79,6 +80,15 @@ class InputData(pydantic.BaseModel):
         default=(),
         description="Instance names that may become focus for this turn (body attention policy).",
         examples=[["device-a"], ["device-a", "device-b"]],
+    )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Who took part in the stimulus, stamped by the producer of this input. Empty when the producer "
+            "knows no one (environment sound, routine tick)."
+        ),
+        examples=[[{"ref": "caller", "role": "source"}, {"ref": "bot", "role": "target"}]],
     )
 
 

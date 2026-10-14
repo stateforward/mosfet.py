@@ -87,6 +87,8 @@
   not parallel hard-coded schema allowlists for individual actors.
 - ALWAYS suffix event payload types with `Data` and event constants with `Event` in PascalCase. Do not use
   SCREAMING_SNAKE event constants. NEVER package-prefix type names.
+- A product built from a stimulus carries the stimulus' `participants` forward unchanged; producers stamp,
+  transformers copy, nobody infers.
 
 ### HSM delivery, context, and correlation
 

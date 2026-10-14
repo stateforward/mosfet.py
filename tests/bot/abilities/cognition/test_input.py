@@ -19,6 +19,8 @@ from tests.bot.abilities.cognition.test_cognition import make_cognition, wait_un
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import device_firmware
 import hsm
+import pydantic
+import pytest
 
 
 def _accept_focus(
@@ -457,3 +459,32 @@ def test_stimulus_name_lives_only_on_cognition_input() -> None:
     assert "stimulus_name" not in reflection.__all__
     assert not hasattr(episodes, "stimulus_name")
     assert "stimulus_name" not in episodes.__all__
+
+
+def _input_with_participants(count: int) -> cognition_input.InputData:
+    return cognition_input.InputData(
+        stimulus=mosfet.InputEventData(target_device="phone", priority=0),
+        participants=tuple(
+            mosfet.Participant(ref=f"person-{index}", role=mosfet.ParticipantRole.SOURCE) for index in range(count)
+        ),
+    )
+
+
+def test_cognition_input_carries_no_participants_unless_its_producer_stamps_them() -> None:
+    assert (
+        cognition_input.InputData(stimulus=mosfet.InputEventData(target_device="phone", priority=0)).participants == ()
+    )
+
+
+def test_cognition_input_participants_are_bounded_at_32() -> None:
+    assert len(_input_with_participants(32).participants) == 32
+    with pytest.raises(pydantic.ValidationError):
+        _ = _input_with_participants(33)
+
+
+def test_cognition_input_participants_schema_says_the_producer_stamps_them() -> None:
+    properties = typing.cast(dict[str, dict[str, object]], cognition_input.InputData.model_json_schema()["properties"])
+    participants = properties["participants"]
+
+    assert "stamped by the producer of this input" in str(participants["description"])
+    assert participants["maxItems"] == 32

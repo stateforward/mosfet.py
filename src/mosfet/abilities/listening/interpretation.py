@@ -51,6 +51,7 @@ from mosfet.telemetry import span
 _SCOPE = "bot.abilities.listening"
 _COMPONENT = "listening.interpretation"
 _STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+_MAX_PARTICIPANTS = 32
 
 DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
 """How loud what is left of an arrival must be, in dB, to be worth handing on.
@@ -151,6 +152,7 @@ class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
     sensed: sensitivity.OutputData
     voice_detection: voice.detection.ApplyData
     speech: bytes
+    participants: tuple[mosfet.Participant, ...] = ()
 
 
 class _SoundClassificationCompletedEventData(pydantic.BaseModel):
@@ -279,6 +281,15 @@ class SpeechData(pydantic.BaseModel):
             "Listening has speech evidence but no identity classifier result; Conversation rejects them."
         ),
         examples=[[], [[0.12, -0.08, 0.31]]],
+    )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=_MAX_PARTICIPANTS,
+        description=(
+            "Who produced the sound this speech was decoded from, copied from the admitted environment.sound "
+            "chunks. Listening never works out who someone is; it only carries what the device stamped."
+        ),
+        examples=[[], [{"ref": "person-42", "role": "source"}]],
     )
     voice_detection: voice.detection.ApplyData = pydantic.Field(
         description="Voice spans from VoiceDetection relative to the start of this observation.",
@@ -452,7 +463,9 @@ def _dispatch_listening_cognition_input_with_operation(
         active.set_attribute("bot.stimulus.name", stimulus.name)
         source_count = len(source_ids) if isinstance(source_ids, collections.abc.Collection) else 0
         active.set_attribute("bot.identity.source.count", source_count)
-        handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus))
+        product = typing.cast(object, stimulus.data)
+        participants = product.participants if isinstance(product, SoundData | SpeechData) else ()
+        handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus, participants=participants))
         handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
         handoff = dataclasses.replace(
             handoff,
@@ -578,12 +591,19 @@ def _sensed_with_pcm_sound(sensed: sensitivity.OutputData) -> sensitivity.Output
     return sensed.model_copy(update={"sound": pcm_sound})
 
 
+def _merged_participants(*groups: tuple[mosfet.Participant, ...]) -> tuple[mosfet.Participant, ...]:
+    """Ordered union of stamped participants: first occurrence wins, bounded like the payload field."""
+
+    return tuple(dict.fromkeys(participant for group in groups for participant in group))[:_MAX_PARTICIPANTS]
+
+
 def _speech_from_sensed(
     *,
     sensed: sensitivity.OutputData,
     voice_detection: voice.detection.ApplyData,
     source_ids: value.IdentitySet | None = None,
     voice_embedding: voice.identification.VoiceEmbedding | None = None,
+    participants: tuple[mosfet.Participant, ...] = (),
 ) -> SpeechData | None:
     """Build a public PCM speech product; unsupported or incomplete formats fail closed."""
 
@@ -601,6 +621,7 @@ def _speech_from_sensed(
         media_type="audio/pcm",
         source_ids=identities,
         voice_embedding=voice_embedding,
+        participants=_merged_participants(participants, sound.participants),
         parent=sensed.parent,
     )
     return speech
@@ -613,6 +634,7 @@ def _speech_from_voice_segment(
     source_ids: value.IdentitySet | None = None,
     voice_embedding: voice.identification.VoiceEmbedding | None = None,
     voice_detection: voice.detection.ApplyData | None = None,
+    participants: tuple[mosfet.Participant, ...] = (),
 ) -> SpeechData | None:
     """Build one public speech product from one already-clipped voice segment.
 
@@ -660,6 +682,7 @@ def _speech_from_voice_segment(
         confidence=diarization_confidence,
         source_ids=identities,
         voice_embedding=voice_embedding,
+        participants=_merged_participants(participants, sound.participants),
         parent=sensed.parent,
     )
 
@@ -702,6 +725,7 @@ def _dispatch_product_cognition_input_with_operation(
     event: hsm.Event[typing.Any],
     *,
     operation_id: str | None,
+    participants: tuple[mosfet.Participant, ...],
 ) -> None:
     """Hand off whatever product this pipeline arrived at, whichever route it came by.
 
@@ -709,6 +733,9 @@ def _dispatch_product_cognition_input_with_operation(
     - No STT (acoustic path): ``SpeechEvent`` with VAD spans + audio for Conversation /
       conversation turn End (including empty-segment silence observations that close a sticky turn).
     - Labeled non-speech (ring, busy, …): original ``environment.sound``.
+
+    ``participants`` are the ones stamped on the sound admitted into the open utterance; every speech
+    product carries them forward with its own chunk's, and the original sound already carries its own.
     """
 
     completion = event.data
@@ -739,6 +766,9 @@ def _dispatch_product_cognition_input_with_operation(
                     sample_rate_hz=sound.sample_rate_hz,
                     channels=sound.channels if sound.channels is not None else 1,
                     media_type="audio/pcm",
+                    participants=_merged_participants(
+                        participants, completion.participants, completion.sensed.sound.participants
+                    ),
                     parent=completion.sensed.parent,
                 )
             ),
@@ -748,7 +778,8 @@ def _dispatch_product_cognition_input_with_operation(
     if isinstance(completion, _VoiceDiarizationCompletedEventData):
         try:
             speech_products = tuple(
-                _speech_from_voice_segment(sensed=completion.sensed, segment=segment) for segment in completion.segments
+                _speech_from_voice_segment(sensed=completion.sensed, segment=segment, participants=participants)
+                for segment in completion.segments
             )
         except Exception as error:
             _dispatch_listening_terminal_failure_with_operation(
@@ -789,6 +820,7 @@ def _dispatch_product_cognition_input_with_operation(
                     voice_embedding=embedding,
                     source_ids=frozenset({embedding.embedding}),
                     voice_detection=completion.voice_detection,
+                    participants=participants,
                 )
                 for segment, embedding in zip(completion.segments, completion.embeddings, strict=True)
             )
@@ -820,6 +852,7 @@ def _dispatch_product_cognition_input_with_operation(
         speech_data = _speech_from_sensed(
             sensed=completion.sensed,
             voice_detection=completion.voice_detection,
+            participants=participants,
         )
         if speech_data is not None:
             _dispatch_listening_cognition_input_with_operation(
@@ -895,6 +928,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _open_speech_format_error: str | None
     _open_speech_wav: bool
     _active_source_ids: value.IdentitySet
+    # Union of participants stamped on the sound admitted into the open utterance (machine-owned, reset with it).
+    _active_participants: tuple[mosfet.Participant, ...]
     _active_voice_embedding: voice.identification.VoiceEmbedding | None
     _active_operation_id: str | None
 
@@ -953,6 +988,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._open_speech_format_error = None
         self._open_speech_wav = False
         self._active_source_ids = frozenset()
+        self._active_participants = ()
         self._active_voice_embedding = None
         self._active_operation_id = None
 
@@ -1016,6 +1052,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             instance,
             event,
             operation_id=instance._active_operation_id,
+            participants=instance._active_participants,
         )
 
     @staticmethod
@@ -1184,6 +1221,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance._open_speech_format_error = None
         instance._open_speech_wav = False
         instance._active_source_ids = frozenset()
+        instance._active_participants = ()
         instance._active_voice_embedding = None
 
     @staticmethod
@@ -1221,6 +1259,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 instance._open_speech_channels = sound.channels
         if sound.audio:
             instance._open_speech_audio.extend(sound.audio)
+        instance._active_participants = _merged_participants(instance._active_participants, sound.participants)
         confidences = tuple(
             segment.confidence for segment in voice_detection.segments if segment.confidence is not None
         )
@@ -1307,6 +1346,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 voice_detection=completion.voice_detection,
                 source_ids=instance._active_source_ids,
                 voice_embedding=instance._active_voice_embedding,
+                participants=instance._active_participants,
             )
             if speech is None:
                 active.set_attribute("bot.product.withheld.reason", "no_speech_content")
@@ -1861,6 +1901,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 sensed=sensed,
                 voice_detection=voice_detection,
                 speech=output,
+                participants=instance._active_participants,
             )
             Interpretation._clear_open_speech(ctx, instance, event)
             _ = hsm.dispatch(

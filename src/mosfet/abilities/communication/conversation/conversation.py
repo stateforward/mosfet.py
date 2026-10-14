@@ -55,6 +55,13 @@ _HISTORY_IMAGE_RELEASED = metrics.get_meter("bot.abilities.communication").creat
     unit="{image}",
     description="Images whose bytes Conversation history released to stay within its retention budget, by media type.",
 )
+_PARTICIPANT_UNSTAMPED = metrics.get_meter("bot.abilities.communication").create_counter(
+    "bot.memory.participant.unstamped.count",
+    unit="{identity}",
+    description="Turn identities (vectors, over-long refs) a cognition handoff could not stamp as participants.",
+)
+_MAX_PARTICIPANTS = 32
+_MAX_PARTICIPANT_REF_LENGTH = 200
 
 
 def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detector.TurnDetector:
@@ -994,12 +1001,37 @@ def _cognition_ready(message: Message) -> bool:
     )
 
 
+def turn_participants(turn: TurnData) -> tuple[mosfet.Participant, ...]:
+    """Participants a cognition handoff stamps for the inbound turn that caused it.
+
+    String identities become participants: ``source_ids`` as sources, ``target_ids`` as targets, followed by
+    whatever the turn's Listening speech parent already carries. Vector identities (and strings longer than a
+    participant ref allows) are not producer-stable refs, so they are counted and never stamped. Deduplicated
+    (first occurrence wins) and bounded at 32.
+    """
+
+    identities = (
+        *((identity, mosfet.ParticipantRole.SOURCE) for identity in value.sorted_identities(turn.source_ids)),
+        *((identity, mosfet.ParticipantRole.TARGET) for identity in value.sorted_identities(turn.target_ids)),
+    )
+    stamped = tuple(
+        mosfet.Participant(ref=identity, role=role)
+        for identity, role in identities
+        if isinstance(identity, str) and len(identity) <= _MAX_PARTICIPANT_REF_LENGTH
+    )
+    if unstamped := len(identities) - len(stamped):
+        _PARTICIPANT_UNSTAMPED.add(unstamped)
+    carried = turn.parent.data.participants if turn.parent is not None else ()
+    return tuple(dict.fromkeys((*stamped, *carried)))[:_MAX_PARTICIPANTS]
+
+
 def _terminal_output(
     ctx: hsm.Context,
     instance: "Conversation",
     event: hsm.Event[typing.Any],
     output: Messages,
     *,
+    turn: TurnData,
     reply_target: str | None,
 ) -> None:
     history_event = dataclasses.replace(
@@ -1014,7 +1046,9 @@ def _terminal_output(
         # audio trust boundary.
         handoff = dataclasses.replace(
             _with_operation(
-                cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event)),
+                cognition.InputEvent.with_data(
+                    cognition.InputData(stimulus=history_event, participants=turn_participants(turn))
+                ),
                 event,
             ),
             source=hsm.id(instance),
@@ -1965,6 +1999,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             instance,
             event,
             Messages(parent=parent, messages=tuple(instance._history), memories=data.memories),
+            turn=input_data,
             reply_target=(
                 parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None
             ),

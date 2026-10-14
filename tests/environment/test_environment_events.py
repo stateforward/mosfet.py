@@ -1,4 +1,6 @@
+import mosfet
 from mosfet import media
+from mosfet.devices import phone
 from mosfet.environment import SoundData, SoundEvent, VisualData, VisualEvent
 
 import pydantic
@@ -31,7 +33,7 @@ def test_visual_event_uses_concrete_pydantic_schema() -> None:
     assert VisualEvent.name == "environment.visual"
     assert schema == VisualData.model_json_schema()
     assert image["$ref"] == "#/$defs/Image"
-    assert set(properties) == {"image", "kind"}
+    assert set(properties) == {"image", "kind", "participants"}
     assert object_dict(image_properties["content"])["format"] in {"binary", "base64", "base64url"}
     assert "description" in schema
 
@@ -52,3 +54,48 @@ def test_sound_data_rejects_empty_audio() -> None:
 def test_visual_data_rejects_raw_image_bytes() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = VisualData.model_validate({"image": _PNG.content})
+
+
+def _participant(index: int) -> mosfet.Participant:
+    return mosfet.Participant(ref=f"person-{index}", role=mosfet.ParticipantRole.SOURCE)
+
+
+@pytest.mark.parametrize("payload", [SoundData(audio=b"pcm"), VisualData(image=_PNG)], ids=["sound", "visual"])
+def test_stimuli_carry_no_participants_unless_their_device_stamps_them(payload: SoundData | VisualData) -> None:
+    assert payload.participants == ()
+
+
+@pytest.mark.parametrize("data_type", [SoundData, VisualData], ids=["sound", "visual"])
+def test_stimulus_participants_are_bounded_at_32(data_type: type[SoundData] | type[VisualData]) -> None:
+    fields: dict[str, object] = {"audio": b"pcm"} if data_type is SoundData else {"image": _PNG}
+
+    stamped = data_type.model_validate({**fields, "participants": [_participant(index) for index in range(32)]})
+
+    assert len(stamped.participants) == 32
+    with pytest.raises(pydantic.ValidationError):
+        _ = data_type.model_validate({**fields, "participants": [_participant(index) for index in range(33)]})
+
+
+@pytest.mark.parametrize("data_type", [SoundData, VisualData], ids=["sound", "visual"])
+def test_stimulus_participants_schema_says_the_emitting_device_stamps_them(
+    data_type: type[SoundData] | type[VisualData],
+) -> None:
+    properties = object_dict(object_dict(data_type.model_json_schema())["properties"])
+    participants = object_dict(properties["participants"])
+
+    assert "stamped by the device that emitted it" in str(participants["description"])
+    assert participants["maxItems"] == 32
+    assert participants["examples"]
+
+
+def test_stimulus_participants_round_trip_through_json() -> None:
+    sound = SoundData(audio=b"pcm", participants=(_participant(1),))
+
+    assert SoundData.model_validate_json(sound.model_dump_json()) == sound
+
+
+def test_phone_sound_inherits_participants_from_the_environment_stimulus() -> None:
+    ring = phone.SoundData(audio=b"ring", kind="phone.ringing", caller="Front desk")
+
+    assert "participants" in phone.SoundData.model_fields
+    assert ring.participants == ()

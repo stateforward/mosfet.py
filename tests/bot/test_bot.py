@@ -5748,3 +5748,48 @@ def test_bot_counts_degraded_transitions_by_stage(monkeypatch: pytest.MonkeyPatc
         after = _degraded_count(metrics, "deactivation_cleanup")
 
     assert after - before == 1
+
+
+def test_body_rebuild_carries_a_products_stamped_participants_into_cognition() -> None:
+    """The body copies who the producer stamped; it never works out who took part itself."""
+
+    ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
+
+    async def run() -> list[cognition.InputData]:
+        ability = IgnoreAbility()
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices={}, cognition=cognitive, input=(RecordingListening(),))
+        environment = await start_bot_with_devices(active_bot)
+        heard = SoundData(
+            audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1, participants=(ada,)
+        )
+        await active_bot.dispatch(active_bot.context(), SoundEvent.with_data(heard))
+        await close_hearing_speech(active_bot, environment, sample_rate_hz=48_000)
+        await wait_until(lambda: len(ability.calls) == 1)
+        inputs = list(cognitive.inputs)
+        _ = await active_bot.detach(environment)
+        return inputs
+
+    (handed,) = asyncio.run(run())
+
+    assert handed.participants == (ada,)
+
+
+def test_body_rebuild_of_a_device_report_names_no_participants() -> None:
+    async def run() -> list[cognition.InputData]:
+        ability = IgnoreAbility()
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        environment = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(ability.calls) == 1)
+        inputs = list(cognitive.inputs)
+        _ = await active_bot.detach(environment)
+        return inputs
+
+    (handed,) = asyncio.run(run())
+
+    assert handed.participants == ()

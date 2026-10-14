@@ -1,3 +1,4 @@
+import enum
 import typing
 
 import pydantic
@@ -60,6 +61,52 @@ class StimulusData(pydantic.BaseModel, typing.Generic[T]):
             source=event.source,
             target=event.target,
         )
+
+
+class ParticipantRole(enum.StrEnum):
+    """The part a participant played in a stimulus."""
+
+    SOURCE = "source"
+    """Who produced the stimulus: the speaker or the sender."""
+    TARGET = "target"
+    """Who the stimulus was addressed to."""
+
+
+class Participant(pydantic.BaseModel):
+    """Someone who took part in a stimulus, stamped by the producer that knows them.
+
+    Producers stamp participants from identities they already hold; products built from a
+    stimulus copy them forward unchanged. Nobody infers a participant by walking actors.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Someone who took part in a stimulus: an opaque, producer-stable identity reference and the "
+                "role it played (source: who produced it; target: who it was addressed to)."
+            ),
+            "examples": [
+                {"ref": "+15555550100", "role": "source"},
+                {"ref": "person-42", "role": "target"},
+            ],
+        },
+    )
+
+    ref: str = pydantic.Field(
+        min_length=1,
+        max_length=200,
+        description=(
+            "Opaque, producer-stable identity such as a phone number, an app person id, or a chat handle. "
+            "Never a display name chosen by the bot."
+        ),
+        examples=["+15555550100", "person-42", "caller"],
+    )
+    role: ParticipantRole = pydantic.Field(
+        description="source: who produced the stimulus (speaker, sender). target: who it was addressed to.",
+        examples=["source", "target"],
+    )
 
 
 DeviceReference = typing.Annotated[

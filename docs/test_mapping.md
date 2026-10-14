@@ -35,6 +35,19 @@ and `turn_detector/turn_detector.py`
 (`.../turn_detector/test_turn_detector.py`); the files above close the
 remaining gaps without duplicating them.
 
+## Participants
+
+| Test | Source under test |
+| --- | --- |
+| `tests/bot/test_event_schemas.py::test_participant_*` | `src/mosfet/events.py` (`Participant` / `ParticipantRole`: root exports, ref bounds, closed role, schema descriptions and examples) |
+| `tests/environment/test_environment_events.py::test_stimul*participants*`, `::test_phone_sound_inherits_participants_*` | `src/mosfet/environment/events.py` (`SoundData` / `VisualData.participants`: default empty, bound 32, schema, inherited by `phone.SoundData`) |
+| `tests/devices/phone/test_phone.py::test_phone_broadcasts_committed_ringing_observation_in_current_environment` | `src/mosfet/devices/phone/phone.py` (the ringer stamps no participant for its display caller ID) |
+| `tests/bot/abilities/cognition/test_input.py::test_cognition_input_*participants*` | `src/mosfet/abilities/cognition/input.py` (`InputData.participants` default, bound, schema) |
+| `tests/bot/abilities/test_listening.py` (participants cases) | `src/mosfet/abilities/listening/interpretation.py` (utterance union copied onto streamed, decoded and diarized speech; labeled sound handoff; reset between utterances) |
+| `tests/bot/abilities/communication/conversation/test_conversation.py` (participants cases) | `conversation/conversation.py` (`turn_participants`: string identities stamped as source/target on text and image-only handoffs, speech parent's participants copied and deduplicated, vector and over-long identities counted on `bot.memory.participant.unstamped.count`) |
+| `tests/bot/abilities/communication/conversation/test_host_turn.py::test_host_turn_hands_cognition_the_turns_string_identities_as_participants` | `conversation/host_turn.py` (host cognition input stamped by the same rule) |
+| `tests/bot/test_bot.py::test_body_rebuild_*participants*` | `src/mosfet/bot.py` (the body copies a product's participants into its rebuilt cognition input; a device report names none) |
+
 ## Embedding ability
 
 | Test | Source under test |

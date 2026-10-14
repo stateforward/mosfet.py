@@ -1674,3 +1674,139 @@ def test_interpretation_routes_child_output_and_preserves_wav_for_vad() -> None:
     assert isinstance(stimulus.data, listening.SpeechData)
     assert stimulus.data.content == pcm
     assert stimulus.data.media_type == "audio/pcm"
+
+
+_ADA = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
+_BOB = mosfet.Participant(ref="bob", role=mosfet.ParticipantRole.SOURCE)
+_CY = mosfet.Participant(ref="cy", role=mosfet.ParticipantRole.SOURCE)
+
+
+def stamped(audio: bytes, *participants: mosfet.Participant) -> SoundData:
+    """A sound chunk as a device that knows who produced it emits it."""
+
+    return sound(audio).model_copy(update={"participants": participants})
+
+
+def _handoff_participants_match_their_stimulus(handoffs: list[cognition.InputData]) -> bool:
+    for handoff in handoffs:
+        data = _stimulus(handoff).data
+        assert isinstance(data, SoundData | listening.SpeechData)
+        if handoff.participants != data.participants:
+            return False
+    return True
+
+
+def test_decoded_speech_carries_the_ordered_union_of_its_utterances_participants() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening()
+        await start_ability_tree(None, listening_ability)
+
+        _ = await listening_ability.apply(stamped(b"voice", _ADA))
+        _ = await listening_ability.apply(stamped(b"silence", _BOB, _ADA))
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+    decoded = next(h for h in handoffs if _is_decoded_speech_handoff(h))
+    speech_data = _stimulus(decoded).data
+
+    assert isinstance(speech_data, listening.SpeechData)
+    assert speech_data.participants == (_ADA, _BOB)
+    assert decoded.participants == (_ADA, _BOB)
+
+
+def test_streamed_speech_carries_participants_admitted_so_far_and_the_handoff_copies_them() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening(decoder=False)
+        await start_ability_tree(None, listening_ability)
+
+        _ = await listening_ability.apply(stamped(b"voice", _ADA))
+        _ = await listening_ability.apply(stamped(b"silence", _BOB))
+        await wait_until(lambda: any(_is_silent_speech_handoff(h) for h in listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+    observations = [_stimulus(h).data for h in handoffs]
+
+    assert [typing.cast(listening.SpeechData, item).participants for item in observations] == [
+        (_ADA,),
+        (_ADA, _BOB),
+    ]
+    assert _handoff_participants_match_their_stimulus(handoffs)
+
+
+def test_diarized_speech_carries_its_utterances_participants() -> None:
+    async def run() -> list[cognition.InputData]:
+        diarizer = FixedVoiceDiarizer()
+        listening_ability, _ = _listening(diarizer=diarizer, decoder=False)
+        await start_ability_tree(None, listening_ability)
+
+        _ = await listening_ability.apply(stamped(b"voice", _ADA))
+        _ = await listening_ability.apply(stamped(b"silence", _BOB))
+        await wait_until(lambda: bool(diarizer.calls) and bool(listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+    diarized = typing.cast(listening.SpeechData, _stimulus(handoffs[-1]).data)
+
+    assert diarized.content == DIARIZED_AUDIO
+    assert diarized.participants == (_ADA, _BOB)
+    assert handoffs[-1].participants == (_ADA, _BOB)
+
+
+def test_a_labeled_sound_hands_cognition_the_participants_its_device_stamped() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening(
+            is_voice=False, decoder=False, sound_classifier=FixedSoundClassifier(labels=("knock",))
+        )
+        await start_ability_tree(None, listening_ability)
+
+        _ = await listening_ability.apply(stamped(b"knock", _CY))
+        await wait_until(lambda: bool(listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    (handoff,) = asyncio.run(run())
+    stimulus = _stimulus(handoff)
+
+    assert stimulus.name == SoundEvent.name
+    assert isinstance(stimulus.data, SoundData)
+    assert stimulus.data.participants == (_CY,)
+    assert handoff.participants == (_CY,)
+
+
+def test_participants_do_not_carry_over_from_one_utterance_to_the_next() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(
+                _VOICE_APPLY, _SILENCE_APPLY, _VOICE_APPLY, _SILENCE_APPLY
+            ),
+        )
+        await start_ability_tree(None, listening_ability)
+
+        _ = await listening_ability.apply(stamped(b"voice", _ADA))
+        _ = await listening_ability.apply(stamped(b"silence", _ADA))
+        await wait_until(lambda: len(listening_ability.handoffs) == 2)
+        _ = await listening_ability.apply(stamped(b"voice", _BOB))
+        _ = await listening_ability.apply(stamped(b"silence"))
+        await wait_until(lambda: len(listening_ability.handoffs) == 4)
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    assert [handoff.participants for handoff in handoffs] == [(_ADA,), (_ADA,), (_BOB,), (_BOB,)]
+    assert _handoff_participants_match_their_stimulus(handoffs)
+
+
+def test_unstamped_sound_yields_speech_and_handoffs_without_participants() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening()
+        await start_ability_tree(None, listening_ability)
+
+        await _apply_utterance(listening_ability, b"voice")
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    assert all(handoff.participants == () for handoff in handoffs)
+    assert _handoff_participants_match_their_stimulus(handoffs)

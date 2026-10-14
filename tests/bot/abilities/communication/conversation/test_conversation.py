@@ -1847,3 +1847,123 @@ def test_history_keeps_image_bytes_only_within_the_injected_retention_budget(
         released_after = _released_history_images(metrics)
 
     assert released_after - released_before == 2
+
+
+_CALLER = mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.SOURCE)
+_BOT = mosfet.Participant(ref="bot", role=mosfet.ParticipantRole.TARGET)
+
+
+def _handoff(terminal: hsm.Event[typing.Any]) -> cognition.InputData:
+    assert terminal.name == cognition.InputEvent.name
+    assert isinstance(terminal.data, cognition.InputData)
+    return terminal.data
+
+
+@pytest.mark.parametrize(
+    ("content", "attachments"),
+    [("hello", ()), (None, (_image(),))],
+    ids=["text", "image-only"],
+)
+def test_cognition_handoff_stamps_string_identities_as_source_and_target_participants(
+    content: str | None, attachments: tuple[media.Image, ...]
+) -> None:
+    target, context = started_conversation()
+
+    terminal = run_terminal(
+        target,
+        context,
+        conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot", "assistant"}),
+            content=content,
+            content_type="text/plain",
+            attachments=attachments,
+        ),
+    )
+
+    assert _handoff(terminal).participants == (
+        _CALLER,
+        mosfet.Participant(ref="assistant", role=mosfet.ParticipantRole.TARGET),
+        _BOT,
+    )
+
+
+def test_cognition_handoff_copies_its_speech_parents_participants_deduplicated() -> None:
+    ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
+    speech = interpretation.SpeechData(
+        content="hello",
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({"caller"}),
+        participants=(ada, _CALLER),
+    )
+    target, context = started_conversation()
+
+    terminal = run_terminal(
+        target,
+        context,
+        conversation.TurnData(
+            parent=mosfet.StimulusData[interpretation.SpeechData](
+                event="bot.ability.listening.speech.output",
+                data=speech,
+            ),
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="hello",
+            content_type="text/plain",
+        ),
+    )
+
+    assert _handoff(terminal).participants == (_CALLER, _BOT, ada)
+
+
+def _unstamped(metrics: metric_reader.Reader) -> int:
+    total = 0
+    for point in metrics.points("bot.memory.participant.unstamped.count"):
+        assert point.attributes == {}
+        total += int(point.value)
+    return total
+
+
+def test_cognition_handoff_never_stamps_vector_identities_and_counts_them(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _unstamped(metrics)
+        target, context = started_conversation()
+
+        terminal = run_terminal(
+            target,
+            context,
+            conversation.TurnData(
+                source_ids=frozenset({(1.0, 0.0)}),
+                target_ids=frozenset({"bot", (0.0, 1.0)}),
+                content="hello",
+                content_type="text/plain",
+            ),
+        )
+
+        assert _handoff(terminal).participants == (_BOT,)
+        assert _unstamped(metrics) - before == 2
+
+
+def test_turn_participants_counts_a_ref_too_long_to_stamp_instead_of_failing_the_turn(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _unstamped(metrics)
+
+        participants = conversation.conversation.turn_participants(
+            conversation.TurnData(
+                source_ids=frozenset({"x" * 201}),
+                target_ids=frozenset({"bot"}),
+                content="hello",
+                content_type="text/plain",
+            )
+        )
+
+        assert participants == (_BOT,)
+        assert _unstamped(metrics) - before == 1

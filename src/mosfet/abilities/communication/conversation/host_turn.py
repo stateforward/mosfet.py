@@ -34,6 +34,7 @@ from .conversation import (
     Message,
     MessageProvenance,
     append_conversation_message,
+    turn_participants,
 )
 
 import collections.abc
@@ -86,6 +87,7 @@ def _cognition_input_for_participated(
         stimulus=typing.cast(mosfet.InputData, shaped.input),
         abilities=(cognition,),
         focus=None,
+        participants=turn_participants(participated.input),
     )
 
 

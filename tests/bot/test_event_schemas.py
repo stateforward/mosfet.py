@@ -393,3 +393,41 @@ def test_conversation_message_attachment_renders_inside_its_message_element() ->
     assert placeholder < second.index("</communication:message>")
     assert "photo" not in xml
     assert "<media:image ref=" not in xml
+
+
+def test_participant_is_a_root_export_with_a_closed_role() -> None:
+    assert "Participant" in mosfet.__all__
+    assert "ParticipantRole" in mosfet.__all__
+    assert [role.value for role in mosfet.ParticipantRole] == ["source", "target"]
+
+
+def test_participant_schema_describes_an_opaque_producer_stable_ref() -> None:
+    schema = object_dict(mosfet.Participant.model_json_schema())
+    properties = object_dict(schema["properties"])
+    ref = object_dict(properties["ref"])
+
+    assert schema["description"]
+    assert schema["examples"] == [{"ref": "+15555550100", "role": "source"}, {"ref": "person-42", "role": "target"}]
+    assert set(properties) == {"ref", "role"}
+    assert "producer-stable" in str(ref["description"])
+    assert (ref["minLength"], ref["maxLength"]) == (1, 200)
+    assert ref["examples"]
+    assert object_dict(properties["role"])["description"]
+
+
+@pytest.mark.parametrize("ref", ["", "x" * 201], ids=["empty", "over-200"])
+def test_participant_rejects_refs_outside_its_bounds(ref: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.Participant(ref=ref, role=mosfet.ParticipantRole.SOURCE)
+
+
+def test_participant_is_closed_hashable_and_equal_by_ref_and_role() -> None:
+    caller = mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.SOURCE)
+
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.Participant.model_validate({"ref": "caller", "role": "source", "name": "Ada"})
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.Participant.model_validate({"ref": "caller", "role": "speaker"})
+    assert caller == mosfet.Participant.model_validate({"ref": "caller", "role": "source"})
+    assert caller != mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.TARGET)
+    assert hash(caller) == hash(mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.SOURCE))

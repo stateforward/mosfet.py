@@ -10,6 +10,7 @@ from __future__ import annotations
 import typing
 
 import hsm
+import mosfet
 import pydantic
 
 from mosfet import media
@@ -102,6 +103,15 @@ class SoundData(pydantic.BaseModel):
         ),
         examples=[54.0, 6.0],
     )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Who produced this stimulus, stamped by the device that emitted it. Empty when the device knows "
+            "no one (ambient sound, an unattended camera)."
+        ),
+        examples=[[{"ref": "person-42", "role": "source"}]],
+    )
 
 
 class VisualData(pydantic.BaseModel):
@@ -131,6 +141,15 @@ class VisualData(pydantic.BaseModel):
         min_length=1,
         description="Optional low-cardinality visual provenance hint (for example camera, screen).",
         examples=["camera", "screen"],
+    )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Who produced this stimulus, stamped by the device that emitted it. Empty when the device knows "
+            "no one (ambient sound, an unattended camera)."
+        ),
+        examples=[[{"ref": "person-42", "role": "source"}]],
     )
 
 
