@@ -21,7 +21,6 @@ members = [
     "mosfet-provider-moonshine",
     "mosfet-provider-needle",
     "mosfet-provider-openai-compat",
-    "mosfet-provider-postgres-memory",
     "mosfet-provider-pyannote",
     "mosfet-provider-sqlite-memory",
     "mosfet-provider-typesafe",
@@ -1790,28 +1789,6 @@ requires-dist = [
     { name = "openai", specifier = ">=2.11.0,<3.0.0" },
     { name = "stateforward-mosfet", editable = "." },
 ]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
-    { name = "ruff", specifier = "~=0.11.13" },
-]
-
-[[package]]
-name = "mosfet-provider-postgres-memory"
-source = { editable = "src/providers/postgres_memory" }
-dependencies = [
-    { name = "stateforward-mosfet" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "stateforward-mosfet", editable = "." }]
 
 [package.metadata.requires-dev]
 dev = [

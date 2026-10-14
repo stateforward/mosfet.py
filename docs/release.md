@@ -25,8 +25,6 @@ This repo uses Hatchling dynamic version metadata with a package-owned
   `src/providers/pyannote/src/mosfet/providers/pyannote/__init__.py`.
 - `mosfet-provider-sqlite-memory` reads its version from
   `src/providers/sqlite_memory/src/mosfet/providers/sqlite_memory/__init__.py`.
-- `mosfet-provider-postgres-memory` reads its version from
-  `src/providers/postgres_memory/src/mosfet/providers/postgres_memory/__init__.py`.
 - `scripts/check_release_version.py` discovers provider packages via
   `src/providers/*/pyproject.toml` (workspace glob, not a hardcoded list), validates that package `pyproject.toml`
   files declare `dynamic = ["version"]`, that Hatchling points at the expected
@@ -110,10 +108,6 @@ after `4fbc76de`. At that point one change pins that release exactly, deletes
   current ability contracts. The OpenAI-compatible provider publishes with
   `stateforward.mosfet>=0.1.0,<0.2.0`; raise the lower bound in the provider package when a
   future release starts requiring newer core APIs.
-- Decide which optional hosted Postgres, PGlite socket, and S3-compatible client
-  packages should become provider-owned dependencies. The initial Postgres
-  memory provider keeps those adapters injected so the package can support both
-  runtimes without changing root `bot` dependencies.
 - Keep the ElevenLabs provider spelling aligned across the distribution name,
   workspace path, and import path before publishing to a public index.
 - Decide the release matrix for native SQLite memory wheels beyond the current

@@ -388,9 +388,9 @@ class Memory(store.MemoryStore):
     """Relational memory ability: one apply = one transaction of crude Statements.
 
     Public surface is HSM events only (``input_event`` / ``output_event`` / ``failed_event``)
-    plus Ability lifecycle. Callers supply parameterized ``Statement`` rows; providers
-    execute them against SQLite, Postgres, or another relational store. The connection
-    stays private to the ability implementation.
+    plus Ability lifecycle. Callers supply parameterized ``Statement`` rows; the ability
+    executes them in one transaction on its SQLite engine. The connection stays private
+    to the ability implementation.
     """
 
     default_scope: typing.ClassVar[str] = "memory"

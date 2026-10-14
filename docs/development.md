@@ -176,6 +176,6 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-mlx-vlm` | local VLM reading (Apple Silicon) |
 | `mosfet-provider-llama-cpp` | in-process llama.cpp on a pinned `llama-cpp-python` build (Metal / CUDA / CPU) |
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
-| `mosfet-provider-sqlite-memory`, `mosfet-provider-postgres-memory` | turnkey SQLite / Postgres(+PGlite) durable memory |
+| `mosfet-provider-sqlite-memory` | turnkey SQLite durable memory |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |
 | `mosfet-provider-needle` | local Needle 3 tool calling for the Intuition reflex tier (Apache-2.0, on-device) |
