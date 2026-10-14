@@ -119,6 +119,13 @@ class RoomAudioTrackSubscribedData(pydantic.BaseModel):
     track: object = pydantic.Field(
         description="LiveKit SDK track object from the room callback. The value is not logged or serialized.",
     )
+    participant_identity: str | None = pydantic.Field(
+        description=(
+            "Identity of the remote participant that published the track, stamped by the room callback; "
+            "None when the SDK reported no identity. Never a telemetry attribute."
+        ),
+        examples=["computer-dev-1", None],
+    )
 
 
 RoomAudioConnectEvent = hsm.Event[RoomAudioConnectData](
@@ -298,16 +305,6 @@ def _has_failure_data(ctx: hsm.Context, instance: "RoomAudioTrackPath", event: h
     return isinstance(event.data, RoomAudioFailureData)
 
 
-def _has_audio_track_subscribed_data(
-    ctx: hsm.Context,
-    instance: "RoomAudioTrackPath",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx, instance
-    data = event.data
-    return isinstance(data, RoomAudioTrackSubscribedData) and _is_audio_track(data.track)
-
-
 def _has_non_audio_track_subscribed_data(
     ctx: hsm.Context,
     instance: "RoomAudioTrackPath",
@@ -334,6 +331,21 @@ def _consume_non_audio_track_subscription(
     del ctx, instance, event
 
 
+def _consume_other_participant_audio_track_subscription(
+    ctx: hsm.Context,
+    instance: "RoomAudioTrackPath",
+    event: hsm.Event[typing.Any],
+) -> None:
+    """Consume an audio track published by a participant this path is not listening to.
+
+    A path built with ``participant_identity`` carries that one participant's audio. Another
+    participant's audio in the same room is somebody else's signal, not a fault: it never
+    starts or ends remote audio here, in ``connected`` and in ``receiving_remote_audio`` alike.
+    """
+
+    del ctx, instance, event
+
+
 def _consume_extra_audio_track_subscription(
     ctx: hsm.Context,
     instance: "RoomAudioTrackPath",
@@ -351,7 +363,12 @@ def _consume_extra_audio_track_subscription(
 
 
 class RoomAudioTrackPath(Traced):
-    """LiveKit room/SIP audio track path for a stateforward.mosfet-owned audio bridge."""
+    """LiveKit room/SIP audio track path for a stateforward.mosfet-owned audio bridge.
+
+    With ``participant_identity`` set, the path forwards only audio tracks published by that
+    remote participant; every other participant's audio track is consumed without being read.
+    Without it, the path forwards the first audio track the room subscribes to, from anyone.
+    """
 
     _bridge: AudioBridge[rtc.AudioFrame]
     _remote_audio_sink: RemoteAudioSink
@@ -363,6 +380,7 @@ class RoomAudioTrackPath(Traced):
     _track_subscribed_callback: collections.abc.Callable[..., object]
     _local_track_sid: str | None
     _track_listener_registered: bool
+    _participant_identity: str | None
 
     def __init__(
         self,
@@ -375,20 +393,29 @@ class RoomAudioTrackPath(Traced):
         local_track_factory: LocalAudioTrackFactory | None = None,
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
         loop: asyncio.AbstractEventLoop | None = None,
+        participant_identity: str | None = None,
     ) -> None:
         super().__init__()
         if operation_timeout <= datetime.timedelta():
             raise ValueError("operation_timeout must be a positive duration.")
+        if participant_identity is not None and not participant_identity:
+            raise ValueError("participant_identity must be a non-empty identity or None.")
         instance_ref = weakref.ref(self)
 
         def handle_track_subscribed(track: object, publication: object, participant: object) -> object:
-            del publication, participant
+            del publication
             live_instance = instance_ref()
             if live_instance is None:
                 return None
+            identity = typing.cast(object, getattr(participant, "identity", None))
             _ = live_instance.dispatch(
                 live_instance.context(),
-                _RoomAudioTrackSubscribedEvent.with_data(RoomAudioTrackSubscribedData(track=track)),
+                _RoomAudioTrackSubscribedEvent.with_data(
+                    RoomAudioTrackSubscribedData(
+                        track=track,
+                        participant_identity=identity if isinstance(identity, str) else None,
+                    )
+                ),
             )
             return None
 
@@ -404,6 +431,7 @@ class RoomAudioTrackPath(Traced):
         self._track_subscribed_callback = handle_track_subscribed
         self._local_track_sid = None
         self._track_listener_registered = False
+        self._participant_identity = participant_identity
 
     def connect_room(self, ctx: hsm.Context, data: RoomAudioConnectData) -> collections.abc.Awaitable[bool]:
         """Start the LiveKit room audio track path."""
@@ -451,6 +479,35 @@ class RoomAudioTrackPath(Traced):
     def _unregister_track_subscription_listener(self) -> None:
         self._room.off("track_subscribed", self._track_subscribed_callback)
         self._track_listener_registered = False
+
+    @staticmethod
+    def _has_listened_audio_track_subscribed_data(
+        ctx: hsm.Context,
+        instance: "RoomAudioTrackPath",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, RoomAudioTrackSubscribedData)
+            and _is_audio_track(data.track)
+            and (instance._participant_identity is None or data.participant_identity == instance._participant_identity)
+        )
+
+    @staticmethod
+    def _has_other_participant_audio_track_subscribed_data(
+        ctx: hsm.Context,
+        instance: "RoomAudioTrackPath",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, RoomAudioTrackSubscribedData)
+            and _is_audio_track(data.track)
+            and instance._participant_identity is not None
+            and data.participant_identity != instance._participant_identity
+        )
 
     @staticmethod
     def _has_local_track_sid(
@@ -637,8 +694,13 @@ class RoomAudioTrackPath(Traced):
             "connected",
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
-                hsm.guard(_has_audio_track_subscribed_data),
+                hsm.guard(_has_listened_audio_track_subscribed_data),
                 hsm.target("/RoomAudioTrackPath/receiving_remote_audio"),
+            ),
+            hsm.transition(
+                hsm.on(_RoomAudioTrackSubscribedEvent),
+                hsm.guard(_has_other_participant_audio_track_subscribed_data),
+                hsm.effect(_consume_other_participant_audio_track_subscription),
             ),
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
@@ -664,8 +726,13 @@ class RoomAudioTrackPath(Traced):
             ),
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),
-                hsm.guard(_has_audio_track_subscribed_data),
+                hsm.guard(_has_listened_audio_track_subscribed_data),
                 hsm.effect(_consume_extra_audio_track_subscription),
+            ),
+            hsm.transition(
+                hsm.on(_RoomAudioTrackSubscribedEvent),
+                hsm.guard(_has_other_participant_audio_track_subscribed_data),
+                hsm.effect(_consume_other_participant_audio_track_subscription),
             ),
             hsm.transition(
                 hsm.on(_RoomAudioTrackSubscribedEvent),

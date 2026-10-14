@@ -149,6 +149,12 @@ it), never through a stand-in carrier that records publishes.
 | `tests/devices/computer/test_app.py` | `src/mosfet/devices/computer/app.py` (show, typing, Backspace and Enter into a focused field, press and release on a button or field, stills and microphone audio elevated with the `person_id` participant stamp or none, room sound relayed only while linked, the remote voice refused by type and counted `echo_suppressed` on `bot.devices.computer.peripheral.event.count`) |
 | `tests/devices/computer/test_computer.py` | `src/mosfet/devices/computer/computer.py` (construction bounds including `peer_id`; bring-up builds and starts the link, which registers `peer_id` (default `device_id`) and the ports' channels with the transport, attaches the firmware by `attachment.attach`, then wires seven ports; a refused or unanswered registration fails bring-up; stop releases the link first, counts the release on `bot.devices.computer.link.detach.count`, lets the connection go and unregisters; `_observe` puts stills and remote audio decoded from the camera and microphone streams into the room from the computer and tells holders the rest; keys and pointer from their streams reach the holder; `computer.show` reaches firmware and the display stream, speaker audio is no owner command; echo, two-computer, and real `speaking.Speaking` voice paths end to end) |
 
+## Device links
+
+| Test | Source under test |
+| --- | --- |
+| `src/providers/livekit/tests/test_room_audio.py::test_livekit_room_audio_track_path_forwards_only_the_named_participants_audio`, `::test_livekit_room_audio_track_path_rejects_an_empty_participant_identity` | `livekit/room_audio.py` (with `participant_identity`, the room callback stamps the publisher's identity and only that participant's audio track is read and forwarded; another participant's or an identity-less audio track is consumed unread; an empty identity is refused at construction; without it, behaviour is unchanged) |
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to

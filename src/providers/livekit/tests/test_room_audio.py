@@ -6,6 +6,7 @@ import asyncio
 import collections.abc
 
 import hsm
+import pytest
 
 import mosfet.providers.livekit.room_audio as room_audio_module
 
@@ -18,9 +19,12 @@ from mosfet.providers.livekit.room_audio import (
 from tests.livekit_room_fakes import (
     FakeAudioFrame,
     FakeAudioSource,
+    FakeRemoteParticipant,
     FakeRemoteTrack,
     FakeRoom,
+    FakeTrackPublication,
     fake_audio_bridge,
+    fake_local_track_factory,
     fake_pcm_stream,
 )
 
@@ -185,3 +189,71 @@ def test_livekit_room_audio_track_path_disconnects_cleanly_while_connect_is_bloc
         assert room.local_participant.publications == []
 
     asyncio.run(run())
+
+
+def test_livekit_room_audio_track_path_forwards_only_the_named_participants_audio() -> None:
+    async def run() -> None:
+        bridge = fake_audio_bridge(FakeAudioSource())
+        room = FakeRoom()
+        read_tracks: list[object] = []
+        received_audio: list[audio_device.InputData] = []
+        connected_events: list[room_audio_module.RoomAudioConnectedData] = []
+        frame = FakeAudioFrame(data=b"\x01\x00\x02\x00", sample_rate=48_000, num_channels=1, samples_per_channel=2)
+
+        async def stream(track: object) -> collections.abc.AsyncIterable[object]:
+            read_tracks.append(track)
+            yield frame
+
+        async def remote_audio_sink(audio: audio_device.InputData) -> None:
+            received_audio.append(audio)
+
+        path = RoomAudioTrackPath(
+            bridge=bridge,
+            room=room,
+            stream_factory=stream,
+            local_track_factory=fake_local_track_factory,
+            remote_audio_sink=remote_audio_sink,
+            connection_sink=connected_events.append,
+            participant_identity="computer-dev-1",
+        )
+        _ = await hsm.started(None, path, path.model)
+        _ = await hsm.dispatch(
+            path.context(),
+            path,
+            RoomAudioConnectEvent.with_data(RoomAudioConnectData(url="wss://livekit.example.com", token="token")),
+        )
+        await _wait_until(
+            lambda: connected_events == [room_audio_module.RoomAudioConnectedData(local_track_sid="TR_local")]
+        )
+
+        stranger_track = FakeRemoteTrack()
+        anonymous_track = FakeRemoteTrack()
+        device_track = FakeRemoteTrack()
+        publication = FakeTrackPublication(sid="TR_remote")
+        room.emit("track_subscribed", stranger_track, publication, FakeRemoteParticipant(identity="human"))
+        room.emit("track_subscribed", anonymous_track, publication, object())
+        room.emit("track_subscribed", device_track, publication, FakeRemoteParticipant(identity="computer-dev-1"))
+        await _wait_until(lambda: bool(received_audio))
+
+        assert read_tracks[0] is device_track
+
+        _ = await hsm.dispatch(path.context(), path, RoomAudioDisconnectEvent)
+        await _wait_until(lambda: room.disconnected)
+
+        assert len(read_tracks) == 1
+        assert len(received_audio) == 1
+
+    asyncio.run(run())
+
+
+def test_livekit_room_audio_track_path_rejects_an_empty_participant_identity() -> None:
+    async def remote_audio_sink(audio: audio_device.InputData) -> None:
+        del audio
+
+    with pytest.raises(ValueError, match="participant_identity"):
+        _ = RoomAudioTrackPath(
+            bridge=fake_audio_bridge(FakeAudioSource()),
+            room=FakeRoom(),
+            remote_audio_sink=remote_audio_sink,
+            participant_identity="",
+        )
